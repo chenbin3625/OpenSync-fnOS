@@ -161,6 +161,18 @@ test("creates an engine and manual job, then edits without changing sync mode", 
     await page
       .getByRole("heading", { name: "新建同步任务", exact: true })
       .click();
+    const sourcePathBox = await trees.nth(0).boundingBox();
+    const targetPathBox = await trees.nth(1).boundingBox();
+    const sourceCacheBox = await page
+      .getByText("源端缓存", { exact: true })
+      .boundingBox();
+    const targetCacheBox = await page
+      .getByText("目标缓存", { exact: true })
+      .boundingBox();
+    expect(sourceCacheBox!.y).toBeGreaterThan(sourcePathBox!.y);
+    expect(targetCacheBox!.y).toBeGreaterThan(targetPathBox!.y);
+    expect(sourceCacheBox!.y).toBeLessThan(sourcePathBox!.y + 120);
+    expect(targetCacheBox!.y).toBeLessThan(targetPathBox!.y + 120);
     await page
       .getByRole("textbox", { name: "任务备注", exact: true })
       .fill(name);
@@ -192,14 +204,23 @@ test("creates an engine and manual job, then edits without changing sync mode", 
     expect(job.enable).toBe(1);
     expect(job.srcPath).toContain("/Photos");
     expect(job.dstPath).toContain("/Backup");
+    const forceMobileClick = testInfo.project.name.includes("mobile");
     await page.goto(`/app/opensync/tasks?jobId=${jobId}`);
-    await page.getByRole("button", { name: "编辑任务", exact: true }).click();
+    const editButton = page.getByRole("button", {
+      name: "编辑任务",
+      exact: true,
+    });
+    await expect(editButton).toBeVisible();
+    await editButton.click({ force: forceMobileClick });
     await page
       .getByRole("textbox", { name: "任务备注", exact: true })
       .fill(name + "-修改");
-    await page
-      .getByRole("button", { name: "保存任务配置", exact: true })
-      .click();
+    const saveButton = page.getByRole("button", {
+      name: "保存任务配置",
+      exact: true,
+    });
+    await expect(saveButton).toBeVisible();
+    await saveButton.click({ force: forceMobileClick });
     await expect(page.getByRole("dialog")).not.toBeVisible();
     await page.screenshot({
       path: `test-results/workspace-${testInfo.project.name}.png`,

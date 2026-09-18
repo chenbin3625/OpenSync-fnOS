@@ -1,4 +1,4 @@
-import { useContext, useState } from "react";
+import { useContext, useState, type ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
 import Banner from "@douyinfe/semi-ui/lib/es/banner";
 import Button from "@douyinfe/semi-ui/lib/es/button";
@@ -8,7 +8,6 @@ import Tabs from "@douyinfe/semi-ui/lib/es/tabs";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import {
   IconPlus,
-  IconRefresh,
   IconEdit,
   IconDelete,
   IconCopy,
@@ -35,18 +34,22 @@ export default function Engines() {
   const local = params.get("view") === "local";
   const engines = useResource((signal) => api.engines(signal));
   const [editing, setEditing] = useState<AlistItem | null | undefined>();
+  const tabs = (
+    <Tabs
+      activeKey={local ? "local" : "engine"}
+      onChange={(view) => setParams(view === "local" ? { view } : {})}
+    >
+      <Tabs.TabPane tab="OpenList / AList" itemKey="engine" />
+      <Tabs.TabPane tab="本地存储" itemKey="local" />
+    </Tabs>
+  );
   return (
     <div className="page">
-      <Header
-        title="引擎管理"
-        actions={
-          <>
-            <IconButton
-              aria-hidden="true"
-              label="刷新引擎"
-              icon={<IconRefresh aria-hidden="true" />}
-              onClick={() => void engines.refresh()}
-            />
+      {!local && (
+        <Header
+          title="引擎管理"
+          tabs={tabs}
+          actions={
             <Button
               theme="solid"
               icon={<IconPlus aria-hidden="true" />}
@@ -54,18 +57,11 @@ export default function Engines() {
             >
               添加引擎
             </Button>
-          </>
-        }
-      />
-      <Tabs
-        activeKey={local ? "local" : "engine"}
-        onChange={(view) => setParams(view === "local" ? { view } : {})}
-      >
-        <Tabs.TabPane tab="OpenList / AList" itemKey="engine" />
-        <Tabs.TabPane tab="本地存储" itemKey="local" />
-      </Tabs>
+          }
+        />
+      )}
       {local ? (
-        <LocalStorage engines={engines.data || []} />
+        <LocalStorage engines={engines.data || []} tabs={tabs} />
       ) : (
         <>
           <LoadState
@@ -73,7 +69,6 @@ export default function Engines() {
             error={engines.error}
             retry={engines.refresh}
             empty={!engines.data?.length}
-            title="暂无存储引擎"
           />
           <div className="item-list">
             {!engines.loading &&
@@ -227,22 +222,23 @@ function EngineEditor({
     </Editor>
   );
 }
-function LocalStorage({ engines }: { engines: AlistItem[] }) {
+function LocalStorage({
+  engines,
+  tabs,
+}: {
+  engines: AlistItem[];
+  tabs: ReactNode;
+}) {
   const { development } = useContext(SessionContext);
   const resource = useResource((signal) => api.storage(signal));
   const [editing, setEditing] = useState<LocalMapping | null | undefined>();
   const action = useAction();
   return (
     <div className="local-storage">
-      <div className="section-heading">
-        <h2>授权目录</h2>
-        <div className="row-actions">
-          <IconButton
-            aria-hidden="true"
-            label="刷新授权目录"
-            icon={<IconRefresh aria-hidden="true" />}
-            onClick={() => void resource.refresh()}
-          />
+      <Header
+        title="本地存储"
+        tabs={tabs}
+        actions={
           <Button
             icon={<IconFolder aria-hidden="true" />}
             disabled={development || action.busy}
@@ -259,8 +255,8 @@ function LocalStorage({ engines }: { engines: AlistItem[] }) {
           >
             授权目录
           </Button>
-        </div>
-      </div>
+        }
+      />
       <LoadState
         loading={resource.loading}
         error={resource.error}

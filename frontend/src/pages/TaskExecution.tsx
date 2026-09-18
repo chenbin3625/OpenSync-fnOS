@@ -2,7 +2,6 @@ import { useState } from "react";
 import Banner from "@douyinfe/semi-ui/lib/es/banner";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import DatePicker from "@douyinfe/semi-ui/lib/es/datePicker";
-import Empty from "@douyinfe/semi-ui/lib/es/empty";
 import Input from "@douyinfe/semi-ui/lib/es/input";
 import Modal from "@douyinfe/semi-ui/lib/es/modal";
 import Pagination from "@douyinfe/semi-ui/lib/es/pagination";
@@ -22,6 +21,7 @@ import dayjs from "dayjs";
 import { api } from "../api/client";
 import {
   IconButton,
+  EmptyState,
   LoadState,
   Status,
   confirmDelete,
@@ -66,16 +66,7 @@ export function Realtime({ jobId }: { jobId: number }) {
   if (!currentTask)
     return (
       <div className="execution-empty">
-        <Empty
-          image={<IconPause aria-hidden="true" size="extra-large" />}
-          title="当前无运行中的任务"
-        />
-        <Button
-          icon={<IconRefresh aria-hidden="true" />}
-          onClick={() => void refreshCurrentTask()}
-        >
-          刷新
-        </Button>
+        <EmptyState />
       </div>
     );
   const total = currentTask.doneSize + currentTask.remainSize;
@@ -83,6 +74,8 @@ export function Realtime({ jobId }: { jobId: number }) {
     total > 0 ? Math.min(100, (currentTask.doneSize / total) * 100) : 0;
   const stop = () =>
     Modal.confirm({
+      width: 454,
+      className: "fnos-confirm",
       title: "停止当前任务？",
       content: "已完成的文件不会撤销。",
       okText: "停止任务",
@@ -302,12 +295,6 @@ export function History({ jobId }: { jobId: number }) {
           }}
           showClear
         />
-        <IconButton
-          aria-hidden="true"
-          label="刷新历史"
-          icon={<IconRefresh aria-hidden="true" />}
-          onClick={() => void resource.refresh()}
-        />
       </div>
       {resource.error && (
         <Banner type="danger" description={resource.error} closeIcon={null} />
@@ -318,7 +305,7 @@ export function History({ jobId }: { jobId: number }) {
           loading={resource.loading}
           pagination={false}
           rowKey="id"
-          empty={<Empty title="暂无历史任务" />}
+          empty={<EmptyState />}
           columns={[
             {
               title: "开始时间",
@@ -357,7 +344,7 @@ export function History({ jobId }: { jobId: number }) {
         {resource.loading ? (
           <LoadState loading retry={resource.refresh} />
         ) : !rows.length ? (
-          <Empty title="暂无历史任务" />
+          <EmptyState />
         ) : (
           rows.map((record) => (
             <div className="mobile-record" key={record.id}>
@@ -415,7 +402,7 @@ export function FileTable({
             String(record?.id || `${record?.srcPath}-${record?.dstPath}`)
           }
           pagination={false}
-          empty={<Empty title="暂无文件记录" />}
+          empty={<EmptyState />}
           columns={[
             {
               title: "文件 / 目录",
@@ -474,7 +461,7 @@ export function FileTable({
         {loading ? (
           <LoadState loading retry={() => {}} />
         ) : !rows.length ? (
-          <Empty title="暂无文件记录" />
+          <EmptyState />
         ) : (
           rows.map((record, index) => (
             <details
@@ -567,7 +554,7 @@ function FileDetails({
       title="执行明细"
       visible
       onCancel={onClose}
-      width={1050}
+      width={454}
       className="editor-modal detail-modal"
       footer={null}
       centered

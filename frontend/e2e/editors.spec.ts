@@ -44,11 +44,11 @@ test("notification channels switch without retaining unrelated fields", async ({
     ),
   ).toBe(true);
 });
-test("settings uses backend units and can reset unsaved values", async ({
+test("settings uses plain inputs, validates limits and keeps backend units", async ({
   page,
 }) => {
   await page.goto("/app/opensync/settings");
-  const timeout = page.getByRole("spinbutton", {
+  const timeout = page.getByRole("textbox", {
     name: "任务超时",
     exact: true,
   });
@@ -59,7 +59,21 @@ test("settings uses backend units and can reset unsaved values", async ({
   await expect(
     page.getByRole("button", { name: "保存设置", exact: true }),
   ).toBeEnabled();
-  await page.getByRole("button", { name: "还原", exact: true }).click();
+  await expect(page.getByRole("spinbutton")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "还原", exact: true }),
+  ).toHaveCount(0);
+  await timeout.fill("abc");
+  await page.getByRole("button", { name: "保存设置", exact: true }).click();
+  await expect(
+    page.getByText("任务超时请输入 0–8760 的整数", { exact: true }),
+  ).toBeVisible();
+  await timeout.fill("8761");
+  await page.getByRole("button", { name: "保存设置", exact: true }).click();
+  await expect(
+    page.getByText("任务超时请输入 0–8760 的整数", { exact: true }),
+  ).toBeVisible();
+  await page.reload();
   await expect(timeout).toHaveValue(original);
   await expect(page.getByText("小时", { exact: true })).toBeVisible();
   await expect(page.getByText("天", { exact: true })).toBeVisible();

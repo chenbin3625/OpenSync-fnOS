@@ -9,7 +9,6 @@ import TextArea from "@douyinfe/semi-ui/lib/es/input/textarea";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import {
   IconPlus,
-  IconRefresh,
   IconEdit,
   IconDelete,
   IconSend,
@@ -57,12 +56,6 @@ export default function Notifications() {
         title="通知配置"
         actions={
           <>
-            <IconButton
-              aria-hidden="true"
-              label="刷新通知"
-              icon={<IconRefresh aria-hidden="true" />}
-              onClick={() => void resource.refresh()}
-            />
             <Button
               theme="solid"
               icon={<IconPlus aria-hidden="true" />}
@@ -78,7 +71,6 @@ export default function Notifications() {
         error={resource.error}
         retry={resource.refresh}
         empty={!resource.data?.length}
-        title="暂无通知渠道"
       />
       <div className="item-list">
         {!resource.loading &&

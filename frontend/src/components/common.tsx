@@ -13,7 +13,7 @@ import Spin from "@douyinfe/semi-ui/lib/es/spin";
 import Tag from "@douyinfe/semi-ui/lib/es/tag";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
-import { IconRefresh, IconFolder, IconClose } from "@douyinfe/semi-icons";
+import { IconRefresh, IconClose } from "@douyinfe/semi-icons";
 import { getHost } from "../lib/host";
 
 export function errorToast(error: unknown) {
@@ -21,16 +21,18 @@ export function errorToast(error: unknown) {
 }
 export function Header({
   title,
+  tabs,
   actions,
 }: {
   title: string;
+  tabs?: ReactNode;
   actions?: ReactNode;
 }) {
   return (
-    <div className="page-heading">
-      <h1>{title}</h1>
+    <header className="page-toolbar" aria-label={`${title}操作`}>
+      <div className="page-tabs">{tabs}</div>
       <div className="page-actions">{actions}</div>
-    </div>
+    </header>
   );
 }
 export function IconButton({
@@ -47,7 +49,7 @@ export function IconButton({
   danger?: boolean;
 }) {
   return (
-    <Tooltip content={label}>
+    <Tooltip content={label} trigger="hover" disableFocusListener>
       <Button
         aria-label={label}
         icon={icon}
@@ -59,18 +61,26 @@ export function IconButton({
     </Tooltip>
   );
 }
+export function EmptyState() {
+  return (
+    <div className="fnos-empty" role="status" aria-label="空空如也">
+      <Empty
+        image={<img src="/app/opensync/fnos-empty.png" alt="" />}
+        description="空空如也"
+      />
+    </div>
+  );
+}
 export function LoadState({
   loading,
   error,
   retry,
   empty,
-  title,
 }: {
   loading: boolean;
   error?: string;
   retry: () => unknown;
   empty?: boolean;
-  title?: string;
 }) {
   if (error)
     return (
@@ -90,14 +100,7 @@ export function LoadState({
         <Spin size="large" />
       </div>
     );
-  if (empty)
-    return (
-      <Empty
-        image={<IconFolder aria-hidden="true" size="extra-large" />}
-        title={title || "暂无记录"}
-        className="state-panel"
-      />
-    );
+  if (empty) return <EmptyState />;
   return null;
 }
 export function Field({
@@ -206,6 +209,8 @@ export function confirmDelete(
   content = "删除后无法恢复，是否继续？",
 ) {
   Modal.confirm({
+    width: 454,
+    className: "fnos-confirm",
     title,
     content,
     okText: "确认删除",
@@ -262,6 +267,8 @@ export function Editor({
     if (busy) return;
     if (dirty)
       Modal.confirm({
+        width: 454,
+        className: "fnos-confirm",
         title: "放弃未保存的修改？",
         okText: "放弃修改",
         cancelText: "继续编辑",
@@ -275,7 +282,7 @@ export function Editor({
     <Modal
       title={title}
       visible={visible}
-      width={680}
+      width={454}
       className="editor-modal"
       centered
       maskClosable={!busy}

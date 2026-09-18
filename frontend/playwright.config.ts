@@ -9,7 +9,8 @@ export default defineConfig({
     screenshot: "only-on-failure",
   },
   projects: [
-    { name: "desktop", use: { viewport: { width: 1440, height: 900 } } },
+    { name: "desktop", use: { viewport: { width: 1100, height: 640 } } },
+    { name: "wide-desktop", use: { viewport: { width: 1440, height: 900 } } },
     { name: "tablet", use: { viewport: { width: 768, height: 900 } } },
     {
       name: "mobile",

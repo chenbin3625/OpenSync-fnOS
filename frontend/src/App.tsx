@@ -16,17 +16,12 @@ import {
 } from "react-router-dom";
 import Banner from "@douyinfe/semi-ui/lib/es/banner";
 import Button from "@douyinfe/semi-ui/lib/es/button";
-import Nav from "@douyinfe/semi-ui/lib/es/navigation";
 import Spin from "@douyinfe/semi-ui/lib/es/spin";
-import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
 import {
-  IconCloud,
-  IconSetting,
   IconBell,
+  IconCloud,
   IconFolder,
-  IconMoon,
-  IconSun,
-  IconMenu,
+  IconSetting,
 } from "@douyinfe/semi-icons";
 import { api } from "./api/client";
 import {
@@ -65,12 +60,7 @@ export const SessionContext = createContext<{ development: boolean }>({
 
 function Shell({ children }: { children: ReactNode }) {
   const { pathname } = useLocation();
-  const [collapsed, setCollapsed] = useState(false);
-  const [theme, setTheme] = useState<"light" | "dark">(() =>
-    window.matchMedia("(prefers-color-scheme: dark)").matches
-      ? "dark"
-      : "light",
-  );
+  const [theme, setTheme] = useState<"light" | "dark">("light");
   useEffect(() => {
     applyTheme(theme);
   }, [theme]);
@@ -97,53 +87,32 @@ function Shell({ children }: { children: ReactNode }) {
     document.title = "OpenSync · " + title;
   }, [pathname]);
   return (
-    <div className={`app-shell ${collapsed ? "nav-collapsed" : ""}`}>
-      <aside className="app-sidebar">
-        <div className="app-brand">
-          <img src="/app/opensync/favicon.svg" alt="" />
-          <span>OpenSync</span>
-        </div>
-        <Nav
-          selectedKeys={[pathname]}
-          items={sections.map((s) => ({
-            itemKey: s.path,
-            text: s.label,
-            icon: s.icon,
-          }))}
-          renderWrapper={({ itemElement, props }) => (
-            <NavLink to={String(props.itemKey)} className="nav-link">
-              {itemElement}
+    <div className="app-shell">
+      <aside className="app-sidebar" aria-label="主菜单">
+        <nav aria-label="主导航">
+          {sections.slice(0, -1).map((section) => (
+            <NavLink
+              key={section.path}
+              to={section.path}
+              className={({ isActive }) =>
+                `nav-link${isActive ? " selected" : ""}`
+              }
+            >
+              {section.icon}
+              {section.label}
             </NavLink>
-          )}
-          isCollapsed={collapsed}
-        />
-        <div className="sidebar-footer">
-          <Tooltip content={collapsed ? "展开导航" : "收起导航"}>
-            <Button
-              aria-label="切换导航"
-              icon={<IconMenu aria-hidden="true" />}
-              theme="borderless"
-              type="tertiary"
-              onClick={() => setCollapsed((c) => !c)}
-            />
-          </Tooltip>
-          <Tooltip content={theme === "light" ? "深色模式" : "浅色模式"}>
-            <Button
-              aria-label="切换主题"
-              icon={
-                theme === "light" ? (
-                  <IconMoon aria-hidden="true" />
-                ) : (
-                  <IconSun aria-hidden="true" />
-                )
-              }
-              theme="borderless"
-              type="tertiary"
-              onClick={() =>
-                setTheme((t) => (t === "light" ? "dark" : "light"))
-              }
-            />
-          </Tooltip>
+          ))}
+        </nav>
+        <div className="sidebar-settings">
+          <NavLink
+            to="/settings"
+            className={({ isActive }) =>
+              `nav-link${isActive ? " selected" : ""}`
+            }
+          >
+            {sections.at(-1)?.icon}
+            系统设置
+          </NavLink>
         </div>
       </aside>
       <main className="app-workspace">

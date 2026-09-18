@@ -17,7 +17,6 @@ import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
 import {
   IconPlus,
   IconPlay,
-  IconRefresh,
   IconEdit,
   IconDelete,
   IconChevronLeft,
@@ -26,6 +25,7 @@ import {
 import { api } from "../api/client";
 import {
   Editor,
+  EmptyState,
   Field,
   Header,
   IconButton,
@@ -96,6 +96,9 @@ export default function Tasks() {
       setParams(next, { replace: true });
     }
   }, [jobs.data, page]);
+  useEffect(() => {
+    setMobileDetail(Boolean(selectedId));
+  }, [selectedId]);
   const action = (operation: () => Promise<unknown>, message: string) =>
     void actions.run(async () => {
       try {
@@ -110,15 +113,19 @@ export default function Tasks() {
     <div className="page task-page">
       <Header
         title="任务管理"
+        tabs={
+          <Tabs
+            activeKey={tab}
+            onChange={(key) => update({ tab: key })}
+            keepDOM={false}
+          >
+            <Tabs.TabPane tab="总览" itemKey="overview" />
+            <Tabs.TabPane tab="实时任务" itemKey="realtime" />
+            <Tabs.TabPane tab="历史任务" itemKey="history" />
+          </Tabs>
+        }
         actions={
           <>
-            <IconButton
-              aria-hidden="true"
-              label="刷新任务"
-              icon={<IconRefresh aria-hidden="true" />}
-              onClick={() => void jobs.refresh()}
-              disabled={jobs.loading}
-            />
             <Button
               icon={<IconPlay aria-hidden="true" />}
               disabled={actions.busy || !jobs.data?.count}
@@ -140,160 +147,163 @@ export default function Tasks() {
       />
       <div
         className={`task-workspace ${mobileDetail ? "show-task-detail" : ""}`}
+        data-empty={
+          (!jobs.loading && !jobs.error && !jobs.data?.count) || undefined
+        }
       >
-        <section className="task-list-pane" aria-label="同步任务列表">
-          <div className="task-search">
-            <Input
-              prefix={<IconSearch aria-hidden="true" />}
-              placeholder="筛选当前页任务"
-              aria-label="筛选任务"
-              value={search}
-              onChange={setSearch}
-              showClear
-            />
-          </div>
-          <LoadState
-            loading={jobs.loading}
-            error={jobs.error}
-            retry={jobs.refresh}
-            empty={!list.length}
-            title="暂无同步任务"
-          />
-          {!jobs.loading && !jobs.error && (
-            <div className="task-list">
-              {list
-                .filter((j) =>
-                  `${getJobName(j)} ${j.srcPath} ${j.dstPath}`
-                    .toLowerCase()
-                    .includes(search.toLowerCase()),
-                )
-                .map((job) => (
-                  <button
-                    key={job.id}
-                    type="button"
-                    className={`task-list-item ${selected?.id === job.id ? "selected" : ""}`}
-                    aria-pressed={selected?.id === job.id}
-                    onClick={() => {
-                      update({ jobId: job.id });
-                      setMobileDetail(true);
-                    }}
-                  >
-                    <div className="task-item-heading">
-                      <strong title={getJobName(job)}>{getJobName(job)}</strong>
-                      <Tag size="small" color={job.enable ? "green" : "grey"}>
-                        {job.enable ? "已启用" : "已暂停"}
-                      </Tag>
-                    </div>
-                    <div className="task-item-meta">
-                      <span>{methodNames[job.method]}</span>
-                      <span>{formatSchedule(job)}</span>
-                    </div>
-                    <div
-                      className="mono task-item-path"
-                      title={formatJobPaths(job.srcPath)}
-                    >
-                      {formatJobPaths(job.srcPath)}
-                    </div>
-                  </button>
-                ))}
-              {list.length > 0 &&
-                !list.some((j) =>
-                  `${getJobName(j)} ${j.srcPath} ${j.dstPath}`
-                    .toLowerCase()
-                    .includes(search.toLowerCase()),
-                ) && <div className="empty-search">无匹配任务</div>}
-            </div>
-          )}
-          {!!jobs.data?.count && (
-            <div className="pane-pagination">
-              <Pagination
-                total={jobs.data.count}
-                currentPage={page}
-                pageSize={12}
-                size="small"
-                onPageChange={(p) => {
-                  update({ page: p, jobId: null });
-                  setSearch("");
-                }}
+        {!jobs.loading && !jobs.error && !jobs.data?.count ? (
+          <EmptyState />
+        ) : (
+          <>
+            <section className="task-list-pane" aria-label="同步任务列表">
+              <div className="task-search">
+                <Input
+                  prefix={<IconSearch aria-hidden="true" />}
+                  placeholder="筛选当前页任务"
+                  aria-label="筛选任务"
+                  value={search}
+                  onChange={setSearch}
+                  showClear
+                />
+              </div>
+              <LoadState
+                loading={jobs.loading}
+                error={jobs.error}
+                retry={jobs.refresh}
+                empty={!list.length}
               />
-            </div>
-          )}
-        </section>
-        <section className="task-detail-pane">
-          {selected && !jobs.error ? (
-            <>
-              <div className="mobile-detail-heading">
-                <Button
-                  icon={<IconChevronLeft aria-hidden="true" />}
-                  theme="borderless"
-                  onClick={() => {
-                    setMobileDetail(false);
-                    update({ jobId: null });
-                  }}
-                >
-                  任务列表
-                </Button>
-              </div>
-              <Tabs
-                activeKey={tab}
-                onChange={(key) => update({ tab: key })}
-                keepDOM={false}
-              >
-                <Tabs.TabPane tab="总览" itemKey="overview" />
-                <Tabs.TabPane tab="实时任务" itemKey="realtime" />
-                <Tabs.TabPane tab="历史任务" itemKey="history" />
-              </Tabs>
-              <div className="task-tab-content">
-                {tab === "overview" && (
-                  <Overview
-                    job={selected}
-                    engines={engines.data || []}
-                    busy={actions.busy}
-                    onRun={() =>
-                      action(
-                        () => api.jobAction({ id: String(selected.id) }),
-                        "已提交执行",
-                      )
-                    }
-                    onToggle={() =>
-                      action(
-                        () =>
-                          api.jobAction({
-                            id: String(selected.id),
-                            pause: selected.enable === 1,
-                          }),
-                        "任务状态已更新",
-                      )
-                    }
-                    onEdit={() => setEditor({ open: true, job: selected })}
-                    onDelete={() =>
-                      confirmDelete(
-                        "删除此同步任务？",
-                        async () => {
-                          await api.deleteJob(selected.id);
-                          await jobs.refresh();
-                          setMobileDetail(false);
-                        },
-                        "此任务的历史执行记录将一并删除。",
-                      )
-                    }
+              {!jobs.loading && !jobs.error && (
+                <div className="task-list">
+                  {list
+                    .filter((j) =>
+                      `${getJobName(j)} ${j.srcPath} ${j.dstPath}`
+                        .toLowerCase()
+                        .includes(search.toLowerCase()),
+                    )
+                    .map((job) => (
+                      <button
+                        key={job.id}
+                        type="button"
+                        className={`task-list-item ${selected?.id === job.id ? "selected" : ""}`}
+                        aria-pressed={selected?.id === job.id}
+                        onClick={() => {
+                          update({ jobId: job.id });
+                          setMobileDetail(true);
+                        }}
+                      >
+                        <div className="task-item-heading">
+                          <strong title={getJobName(job)}>
+                            {getJobName(job)}
+                          </strong>
+                          <Tag
+                            size="small"
+                            color={job.enable ? "green" : "grey"}
+                          >
+                            {job.enable ? "已启用" : "已暂停"}
+                          </Tag>
+                        </div>
+                        <div className="task-item-meta">
+                          <span>{methodNames[job.method]}</span>
+                          <span>{formatSchedule(job)}</span>
+                        </div>
+                        <div
+                          className="mono task-item-path"
+                          title={formatJobPaths(job.srcPath)}
+                        >
+                          {formatJobPaths(job.srcPath)}
+                        </div>
+                      </button>
+                    ))}
+                  {list.length > 0 &&
+                    !list.some((j) =>
+                      `${getJobName(j)} ${j.srcPath} ${j.dstPath}`
+                        .toLowerCase()
+                        .includes(search.toLowerCase()),
+                    ) && <EmptyState />}
+                </div>
+              )}
+              {!!jobs.data?.count && (
+                <div className="pane-pagination">
+                  <Pagination
+                    total={jobs.data.count}
+                    currentPage={page}
+                    pageSize={12}
+                    size="small"
+                    onPageChange={(p) => {
+                      update({ page: p, jobId: null });
+                      setSearch("");
+                    }}
                   />
-                )}
-                {tab === "realtime" && (
-                  <Realtime key={selected.id} jobId={selected.id} />
-                )}
-                {tab === "history" && (
-                  <History key={selected.id} jobId={selected.id} />
-                )}
-              </div>
-            </>
-          ) : (
-            <div className="task-empty-detail">
-              <img src="/app/opensync/favicon.svg" alt="" />
-              <h2>{jobs.error ? "任务加载失败" : "尚未选择任务"}</h2>
-            </div>
-          )}
-        </section>
+                </div>
+              )}
+            </section>
+            <section className="task-detail-pane">
+              {selected && !jobs.error ? (
+                <>
+                  <div className="mobile-detail-heading">
+                    <Button
+                      icon={<IconChevronLeft aria-hidden="true" />}
+                      theme="borderless"
+                      onClick={() => {
+                        setMobileDetail(false);
+                        update({ jobId: null });
+                      }}
+                    >
+                      任务列表
+                    </Button>
+                  </div>
+                  <div className="task-tab-content">
+                    {tab === "overview" && (
+                      <Overview
+                        job={selected}
+                        engines={engines.data || []}
+                        busy={actions.busy}
+                        onRun={() =>
+                          action(
+                            () => api.jobAction({ id: String(selected.id) }),
+                            "已提交执行",
+                          )
+                        }
+                        onToggle={() =>
+                          action(
+                            () =>
+                              api.jobAction({
+                                id: String(selected.id),
+                                pause: selected.enable === 1,
+                              }),
+                            "任务状态已更新",
+                          )
+                        }
+                        onEdit={() => setEditor({ open: true, job: selected })}
+                        onDelete={() =>
+                          confirmDelete(
+                            "删除此同步任务？",
+                            async () => {
+                              await api.deleteJob(selected.id);
+                              await jobs.refresh();
+                              setMobileDetail(false);
+                            },
+                            "此任务的历史执行记录将一并删除。",
+                          )
+                        }
+                      />
+                    )}
+                    {tab === "realtime" && (
+                      <Realtime key={selected.id} jobId={selected.id} />
+                    )}
+                    {tab === "history" && (
+                      <History key={selected.id} jobId={selected.id} />
+                    )}
+                  </div>
+                </>
+              ) : (
+                <div className="task-empty-detail">
+                  {jobs.error ? "任务加载失败" : <EmptyState />}
+                </div>
+              )}
+            </section>
+          </>
+        )}
       </div>
       {editor.open && (
         <JobEditor
@@ -494,6 +504,12 @@ function JobEditor({
                   value={form.srcPath}
                   onChange={(paths) => change("srcPath", paths)}
                 />
+                <SettingRow label="源端缓存">
+                  <Switch
+                    checked={form.useCacheS}
+                    onChange={(value) => change("useCacheS", value)}
+                  />
+                </SettingRow>
               </Field>
               <Field label="目标目录" required>
                 <RemotePaths
@@ -502,6 +518,12 @@ function JobEditor({
                   value={form.dstPath}
                   onChange={(paths) => change("dstPath", paths)}
                 />
+                <SettingRow label="目标缓存">
+                  <Switch
+                    checked={form.useCacheT}
+                    onChange={(value) => change("useCacheT", value)}
+                  />
+                </SettingRow>
               </Field>
             </div>
             <Field label="任务备注">
@@ -606,19 +628,7 @@ function JobEditor({
             </Field>
           </div>
           <div className="form-section">
-            <h3>缓存与启用</h3>
-            <SettingRow label="源端缓存">
-              <Switch
-                checked={form.useCacheS}
-                onChange={(value) => change("useCacheS", value)}
-              />
-            </SettingRow>
-            <SettingRow label="目标缓存">
-              <Switch
-                checked={form.useCacheT}
-                onChange={(value) => change("useCacheT", value)}
-              />
-            </SettingRow>
+            <h3>任务状态</h3>
             <SettingRow label="任务启用状态">
               <Switch
                 disabled={form.isCron === 2}
