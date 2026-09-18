@@ -150,7 +150,7 @@ test("creates an engine and manual job, then edits without changing sync mode", 
       .filter({ hasText: /^Photos$/ })
       .click();
     await page
-      .getByRole("heading", { name: "新建同步任务", exact: true })
+      .getByRole("heading", { name: "新建任务 - 引擎与路径", exact: true })
       .click();
     await trees.nth(1).locator('[role="combobox"]').click();
     await page.locator(".semi-tree-option-expand-icon").first().click();
@@ -159,7 +159,7 @@ test("creates an engine and manual job, then edits without changing sync mode", 
       .filter({ hasText: /^Backup$/ })
       .click();
     await page
-      .getByRole("heading", { name: "新建同步任务", exact: true })
+      .getByRole("heading", { name: "新建任务 - 引擎与路径", exact: true })
       .click();
     const sourcePathBox = await trees.nth(0).boundingBox();
     const targetPathBox = await trees.nth(1).boundingBox();
@@ -176,11 +176,14 @@ test("creates an engine and manual job, then edits without changing sync mode", 
     await page
       .getByRole("textbox", { name: "任务备注", exact: true })
       .fill(name);
+    await page.getByRole("button", { name: "下一步", exact: true }).click();
     await page.getByRole("combobox", { name: "调度方式", exact: true }).click();
     await page.getByRole("option").filter({ hasText: "仅手动" }).click();
     await expect(
       page.getByRole("combobox", { name: "调度方式", exact: true }),
     ).toHaveText("仅手动");
+    await page.getByRole("button", { name: "下一步", exact: true }).click();
+    await page.getByRole("button", { name: "下一步", exact: true }).click();
     const posted = page.waitForRequest(
       (r) => r.url().endsWith("/svr/job") && r.method() === "POST",
     );
@@ -215,6 +218,15 @@ test("creates an engine and manual job, then edits without changing sync mode", 
     await page
       .getByRole("textbox", { name: "任务备注", exact: true })
       .fill(name + "-修改");
+    await page
+      .getByRole("button", { name: "下一步", exact: true })
+      .click({ force: forceMobileClick });
+    await page
+      .getByRole("button", { name: "下一步", exact: true })
+      .click({ force: forceMobileClick });
+    await page
+      .getByRole("button", { name: "下一步", exact: true })
+      .click({ force: forceMobileClick });
     const saveButton = page.getByRole("button", {
       name: "保存任务配置",
       exact: true,

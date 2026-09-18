@@ -39,7 +39,20 @@ test("desktop sidebar is 220px with icon menus and bottom settings", async ({
   const sidebar = page.locator(".app-sidebar");
   await expect(sidebar).toBeVisible();
   expect((await sidebar.boundingBox())?.width).toBe(220);
+  const firstNav = sidebar.getByRole("link", { name: "任务管理" });
+  const firstNavBox = await firstNav.boundingBox();
+  expect(firstNavBox?.width).toBe(204);
+  expect(firstNavBox?.height).toBe(36);
+  await expect(firstNav).toHaveCSS("font-size", "14px");
   await expect(sidebar.locator(".semi-icon")).toHaveCount(4);
+  await expect(sidebar.locator(".semi-icon").first()).toHaveAttribute(
+    "aria-label",
+    "cloud_stroked",
+  );
+  await expect(sidebar.locator(".semi-icon").first()).toHaveCSS(
+    "font-size",
+    "16px",
+  );
   await expect(page.getByRole("button", { name: "切换导航" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "切换主题" })).toHaveCount(0);
   const settings = page.locator(".sidebar-settings");
@@ -66,6 +79,14 @@ test("task and engine tabs share an integrated toolbar row with commands", async
     await expect(toolbar.locator(".semi-tabs-bar")).toHaveCSS(
       "border-bottom-width",
       "0px",
+    );
+    await expect(toolbar.locator(".semi-tabs-bar")).toHaveCSS(
+      "border-top-width",
+      "0px",
+    );
+    await expect(toolbar.locator(".semi-tabs-bar")).toHaveCSS(
+      "background-color",
+      "rgba(0, 0, 0, 0)",
     );
     const tabBox = await toolbar
       .getByRole("tab", { name: tab, exact: true })
@@ -117,6 +138,110 @@ test("primary surface, cards and controls use consistent radii and full width", 
   await expect(save).toBeEnabled();
   await expect(save).toHaveCSS("background-color", "rgb(0, 102, 255)");
   await expect(save).toHaveCSS("border-radius", "8px");
+});
+
+test("data fixture renders inspectable engine, task and notification rows", async ({
+  page,
+  request,
+}, testInfo) => {
+  const name = "检查数据-" + testInfo.project.name + "-" + Date.now();
+  let engineId: number | undefined;
+  let jobId: number | undefined;
+  let notifyId: number | undefined;
+  try {
+    await request.post("/app/opensync/svr/alist", {
+      data: {
+        url: engineUrl,
+        token: "fixture-token",
+        remark: name,
+      },
+    });
+    const engines = await (
+      await request.get("/app/opensync/svr/alist")
+    ).json();
+    engineId = engines.data.find(
+      (item: { remark: string }) => item.remark === name,
+    ).id;
+
+    await request.post("/app/opensync/svr/job", {
+      data: {
+        alistId: engineId,
+        srcPath: JSON.stringify(["/Photos"]),
+        dstPath: JSON.stringify(["/Backup"]),
+        method: 0,
+        isCron: 2,
+        enable: 1,
+        useCacheS: false,
+        useCacheT: false,
+        remark: name,
+      },
+    });
+    const jobs = await (
+      await request.get("/app/opensync/svr/job?pageNum=1&pageSize=100")
+    ).json();
+    jobId = jobs.data.dataList.find(
+      (item: { remark: string }) => item.remark === name,
+    ).id;
+
+    await request.post("/app/opensync/svr/notify", {
+      data: {
+        notify: {
+          method: 0,
+          enable: 1,
+          params: JSON.stringify({
+            url: engineUrl + "/hook",
+            httpMethod: "POST",
+            contentType: "application/json",
+            needContent: true,
+            titleName: "title",
+            contentName: "content",
+            notSendNull: false,
+          }),
+        },
+      },
+    });
+    const notifications = await (
+      await request.get("/app/opensync/svr/notify")
+    ).json();
+    notifyId = notifications.data.at(-1).id;
+
+    await page.goto("/app/opensync/engines");
+    await expect(page.getByRole("heading", { name, exact: true })).toBeVisible();
+    await expect(page.locator(".engine-item .item-symbol .semi-icon")).toHaveCSS(
+      "font-size",
+      "16px",
+    );
+
+    await page.goto("/app/opensync/tasks");
+    await expect(
+      page.locator(".task-list-item").filter({ hasText: name }),
+    ).toBeVisible();
+
+    await page.goto("/app/opensync/notifications");
+    await expect(page.getByText(`通知 #${notifyId}`, { exact: true })).toBeVisible();
+    await expect(
+      page.locator(".notification-item .semi-switch").first(),
+    ).toHaveCSS("width", "40px");
+    await expect(
+      page.locator(".notification-item .semi-switch").first(),
+    ).toHaveCSS("height", "24px");
+    await expect(
+      page.locator(".notification-item .semi-switch").first(),
+    ).toHaveCSS("background-color", "rgb(0, 102, 255)");
+    await page.screenshot({
+      path: `test-results/data-${testInfo.project.name}.png`,
+      fullPage: true,
+    });
+  } finally {
+    if (notifyId)
+      await request.delete(
+        `/app/opensync/svr/notify?notifyId=${notifyId}`,
+      );
+    if (jobId)
+      await request.delete(`/app/opensync/svr/job?id=${jobId}`);
+    if (engineId)
+      await request.delete(`/app/opensync/svr/alist?id=${engineId}`);
+  }
 });
 
 test("task cards follow the reference card style and fill the detail pane", async ({

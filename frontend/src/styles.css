@@ -19,6 +19,12 @@
   --semi-border-radius-small: 8px;
   --semi-border-radius-medium: 8px;
   --radius: 8px;
+  --control-height: 36px;
+  --font-size-body: 14px;
+  --font-size-small: 12px;
+  --font-size-nav: 14px;
+  --font-size-section-title: 16px;
+  --font-size-page-title: 20px;
 }
 * {
   box-sizing: border-box;
@@ -26,7 +32,7 @@
 body {
   margin: 0;
   min-width: 320px;
-  font-size: 14px;
+  font-size: var(--font-size-body);
 }
 body {
   --semi-color-primary: #0066ff;
@@ -63,12 +69,12 @@ p {
   margin: 0;
 }
 h1 {
-  font-size: 20px;
+  font-size: var(--font-size-page-title);
   font-weight: 600;
   line-height: 1.5;
 }
 h2 {
-  font-size: 16px;
+  font-size: var(--font-size-section-title);
   font-weight: 600;
   line-height: 1.5;
   overflow-wrap: anywhere;
@@ -86,13 +92,13 @@ h3 {
 .muted,
 .field-hint {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--font-size-small);
 }
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
-  font-size: 12px;
+  font-size: var(--font-size-small);
 }
 .app-shell {
   display: grid;
@@ -109,16 +115,17 @@ h3 {
 .nav-link {
   display: flex;
   align-items: center;
-  gap: 12px;
-  height: 40px;
-  padding: 0 20px;
+  gap: 10px;
+  width: 204px;
+  height: var(--control-height);
+  padding: 0 16px;
   margin-bottom: 8px;
   border-radius: var(--radius);
-  font-size: 15px;
+  font-size: var(--font-size-nav);
   font-weight: 500;
 }
 .nav-link .semi-icon {
-  font-size: 18px;
+  font-size: 16px;
   flex-shrink: 0;
 }
 .nav-link:hover {
@@ -564,8 +571,13 @@ body .semi-modal-mask {
 .fnos-confirm .semi-modal-content {
   padding: 24px;
 }
+.fnos-confirm .semi-modal-header {
+  margin: 0 32px 16px 0;
+  padding: 0;
+}
 .fnos-confirm .semi-modal-confirm-icon,
-.fnos-confirm .semi-modal-confirm-icon-wrapper {
+.fnos-confirm .semi-modal-confirm-icon-wrapper,
+.fnos-confirm .semi-modal-icon-wrapper {
   display: none;
 }
 .fnos-confirm .semi-modal-confirm-content {
@@ -693,6 +705,75 @@ body .semi-modal-mask {
 .editor-form .form-section:first-child {
   padding-top: 0;
   border-top: 0;
+}
+.task-editor-modal .semi-modal-header {
+  padding: 32px 48px 24px;
+}
+.task-editor-modal .semi-modal-title {
+  font-size: 24px;
+  line-height: 32px;
+}
+.task-editor-modal .semi-modal-close {
+  top: 26px;
+  right: 40px;
+}
+.task-editor-modal .semi-modal-body {
+  padding: 0 48px;
+  max-height: min(calc(100dvh - 220px), 620px);
+}
+.task-editor-modal .semi-modal-footer {
+  padding: 28px 48px 32px;
+}
+.task-editor-stepbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 8px 0 24px;
+  border-bottom: 1px solid var(--line);
+}
+.task-editor-stepbar h3 {
+  margin: 0;
+  font-size: 18px;
+  line-height: 26px;
+  font-weight: 600;
+}
+.task-editor-count {
+  flex: 0 0 auto;
+  color: var(--semi-color-text-0);
+  font-size: 18px;
+  font-weight: 600;
+}
+.task-editor-count strong {
+  color: var(--accent);
+}
+.task-editor-step {
+  min-height: 420px;
+  padding: 24px 0 4px;
+}
+.task-editor-step .form-section {
+  padding-top: 0;
+  border-top: 0;
+}
+.task-editor-modal .editor-form .form-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.task-editor-review {
+  display: grid;
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.task-editor-review .info-row {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.task-editor-review .info-row:last-child {
+  border-bottom: 0;
+}
+.task-editor-actions {
+  align-items: center;
 }
 .setting-row {
   display: flex;
@@ -1167,6 +1248,12 @@ html[data-theme="dark"] .semi-modal-mask {
   --radius: 8px;
   --semi-border-radius-small: 8px;
   --semi-border-radius-medium: 8px;
+  --control-height: 36px;
+  --font-size-body: 14px;
+  --font-size-small: 12px;
+  --font-size-nav: 14px;
+  --font-size-section-title: 16px;
+  --font-size-page-title: 20px;
 }
 .app-shell {
   grid-template-columns: 220px minmax(0, 1fr);
@@ -1184,17 +1271,18 @@ html[data-theme="dark"] .semi-modal-mask {
 .nav-link {
   display: flex;
   align-items: center;
-  gap: 12px;
-  height: 40px;
+  gap: 10px;
+  width: 204px;
+  height: var(--control-height);
   margin: 0;
-  padding: 0 20px;
+  padding: 0 16px;
   border-radius: var(--radius);
-  font-size: 15px;
+  font-size: var(--font-size-nav);
   font-weight: 500;
 }
 .nav-link .semi-icon {
   flex: 0 0 auto;
-  font-size: 18px;
+  font-size: 16px;
 }
 .nav-link:hover {
   background: var(--surface-soft);
@@ -1248,6 +1336,8 @@ html[data-theme="dark"] .semi-modal-mask {
   height: 56px;
   margin: 0 28px 0 0;
   padding: 0;
+  font-size: var(--font-size-body);
+  font-weight: 500;
 }
 .page-tabs .semi-tabs-bar-line {
   bottom: 0;
@@ -1261,6 +1351,8 @@ html[data-theme="dark"] .semi-modal-mask {
 }
 .semi-button {
   border-radius: var(--radius);
+  font-size: var(--font-size-body);
+  font-weight: 500;
 }
 .semi-button-primary.semi-button-solid {
   background: var(--accent);
@@ -1361,6 +1453,8 @@ html[data-theme="dark"] .semi-modal-mask {
   background: var(--surface);
   border: 1px solid #d8d8d8;
   border-radius: var(--radius);
+  font-size: var(--font-size-body);
+  min-height: var(--control-height);
 }
 .editor-form .form-grid {
   grid-template-columns: minmax(0, 1fr);
@@ -1412,4 +1506,115 @@ html[data-theme="dark"] .semi-modal-mask {
   .page-tabs .semi-tabs-tab {
     height: 40px;
   }
+  .task-editor-modal .semi-modal-header {
+    padding: 20px 16px 16px;
+  }
+  .task-editor-modal .semi-modal-title {
+    max-width: calc(100vw - 88px);
+    font-size: 20px;
+    line-height: 28px;
+  }
+  .task-editor-modal .semi-modal-close {
+    top: 14px;
+    right: 12px;
+  }
+  .task-editor-modal .semi-modal-body {
+    padding: 0 16px;
+  }
+  .task-editor-modal .semi-modal-footer {
+    padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
+  }
+  .task-editor-stepbar {
+    align-items: flex-start;
+    gap: 8px;
+    padding-bottom: 18px;
+  }
+  .task-editor-stepbar h3,
+  .task-editor-count {
+    font-size: 16px;
+    line-height: 24px;
+  }
+  .task-editor-step {
+    min-height: 0;
+    padding-top: 18px;
+  }
+  .task-editor-modal .editor-form .form-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .task-editor-actions {
+    flex-wrap: wrap;
+  }
+  .task-editor-actions .semi-button {
+    flex: 1 1 92px;
+  }
+}
+
+/* Keep compact controls consistent with fnOS's outlined icon treatment. */
+.semi-icon,
+.semi-button .semi-icon,
+.nav-link .semi-icon,
+.item-symbol .semi-icon,
+.authorized-path > .semi-icon,
+.mobile-navigation .semi-icon {
+  font-size: 16px;
+}
+
+.page-tabs .semi-tabs,
+.page-tabs .semi-tabs-bar {
+  height: 56px;
+}
+
+.page-tabs .semi-tabs,
+.page-tabs .semi-tabs-bar,
+.execution-tabs .semi-tabs,
+.execution-tabs .semi-tabs-bar {
+  border-top: 0 !important;
+  box-shadow: none !important;
+}
+
+.page-tabs .semi-tabs-bar,
+.page-tabs .semi-tabs-bar-line,
+.execution-tabs .semi-tabs-bar,
+.execution-tabs .semi-tabs-bar-line {
+  border-bottom: 0 !important;
+  background-color: transparent !important;
+}
+
+.page-tabs .semi-tabs-bar-line .semi-tabs-tab-active,
+.execution-tabs .semi-tabs-bar-line .semi-tabs-tab-active {
+  border-bottom: 2px solid var(--accent) !important;
+}
+
+.semi-switch {
+  width: 40px;
+  height: 24px;
+  border-radius: 12px;
+  background-color: #dedede;
+}
+
+.semi-switch:hover {
+  background-color: #d4d4d4;
+}
+
+.semi-switch-checked,
+.semi-switch-checked:hover {
+  background-color: var(--accent) !important;
+}
+
+.settings-section .setting-row {
+  min-height: 68px;
+  padding: 20px 24px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.settings-section .setting-row + .setting-row {
+  margin-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.settings-section .setting-row:first-of-type,
+.settings-section .setting-row:last-of-type {
+  border-radius: var(--radius);
 }

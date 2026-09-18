@@ -11,11 +11,11 @@ import Table from "@douyinfe/semi-ui/lib/es/table";
 import Tabs from "@douyinfe/semi-ui/lib/es/tabs";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import {
-  IconDelete,
-  IconEyeOpened,
+  IconDeleteStroked,
+  IconEyeOpenedStroked,
   IconPause,
   IconRefresh,
-  IconSearch,
+  IconSearchStroked,
 } from "@douyinfe/semi-icons";
 import dayjs from "dayjs";
 import { api } from "../api/client";
@@ -215,7 +215,7 @@ export function History({ jobId }: { jobId: number }) {
       <IconButton
         aria-hidden="true"
         label="查看执行明细"
-        icon={<IconEyeOpened aria-hidden="true" />}
+        icon={<IconEyeOpenedStroked aria-hidden="true" />}
         onClick={() => setDetail(record.id)}
       />
       <IconButton
@@ -228,7 +228,7 @@ export function History({ jobId }: { jobId: number }) {
       <IconButton
         aria-hidden="true"
         label="删除执行记录"
-        icon={<IconDelete aria-hidden="true" />}
+        icon={<IconDeleteStroked aria-hidden="true" />}
         danger
         onClick={() =>
           confirmDelete("删除此执行记录？", async () => {
@@ -243,7 +243,7 @@ export function History({ jobId }: { jobId: number }) {
     <div className="history-view">
       <div className="filter-bar">
         <Input
-          prefix={<IconSearch aria-hidden="true" />}
+          prefix={<IconSearchStroked aria-hidden="true" />}
           aria-label="搜索执行记录"
           placeholder="任务 / 错误关键词"
           value={input}
@@ -263,7 +263,7 @@ export function History({ jobId }: { jobId: number }) {
             <IconButton
               aria-hidden="true"
               label="搜索记录"
-              icon={<IconSearch aria-hidden="true" />}
+              icon={<IconSearchStroked aria-hidden="true" />}
               onClick={() => {
                 setKeyword(input.trim());
                 setPage(1);
@@ -562,7 +562,7 @@ function FileDetails({
       <div className="filter-bar">
         <Input
           aria-label="搜索文件明细"
-          prefix={<IconSearch aria-hidden="true" />}
+          prefix={<IconSearchStroked aria-hidden="true" />}
           placeholder="文件 / 路径 / 错误"
           value={input}
           onChange={(value) => {

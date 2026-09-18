@@ -15,12 +15,12 @@ import TextArea from "@douyinfe/semi-ui/lib/es/input/textarea";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
 import {
-  IconPlus,
   IconPlay,
-  IconEdit,
-  IconDelete,
+  IconPlusStroked,
+  IconEditStroked,
+  IconDeleteStroked,
   IconChevronLeft,
-  IconSearch,
+  IconSearchStroked,
 } from "@douyinfe/semi-icons";
 import { api } from "../api/client";
 import {
@@ -137,7 +137,7 @@ export default function Tasks() {
             </Button>
             <Button
               theme="solid"
-              icon={<IconPlus aria-hidden="true" />}
+              icon={<IconPlusStroked aria-hidden="true" />}
               onClick={() => setEditor({ open: true, job: null })}
             >
               新建任务
@@ -158,7 +158,7 @@ export default function Tasks() {
             <section className="task-list-pane" aria-label="同步任务列表">
               <div className="task-search">
                 <Input
-                  prefix={<IconSearch aria-hidden="true" />}
+                  prefix={<IconSearchStroked aria-hidden="true" />}
                   placeholder="筛选当前页任务"
                   aria-label="筛选任务"
                   value={search}
@@ -375,14 +375,14 @@ function Overview({
           <IconButton
             aria-hidden="true"
             label="编辑任务"
-            icon={<IconEdit aria-hidden="true" />}
+            icon={<IconEditStroked aria-hidden="true" />}
             onClick={onEdit}
             disabled={busy}
           />
           <IconButton
             aria-hidden="true"
             label="删除任务"
-            icon={<IconDelete aria-hidden="true" />}
+            icon={<IconDeleteStroked aria-hidden="true" />}
             onClick={onDelete}
             disabled={busy}
             danger
@@ -423,6 +423,8 @@ function Overview({
   );
 }
 
+const taskEditorSteps = ["引擎与路径", "同步与调度", "文件过滤", "任务状态"];
+
 function JobEditor({
   job,
   engines,
@@ -439,10 +441,21 @@ function JobEditor({
   );
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState("");
+  const [step, setStep] = useState(0);
   const action = useAction();
+  const activeStep = taskEditorSteps[step];
+  const lastStep = step === taskEditorSteps.length - 1;
   const change = <K extends keyof JobForm>(key: K, value: JobForm[K]) => {
     setDirty(true);
     setForm((f) => ({ ...f, [key]: value }));
+  };
+  const nextStep = () => {
+    setError("");
+    setStep((current) => Math.min(current + 1, taskEditorSteps.length - 1));
+  };
+  const previousStep = () => {
+    setError("");
+    setStep((current) => Math.max(current - 1, 0));
   };
   const save = () => {
     const validation = validateJobForm(form);
@@ -461,181 +474,241 @@ function JobEditor({
   };
   return (
     <Editor
-      title={job ? "编辑同步任务" : "新建同步任务"}
+      title={`${job ? "编辑任务" : "新建任务"} - ${activeStep}`}
       visible
       busy={action.busy}
       onClose={onClose}
       onSave={save}
       dirty={dirty}
-      saveLabel="保存任务配置"
+      width={820}
+      className="task-editor-modal"
+      footer={({ close }) => (
+        <div className="editor-actions task-editor-actions">
+          <Button onClick={close} disabled={action.busy}>
+            取消
+          </Button>
+          {step > 0 && (
+            <Button onClick={previousStep} disabled={action.busy}>
+              上一步
+            </Button>
+          )}
+          <Button
+            type="primary"
+            theme="solid"
+            loading={action.busy}
+            onClick={lastStep ? save : nextStep}
+          >
+            {lastStep ? "保存任务配置" : "下一步"}
+          </Button>
+        </div>
+      )}
     >
-      <Form onSubmit={save} className="editor-form">
+      <Form onSubmit={lastStep ? save : nextStep} className="editor-form">
         <fieldset disabled={action.busy}>
           {error && (
             <Banner type="danger" description={error} closeIcon={null} />
           )}
-          <div className="form-section">
-            <h3>引擎与路径</h3>
-            <Field label="存储引擎" required>
-              <Select
-                value={form.alistId}
-                placeholder="请选择引擎"
-                optionList={engines.map((e) => ({
-                  label: `${e.remark || e.userName} · ${e.url}`,
-                  value: e.id,
-                }))}
-                onChange={(value) => {
-                  setDirty(true);
-                  setForm((f) => ({
-                    ...f,
-                    alistId: Number(value),
-                    srcPath: [],
-                    dstPath: [],
-                  }));
-                }}
-                style={{ width: "100%" }}
-              />
-            </Field>
-            <div className="form-grid">
-              <Field label="源目录" required>
-                <RemotePaths
-                  key={`src-${form.alistId}`}
-                  engineId={form.alistId}
-                  value={form.srcPath}
-                  onChange={(paths) => change("srcPath", paths)}
-                />
-                <SettingRow label="源端缓存">
-                  <Switch
-                    checked={form.useCacheS}
-                    onChange={(value) => change("useCacheS", value)}
-                  />
-                </SettingRow>
-              </Field>
-              <Field label="目标目录" required>
-                <RemotePaths
-                  key={`dst-${form.alistId}`}
-                  engineId={form.alistId}
-                  value={form.dstPath}
-                  onChange={(paths) => change("dstPath", paths)}
-                />
-                <SettingRow label="目标缓存">
-                  <Switch
-                    checked={form.useCacheT}
-                    onChange={(value) => change("useCacheT", value)}
-                  />
-                </SettingRow>
-              </Field>
+          <div className="task-editor-stepbar">
+            <h3>{activeStep}</h3>
+            <div className="task-editor-count" aria-label="当前步骤">
+              步骤 <strong>{step + 1}</strong> / {taskEditorSteps.length}
             </div>
-            <Field label="任务备注">
-              <Input
-                value={form.remark}
-                onChange={(value) => change("remark", value)}
-                placeholder="相册每日备份"
-              />
-            </Field>
           </div>
-          <div className="form-section">
-            <h3>同步与调度</h3>
-            <div className="form-grid">
-              <Field label="同步方式">
-                <Select
-                  value={form.method}
-                  style={{ width: "100%" }}
-                  optionList={methodOptions.map((m, value) => ({
-                    value,
-                    label: <Tooltip content={m.description}>{m.name}</Tooltip>,
-                  }))}
-                  onChange={(value) => change("method", Number(value))}
-                />
-              </Field>
-              <Field label="调度方式">
-                <Select
-                  value={form.isCron}
-                  style={{ width: "100%" }}
-                  optionList={cronTypeNames.map((label, value) => ({
-                    value,
-                    label,
-                  }))}
-                  onChange={(value) => change("isCron", Number(value))}
-                />
-              </Field>
-            </div>
-            {form.isCron === 0 && (
-              <Field label="执行间隔（分钟）">
-                <InputNumber
-                  min={1}
-                  value={form.interval}
-                  onChange={(value) => change("interval", Number(value))}
-                  style={{ width: "100%" }}
-                />
-              </Field>
-            )}
-            {form.isCron === 1 && (
-              <div className="cron-grid">
-                {cronFields.map((field) => (
-                  <Field key={field.name} label={field.label}>
-                    <Input
-                      value={form[field.name as keyof typeof rangesKeys]}
-                      onChange={(value) =>
-                        change(field.name as keyof typeof rangesKeys, value)
-                      }
+          <div className="task-editor-step">
+            {step === 0 && (
+              <div className="form-section">
+                <Field label="存储引擎" required>
+                  <Select
+                    value={form.alistId}
+                    placeholder="请选择引擎"
+                    optionList={engines.map((e) => ({
+                      label: `${e.remark || e.userName} · ${e.url}`,
+                      value: e.id,
+                    }))}
+                    onChange={(value) => {
+                      setDirty(true);
+                      setForm((f) => ({
+                        ...f,
+                        alistId: Number(value),
+                        srcPath: [],
+                        dstPath: [],
+                      }));
+                    }}
+                    style={{ width: "100%" }}
+                  />
+                </Field>
+                <div className="form-grid">
+                  <Field label="源目录" required>
+                    <RemotePaths
+                      key={`src-${form.alistId}`}
+                      engineId={form.alistId}
+                      value={form.srcPath}
+                      onChange={(paths) => change("srcPath", paths)}
                     />
+                    <SettingRow label="源端缓存">
+                      <Switch
+                        checked={form.useCacheS}
+                        onChange={(value) => change("useCacheS", value)}
+                      />
+                    </SettingRow>
                   </Field>
-                ))}
+                  <Field label="目标目录" required>
+                    <RemotePaths
+                      key={`dst-${form.alistId}`}
+                      engineId={form.alistId}
+                      value={form.dstPath}
+                      onChange={(paths) => change("dstPath", paths)}
+                    />
+                    <SettingRow label="目标缓存">
+                      <Switch
+                        checked={form.useCacheT}
+                        onChange={(value) => change("useCacheT", value)}
+                      />
+                    </SettingRow>
+                  </Field>
+                </div>
+                <Field label="任务备注">
+                  <Input
+                    value={form.remark}
+                    onChange={(value) => change("remark", value)}
+                    placeholder="相册每日备份"
+                  />
+                </Field>
               </div>
             )}
-            <div className="schedule-preview">{formatSchedulePlan(form)}</div>
-          </div>
-          <div className="form-section">
-            <h3>文件过滤</h3>
-            <div className="form-grid">
-              {(["min", "max"] as const).map((kind) => (
-                <Field
-                  key={kind}
-                  label={kind === "min" ? "最小文件大小" : "最大文件大小"}
-                  hint="0 表示不限"
-                >
-                  <div className="unit-input">
-                    <InputNumber
-                      min={0}
-                      step={0.1}
-                      value={form[`${kind}FileSize`]}
-                      onChange={(value) =>
-                        change(`${kind}FileSize`, Number(value))
-                      }
-                    />
+            {step === 1 && (
+              <div className="form-section">
+                <div className="form-grid">
+                  <Field label="同步方式">
                     <Select
-                      aria-label={
-                        kind === "min" ? "最小文件大小单位" : "最大文件大小单位"
-                      }
-                      value={form[`${kind}FileSizeUnit`]}
-                      optionList={fileSizeUnitOptions}
-                      onChange={(value) =>
-                        change(`${kind}FileSizeUnit`, String(value))
-                      }
+                      value={form.method}
+                      style={{ width: "100%" }}
+                      optionList={methodOptions.map((m, value) => ({
+                        value,
+                        label: (
+                          <Tooltip content={m.description}>{m.name}</Tooltip>
+                        ),
+                      }))}
+                      onChange={(value) => change("method", Number(value))}
                     />
+                  </Field>
+                  <Field label="调度方式">
+                    <Select
+                      value={form.isCron}
+                      style={{ width: "100%" }}
+                      optionList={cronTypeNames.map((label, value) => ({
+                        value,
+                        label,
+                      }))}
+                      onChange={(value) => change("isCron", Number(value))}
+                    />
+                  </Field>
+                </div>
+                {form.isCron === 0 && (
+                  <Field label="执行间隔（分钟）">
+                    <InputNumber
+                      min={1}
+                      value={form.interval}
+                      onChange={(value) => change("interval", Number(value))}
+                      style={{ width: "100%" }}
+                    />
+                  </Field>
+                )}
+                {form.isCron === 1 && (
+                  <div className="cron-grid">
+                    {cronFields.map((field) => (
+                      <Field key={field.name} label={field.label}>
+                        <Input
+                          value={form[field.name as keyof typeof rangesKeys]}
+                          onChange={(value) =>
+                            change(field.name as keyof typeof rangesKeys, value)
+                          }
+                        />
+                      </Field>
+                    ))}
                   </div>
+                )}
+                <div className="schedule-preview">
+                  {formatSchedulePlan(form)}
+                </div>
+              </div>
+            )}
+            {step === 2 && (
+              <div className="form-section">
+                <div className="form-grid">
+                  {(["min", "max"] as const).map((kind) => (
+                    <Field
+                      key={kind}
+                      label={kind === "min" ? "最小文件大小" : "最大文件大小"}
+                      hint="0 表示不限"
+                    >
+                      <div className="unit-input">
+                        <InputNumber
+                          min={0}
+                          step={0.1}
+                          value={form[`${kind}FileSize`]}
+                          onChange={(value) =>
+                            change(`${kind}FileSize`, Number(value))
+                          }
+                        />
+                        <Select
+                          aria-label={
+                            kind === "min"
+                              ? "最小文件大小单位"
+                              : "最大文件大小单位"
+                          }
+                          value={form[`${kind}FileSizeUnit`]}
+                          optionList={fileSizeUnitOptions}
+                          onChange={(value) =>
+                            change(`${kind}FileSizeUnit`, String(value))
+                          }
+                        />
+                      </div>
+                    </Field>
+                  ))}
+                </div>
+                <Field label="排除规则（.gitignore 格式）">
+                  <TextArea
+                    value={form.exclude}
+                    onChange={(value) => change("exclude", value)}
+                    rows={5}
+                    className="mono"
+                  />
                 </Field>
-              ))}
-            </div>
-            <Field label="排除规则（.gitignore 格式）">
-              <TextArea
-                value={form.exclude}
-                onChange={(value) => change("exclude", value)}
-                rows={5}
-                className="mono"
-              />
-            </Field>
-          </div>
-          <div className="form-section">
-            <h3>任务状态</h3>
-            <SettingRow label="任务启用状态">
-              <Switch
-                disabled={form.isCron === 2}
-                checked={form.isCron === 2 || form.enable}
-                onChange={(value) => change("enable", value)}
-              />
-            </SettingRow>
+              </div>
+            )}
+            {step === 3 && (
+              <div className="form-section">
+                <SettingRow label="任务启用状态">
+                  <Switch
+                    disabled={form.isCron === 2}
+                    checked={form.isCron === 2 || form.enable}
+                    onChange={(value) => change("enable", value)}
+                  />
+                </SettingRow>
+                <div className="task-editor-review">
+                  <Info label="源目录" mono>
+                    {form.srcPath.join("\n") || "未选择"}
+                  </Info>
+                  <Info label="目标目录" mono>
+                    {form.dstPath.join("\n") || "未选择"}
+                  </Info>
+                  <Info label="同步方式">
+                    {methodNames[form.method] || "增量同步"}
+                  </Info>
+                  <Info label="执行计划">{formatSchedulePlan(form)}</Info>
+                  <Info label="文件大小">
+                    {formatFileSizeRange(
+                      form.minFileSize,
+                      form.maxFileSize,
+                    ) || "不限制"}
+                  </Info>
+                  <Info label="排除规则">
+                    {form.exclude?.trim() ? "已配置" : "无排除规则"}
+                  </Info>
+                </div>
+              </div>
+            )}
           </div>
         </fieldset>
       </Form>

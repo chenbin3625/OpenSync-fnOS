@@ -10,12 +10,19 @@ test("opens usable task workspace without a second login", async ({ page }) => {
   await expect(page.getByText("空空如也", { exact: true })).toBeVisible();
 });
 
-test("opens and cancels task editor with pinned actions", async ({ page }) => {
+test("opens task editor as a step-by-step wizard", async ({ page }) => {
   await page.goto("/app/opensync/tasks");
   await page.getByRole("button", { name: "新建任务", exact: true }).click();
   await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(page.getByText("步骤 1 / 4", { exact: true })).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "保存任务配置" }),
+    page.getByRole("heading", { name: "引擎与路径", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("combobox", { name: "同步方式", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "下一步", exact: true }),
   ).toBeVisible();
   await page.getByRole("button", { name: "取消", exact: true }).click();
   await expect(page.getByRole("dialog")).not.toBeVisible();

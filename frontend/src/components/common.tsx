@@ -236,6 +236,9 @@ export function Editor({
   children,
   dirty = false,
   saveLabel = "保存",
+  width = 454,
+  className,
+  footer,
 }: {
   title: string;
   visible: boolean;
@@ -245,6 +248,9 @@ export function Editor({
   children: ReactNode;
   dirty?: boolean;
   saveLabel?: string;
+  width?: number;
+  className?: string;
+  footer?: ReactNode | ((controls: { close: () => void }) => ReactNode);
 }) {
   useEffect(() => {
     if (!visible || !dirty) return;
@@ -282,8 +288,8 @@ export function Editor({
     <Modal
       title={title}
       visible={visible}
-      width={454}
-      className="editor-modal"
+      width={width}
+      className={["editor-modal", className].filter(Boolean).join(" ")}
       centered
       maskClosable={!busy}
       closable={!busy}
@@ -291,14 +297,25 @@ export function Editor({
       onCancel={close}
       closeIcon={<IconClose aria-hidden="true" />}
       footer={
-        <div className="editor-actions">
-          <Button onClick={close} disabled={busy}>
-            取消
-          </Button>
-          <Button type="primary" theme="solid" loading={busy} onClick={onSave}>
-            {saveLabel}
-          </Button>
-        </div>
+        typeof footer === "function" ? (
+          footer({ close })
+        ) : (
+          footer ?? (
+            <div className="editor-actions">
+              <Button onClick={close} disabled={busy}>
+                取消
+              </Button>
+              <Button
+                type="primary"
+                theme="solid"
+                loading={busy}
+                onClick={onSave}
+              >
+                {saveLabel}
+              </Button>
+            </div>
+          )
+        )
       }
     >
       {children}
