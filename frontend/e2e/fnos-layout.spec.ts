@@ -53,6 +53,62 @@ test("desktop sidebar is 220px with icon menus and bottom settings", async ({
   ).toBe("1px");
 });
 
+test("task management expands in the sidebar and lists task names", async ({
+  page,
+  request,
+}, testInfo) => {
+  test.skip(
+    (page.viewportSize()?.width || 0) <= 640,
+    "mobile uses bottom navigation",
+  );
+  const name = "菜单任务-" + testInfo.project.name + "-" + Date.now();
+  await request.post("/app/opensync/svr/alist", {
+    data: {
+      url: engineUrl,
+      token: "layout-token",
+      remark: name,
+    },
+  });
+  const engines = await (await request.get("/app/opensync/svr/alist")).json();
+  const engineId = engines.data.find(
+    (e: { remark: string }) => e.remark === name,
+  ).id;
+  await request.post("/app/opensync/svr/job", {
+    data: {
+      alistId: engineId,
+      srcPath: JSON.stringify(["/photos"]),
+      dstPath: JSON.stringify(["/backup/photos"]),
+      method: 0,
+      isCron: 2,
+      enable: 1,
+      useCacheS: false,
+      useCacheT: false,
+      remark: name,
+    },
+  });
+  const jobs = await (
+    await request.get("/app/opensync/svr/job?pageNum=1&pageSize=100")
+  ).json();
+  const jobId = jobs.data.dataList.find(
+    (j: { remark: string }) => j.remark === name,
+  ).id;
+  try {
+    await page.goto(`/app/opensync/tasks?jobId=${jobId}`);
+    const sidebar = page.locator(".app-sidebar");
+    await expect(
+      sidebar.getByRole("button", { name: "任务管理", exact: true }),
+    ).toHaveAttribute("aria-expanded", "true");
+    await expect(
+      sidebar.getByRole("link", { name, exact: true }),
+    ).toBeVisible();
+    await expect(page.locator(".task-list-pane")).toHaveCount(0);
+    await expect(page.locator(".task-detail-pane")).toBeVisible();
+  } finally {
+    await request.delete(`/app/opensync/svr/job?id=${jobId}`);
+    await request.delete(`/app/opensync/svr/alist?id=${engineId}`);
+  }
+});
+
 test("task and engine tabs share an integrated toolbar row with commands", async ({
   page,
 }) => {

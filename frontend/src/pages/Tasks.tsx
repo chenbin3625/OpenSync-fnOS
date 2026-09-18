@@ -6,7 +6,6 @@ import { Form } from "@douyinfe/semi-ui/lib/es/form";
 import Input from "@douyinfe/semi-ui/lib/es/input";
 import InputNumber from "@douyinfe/semi-ui/lib/es/inputNumber";
 import Modal from "@douyinfe/semi-ui/lib/es/modal";
-import Pagination from "@douyinfe/semi-ui/lib/es/pagination";
 import Select from "@douyinfe/semi-ui/lib/es/select";
 import Switch from "@douyinfe/semi-ui/lib/es/switch";
 import Tabs from "@douyinfe/semi-ui/lib/es/tabs";
@@ -19,8 +18,6 @@ import {
   IconPlay,
   IconEdit,
   IconDelete,
-  IconChevronLeft,
-  IconSearch,
 } from "@douyinfe/semi-icons";
 import { api } from "../api/client";
 import {
@@ -62,21 +59,18 @@ import { History, Realtime } from "./TaskExecution";
 
 export default function Tasks() {
   const [params, setParams] = useSearchParams();
-  const page = Math.max(1, Number(params.get("page")) || 1);
   const selectedId = Number(params.get("jobId")) || null;
   const tab = ["overview", "realtime", "history"].includes(
     params.get("tab") || "",
   )
     ? params.get("tab")!
     : "overview";
-  const jobs = useResource((signal) => api.jobs(page, signal), [page]);
+  const jobs = useResource((signal) => api.jobs(1, signal, 100));
   const engines = useResource((signal) => api.engines(signal));
   const [editor, setEditor] = useState<{ open: boolean; job: JobItem | null }>({
     open: false,
     job: null,
   });
-  const [search, setSearch] = useState("");
-  const [mobileDetail, setMobileDetail] = useState(Boolean(selectedId));
   const actions = useAction();
   const list = jobs.data?.dataList || [];
   const selected = list.find((j) => j.id === selectedId) || list[0];
@@ -86,25 +80,16 @@ export default function Tasks() {
       value === null ? next.delete(key) : next.set(key, String(value));
     setParams(next);
   };
-  useEffect(() => {
-    if (!jobs.data) return;
-    const maximum = Math.max(1, Math.ceil(jobs.data.count / 12));
-    if (page > maximum) {
-      const next = new URLSearchParams(params);
-      next.set("page", String(maximum));
-      next.delete("jobId");
-      setParams(next, { replace: true });
-    }
-  }, [jobs.data, page]);
-  useEffect(() => {
-    setMobileDetail(Boolean(selectedId));
-  }, [selectedId]);
+  const refreshJobs = async () => {
+    await jobs.refresh();
+    window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
+  };
   const action = (operation: () => Promise<unknown>, message: string) =>
     void actions.run(async () => {
       try {
         await operation();
         Toast.success(message);
-        await jobs.refresh();
+        await refreshJobs();
       } catch (err) {
         errorToast(err);
       }
@@ -146,7 +131,7 @@ export default function Tasks() {
         }
       />
       <div
-        className={`task-workspace ${mobileDetail ? "show-task-detail" : ""}`}
+        className="task-workspace"
         data-empty={
           (!jobs.loading && !jobs.error && !jobs.data?.count) || undefined
         }
@@ -154,155 +139,63 @@ export default function Tasks() {
         {!jobs.loading && !jobs.error && !jobs.data?.count ? (
           <EmptyState />
         ) : (
-          <>
-            <section className="task-list-pane" aria-label="同步任务列表">
-              <div className="task-search">
-                <Input
-                  prefix={<IconSearch aria-hidden="true" />}
-                  placeholder="筛选当前页任务"
-                  aria-label="筛选任务"
-                  value={search}
-                  onChange={setSearch}
-                  showClear
-                />
-              </div>
-              <LoadState
-                loading={jobs.loading}
-                error={jobs.error}
-                retry={jobs.refresh}
-                empty={!list.length}
-              />
-              {!jobs.loading && !jobs.error && (
-                <div className="task-list">
-                  {list
-                    .filter((j) =>
-                      `${getJobName(j)} ${j.srcPath} ${j.dstPath}`
-                        .toLowerCase()
-                        .includes(search.toLowerCase()),
-                    )
-                    .map((job) => (
-                      <button
-                        key={job.id}
-                        type="button"
-                        className={`task-list-item ${selected?.id === job.id ? "selected" : ""}`}
-                        aria-pressed={selected?.id === job.id}
-                        onClick={() => {
-                          update({ jobId: job.id });
-                          setMobileDetail(true);
-                        }}
-                      >
-                        <div className="task-item-heading">
-                          <strong title={getJobName(job)}>
-                            {getJobName(job)}
-                          </strong>
-                          <Tag
-                            size="small"
-                            color={job.enable ? "green" : "grey"}
-                          >
-                            {job.enable ? "已启用" : "已暂停"}
-                          </Tag>
-                        </div>
-                        <div className="task-item-meta">
-                          <span>{methodNames[job.method]}</span>
-                          <span>{formatSchedule(job)}</span>
-                        </div>
-                        <div
-                          className="mono task-item-path"
-                          title={formatJobPaths(job.srcPath)}
-                        >
-                          {formatJobPaths(job.srcPath)}
-                        </div>
-                      </button>
-                    ))}
-                  {list.length > 0 &&
-                    !list.some((j) =>
-                      `${getJobName(j)} ${j.srcPath} ${j.dstPath}`
-                        .toLowerCase()
-                        .includes(search.toLowerCase()),
-                    ) && <EmptyState />}
-                </div>
-              )}
-              {!!jobs.data?.count && (
-                <div className="pane-pagination">
-                  <Pagination
-                    total={jobs.data.count}
-                    currentPage={page}
-                    pageSize={12}
-                    size="small"
-                    onPageChange={(p) => {
-                      update({ page: p, jobId: null });
-                      setSearch("");
-                    }}
+          <section className="task-detail-pane">
+            <LoadState
+              loading={jobs.loading}
+              error={jobs.error}
+              retry={jobs.refresh}
+              empty={!list.length}
+            />
+            {selected && !jobs.error ? (
+              <div className="task-tab-content">
+                {tab === "overview" && (
+                  <Overview
+                    job={selected}
+                    engines={engines.data || []}
+                    busy={actions.busy}
+                    onRun={() =>
+                      action(
+                        () => api.jobAction({ id: String(selected.id) }),
+                        "已提交执行",
+                      )
+                    }
+                    onToggle={() =>
+                      action(
+                        () =>
+                          api.jobAction({
+                            id: String(selected.id),
+                            pause: selected.enable === 1,
+                          }),
+                        "任务状态已更新",
+                      )
+                    }
+                    onEdit={() => setEditor({ open: true, job: selected })}
+                    onDelete={() =>
+                      confirmDelete(
+                        "删除此同步任务？",
+                        async () => {
+                          await api.deleteJob(selected.id);
+                          update({ jobId: null });
+                          await refreshJobs();
+                        },
+                        "此任务的历史执行记录将一并删除。",
+                      )
+                    }
                   />
-                </div>
-              )}
-            </section>
-            <section className="task-detail-pane">
-              {selected && !jobs.error ? (
-                <>
-                  <div className="mobile-detail-heading">
-                    <Button
-                      icon={<IconChevronLeft aria-hidden="true" />}
-                      theme="borderless"
-                      onClick={() => {
-                        setMobileDetail(false);
-                        update({ jobId: null });
-                      }}
-                    >
-                      任务列表
-                    </Button>
-                  </div>
-                  <div className="task-tab-content">
-                    {tab === "overview" && (
-                      <Overview
-                        job={selected}
-                        engines={engines.data || []}
-                        busy={actions.busy}
-                        onRun={() =>
-                          action(
-                            () => api.jobAction({ id: String(selected.id) }),
-                            "已提交执行",
-                          )
-                        }
-                        onToggle={() =>
-                          action(
-                            () =>
-                              api.jobAction({
-                                id: String(selected.id),
-                                pause: selected.enable === 1,
-                              }),
-                            "任务状态已更新",
-                          )
-                        }
-                        onEdit={() => setEditor({ open: true, job: selected })}
-                        onDelete={() =>
-                          confirmDelete(
-                            "删除此同步任务？",
-                            async () => {
-                              await api.deleteJob(selected.id);
-                              await jobs.refresh();
-                              setMobileDetail(false);
-                            },
-                            "此任务的历史执行记录将一并删除。",
-                          )
-                        }
-                      />
-                    )}
-                    {tab === "realtime" && (
-                      <Realtime key={selected.id} jobId={selected.id} />
-                    )}
-                    {tab === "history" && (
-                      <History key={selected.id} jobId={selected.id} />
-                    )}
-                  </div>
-                </>
-              ) : (
-                <div className="task-empty-detail">
-                  {jobs.error ? "任务加载失败" : <EmptyState />}
-                </div>
-              )}
-            </section>
-          </>
+                )}
+                {tab === "realtime" && (
+                  <Realtime key={selected.id} jobId={selected.id} />
+                )}
+                {tab === "history" && (
+                  <History key={selected.id} jobId={selected.id} />
+                )}
+              </div>
+            ) : (
+              <div className="task-empty-detail">
+                {jobs.error ? "任务加载失败" : <EmptyState />}
+              </div>
+            )}
+          </section>
         )}
       </div>
       {editor.open && (
@@ -312,7 +205,7 @@ export default function Tasks() {
           onClose={() => setEditor({ open: false, job: null })}
           onSaved={() => {
             setEditor({ open: false, job: null });
-            void jobs.refresh();
+            void refreshJobs();
           }}
         />
       )}

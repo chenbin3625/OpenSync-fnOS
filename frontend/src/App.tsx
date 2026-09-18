@@ -13,6 +13,7 @@ import {
   Route,
   Routes,
   useLocation,
+  useNavigate,
 } from "react-router-dom";
 import Banner from "@douyinfe/semi-ui/lib/es/banner";
 import Button from "@douyinfe/semi-ui/lib/es/button";
@@ -31,6 +32,7 @@ import {
   handleAuthCallback,
 } from "./lib/host";
 import { useResource } from "./lib/hooks";
+import { getJobName } from "./pages/Home/homeUtils";
 
 const Tasks = lazy(() => import("./pages/Tasks"));
 const Engines = lazy(() => import("./pages/Engines"));
@@ -59,8 +61,23 @@ export const SessionContext = createContext<{ development: boolean }>({
 });
 
 function Shell({ children }: { children: ReactNode }) {
-  const { pathname } = useLocation();
+  const { pathname, search } = useLocation();
+  const navigate = useNavigate();
   const [theme, setTheme] = useState<"light" | "dark">("light");
+  const [taskMenuOpen, setTaskMenuOpen] = useState(false);
+  const [taskMenuTouched, setTaskMenuTouched] = useState(false);
+  const taskMenu = useResource((signal) => api.jobMenu(signal));
+  const taskItems = taskMenu.data?.dataList || [];
+  const currentTaskId = new URLSearchParams(search).get("jobId");
+  const taskHref = (jobId: number) => {
+    const next = new URLSearchParams(pathname.startsWith("/tasks") ? search : "");
+    next.set("jobId", String(jobId));
+    return `/tasks?${next.toString()}`;
+  };
+  useEffect(() => {
+    if (taskMenuTouched) return;
+    setTaskMenuOpen(taskItems.length > 0);
+  }, [taskItems.length, taskMenuTouched]);
   useEffect(() => {
     applyTheme(theme);
   }, [theme]);
@@ -86,11 +103,48 @@ function Shell({ children }: { children: ReactNode }) {
       void host.setTitle("OpenSync · " + title).catch(() => {});
     document.title = "OpenSync · " + title;
   }, [pathname]);
+  useEffect(() => {
+    const refresh = () => void taskMenu.refresh();
+    window.addEventListener("opensync:jobs-changed", refresh);
+    return () => window.removeEventListener("opensync:jobs-changed", refresh);
+  }, [taskMenu.refresh]);
   return (
     <div className="app-shell">
       <aside className="app-sidebar" aria-label="主菜单">
         <nav aria-label="主导航">
-          {sections.slice(0, -1).map((section) => (
+          <button
+            type="button"
+            className={`nav-link nav-menu-toggle${pathname.startsWith("/tasks") ? " selected" : ""}`}
+            aria-expanded={taskMenuOpen}
+            aria-controls="task-menu"
+            onClick={() => {
+              setTaskMenuTouched(true);
+              if (!pathname.startsWith("/tasks")) {
+                setTaskMenuOpen(true);
+                navigate("/tasks");
+                return;
+              }
+              setTaskMenuOpen((open) => !open);
+            }}
+          >
+            {sections[0].icon}
+            <span className="nav-label">任务管理</span>
+          </button>
+          {taskMenuOpen && (
+            <div className="nav-submenu" id="task-menu">
+              {taskItems.map((job) => (
+                <NavLink
+                  key={job.id}
+                  to={taskHref(job.id)}
+                  className={`task-sub-link${currentTaskId === String(job.id) ? " selected" : ""}`}
+                  title={getJobName(job)}
+                >
+                  {getJobName(job)}
+                </NavLink>
+              ))}
+            </div>
+          )}
+          {sections.slice(1, -1).map((section) => (
             <NavLink
               key={section.path}
               to={section.path}
@@ -99,7 +153,7 @@ function Shell({ children }: { children: ReactNode }) {
               }
             >
               {section.icon}
-              {section.label}
+              <span className="nav-label">{section.label}</span>
             </NavLink>
           ))}
         </nav>
@@ -111,7 +165,7 @@ function Shell({ children }: { children: ReactNode }) {
             }
           >
             {sections.at(-1)?.icon}
-            系统设置
+            <span className="nav-label">系统设置</span>
           </NavLink>
         </div>
       </aside>
