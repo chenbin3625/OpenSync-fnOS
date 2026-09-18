@@ -10,3 +10,6 @@ playwright-report/
 test-results/
 .tools/
 *.fpk
+
+# 一键预览脚本（scripts/dev.mjs）的运行日志
+.dev-logs/

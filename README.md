@@ -16,20 +16,24 @@
 
 需要 Node.js 22.12+、npm、Go 1.26.6（允许 Go 自动下载对应工具链）、Chrome（浏览器测试）。
 
-```sh
-cd frontend
-npm ci
-npm run dev
-```
-
-另开终端：
+一条命令同时启动后端与前端：
 
 ```sh
-cd backend
-go run ./cmd/server --dev --port 8030
+node scripts/dev.mjs
 ```
 
-打开 http://127.0.0.1:3010/app/opensync/ 。开发服务仅绑定 127.0.0.1，并使用显式开发身份；环境中存在 `TRIM_APPNAME` 时拒绝开发模式。本地存储系统授权仅能在飞牛环境验收，预览不会伪造授权结果。
+打开 http://127.0.0.1:3010/app/opensync/ 。Ctrl-C 会停止本脚本启动的两个服务。
+
+脚本做了三件手工步骤容易出错的事：从 PATH 与常见安装目录中挑出满足 22.12+ 的 Node 并按目录前置（`npm` 的 shebang 通过 PATH 找 `node`，只调用新版二进制而不前置目录，`npm` 仍会用旧版本）；缺少 `frontend/node_modules` 时自动 `npm ci`（`--no-install` 可关闭）；端口若已被占用则报错退出并列出 PID，不会结束不属于本脚本的进程——本仓库常有多会话并行，别的会话可能正在用这些端口。端口取自 `frontend/vite.config.ts`，日志写入 `.dev-logs/`（已忽略）。
+
+也可以用 `npm run dev`（在仓库根目录）执行同一脚本。要手工控制进程时，仍是原来两条命令：
+
+```sh
+cd frontend && npm run dev
+cd backend && go run ./cmd/server --dev --port 8030
+```
+
+开发服务仅绑定 127.0.0.1，并使用显式开发身份；环境中存在 `TRIM_APPNAME` 时拒绝开发模式。本地存储系统授权仅能在飞牛环境验收，预览不会伪造授权结果。
 
 开发数据位于 `backend/data/`，可用 `OPENSYNC_DATA_DIR` 指定独立目录。不要将开发服务通过隧道或反向代理公开。前端代理保持原始 Host，生产服务不提供 TCP 监听。
 
@@ -50,7 +54,7 @@ go test ./...
 go test -race ./internal/platform ./internal/config ./cmd/server
 go build -o /tmp/opensync-fnos-lifecycle ./cmd/server
 cd ..
-node --test scripts/package.test.mjs
+npm run test:scripts
 OPENSYNC_TEST_BINARY=/tmp/opensync-fnos-lifecycle node --test scripts/lifecycle.test.mjs
 ```
 
@@ -63,11 +67,21 @@ OPENSYNC_TEST_BINARY=/tmp/opensync-fnos-lifecycle node --test scripts/lifecycle.
 按官方文档下载对应开发机的 [fnpack 1.2.3](https://developer.fnnas.com/docs/cli/fnpack/)，放到 `.tools/fnpack`，或者以 `FNPACK` 指定路径。
 
 ```sh
+node scripts/release.mjs
+```
+
+依次执行：工作区状态检查（有未提交改动会告警，产物将无法用提交号追溯，但不中止）→ 前端 `tsc --noEmit` 与 vitest → `go test ./...` → 前端构建一次 → 交叉编译并打包 amd64 / arm64 → 写出 `dist/SHA256SUMS` 与产物清单。`--skip-tests` 可跳过测试只出包。
+
+前端只构建一次供两个架构共用，避免重复构建产生不一致的 UI 资源。脚本不修改 git 状态：不提交、不打 tag、不推送。结尾会打印 README「设备验收」中必须在真机确认的项——打包成功不等于可以发布。
+
+单独打包某个架构：
+
+```sh
 node scripts/build.mjs amd64
 node scripts/build.mjs arm64
 ```
 
-生成 `dist/opensync-amd64.fpk` 和 `dist/opensync-arm64.fpk`。分别声明 `platform=x86` 与 `platform=arm`，不是包含架构二进制却声明 `all`。包中只有 Go 二进制与 UI 入口资源，不依赖 NAS 上的 Node、Docker 或额外数据库服务。
+生成 `dist/opensync-amd64.fpk` 和 `dist/opensync-arm64.fpk`。分别声明 `platform=x86` 与 `platform=arm`，不是包含架构二进制却声明 `all`。包中只有 Go 二进制与 UI 入口资源，不依赖 NAS 上的 Node、Docker 或额外数据库服务。打包前会清空 `dist/opensync-<arch>/` 并跳过 `.DS_Store` 等无关文件，避免上一次构建的残留被打进包。
 
 `fnos/` 来自官方 `fnpack create` Native 模板。系统版本声明依据所使用的 API 最低版本为 1.2.0401；移动端开放能力要求飞牛 App 1.34.0+。这不是已完成设备兼容测试的承诺。
 
