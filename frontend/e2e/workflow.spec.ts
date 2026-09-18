@@ -142,7 +142,8 @@ test("creates an engine and manual job, then edits without changing sync mode", 
     await page.getByRole("button", { name: "新建任务", exact: true }).click();
     await page.getByRole("combobox", { name: "存储引擎", exact: true }).click();
     await page.getByRole("option").filter({ hasText: name }).click();
-    const trees = page.locator(".remote-paths");
+    const dialog = page.getByRole("dialog");
+    const trees = dialog.locator(".remote-paths");
     await trees.nth(0).locator('[role="combobox"]').click();
     await page.locator(".semi-tree-option-expand-icon").first().click();
     await page
@@ -150,8 +151,14 @@ test("creates an engine and manual job, then edits without changing sync mode", 
       .filter({ hasText: /^Photos$/ })
       .click();
     await page
-      .getByRole("heading", { name: "新建任务 - 引擎与路径", exact: true })
+      .getByRole("heading", { name: "新建任务", exact: true })
       .click();
+    const sourcePathBox = await trees.nth(0).boundingBox();
+    const sourceCacheBox = await dialog
+      .getByText("源端缓存", { exact: true })
+      .boundingBox();
+    expect(sourceCacheBox!.y).toBeGreaterThan(sourcePathBox!.y);
+    expect(sourceCacheBox!.y).toBeLessThan(sourcePathBox!.y + 120);
     await trees.nth(1).locator('[role="combobox"]').click();
     await page.locator(".semi-tree-option-expand-icon").first().click();
     await page
@@ -159,19 +166,13 @@ test("creates an engine and manual job, then edits without changing sync mode", 
       .filter({ hasText: /^Backup$/ })
       .click();
     await page
-      .getByRole("heading", { name: "新建任务 - 引擎与路径", exact: true })
+      .getByRole("heading", { name: "新建任务", exact: true })
       .click();
-    const sourcePathBox = await trees.nth(0).boundingBox();
     const targetPathBox = await trees.nth(1).boundingBox();
-    const sourceCacheBox = await page
-      .getByText("源端缓存", { exact: true })
-      .boundingBox();
-    const targetCacheBox = await page
+    const targetCacheBox = await dialog
       .getByText("目标缓存", { exact: true })
       .boundingBox();
-    expect(sourceCacheBox!.y).toBeGreaterThan(sourcePathBox!.y);
     expect(targetCacheBox!.y).toBeGreaterThan(targetPathBox!.y);
-    expect(sourceCacheBox!.y).toBeLessThan(sourcePathBox!.y + 120);
     expect(targetCacheBox!.y).toBeLessThan(targetPathBox!.y + 120);
     await page
       .getByRole("textbox", { name: "任务备注", exact: true })
@@ -249,21 +250,19 @@ test("creates an engine and manual job, then edits without changing sync mode", 
       updated.data.dataList.find((j: { id: number }) => j.id === jobId),
     ).toMatchObject({ method: 0, isCron: 2, remark: name + "-修改" });
   } finally {
-    const base = "http://127.0.0.1:3010/app/opensync/svr";
     if (!engineId) {
-      const es = await (await fetch(base + "/alist")).json();
+      const es = await (await request.get("/app/opensync/svr/alist")).json();
       engineId = es.data.find((e: { url: string }) => e.url === engineUrl)?.id;
     }
     if (!jobId) {
       const js = await (
-        await fetch(base + "/job?pageNum=1&pageSize=100")
+        await request.get("/app/opensync/svr/job?pageNum=1&pageSize=100")
       ).json();
       jobId = js.data.dataList.find((j: { remark: string }) =>
         j.remark?.startsWith(name),
       )?.id;
     }
-    if (jobId) await fetch(`${base}/job?id=${jobId}`, { method: "DELETE" });
-    if (engineId)
-      await fetch(`${base}/alist?id=${engineId}`, { method: "DELETE" });
+    if (jobId) await request.delete(`/app/opensync/svr/job?id=${jobId}`);
+    if (engineId) await request.delete(`/app/opensync/svr/alist?id=${engineId}`);
   }
 });
