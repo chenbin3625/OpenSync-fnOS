@@ -138,40 +138,45 @@ h3 {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.nav-menu-toggle::after {
-  content: "";
-  width: 7px;
-  height: 7px;
-  margin-left: auto;
-  border-right: 1.5px solid currentColor;
-  border-bottom: 1.5px solid currentColor;
-  transform: rotate(-45deg);
+.task-menu-triangle {
+  flex-shrink: 0;
+  font-size: 14px !important;
 }
-.nav-menu-toggle[aria-expanded="true"]::after {
-  transform: rotate(45deg);
+.nav-menu-toggle.selected {
+  background: transparent;
+  color: inherit;
 }
 .nav-submenu {
   display: grid;
   gap: 4px;
-  margin: -4px 0 8px 34px;
+  margin: 0 0 12px 34px;
 }
 .task-sub-link {
+  display: flex;
+  align-items: center;
+  gap: 12px;
   min-width: 0;
+  min-height: 40px;
   padding: 8px 12px;
   border-radius: var(--radius);
-  color: var(--muted);
-  font-size: 13px;
+  color: var(--semi-color-text-0);
+  font-size: var(--font-size-nav);
+  font-weight: 500;
   line-height: 18px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.task-sub-icon {
+  flex-shrink: 0;
+  font-size: 18px !important;
 }
 .task-sub-link:hover {
   background: var(--surface-soft);
   color: inherit;
 }
 .task-sub-link.selected {
-  background: var(--selected);
+  background: var(--surface);
   color: var(--accent);
 }
 .nav-link:hover {

@@ -39,11 +39,13 @@ test("desktop sidebar is 220px with icon menus and bottom settings", async ({
   const sidebar = page.locator(".app-sidebar");
   await expect(sidebar).toBeVisible();
   expect((await sidebar.boundingBox())?.width).toBe(220);
-  const firstNav = sidebar.getByRole("button", { name: "任务管理" });
+  const firstNav = sidebar.getByRole("link", { name: "任务管理" });
   const firstNavBox = await firstNav.boundingBox();
   expect(firstNavBox?.width).toBe(204);
   expect(firstNavBox?.height).toBe(36);
   await expect(firstNav).toHaveCSS("font-size", "14px");
+  await expect(firstNav).not.toHaveAttribute("aria-expanded", /.+/);
+  await expect(sidebar.locator(".nav-submenu")).toHaveCount(0);
   await expect(sidebar.locator(".semi-icon")).toHaveCount(4);
   await expect(sidebar.locator(".semi-icon").first()).toHaveAttribute(
     "aria-label",
@@ -108,12 +110,21 @@ test("task management expands in the sidebar and lists task names", async ({
   try {
     await page.goto(`/app/opensync/tasks?jobId=${jobId}`);
     const sidebar = page.locator(".app-sidebar");
+    const taskToggle = sidebar.getByRole("button", {
+      name: "任务管理",
+      exact: true,
+    });
+    await expect(taskToggle).toHaveAttribute("aria-expanded", "true");
     await expect(
-      sidebar.getByRole("button", { name: "任务管理", exact: true }),
-    ).toHaveAttribute("aria-expanded", "true");
-    await expect(
-      sidebar.getByRole("link", { name, exact: true }),
-    ).toBeVisible();
+      taskToggle.locator(".task-menu-triangle"),
+    ).toHaveAttribute("aria-label", "tree_triangle_down");
+    const taskLink = sidebar.getByRole("link", { name, exact: true });
+    await expect(taskLink).toBeVisible();
+    await expect(taskLink.locator(".task-sub-icon")).toHaveAttribute(
+      "aria-label",
+      "folder_stroked",
+    );
+    await expect(taskLink).toHaveCSS("background-color", "rgb(255, 255, 255)");
     await expect(page.locator(".task-list-pane")).toHaveCount(0);
     await expect(page.locator(".task-detail-pane")).toBeVisible();
   } finally {

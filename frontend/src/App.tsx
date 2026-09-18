@@ -23,6 +23,8 @@ import {
   IconCloudStroked,
   IconFolderStroked,
   IconSettingStroked,
+  IconTreeTriangleDown,
+  IconTreeTriangleRight,
 } from "@douyinfe/semi-icons";
 import { api } from "./api/client";
 import {
@@ -72,6 +74,7 @@ function Shell({ children }: { children: ReactNode }) {
   const [taskMenuTouched, setTaskMenuTouched] = useState(false);
   const taskMenu = useResource((signal) => api.jobMenu(signal));
   const taskItems = taskMenu.data?.dataList || [];
+  const hasTaskItems = taskItems.length > 0;
   const currentTaskId = new URLSearchParams(search).get("jobId");
   const taskHref = (jobId: number) => {
     const next = new URLSearchParams(pathname.startsWith("/tasks") ? search : "");
@@ -79,9 +82,12 @@ function Shell({ children }: { children: ReactNode }) {
     return `/tasks?${next.toString()}`;
   };
   useEffect(() => {
-    if (taskMenuTouched) return;
-    setTaskMenuOpen(taskItems.length > 0);
-  }, [taskItems.length, taskMenuTouched]);
+    if (!hasTaskItems) {
+      setTaskMenuOpen(false);
+      return;
+    }
+    if (!taskMenuTouched) setTaskMenuOpen(true);
+  }, [hasTaskItems, taskMenuTouched]);
   useEffect(() => {
     applyTheme(theme);
   }, [theme]);
@@ -116,25 +122,47 @@ function Shell({ children }: { children: ReactNode }) {
     <div className="app-shell">
       <aside className="app-sidebar" aria-label="主菜单">
         <nav aria-label="主导航">
-          <button
-            type="button"
-            className={`nav-link nav-menu-toggle${pathname.startsWith("/tasks") ? " selected" : ""}`}
-            aria-expanded={taskMenuOpen}
-            aria-controls="task-menu"
-            onClick={() => {
-              setTaskMenuTouched(true);
-              if (!pathname.startsWith("/tasks")) {
-                setTaskMenuOpen(true);
-                navigate("/tasks");
-                return;
+          {hasTaskItems ? (
+            <button
+              type="button"
+              className={`nav-link nav-menu-toggle${pathname.startsWith("/tasks") ? " selected" : ""}`}
+              aria-expanded={taskMenuOpen}
+              aria-controls="task-menu"
+              onClick={() => {
+                setTaskMenuTouched(true);
+                if (!pathname.startsWith("/tasks")) {
+                  setTaskMenuOpen(true);
+                  navigate("/tasks");
+                  return;
+                }
+                setTaskMenuOpen((open) => !open);
+              }}
+            >
+              {taskMenuOpen ? (
+                <IconTreeTriangleDown
+                  className="task-menu-triangle"
+                  aria-hidden="true"
+                />
+              ) : (
+                <IconTreeTriangleRight
+                  className="task-menu-triangle"
+                  aria-hidden="true"
+                />
+              )}
+              <span className="nav-label">任务管理</span>
+            </button>
+          ) : (
+            <NavLink
+              to="/tasks"
+              className={({ isActive }) =>
+                `nav-link${isActive ? " selected" : ""}`
               }
-              setTaskMenuOpen((open) => !open);
-            }}
-          >
-            {sections[0].icon}
-            <span className="nav-label">任务管理</span>
-          </button>
-          {taskMenuOpen && (
+            >
+              {sections[0].icon}
+              <span className="nav-label">任务管理</span>
+            </NavLink>
+          )}
+          {hasTaskItems && taskMenuOpen && (
             <div className="nav-submenu" id="task-menu">
               {taskItems.map((job) => (
                 <NavLink
@@ -143,6 +171,10 @@ function Shell({ children }: { children: ReactNode }) {
                   className={`task-sub-link${currentTaskId === String(job.id) ? " selected" : ""}`}
                   title={getJobName(job)}
                 >
+                  <IconFolderStroked
+                    className="task-sub-icon"
+                    aria-hidden="true"
+                  />
                   {getJobName(job)}
                 </NavLink>
               ))}
