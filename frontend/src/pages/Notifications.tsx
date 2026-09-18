@@ -8,11 +8,11 @@ import Tag from "@douyinfe/semi-ui/lib/es/tag";
 import TextArea from "@douyinfe/semi-ui/lib/es/input/textarea";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import {
-  IconPlus,
-  IconEdit,
-  IconDelete,
-  IconSend,
-  IconBell,
+  IconPlusStroked,
+  IconEditStroked,
+  IconDeleteStroked,
+  IconSendStroked,
+  IconBellStroked,
 } from "@douyinfe/semi-icons";
 import { api } from "../api/client";
 import {
@@ -58,7 +58,7 @@ export default function Notifications() {
           <>
             <Button
               theme="solid"
-              icon={<IconPlus aria-hidden="true" />}
+              icon={<IconPlusStroked aria-hidden="true" />}
               onClick={() => setEditing(null)}
             >
               添加通知
@@ -78,7 +78,7 @@ export default function Notifications() {
           resource.data?.map((item) => (
             <div className="notification-item" key={item.id}>
               <div className="item-symbol">
-                <IconBell aria-hidden="true" size="large" />
+                <IconBellStroked aria-hidden="true" />
               </div>
               <div className="item-content">
                 <h2>
@@ -104,7 +104,7 @@ export default function Notifications() {
                 <IconButton
                   aria-hidden="true"
                   label="发送测试通知"
-                  icon={<IconSend aria-hidden="true" />}
+                  icon={<IconSendStroked aria-hidden="true" />}
                   disabled={action.busy}
                   onClick={() =>
                     perform(
@@ -122,13 +122,13 @@ export default function Notifications() {
                 <IconButton
                   aria-hidden="true"
                   label="编辑通知"
-                  icon={<IconEdit aria-hidden="true" />}
+                  icon={<IconEditStroked aria-hidden="true" />}
                   onClick={() => setEditing(item)}
                 />
                 <IconButton
                   aria-hidden="true"
                   label="删除通知"
-                  icon={<IconDelete aria-hidden="true" />}
+                  icon={<IconDeleteStroked aria-hidden="true" />}
                   danger
                   onClick={() =>
                     confirmDelete("删除此通知渠道？", async () => {
@@ -345,8 +345,8 @@ function NotificationEditor({
             onChange={(v) => change("notSendNull", v)}
           />
         </SettingRow>
-        <Button
-          icon={<IconSend aria-hidden="true" />}
+          <Button
+            icon={<IconSendStroked aria-hidden="true" />}
           disabled={action.busy}
           onClick={() => submit(true)}
         >

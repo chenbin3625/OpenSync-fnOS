@@ -3,7 +3,7 @@ import Banner from "@douyinfe/semi-ui/lib/es/banner";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Input from "@douyinfe/semi-ui/lib/es/input";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
-import { IconSave } from "@douyinfe/semi-icons";
+import { IconSaveStroked } from "@douyinfe/semi-icons";
 import { api } from "../api/client";
 import { Header, LoadState, SettingRow } from "../components/common";
 import { useAction, useResource } from "../lib/hooks";
@@ -88,7 +88,7 @@ export default function Settings() {
         actions={
           <Button
             theme="solid"
-            icon={<IconSave aria-hidden="true" />}
+            icon={<IconSaveStroked aria-hidden="true" />}
             loading={action.busy}
             disabled={!dirty || resource.loading || Boolean(resource.error)}
             onClick={save}

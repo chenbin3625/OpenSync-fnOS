@@ -7,11 +7,11 @@ import Select from "@douyinfe/semi-ui/lib/es/select";
 import Tabs from "@douyinfe/semi-ui/lib/es/tabs";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import {
-  IconPlus,
-  IconEdit,
-  IconDelete,
-  IconCopy,
-  IconFolder,
+  IconPlusStroked,
+  IconEditStroked,
+  IconDeleteStroked,
+  IconCopyStroked,
+  IconFolderStroked,
 } from "@douyinfe/semi-icons";
 import { api, type LocalMapping } from "../api/client";
 import { SessionContext } from "../App";
@@ -52,7 +52,7 @@ export default function Engines() {
           actions={
             <Button
               theme="solid"
-              icon={<IconPlus aria-hidden="true" />}
+              icon={<IconPlusStroked aria-hidden="true" />}
               onClick={() => setEditing(null)}
             >
               添加引擎
@@ -76,7 +76,7 @@ export default function Engines() {
               engines.data?.map((engine) => (
                 <div className="engine-item" key={engine.id}>
                   <div className="item-symbol">
-                    <IconFolder aria-hidden="true" size="large" />
+                    <IconFolderStroked aria-hidden="true" />
                   </div>
                   <div className="item-content">
                     <h2>
@@ -89,7 +89,7 @@ export default function Engines() {
                     <IconButton
                       aria-hidden="true"
                       label="复制引擎地址"
-                      icon={<IconCopy aria-hidden="true" />}
+                      icon={<IconCopyStroked aria-hidden="true" />}
                       onClick={() => {
                         void navigator.clipboard
                           .writeText(engine.url)
@@ -100,14 +100,14 @@ export default function Engines() {
                     <IconButton
                       aria-hidden="true"
                       label="编辑引擎"
-                      icon={<IconEdit aria-hidden="true" />}
+                      icon={<IconEditStroked aria-hidden="true" />}
                       onClick={() => setEditing(engine)}
                     />
                     <IconButton
                       aria-hidden="true"
                       label="删除引擎"
                       danger
-                      icon={<IconDelete aria-hidden="true" />}
+                      icon={<IconDeleteStroked aria-hidden="true" />}
                       onClick={() =>
                         confirmDelete(
                           "删除此存储引擎？",
@@ -240,7 +240,7 @@ function LocalStorage({
         tabs={tabs}
         actions={
           <Button
-            icon={<IconFolder aria-hidden="true" />}
+            icon={<IconFolderStroked aria-hidden="true" />}
             disabled={development || action.busy}
             onClick={() =>
               void action.run(async () => {
@@ -272,12 +272,12 @@ function LocalStorage({
       <div className="authorized-paths">
         {resource.data?.paths.map((path) => (
           <div key={path} className="authorized-path">
-            <IconFolder aria-hidden="true" />
+            <IconFolderStroked aria-hidden="true" />
             <span className="mono">{path}</span>
             <IconButton
               aria-hidden="true"
               label="在文件管理器中打开"
-              icon={<IconFolder aria-hidden="true" />}
+              icon={<IconFolderStroked aria-hidden="true" />}
               onClick={() => {
                 void getHost().openFileManager(path).catch(errorToast);
               }}
@@ -288,7 +288,7 @@ function LocalStorage({
       <div className="section-heading">
         <h2>引擎路径映射</h2>
         <Button
-          icon={<IconPlus aria-hidden="true" />}
+          icon={<IconPlusStroked aria-hidden="true" />}
           disabled={!resource.data?.paths.length || !engines.length}
           onClick={() => setEditing(null)}
         >
@@ -316,13 +316,13 @@ function LocalStorage({
               <IconButton
                 aria-hidden="true"
                 label="编辑映射"
-                icon={<IconEdit aria-hidden="true" />}
+                icon={<IconEditStroked aria-hidden="true" />}
                 onClick={() => setEditing(mapping)}
               />
               <IconButton
                 aria-hidden="true"
                 label="移除映射"
-                icon={<IconDelete aria-hidden="true" />}
+                icon={<IconDeleteStroked aria-hidden="true" />}
                 danger
                 onClick={() =>
                   confirmDelete(

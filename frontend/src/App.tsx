@@ -18,10 +18,10 @@ import Banner from "@douyinfe/semi-ui/lib/es/banner";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Spin from "@douyinfe/semi-ui/lib/es/spin";
 import {
-  IconBell,
-  IconCloud,
-  IconFolder,
-  IconSetting,
+  IconBellStroked,
+  IconCloudStroked,
+  IconFolderStroked,
+  IconSettingStroked,
 } from "@douyinfe/semi-icons";
 import { api } from "./api/client";
 import {
@@ -37,21 +37,25 @@ const Engines = lazy(() => import("./pages/Engines"));
 const Notifications = lazy(() => import("./pages/Notifications"));
 const Settings = lazy(() => import("./pages/Settings"));
 const sections = [
-  { path: "/tasks", label: "任务管理", icon: <IconCloud aria-hidden="true" /> },
+  {
+    path: "/tasks",
+    label: "任务管理",
+    icon: <IconCloudStroked aria-hidden="true" />,
+  },
   {
     path: "/engines",
     label: "引擎管理",
-    icon: <IconFolder aria-hidden="true" />,
+    icon: <IconFolderStroked aria-hidden="true" />,
   },
   {
     path: "/notifications",
     label: "通知配置",
-    icon: <IconBell aria-hidden="true" />,
+    icon: <IconBellStroked aria-hidden="true" />,
   },
   {
     path: "/settings",
     label: "系统设置",
-    icon: <IconSetting aria-hidden="true" />,
+    icon: <IconSettingStroked aria-hidden="true" />,
   },
 ];
 export const SessionContext = createContext<{ development: boolean }>({
