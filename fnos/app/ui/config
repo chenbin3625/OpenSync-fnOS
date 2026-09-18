@@ -1,0 +1,15 @@
+{
+  ".url": {
+    "opensync.main": {
+      "title": "OpenSync",
+      "icon": "images/icon_{0}.png",
+      "type": "iframe",
+      "protocol": "",
+      "gatewayPrefix": "/app/opensync",
+      "gatewaySocket": "app.sock",
+      "url": "/app/opensync/",
+      "allUsers": false,
+      "control": { "accessPerm": "readonly" }
+    }
+  }
+}

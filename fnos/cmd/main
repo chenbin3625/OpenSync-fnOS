@@ -1,0 +1,72 @@
+#!/bin/bash
+set -eu
+umask 077
+
+fail() {
+    if [ -n "${TRIM_TEMP_LOGFILE:-}" ]; then printf '%s\n' "$1" > "$TRIM_TEMP_LOGFILE"; fi
+    printf '%s\n' "$1" >&2
+    exit 1
+}
+for name in TRIM_APPDEST TRIM_PKGVAR TRIM_PKGETC TRIM_PKGTMP; do
+    value="${!name:-}"
+    [ -n "$value" ] && [ "${value:0:1}" = / ] && [ "$value" != / ] || fail "缺少有效的应用目录变量：$name"
+done
+BIN="${TRIM_APPDEST}/server/opensync"
+PID_FILE="${TRIM_PKGVAR}/app.pid"
+SOCKET="${TRIM_APPDEST}/app.sock"
+LOG_FILE="${TRIM_PKGVAR}/app.log"
+
+check_process() {
+    local pid="$1" executable
+    case "$pid" in ''|*[!0-9]*|0|1) return 1 ;; esac
+    kill -0 "$pid" 2>/dev/null || return 1
+    if [ -d /proc ]; then
+        executable="$(readlink "/proc/$pid/exe" 2>/dev/null)" || return 1
+        [ "$executable" = "$BIN" ] || [ "$executable" = "$BIN (deleted)" ]
+    else
+        executable="$(ps -p "$pid" -o command= 2>/dev/null)" || return 1
+        [ "$executable" = "$BIN" ]
+    fi
+}
+status_app() {
+    [ -f "$PID_FILE" ] || return 1
+    PID="$(head -n 1 "$PID_FILE" | tr -d '[:space:]')"
+    check_process "$PID"
+}
+stop_app() {
+    if ! status_app; then rm -f "$PID_FILE"; return 0; fi
+    kill -TERM "$PID" || fail '无法停止应用，请检查运行权限'
+    local count=0
+    while check_process "$PID" && [ "$count" -lt 40 ]; do sleep 1; count=$((count + 1)); done
+    if check_process "$PID"; then fail '应用尚未完成停止，请稍后重试；未强制结束以保护任务数据'; fi
+    rm -f "$PID_FILE"
+    [ ! -S "$SOCKET" ] || rm -f "$SOCKET"
+}
+start_app() {
+    if status_app; then return 0; fi
+    [ -x "$BIN" ] || fail '应用服务文件缺失，请重新安装对应架构的安装包'
+    [ -n "${TRIM_API_TOKEN:-}" ] || fail '未取得飞牛 API Token，请检查系统版本和应用权限'
+    mkdir -p "$TRIM_PKGVAR" "$TRIM_PKGETC" "$TRIM_PKGTMP"
+    START_LOCK="${TRIM_PKGTMP}/start.lock"
+    mkdir "$START_LOCK" 2>/dev/null || fail '应用正在启动，请稍后重试'
+    trap 'rmdir "$START_LOCK" 2>/dev/null || true' EXIT
+    if status_app; then return 0; fi
+    cd "$TRIM_APPDEST"
+    GIN_MODE=release "$BIN" >> "$LOG_FILE" 2>&1 &
+    local pid=$!
+    printf '%s\n' "$pid" > "$PID_FILE"
+    local count=0
+    while [ "$count" -lt 20 ]; do
+        check_process "$pid" || fail '服务启动失败，请查看应用日志'
+        if [ -S "$SOCKET" ]; then return 0; fi
+        sleep 1; count=$((count + 1))
+    done
+    stop_app
+    fail '服务启动超时，请查看应用日志'
+}
+case "${1:-}" in
+    start) start_app ;;
+    stop) stop_app ;;
+    status) if status_app; then exit 0; else exit 3; fi ;;
+    *) fail '不支持的运行操作' ;;
+esac

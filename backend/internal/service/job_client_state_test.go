@@ -1,0 +1,314 @@
+package service
+
+import (
+	"errors"
+	"opensync/internal/mapper"
+	"opensync/internal/msg"
+	"opensync/pkg/util"
+	"sync"
+	"testing"
+	"time"
+)
+
+func TestJobClientDoingStateIsSerialized(t *testing.T) {
+	client := &JobClient{}
+
+	if !client.tryMarkDoing() {
+		t.Fatalf("tryMarkDoing() on idle client = false, want true")
+	}
+	if client.tryMarkDoing() {
+		t.Fatalf("tryMarkDoing() on running client = true, want false")
+	}
+	if !client.isDoing() {
+		t.Fatalf("isDoing() = false, want true")
+	}
+
+	client.markDone()
+	if client.isDoing() {
+		t.Fatalf("isDoing() after markDone = true, want false")
+	}
+	if !client.tryMarkDoing() {
+		t.Fatalf("tryMarkDoing() after markDone = false, want true")
+	}
+}
+
+func TestJobClientCurrentTaskIsProtected(t *testing.T) {
+	client := &JobClient{}
+	task := &JobTask{TaskID: 99}
+
+	client.setCurrentTask(task)
+	if got := client.currentTask(); got != task {
+		t.Fatalf("currentTask() = %#v, want %#v", got, task)
+	}
+
+	client.clearCurrentTask(task)
+	if got := client.currentTask(); got != nil {
+		t.Fatalf("currentTask() after clear = %#v, want nil", got)
+	}
+}
+
+func TestStopJobKeepsClientBusyUntilTaskFinishes(t *testing.T) {
+	client := &JobClient{
+		Job:       map[string]interface{}{"enable": 1, "isCron": 2},
+		Scheduler: NewScheduler(),
+	}
+	defer client.Scheduler.Stop()
+
+	task := &JobTask{}
+	task.initRuntime()
+	client.setCurrentTask(task)
+	if !client.tryMarkDoing() {
+		t.Fatalf("tryMarkDoing() = false, want true")
+	}
+
+	client.StopJob(true)
+
+	if !task.isBreak() {
+		t.Fatalf("StopJob() did not request task break")
+	}
+	if !client.isDoing() {
+		t.Fatalf("StopJob() marked client idle before task cleanup finished")
+	}
+}
+
+func TestPauseJobKeepsMemoryStateWhenDatabaseUpdateFails(t *testing.T) {
+	testDB := newServiceTaskStatusTestDB(t)
+	restoreDB := mapper.SetDBForTest(testDB)
+	defer restoreDB()
+	if err := testDB.Close(); err != nil {
+		t.Fatalf("close test DB: %v", err)
+	}
+
+	client := &JobClient{
+		JobID:     10,
+		Job:       map[string]interface{}{"id": int64(10), "enable": 1, "isCron": 2},
+		Scheduler: NewScheduler(),
+	}
+	defer client.Scheduler.Stop()
+	task := &JobTask{TaskID: 10}
+	task.initRuntime()
+	client.setCurrentTask(task)
+
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			t.Fatalf("StopJob(false) did not panic after database update failure")
+		}
+		if task.isBreak() {
+			t.Fatalf("StopJob(false) requested task break before database update succeeded")
+		}
+		if got := util.ToInt(client.Job["enable"]); got != 1 {
+			t.Fatalf("job enable after failed pause = %d, want 1", got)
+		}
+	}()
+
+	client.StopJob(false)
+}
+
+func TestDoScheduledSkipsWhenJobAlreadyRunning(t *testing.T) {
+	client := &JobClient{
+		Job: map[string]interface{}{"enable": 1, "isCron": 2},
+	}
+	if !client.tryMarkDoing() {
+		t.Fatalf("tryMarkDoing() = false, want true")
+	}
+
+	if client.DoScheduled() {
+		t.Fatalf("DoScheduled() = true while job is running, want false")
+	}
+	if !client.isDoing() {
+		t.Fatalf("DoScheduled() changed running state, want still running")
+	}
+}
+
+func TestWaitUntilIdleWaitsForTaskCleanup(t *testing.T) {
+	client := &JobClient{}
+	task := &JobTask{TaskID: 99}
+	client.setCurrentTask(task)
+	if !client.tryMarkDoing() {
+		t.Fatalf("tryMarkDoing() = false, want true")
+	}
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		client.markDone()
+		client.clearCurrentTask(task)
+	}()
+
+	if !client.waitUntilIdle(time.Second) {
+		t.Fatalf("waitUntilIdle() = false, want true after task cleanup")
+	}
+}
+
+func TestWaitUntilIdleTimesOutWhileTaskStillRunning(t *testing.T) {
+	client := &JobClient{}
+	task := &JobTask{TaskID: 99}
+	client.setCurrentTask(task)
+	if !client.tryMarkDoing() {
+		t.Fatalf("tryMarkDoing() = false, want true")
+	}
+	defer func() {
+		client.markDone()
+		client.clearCurrentTask(task)
+	}()
+
+	if client.waitUntilIdle(20 * time.Millisecond) {
+		t.Fatalf("waitUntilIdle() = true, want false while task is still running")
+	}
+}
+
+func TestJobClientJobSnapshotIsIndependentAndRaceSafe(t *testing.T) {
+	client := &JobClient{
+		Job:       map[string]interface{}{"id": int64(1), "enable": 1, "isCron": 0, "interval": 1},
+		Scheduler: NewScheduler(),
+	}
+
+	snapshot := client.jobSnapshot()
+	oldScheduler := client.replaceJobConfig(
+		map[string]interface{}{"id": int64(1), "enable": 0, "isCron": 2, "interval": 5},
+		NewScheduler(),
+	)
+	if oldScheduler != nil {
+		oldScheduler.Stop()
+	}
+	defer client.Scheduler.Stop()
+
+	if got := util.ToInt(snapshot["enable"]); got != 1 {
+		t.Fatalf("snapshot enable = %d, want original value 1", got)
+	}
+	if got := util.ToInt(client.jobSnapshot()["enable"]); got != 0 {
+		t.Fatalf("current enable = %d, want replacement value 0", got)
+	}
+}
+
+func TestDoAllJobManualPropagatesMapperErrors(t *testing.T) {
+	oldGetEnableJobList := getEnableJobList
+	defer func() {
+		getEnableJobList = oldGetEnableJobList
+	}()
+	getEnableJobList = func() ([]map[string]interface{}, error) {
+		return nil, errors.New("database unavailable")
+	}
+
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			t.Fatalf("DoAllJobManual() did not panic")
+		}
+		if err, ok := recovered.(interface{ Error() string }); ok && err.Error() == msg.NoJobForRun {
+			t.Fatalf("DoAllJobManual() masked database error as no jobs")
+		}
+	}()
+
+	DoAllJobManual()
+}
+
+func TestGetUserUsesSentinelForUserNotFound(t *testing.T) {
+	oldGetUserByName := getUserByName
+	oldGetUserByID := getUserByID
+	defer func() {
+		getUserByName = oldGetUserByName
+		getUserByID = oldGetUserByID
+	}()
+
+	getUserByName = func(string) (map[string]interface{}, error) {
+		return nil, mapper.ErrUserNotFound
+	}
+	getUserByID = mapper.GetUserByID
+
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			t.Fatalf("GetUser() did not panic")
+		}
+		if err, ok := recovered.(interface{ Error() string }); !ok || err.Error() != msg.UserNotFound {
+			t.Fatalf("GetUser() panic = %#v, want public user_not_found", recovered)
+		}
+	}()
+
+	GetUser(0, "missing")
+}
+
+func TestRemoveJobClientRejectsRunningJobWithoutStoppingIt(t *testing.T) {
+	client := &JobClient{
+		JobID:     99,
+		Job:       map[string]interface{}{"id": int64(99), "enable": 1, "isCron": 2},
+		Scheduler: NewScheduler(),
+	}
+	defer client.Scheduler.Stop()
+
+	task := &JobTask{TaskID: 100}
+	task.initRuntime()
+	client.setCurrentTask(task)
+	if !client.tryMarkDoing() {
+		t.Fatalf("tryMarkDoing() = false, want true")
+	}
+
+	jobClientListMu.Lock()
+	previousClients := jobClientList
+	jobClientList = map[int64]*JobClient{client.JobID: client}
+	jobClientListMu.Unlock()
+	defer func() {
+		jobClientListMu.Lock()
+		jobClientList = previousClients
+		jobClientListMu.Unlock()
+	}()
+
+	panicCh := make(chan interface{}, 1)
+	go func() {
+		defer func() {
+			panicCh <- recover()
+		}()
+		RemoveJobClient(client.JobID)
+	}()
+
+	select {
+	case recovered := <-panicCh:
+		err, ok := recovered.(interface{ Error() string })
+		if !ok || err.Error() != msg.JobRunningCannotDelete {
+			t.Fatalf("RemoveJobClient() panic = %#v, want %q", recovered, msg.JobRunningCannotDelete)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatalf("RemoveJobClient() did not reject running job immediately")
+	}
+
+	if task.isBreak() {
+		t.Fatalf("RemoveJobClient() requested task break while rejecting delete")
+	}
+	if got := util.ToInt(client.Job["enable"]); got != 1 {
+		t.Fatalf("job enable after rejected delete = %d, want 1", got)
+	}
+}
+
+// startCopyItem is reached from both the submit executor and the full-sync
+// relocation path. Every item must get a distinct DoingKey, otherwise entries
+// overwrite each other in Doing and the concurrency gate under-counts.
+func TestStartCopyItemAssignsDistinctDoingKeysConcurrently(t *testing.T) {
+	jt := &JobTask{
+		Doing:          make(map[int64]*CopyItem),
+		Waiting:        newCopyQueue(),
+		FinishedCounts: make(map[taskStatus]int),
+		FinishedSizes:  make(map[taskStatus]int64),
+	}
+
+	const perGoroutine = 300
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < perGoroutine; j++ {
+				key := jt.QueueNum.Add(1)
+				item := &CopyItem{DoingKey: key}
+				jt.DoingMu.Lock()
+				jt.Doing[key] = item
+				jt.DoingMu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got, want := len(jt.Doing), 2*perGoroutine; got != want {
+		t.Fatalf("Doing entries = %d, want %d: DoingKey collisions dropped items", got, want)
+	}
+}

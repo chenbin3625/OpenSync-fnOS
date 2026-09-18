@@ -1,0 +1,13 @@
+#!/bin/bash
+set -eu
+umask 077
+CMD_DIR="$(cd "$(dirname "$0")" && pwd)"
+"${CMD_DIR}/main" stop
+mkdir -p "${TRIM_PKGVAR}/backups"
+BACKUP="$(mktemp -d "${TRIM_PKGVAR}/backups/upgrade.XXXXXXXX")"
+# Copy the database and WAL only after the service is fully stopped.
+for name in openSync.db openSync.db-wal openSync.db-shm secret.key local-mappings.json; do
+    if [ -f "${TRIM_PKGVAR}/$name" ]; then cp -p "${TRIM_PKGVAR}/$name" "$BACKUP/$name"; fi
+done
+if [ -f "${TRIM_PKGETC}/config.ini" ]; then cp -p "${TRIM_PKGETC}/config.ini" "$BACKUP/config.ini"; fi
+printf '%s\n' "$BACKUP" > "${TRIM_PKGVAR}/last-upgrade-backup"

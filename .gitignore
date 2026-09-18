@@ -1,0 +1,12 @@
+node_modules/
+frontend/dist/
+backend/cmd/server/web/*
+!backend/cmd/server/web/.gitkeep
+data/
+dist/
+*.log
+.DS_Store
+playwright-report/
+test-results/
+.tools/
+*.fpk
