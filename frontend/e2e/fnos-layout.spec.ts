@@ -213,7 +213,9 @@ test("data fixture renders inspectable engine, task and notification rows", asyn
     );
 
     await page.goto("/app/opensync/tasks");
-    await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
+    await expect(
+      page.locator(".task-list-item").filter({ hasText: name }),
+    ).toBeVisible();
 
     await page.goto("/app/opensync/notifications");
     await expect(page.getByText(`通知 #${notifyId}`, { exact: true })).toBeVisible();
@@ -223,6 +225,9 @@ test("data fixture renders inspectable engine, task and notification rows", asyn
     await expect(
       page.locator(".notification-item .semi-switch").first(),
     ).toHaveCSS("height", "24px");
+    await expect(
+      page.locator(".notification-item .semi-switch").first(),
+    ).toHaveCSS("background-color", "rgb(0, 102, 255)");
     await page.screenshot({
       path: `test-results/data-${testInfo.project.name}.png`,
       fullPage: true,

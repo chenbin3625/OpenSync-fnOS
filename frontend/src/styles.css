@@ -1598,7 +1598,7 @@ html[data-theme="dark"] .semi-modal-mask {
 
 .semi-switch-checked,
 .semi-switch-checked:hover {
-  background-color: var(--accent);
+  background-color: var(--accent) !important;
 }
 
 .settings-section .setting-row {
