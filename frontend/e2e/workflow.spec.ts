@@ -85,7 +85,15 @@ test("sends a webhook template and preserves masked credentials when editing", a
     const card = page
       .locator(".notification-item")
       .filter({ hasText: `通知 #${id}` });
-    await card.getByRole("button", { name: "编辑通知", exact: true }).click();
+    const cardMenu = async () => {
+      await card
+        .getByRole("button", { name: "更多操作", exact: true })
+        .click();
+      return page.locator(".semi-dropdown-menu");
+    };
+    await (await cardMenu())
+      .getByText("编辑通知", { exact: true })
+      .click();
     await page
       .getByRole("switch", { name: "无变更时不发送", exact: true })
       .check();
@@ -96,8 +104,8 @@ test("sends a webhook template and preserves masked credentials when editing", a
     await expect.poll(() => webhookCalls).toBe(initialCalls + 2);
     await page.getByRole("button", { name: "保存", exact: true }).click();
     await expect(page.getByRole("dialog")).not.toBeVisible();
-    await card
-      .getByRole("button", { name: "发送测试通知", exact: true })
+    await (await cardMenu())
+      .getByText("发送测试通知", { exact: true })
       .click();
     await expect.poll(() => webhookCalls).toBe(initialCalls + 3);
   } finally {
@@ -210,10 +218,13 @@ test("creates an engine and manual job, then edits without changing sync mode", 
     expect(job.dstPath).toContain("/Backup");
     const forceMobileClick = testInfo.project.name.includes("mobile");
     await page.goto(`/app/opensync/tasks?jobId=${jobId}`);
-    const editButton = page.getByRole("button", {
-      name: "编辑任务",
-      exact: true,
-    });
+    await page
+      .locator(".overview-card")
+      .getByRole("button", { name: "更多操作", exact: true })
+      .click({ force: forceMobileClick });
+    const editButton = page
+      .locator(".semi-dropdown-menu")
+      .getByText("设置", { exact: true });
     await expect(editButton).toBeVisible();
     await editButton.click({ force: forceMobileClick });
     await page
