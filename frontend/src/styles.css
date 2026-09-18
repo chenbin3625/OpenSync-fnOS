@@ -671,57 +671,36 @@ body .semi-modal-mask {
   padding-top: 0;
   border-top: 0;
 }
-.task-editor-modal .semi-modal-header {
-  padding: 32px 48px 24px;
-}
-.task-editor-modal .semi-modal-title {
-  font-size: 24px;
-  line-height: 32px;
-}
-.task-editor-modal .semi-modal-close {
-  top: 26px;
-  right: 40px;
-}
-.task-editor-modal .semi-modal-body {
-  padding: 0 48px;
-  max-height: min(calc(100dvh - 220px), 620px);
-}
-.task-editor-modal .semi-modal-footer {
-  padding: 28px 48px 32px;
-}
 .task-editor-stepbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 24px;
-  padding: 8px 0 24px;
+  gap: 12px;
+  padding: 0 0 16px;
   border-bottom: 1px solid var(--line);
 }
 .task-editor-stepbar h3 {
   margin: 0;
-  font-size: 18px;
-  line-height: 26px;
+  font-size: var(--font-size-section-title);
+  line-height: 24px;
   font-weight: 600;
 }
 .task-editor-count {
   flex: 0 0 auto;
   color: var(--semi-color-text-0);
-  font-size: 18px;
+  font-size: var(--font-size-body);
   font-weight: 600;
 }
 .task-editor-count strong {
   color: var(--accent);
 }
 .task-editor-step {
-  min-height: 420px;
-  padding: 24px 0 4px;
+  min-height: 0;
+  padding: 16px 0 0;
 }
 .task-editor-step .form-section {
   padding-top: 0;
   border-top: 0;
-}
-.task-editor-modal .editor-form .form-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 .task-editor-review {
   display: grid;
@@ -739,6 +718,9 @@ body .semi-modal-mask {
 }
 .task-editor-actions {
   align-items: center;
+}
+.editor-form .setting-row {
+  border-radius: var(--radius);
 }
 .setting-row {
   display: flex;

@@ -367,14 +367,12 @@ function JobEditor({
   };
   return (
     <Editor
-      title={`${job ? "编辑任务" : "新建任务"} - ${activeStep}`}
+      title={job ? "编辑任务" : "新建任务"}
       visible
       busy={action.busy}
       onClose={onClose}
       onSave={save}
       dirty={dirty}
-      width={820}
-      className="task-editor-modal"
       footer={({ close }) => (
         <div className="editor-actions task-editor-actions">
           <Button onClick={close} disabled={action.busy}>
