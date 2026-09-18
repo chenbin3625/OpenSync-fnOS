@@ -187,10 +187,18 @@ test("primary surface, cards and controls use consistent radii and full width", 
     "border-radius",
     "8px",
   );
-  const section = page.locator(".settings-section").first();
+  const section = page.locator(".settings-card").first();
   const pageBox = await page.locator(".page").boundingBox();
   const sectionBox = await section.boundingBox();
   expect(sectionBox!.width).toBeGreaterThan(pageBox!.width - 60);
+  // 五个设置项合并成两张分组卡片，条目之间用分隔线而不是各自成卡。
+  await expect(page.locator(".settings-card")).toHaveCount(2);
+  await expect(page.locator(".settings-card").first()).toHaveCSS(
+    "border-top-width",
+    "1px",
+  );
+  await expect(page.locator(".settings-card-body .setting-row")).toHaveCount(5);
+  await expect(page.locator(".settings-card .settings-card")).toHaveCount(0);
 
   const input = page.getByRole("textbox", { name: "复制并发数", exact: true });
   await input.hover();
@@ -443,7 +451,24 @@ test("settings save stays at the top right", async ({ page }) => {
   expect(bounds!.x + bounds!.width).toBeGreaterThan(
     page.viewportSize()!.width - 50,
   );
+  // 设置页没有左侧 tab，操作栏底部的分隔条应当去掉。
+  await expect(page.locator(".page-toolbar")).toHaveCSS(
+    "border-bottom-width",
+    "0px",
+  );
   await page.screenshot({
     path: `test-results/settings-${test.info().project.name}.png`,
   });
+});
+
+test("toolbar keeps its divider only when tabs are present", async ({
+  page,
+}) => {
+  await page.goto("/app/opensync/settings");
+  await expect(page.locator(".page-toolbar")).toHaveClass(/no-tabs/);
+  await page.goto("/app/opensync/engines?view=engine");
+  const toolbar = page.locator(".page-toolbar");
+  await expect(toolbar.locator(".page-tabs .semi-tabs-tab").first()).toBeVisible();
+  await expect(toolbar).not.toHaveClass(/no-tabs/);
+  await expect(toolbar).toHaveCSS("border-bottom-width", "1px");
 });
