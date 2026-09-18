@@ -45,7 +45,6 @@ stop_app() {
 start_app() {
     if status_app; then return 0; fi
     [ -x "$BIN" ] || fail '应用服务文件缺失，请重新安装对应架构的安装包'
-    [ -n "${TRIM_API_TOKEN:-}" ] || fail '未取得飞牛 API Token，请检查系统版本和应用权限'
     mkdir -p "$TRIM_PKGVAR" "$TRIM_PKGETC" "$TRIM_PKGTMP"
     START_LOCK="${TRIM_PKGTMP}/start.lock"
     mkdir "$START_LOCK" 2>/dev/null || fail '应用正在启动，请稍后重试'

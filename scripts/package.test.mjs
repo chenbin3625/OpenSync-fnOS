@@ -14,9 +14,11 @@ test("package declares rootless gateway and minimum API scopes", () => {
     JSON.parse(readFileSync(root + "fnos/config/privilege")).defaults["run-as"],
     "package",
   );
+  // 应用只调用统一网关注入的身份头，不再访问共享目录或文件 ACL，
+  // 因此不申请任何开放 API 权限。
   assert.deepEqual(
     JSON.parse(readFileSync(root + "fnos/config/resource"))["api-scope"],
-    ["trim.file.sharedAccess", "trim.file.userAcl"],
+    [],
   );
   const entry = JSON.parse(readFileSync(root + "fnos/app/ui/config"))[".url"][
     "opensync.main"

@@ -467,8 +467,7 @@ h3 {
   gap: 12px;
 }
 .engine-item,
-.notification-item,
-.mapping-item {
+.notification-item {
   width: 100%;
   display: flex;
   gap: 16px;
@@ -498,27 +497,6 @@ h3 {
 }
 .item-list .row-actions {
   flex-shrink: 0;
-}
-.section-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin: 24px 0 16px;
-}
-.authorized-paths {
-  margin: 16px 0 32px;
-}
-.authorized-path {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 0;
-  border-bottom: 1px solid var(--line);
-}
-.authorized-path > span {
-  flex: 1;
-  min-width: 0;
 }
 body .semi-modal-mask {
   background-color: rgba(255, 255, 255, 0.65);
@@ -1078,12 +1056,6 @@ html[data-theme="dark"] .semi-modal-mask {
     width: 100%;
     justify-content: flex-end;
   }
-  .mapping-item {
-    align-items: flex-start;
-  }
-  .section-heading {
-    flex-wrap: wrap;
-  }
   .editor-modal {
     width: 100% !important;
     max-width: 100%;
@@ -1321,17 +1293,15 @@ html[data-theme="dark"] .semi-modal-mask {
 }
 .task-tab-content,
 .overview,
-.settings-page,
-.item-list,
-.local-storage {
+.settings-section,
+.item-list {
   width: 100%;
   max-width: none;
 }
 .overview-card,
 .info-section,
 .engine-item,
-.notification-item,
-.mapping-item {
+.notification-item {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -1350,8 +1320,7 @@ html[data-theme="dark"] .semi-modal-mask {
   gap: 12px;
 }
 .engine-item,
-.notification-item,
-.mapping-item {
+.notification-item {
   padding: 20px 24px;
   border-bottom: 1px solid var(--line);
 }
@@ -1467,9 +1436,7 @@ html[data-theme="dark"] .semi-modal-mask {
 .semi-icon,
 .semi-button .semi-icon,
 .nav-link .semi-icon,
-.flow-name .semi-icon,
-.flow-arrow,
-.authorized-path > .semi-icon,
+.item-symbol .semi-icon,
 .mobile-navigation .semi-icon {
   font-size: 16px;
 }

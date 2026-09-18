@@ -50,9 +50,9 @@ test(
       });
     try {
       assert.equal(run("status").status, 3);
-      assert.equal(run("start", { TRIM_API_TOKEN: "" }).status, 1);
-      assert.match(readFileSync(env.TRIM_TEMP_LOGFILE, "utf8"), /API Token/);
-      const start = run("start");
+      // 应用只读统一网关注入的身份头，不再调用飞牛开放 API，因此启动不应依赖
+      // TRIM_API_TOKEN；缺少它也必须能起来（api-scope 为空时平台可能不注入）。
+      const start = run("start", { TRIM_API_TOKEN: "" });
       assert.equal(start.status, 0, start.stderr);
       const first = readFileSync(join(fixture, "var/app.pid"), "utf8");
       assert.equal(run("start").status, 0);

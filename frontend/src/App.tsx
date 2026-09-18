@@ -27,12 +27,7 @@ import {
   IconTreeTriangleRight,
 } from "@douyinfe/semi-icons";
 import { api } from "./api/client";
-import {
-  applyTheme,
-  connectHost,
-  getHost,
-  handleAuthCallback,
-} from "./lib/host";
+import { applyTheme, connectHost } from "./lib/host";
 import { useResource } from "./lib/hooks";
 import { getJobName } from "./pages/Home/homeUtils";
 
@@ -105,14 +100,6 @@ function Shell({ children }: { children: ReactNode }) {
       cleanup?.();
     };
   }, []);
-  useEffect(() => {
-    const title =
-      sections.find((s) => pathname.startsWith(s.path))?.label || "OpenSync";
-    const host = getHost();
-    if (!host.isStandaloneWeb)
-      void host.setTitle("OpenSync · " + title).catch(() => {});
-    document.title = "OpenSync · " + title;
-  }, [pathname]);
   useEffect(() => {
     const refresh = () => void taskMenu.refresh();
     window.addEventListener("opensync:jobs-changed", refresh);
@@ -231,23 +218,6 @@ function Shell({ children }: { children: ReactNode }) {
     </div>
   );
 }
-function AuthCallback() {
-  const [error, setError] = useState("");
-  useEffect(() => {
-    try {
-      handleAuthCallback();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "授权失败");
-    }
-  }, []);
-  return (
-    <Banner
-      type="danger"
-      description={error || "正在确认授权"}
-      closeIcon={null}
-    />
-  );
-}
 function Workspace() {
   const session = useResource(() => api.session());
   useEffect(() => {
@@ -278,7 +248,6 @@ function Workspace() {
           <Route path="/engines" element={<Engines />} />
           <Route path="/notifications" element={<Notifications />} />
           <Route path="/settings" element={<Settings />} />
-          <Route path="/auth-callback" element={<AuthCallback />} />
           <Route path="*" element={<Navigate to="/tasks" replace />} />
         </Routes>
       </Shell>

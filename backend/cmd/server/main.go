@@ -31,7 +31,7 @@ var webFiles embed.FS
 
 const prefix = "/app/opensync"
 
-func newRouter(development bool) *gin.Engine {
+func newRouter(development bool, allowedOrigins []string) *gin.Engine {
 	r := gin.New()
 	_ = r.SetTrustedProxies(nil)
 	r.Use(gin.Logger(), func(c *gin.Context) {
@@ -55,7 +55,7 @@ func newRouter(development bool) *gin.Engine {
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
 		c.Next()
 	})
-	api := r.Group(prefix+"/svr", platform.GatewayRequired(development))
+	api := r.Group(prefix+"/svr", platform.GatewayRequired(development, allowedOrigins))
 	api.GET("/session", func(c *gin.Context) {
 		c.JSON(200, model.Success(gin.H{"uid": c.GetInt64("uid"), "development": development, "version": "0.1.0"}))
 	})
@@ -87,7 +87,6 @@ func newRouter(development bool) *gin.Engine {
 	api.POST("/notify/test", handler.TestNotify)
 	api.PUT("/notify", handler.UpdateNotify)
 	api.DELETE("/notify", handler.DeleteNotify)
-	platform.RegisterStorage(api)
 	files, _ := fs.Sub(webFiles, "web")
 	r.NoRoute(func(c *gin.Context) {
 		name := strings.TrimPrefix(c.Request.URL.Path, prefix+"/")
@@ -117,7 +116,7 @@ func newRouter(development bool) *gin.Engine {
 
 func main() {
 	development := flag.Bool("dev", false, "loopback-only local development mode")
-	port := flag.String("port", "8030", "development port")
+	port := flag.String("port", "8040", "development port")
 	flag.Parse()
 	if *development && os.Getenv("TRIM_APPNAME") != "" {
 		log.Fatal("development mode is not allowed inside a fnOS application")
@@ -129,6 +128,7 @@ func main() {
 		log.Fatal(err)
 	}
 	config.GetConfig()
+	platform.LogOriginPolicy(config.GetConfig().Server.AllowedOrigins)
 	mapper.InitSQL()
 	defer mapper.CloseDB()
 	service.InitJobs()
@@ -164,7 +164,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	server := &http.Server{Handler: newRouter(*development), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 32 << 10}
+	server := &http.Server{Handler: newRouter(*development, config.GetConfig().Server.AllowedOrigins), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 32 << 10}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	done := make(chan error, 1)

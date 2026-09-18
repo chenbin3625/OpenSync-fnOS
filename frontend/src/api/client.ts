@@ -142,22 +142,4 @@ export const api = {
     request<SystemSettings>("/system/config", { signal }),
   saveSettings: (data: SystemSettings) =>
     request<SystemSettings>("/system/config", { method: "PUT", data }),
-  storage: (signal?: AbortSignal) =>
-    request<StorageState>("/storage", { signal }),
-  saveMapping: (data: LocalMapping) =>
-    request("/storage", { method: "PUT", data }),
-  deleteMapping: (path: string) =>
-    request("/storage", { method: "DELETE", params: { path } }),
 };
-export interface LocalMapping {
-  path: string;
-  alistId: number;
-  virtualPath: string;
-  remark: string;
-}
-export interface StorageState {
-  paths: string[];
-  mappings: LocalMapping[];
-  available: boolean;
-  reason?: string;
-}

@@ -56,13 +56,3 @@ test("four modules fit desktop and mobile windows", async ({ page }) => {
     ).toBe(true);
   }
 });
-
-test("local storage cannot bypass the existing engine dependency", async ({
-  page,
-}) => {
-  await page.goto("/app/opensync/engines?view=local");
-  await expect(
-    page.getByRole("button", { name: "授权目录", exact: true }),
-  ).toBeVisible();
-  await expect(page.getByRole("button", { name: "直接同步" })).toHaveCount(0);
-});

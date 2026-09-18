@@ -30,12 +30,8 @@ export function Header({
   actions?: ReactNode;
 }) {
   return (
-    // 只有左侧有 tab 才需要与内容分隔的底边；纯操作栏去掉分隔条更干净。
-    <header
-      className={`page-toolbar${tabs ? "" : " no-tabs"}`}
-      aria-label={`${title}操作`}
-    >
-      <div className="page-tabs">{tabs}</div>
+    <header className="page-toolbar" aria-label={`${title}操作`}>
+      {tabs && <div className="page-tabs">{tabs}</div>}
       <div className="page-actions">{actions}</div>
     </header>
   );
