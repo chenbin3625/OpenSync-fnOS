@@ -1516,8 +1516,8 @@ html[data-theme="dark"] .semi-modal-mask {
   background-color: var(--accent) !important;
 }
 
-/* 系统设置：整页只保留两张分组大卡片，条目在卡片内用分隔线区分，
-   不再让每个条目各自成为一张小卡片。 */
+/* 系统设置：整页只保留两张分组大卡片，条目靠间距区分，
+   卡片内不再画分隔线，也不再让每个条目各自成为一张小卡片。 */
 .settings-page {
   display: flex;
   flex-direction: column;
@@ -1535,12 +1535,7 @@ html[data-theme="dark"] .semi-modal-mask {
 .settings-card-head {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 20px 24px;
-}
-
-.settings-card-head .semi-icon {
-  font-size: 18px;
+  padding: 20px 24px 0;
 }
 
 .settings-card-head h2 {
@@ -1550,7 +1545,7 @@ html[data-theme="dark"] .semi-modal-mask {
 .settings-card-body .setting-row {
   min-height: 68px;
   padding: 20px 24px;
-  border-top: 1px solid var(--line);
+  border: 0;
   border-radius: 0;
   background: var(--surface);
 }

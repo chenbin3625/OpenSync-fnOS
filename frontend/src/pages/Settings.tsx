@@ -1,13 +1,9 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState } from "react";
 import Banner from "@douyinfe/semi-ui/lib/es/banner";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Input from "@douyinfe/semi-ui/lib/es/input";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
-import {
-  IconCalendarClockStroked,
-  IconSaveStroked,
-  IconSettingStroked,
-} from "@douyinfe/semi-icons";
+import { IconSaveStroked } from "@douyinfe/semi-icons";
 import { api } from "../api/client";
 import { Header, LoadState, SettingRow } from "../components/common";
 import { useAction, useResource } from "../lib/hooks";
@@ -24,7 +20,6 @@ type SettingsForm = Record<(typeof fields)[number]["key"], string>;
 
 const cardGroups = [
   {
-    icon: <IconSettingStroked aria-hidden="true" />,
     title: "任务执行",
     note: "并发数越大占用的系统资源越多，请按硬件配置调整。",
     keys: [
@@ -35,7 +30,6 @@ const cardGroups = [
     ] as const,
   },
   {
-    icon: <IconCalendarClockStroked aria-hidden="true" />,
     title: "历史记录",
     note: "超时或保留时间为 0 时，不设置相应限制。",
     keys: ["taskSave"] as const,
@@ -108,16 +102,14 @@ export default function Settings() {
       </div>
     </SettingRow>
   );
-  // 每个分组渲染成一张大卡片，卡片内部用分隔线区分条目，避免卡片套卡片。
+  // 每个分组渲染成一张大卡片，条目靠间距区分，不用图标和小卡片分组。
   const card = (
-    icon: ReactNode,
     title: string,
     note: string,
     keys: readonly (typeof fields)[number]["key"][],
   ) => (
     <section className="settings-card" key={title}>
       <div className="settings-card-head">
-        <div className="item-symbol">{icon}</div>
         <h2>{title}</h2>
       </div>
       <div className="settings-card-body">{keys.map((key) => input(fieldOf(key)))}</div>
@@ -149,7 +141,7 @@ export default function Settings() {
       {form && !resource.loading && !resource.error && (
         <>
           {cardGroups.map((group) =>
-            card(group.icon, group.title, group.note, group.keys),
+            card(group.title, group.note, group.keys),
           )}
         </>
       )}
