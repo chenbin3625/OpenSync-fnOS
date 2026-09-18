@@ -273,11 +273,15 @@ test("data fixture renders inspectable engine, task and notification rows", asyn
     notifyId = notifications.data.at(-1).id;
 
     await page.goto("/app/opensync/engines");
-    await expect(page.getByRole("heading", { name, exact: true })).toBeVisible();
-    await expect(page.locator(".engine-item .item-symbol .semi-icon")).toHaveCSS(
-      "font-size",
-      "16px",
-    );
+    const engineCard = page
+      .locator(".engine-item")
+      .filter({ hasText: name })
+      .first();
+    await expect(engineCard.getByRole("heading", { name, exact: true })).toBeVisible();
+    await expect(engineCard.locator(".item-symbol")).toHaveCount(0);
+    await expect(
+      engineCard.getByRole("button", { name: "更多操作", exact: true }),
+    ).toBeVisible();
 
     await page.goto(`/app/opensync/tasks?jobId=${jobId}`);
     await expect(
@@ -289,6 +293,7 @@ test("data fixture renders inspectable engine, task and notification rows", asyn
 
     await page.goto("/app/opensync/notifications");
     await expect(page.getByText(`通知 #${notifyId}`, { exact: true })).toBeVisible();
+    await expect(page.locator(".notification-item .item-symbol")).toHaveCount(0);
     await expect(
       page.locator(".notification-item .semi-switch").first(),
     ).toHaveCSS("width", "40px");
@@ -336,8 +341,11 @@ test("task cards follow the reference card style and fill the detail pane", asyn
       srcPath: JSON.stringify(["/docker"]),
       dstPath: JSON.stringify(["/dav/nas/docker"]),
       method: 0,
-      isCron: 2,
+      isCron: 1,
       enable: 1,
+      hour: "2",
+      minute: "0",
+      second: "0",
       useCacheS: false,
       useCacheT: false,
       remark: name,
@@ -351,7 +359,7 @@ test("task cards follow the reference card style and fill the detail pane", asyn
   ).id;
   try {
     await page.goto(`/app/opensync/tasks?jobId=${jobId}`);
-    const summary = page.locator(".task-summary");
+    const summary = page.locator(".overview-card");
     const detail = page.locator(".task-detail-pane");
     await expect(summary).toBeVisible();
     await expect(summary).toHaveCSS("background-color", "rgb(255, 255, 255)");
@@ -360,6 +368,34 @@ test("task cards follow the reference card style and fill the detail pane", asyn
     const summaryBox = await summary.boundingBox();
     const detailBox = await detail.boundingBox();
     expect(summaryBox!.width).toBeGreaterThan(detailBox!.width - 12);
+    // 卡片头部：名称 + 状态标签 + 「⋯」菜单
+    await expect(
+      summary.getByRole("heading", { name, exact: true }),
+    ).toBeVisible();
+    const menu = summary.getByRole("button", {
+      name: "更多操作",
+      exact: true,
+    });
+    await expect(menu).toBeVisible();
+    // 源 → 目标 流向，以及「下次执行」
+    await expect(summary.locator(".flow-arrow")).toBeVisible();
+    await expect(
+      summary.locator(".flow-next").getByText("下次执行", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      summary.getByText("/docker", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      summary.getByText("/dav/nas/docker", { exact: true }),
+    ).toBeVisible();
+    // 「⋯」菜单里的操作与参考稿一致
+    await menu.click();
+    for (const label of ["设置", "执行记录", "禁用", "删除"]) {
+      await expect(
+        page.locator(".semi-dropdown-menu").getByText(label, { exact: true }),
+      ).toBeVisible();
+    }
+    await page.keyboard.press("Escape");
   } finally {
     await request.delete(`/app/opensync/svr/job?id=${jobId}`);
     await request.delete(`/app/opensync/svr/alist?id=${engineId}`);

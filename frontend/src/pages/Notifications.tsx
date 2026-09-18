@@ -12,20 +12,20 @@ import {
   IconEditStroked,
   IconDeleteStroked,
   IconSendStroked,
-  IconBellStroked,
 } from "@douyinfe/semi-icons";
 import { api } from "../api/client";
 import {
+  ActionMenu,
   Editor,
   Field,
   Header,
-  IconButton,
   LoadState,
   SettingRow,
   confirmDelete,
   errorToast,
 } from "../components/common";
 import { useAction, useResource } from "../lib/hooks";
+import { formatTimestamp } from "../utils/date";
 import {
   buildNotifyParams,
   channelNames,
@@ -77,9 +77,6 @@ export default function Notifications() {
           !resource.error &&
           resource.data?.map((item) => (
             <div className="notification-item" key={item.id}>
-              <div className="item-symbol">
-                <IconBellStroked aria-hidden="true" />
-              </div>
               <div className="item-content">
                 <h2>
                   {channelNames[item.method]}{" "}
@@ -87,7 +84,9 @@ export default function Notifications() {
                     {item.enable ? "已启用" : "已关闭"}
                   </Tag>
                 </h2>
-                <span className="muted">通知 #{item.id}</span>
+                <div className="item-meta">
+                  通知 #{item.id} · 创建于 {formatTimestamp(item.createTime)}
+                </div>
               </div>
               <div className="row-actions">
                 <Switch
@@ -101,41 +100,40 @@ export default function Notifications() {
                     )
                   }
                 />
-                <IconButton
-                  aria-hidden="true"
-                  label="发送测试通知"
-                  icon={<IconSendStroked aria-hidden="true" />}
+                <ActionMenu
                   disabled={action.busy}
-                  onClick={() =>
-                    perform(
-                      () =>
-                        api.testNotification({
-                          id: item.id,
-                          method: item.method,
-                          enable: item.enable,
-                          params: buildNotifyParams(notifyToForm(item)),
+                  actions={[
+                    {
+                      label: "发送测试通知",
+                      icon: <IconSendStroked aria-hidden="true" />,
+                      onClick: () =>
+                        perform(
+                          () =>
+                            api.testNotification({
+                              id: item.id,
+                              method: item.method,
+                              enable: item.enable,
+                              params: buildNotifyParams(notifyToForm(item)),
+                            }),
+                          "测试通知已发送",
+                        ),
+                    },
+                    {
+                      label: "编辑通知",
+                      icon: <IconEditStroked aria-hidden="true" />,
+                      onClick: () => setEditing(item),
+                    },
+                    {
+                      label: "删除通知",
+                      icon: <IconDeleteStroked aria-hidden="true" />,
+                      danger: true,
+                      onClick: () =>
+                        confirmDelete("删除此通知渠道？", async () => {
+                          await api.deleteNotification(item.id);
+                          await resource.refresh();
                         }),
-                      "测试通知已发送",
-                    )
-                  }
-                />
-                <IconButton
-                  aria-hidden="true"
-                  label="编辑通知"
-                  icon={<IconEditStroked aria-hidden="true" />}
-                  onClick={() => setEditing(item)}
-                />
-                <IconButton
-                  aria-hidden="true"
-                  label="删除通知"
-                  icon={<IconDeleteStroked aria-hidden="true" />}
-                  danger
-                  onClick={() =>
-                    confirmDelete("删除此通知渠道？", async () => {
-                      await api.deleteNotification(item.id);
-                      await resource.refresh();
-                    })
-                  }
+                    },
+                  ]}
                 />
               </div>
             </div>

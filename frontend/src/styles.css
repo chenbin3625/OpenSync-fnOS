@@ -243,8 +243,7 @@ h3 {
   margin-right: 0;
 }
 .page-actions,
-.row-actions,
-.summary-actions {
+.row-actions {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -350,55 +349,75 @@ h3 {
 .overview {
   width: 100%;
 }
-.task-summary {
+/* 任务卡片参考 fnOS 备份任务的卡片：标题 + 状态 + 「⋯」菜单、源→目标流向、底部操作条。 */
+.overview-card {
   width: 100%;
-  padding: 0;
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   overflow: hidden;
 }
-.task-summary > .summary-title,
-.task-summary > .summary-meta,
-.task-summary > .summary-actions {
-  padding-inline: 24px;
-}
-.task-summary > .summary-title {
-  padding-top: 24px;
-}
-.task-summary > .summary-meta {
-  padding-bottom: 24px;
-  border-bottom: 1px solid var(--line);
-}
-.task-summary > .summary-actions {
-  padding-block: 18px;
-}
-.summary-title {
+.overview-head {
   display: flex;
   align-items: center;
   gap: 10px;
-  flex-wrap: wrap;
+  padding: 20px 20px 16px;
 }
-.summary-title h2 {
-  margin-right: auto;
+.overview-head h2 {
+  min-width: 0;
+  margin-right: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.overview-head .semi-button {
+  margin-left: auto;
+}
+.overview-flow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 18px;
+  padding: 0 20px 20px;
+  border-bottom: 1px solid var(--line);
+}
+.flow-node {
+  display: grid;
+  gap: 6px;
   min-width: 0;
 }
-.summary-meta {
+.flow-name {
   display: flex;
-  flex-wrap: wrap;
-  gap: 16px;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.flow-name .semi-icon {
+  flex: 0 0 auto;
   color: var(--muted);
-  margin-top: 12px;
-  font-size: 12px;
 }
-.summary-actions {
-  margin-top: 20px;
+.flow-arrow {
+  align-self: center;
+  color: var(--accent);
 }
-.summary-actions .setting-row {
-  background: none;
-  padding: 0;
+.flow-sub {
+  color: var(--muted);
+  font-size: var(--font-size-small);
+  overflow-wrap: anywhere;
+}
+.flow-next .flow-name {
+  color: var(--muted);
+}
+.overview-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 20px;
+}
+.overview-actions > .flow-sub {
   margin-right: auto;
-  gap: 12px;
 }
 .overview-sections {
   display: grid;
@@ -455,16 +474,6 @@ h3 {
   border-radius: var(--radius);
   background: var(--surface);
 }
-.item-symbol {
-  width: 44px;
-  height: 44px;
-  background: var(--selected);
-  color: var(--accent);
-  display: grid;
-  place-items: center;
-  border-radius: var(--radius);
-  flex-shrink: 0;
-}
 .item-content {
   min-width: 0;
   flex: 1;
@@ -477,6 +486,11 @@ h3 {
   gap: 8px;
   align-items: center;
   flex-wrap: wrap;
+}
+.item-meta {
+  color: var(--muted);
+  font-size: var(--font-size-small);
+  overflow-wrap: anywhere;
 }
 .item-list .row-actions {
   flex-shrink: 0;
@@ -1041,18 +1055,25 @@ html[data-theme="dark"] .semi-modal-mask {
   .task-detail-pane {
     padding-top: 8px;
   }
-  .task-summary {
-    padding: 16px;
+  .overview-head {
+    padding: 16px 16px 14px;
   }
-  .summary-meta {
-    gap: 10px;
+  .overview-flow {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+    padding: 0 16px 16px;
   }
-  .summary-actions {
-    gap: 10px;
+  .flow-arrow {
+    justify-self: start;
+    transform: rotate(90deg);
   }
-  .summary-actions .setting-row {
+  .overview-actions {
+    flex-wrap: wrap;
+    gap: 12px;
+    padding: 14px 16px;
+  }
+  .overview-actions > .flow-sub {
     flex-basis: 100%;
-    justify-content: flex-start;
   }
   .info-row {
     grid-template-columns: 76px minmax(0, 1fr);
@@ -1319,7 +1340,7 @@ html[data-theme="dark"] .semi-modal-mask {
   width: 100%;
   max-width: none;
 }
-.task-summary,
+.overview-card,
 .info-section,
 .engine-item,
 .notification-item,
@@ -1328,25 +1349,6 @@ html[data-theme="dark"] .semi-modal-mask {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--surface);
-}
-.task-summary {
-  padding: 0;
-  overflow: hidden;
-}
-.task-summary > .summary-title,
-.task-summary > .summary-meta,
-.task-summary > .summary-actions {
-  padding-inline: 24px;
-}
-.task-summary > .summary-title {
-  padding-top: 24px;
-}
-.task-summary > .summary-meta {
-  padding-bottom: 24px;
-  border-bottom: 1px solid var(--line);
-}
-.task-summary > .summary-actions {
-  padding-block: 18px;
 }
 .overview-sections {
   display: grid;
@@ -1487,7 +1489,8 @@ html[data-theme="dark"] .semi-modal-mask {
 .semi-icon,
 .semi-button .semi-icon,
 .nav-link .semi-icon,
-.item-symbol .semi-icon,
+.flow-name .semi-icon,
+.flow-arrow,
 .authorized-path > .semi-icon,
 .mobile-navigation .semi-icon {
   font-size: 16px;

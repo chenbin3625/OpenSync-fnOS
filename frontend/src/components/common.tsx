@@ -7,13 +7,14 @@ import {
 } from "react";
 import Banner from "@douyinfe/semi-ui/lib/es/banner";
 import Button from "@douyinfe/semi-ui/lib/es/button";
+import Dropdown from "@douyinfe/semi-ui/lib/es/dropdown";
 import Empty from "@douyinfe/semi-ui/lib/es/empty";
 import Modal from "@douyinfe/semi-ui/lib/es/modal";
 import Spin from "@douyinfe/semi-ui/lib/es/spin";
 import Tag from "@douyinfe/semi-ui/lib/es/tag";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
-import { IconRefresh, IconClose } from "@douyinfe/semi-icons";
+import { IconRefresh, IconClose, IconMoreStroked } from "@douyinfe/semi-icons";
 import { getHost } from "../lib/host";
 
 export function errorToast(error: unknown) {
@@ -59,6 +60,46 @@ export function IconButton({
         onClick={onClick}
       />
     </Tooltip>
+  );
+}
+export interface MenuAction {
+  label: string;
+  icon?: ReactNode;
+  onClick: () => void;
+  danger?: boolean;
+  disabled?: boolean;
+}
+/** 卡片右上角的「⋯」操作菜单，与参考稿的卡片操作入口保持一致。 */
+export function ActionMenu({
+  actions,
+  disabled,
+  label = "更多操作",
+}: {
+  actions: MenuAction[];
+  disabled?: boolean;
+  label?: string;
+}) {
+  return (
+    <Dropdown
+      trigger="click"
+      position="bottomRight"
+      menu={actions.map((action) => ({
+        node: "item" as const,
+        name: action.label,
+        icon: action.icon,
+        type: action.danger ? ("danger" as const) : ("tertiary" as const),
+        disabled: action.disabled,
+        onClick: action.onClick,
+      }))}
+    >
+      <Button
+        aria-label={label}
+        icon={<IconMoreStroked aria-hidden="true" />}
+        theme="borderless"
+        type="tertiary"
+        disabled={disabled}
+      />
+    </Dropdown>
   );
 }
 export function EmptyState() {

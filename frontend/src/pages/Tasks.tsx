@@ -14,23 +14,29 @@ import TextArea from "@douyinfe/semi-ui/lib/es/input/textarea";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
 import {
+  IconArrowRight,
+  IconCloudStroked,
+  IconHistory,
+  IconPause,
   IconPlay,
   IconPlusStroked,
-  IconEditStroked,
+  IconServerStroked,
+  IconSettingStroked,
   IconDeleteStroked,
 } from "@douyinfe/semi-icons";
 import { api } from "../api/client";
 import {
+  ActionMenu,
   Editor,
   EmptyState,
   Field,
   Header,
-  IconButton,
   Info,
   LoadState,
   SettingRow,
   confirmDelete,
   errorToast,
+  type MenuAction,
 } from "../components/common";
 import { RemotePaths } from "../components/RemotePaths";
 import { useAction, useResource } from "../lib/hooks";
@@ -52,6 +58,7 @@ import {
   getJobName,
   methodNames,
   methodOptions,
+  parseJobPathList,
 } from "./Home/homeUtils";
 import { fileSizeUnitOptions } from "./Home/fileSizeUnits";
 import type { AlistItem, JobItem } from "../types";
@@ -169,6 +176,7 @@ export default function Tasks() {
                         "任务状态已更新",
                       )
                     }
+                    onHistory={() => update({ tab: "history" })}
                     onEdit={() => setEditor({ open: true, job: selected })}
                     onDelete={() =>
                       confirmDelete(
@@ -221,6 +229,7 @@ function Overview({
   onToggle,
   onEdit,
   onDelete,
+  onHistory,
 }: {
   job: JobItem;
   engines: AlistItem[];
@@ -229,34 +238,85 @@ function Overview({
   onToggle: () => void;
   onEdit: () => void;
   onDelete: () => void;
+  onHistory: () => void;
 }) {
   const engine = engines.find((e) => e.id === job.alistId);
+  const engineName = engine
+    ? engine.remark || engine.userName
+    : `引擎 #${job.alistId}`;
+  const engineHost = engine ? engineHostOf(engine.url) : "";
+  const enabled = job.enable === 1;
+  const menu: MenuAction[] = [
+    {
+      label: "设置",
+      icon: <IconSettingStroked aria-hidden="true" />,
+      onClick: onEdit,
+    },
+    {
+      label: "执行记录",
+      icon: <IconHistory aria-hidden="true" />,
+      onClick: onHistory,
+    },
+    ...(job.isCron !== 2
+      ? [
+          {
+            label: enabled ? "禁用" : "启用",
+            icon: enabled ? (
+              <IconPause aria-hidden="true" />
+            ) : (
+              <IconPlay aria-hidden="true" />
+            ),
+            onClick: onToggle,
+          },
+        ]
+      : []),
+    {
+      label: "删除",
+      icon: <IconDeleteStroked aria-hidden="true" />,
+      onClick: onDelete,
+      danger: true,
+    },
+  ];
   return (
     <div className="overview">
-      <div className="task-summary">
-        <div className="summary-title">
+      <section className="overview-card">
+        <div className="overview-head">
           <h2 title={getJobName(job)}>{getJobName(job)}</h2>
-          <Tag color="blue">{methodNames[job.method]}</Tag>
-          <Tag color={job.enable ? "green" : "grey"}>
-            {job.enable ? "已启用" : "已暂停"}
+          <Tag size="small" color={enabled ? "green" : "grey"}>
+            {enabled ? "已启用" : "已禁用"}
           </Tag>
+          <ActionMenu actions={menu} disabled={busy} />
         </div>
-        <div className="summary-meta">
-          <span>源目录 {countJobPaths(job.srcPath)} 个</span>
-          <span>目标目录 {countJobPaths(job.dstPath)} 个</span>
-          <span>{formatSchedule(job)}</span>
+        <div className="overview-flow">
+          <div className="flow-node">
+            <div className="flow-name">
+              <IconServerStroked aria-hidden="true" />
+              本地存储
+            </div>
+            <div className="flow-sub mono">
+              {parseJobPathList(job.srcPath).join("\n") || "—"}
+            </div>
+          </div>
+          <IconArrowRight className="flow-arrow" aria-hidden="true" />
+          <div className="flow-node">
+            <div className="flow-name" title={engineHost || engineName}>
+              <IconCloudStroked aria-hidden="true" />
+              {engineName}
+            </div>
+            <div className="flow-sub mono">
+              {parseJobPathList(job.dstPath).join("\n") || "—"}
+            </div>
+          </div>
+          <div className="flow-node flow-next">
+            <div className="flow-name">下次执行</div>
+            <div className="flow-sub">{formatSchedule(job)}</div>
+          </div>
         </div>
-        <div className="summary-actions">
-          {job.isCron !== 2 && (
-            <SettingRow label="任务开关">
-              <Switch
-                aria-label="切换任务启用状态"
-                checked={job.enable === 1}
-                disabled={busy}
-                onChange={onToggle}
-              />
-            </SettingRow>
-          )}
+        <div className="overview-actions">
+          <span className="flow-sub">
+            {methodNames[job.method]} · 源目录 {countJobPaths(job.srcPath)} 个 ·
+            目标目录 {countJobPaths(job.dstPath)} 个
+          </span>
           <Button
             icon={<IconPlay aria-hidden="true" />}
             theme="solid"
@@ -265,23 +325,8 @@ function Overview({
           >
             手动执行
           </Button>
-          <IconButton
-            aria-hidden="true"
-            label="编辑任务"
-            icon={<IconEditStroked aria-hidden="true" />}
-            onClick={onEdit}
-            disabled={busy}
-          />
-          <IconButton
-            aria-hidden="true"
-            label="删除任务"
-            icon={<IconDeleteStroked aria-hidden="true" />}
-            onClick={onDelete}
-            disabled={busy}
-            danger
-          />
         </div>
-      </div>
+      </section>
       <div className="overview-sections">
         <section className="info-section">
           <h3>存储与路径</h3>
@@ -315,6 +360,15 @@ function Overview({
     </div>
   );
 }
+
+/** 引擎卡片只展示主机名，完整地址留给悬浮提示。 */
+const engineHostOf = (url: string) => {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+};
 
 const taskEditorSteps = ["引擎与路径", "同步与调度", "文件过滤", "任务状态"];
 
