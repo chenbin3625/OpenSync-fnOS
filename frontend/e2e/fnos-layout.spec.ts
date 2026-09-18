@@ -133,12 +133,13 @@ test("task management expands in the sidebar and lists task names", async ({
   }
 });
 
-test("task and engine tabs share an integrated toolbar row with commands", async ({
+test("task tabs and page commands share an integrated toolbar row", async ({
   page,
 }) => {
   for (const [path, tab, action] of [
     ["tasks", "总览", "新建任务"],
-    ["engines", "OpenList / AList", "添加引擎"],
+    ["tasks", "实时任务", "新建任务"],
+    ["tasks", "历史任务", "执行全部"],
   ]) {
     await page.goto(`/app/opensync/${path}`);
     const toolbar = page.locator(".page-toolbar");
@@ -171,12 +172,20 @@ test("task and engine tabs share an integrated toolbar row with commands", async
       ).toBeLessThan(8);
     }
   }
-  await page.goto("/app/opensync/engines?view=local");
-  await expect(
-    page
-      .locator(".page-toolbar")
-      .getByRole("button", { name: "授权目录", exact: true }),
-  ).toBeVisible();
+  // 引擎管理只有一个页面，不再有 Tab；工具栏仍须撑满高度并右对齐操作按钮。
+  await page.goto("/app/opensync/engines");
+  const toolbar = page.locator(".page-toolbar");
+  await expect(toolbar.locator(".semi-tabs-bar")).toHaveCount(0);
+  const toolbarBox = await toolbar.boundingBox();
+  const actionBox = await toolbar
+    .getByRole("button", { name: "添加引擎", exact: true })
+    .boundingBox();
+  expect(toolbarBox!.height).toBeLessThan(80);
+  expect(
+    Math.abs(
+      actionBox!.y + actionBox!.height / 2 - toolbarBox!.y - toolbarBox!.height / 2,
+    ),
+  ).toBeLessThan(8);
 });
 
 test("primary surface, cards and controls use consistent radii and full width", async ({

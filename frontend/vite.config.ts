@@ -17,11 +17,11 @@ export default defineConfig({
     },
   ],
   server: {
-    port: 3010,
+    port: 3020,
     strictPort: true,
     proxy: {
       "/app/opensync/svr": {
-        target: "http://127.0.0.1:8030",
+        target: "http://127.0.0.1:8040",
         changeOrigin: false,
       },
     },

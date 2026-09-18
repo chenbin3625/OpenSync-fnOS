@@ -32,6 +32,13 @@ type ServerConfig struct {
 	// header may be honored when deciding whether to mark the auth cookie
 	// Secure behind a TLS-terminating reverse proxy.
 	TrustedProxies []string
+	// AllowedOrigins lists the origins allowed to perform mutations. Entries are
+	// full origins ("http://nas.example:5666") or bare hosts ("nas.example");
+	// ports are ignored. Configuring it retires the Referer-based same-origin
+	// fallback in platform.GatewayRequired, so a deployment that sets it must
+	// list the address the NAS is actually reached at — otherwise the UI's own
+	// writes are rejected.
+	AllowedOrigins []string
 	// TLSCertFile and TLSKeyFile enable HTTPS/HTTP2 and opportunistic HTTP3.
 	TLSCertFile string
 	TLSKeyFile  string
@@ -178,7 +185,10 @@ func GetConfig() *Config {
 				sCfg.MaxRetries = intConfigValue(v, sCfg.MaxRetries, "max_retries")
 			}
 			if v, ok := opensync["trusted_proxies"]; ok {
-				sCfg.TrustedProxies = parseTrustedProxies(v)
+				sCfg.TrustedProxies = splitList(v)
+			}
+			if v, ok := opensync["allowed_origins"]; ok {
+				sCfg.AllowedOrigins = splitList(v)
 			}
 		}
 	} else {
@@ -194,7 +204,8 @@ func GetConfig() *Config {
 		sCfg.CopyConcurrency = envIntConfigValue("OPENSYNC_COPY_CONCURRENCY", sCfg.CopyConcurrency)
 		sCfg.ScanConcurrency = envIntConfigValue("OPENSYNC_SCAN_CONCURRENCY", sCfg.ScanConcurrency)
 		sCfg.MaxRetries = envIntConfigValue("OPENSYNC_MAX_RETRIES", sCfg.MaxRetries)
-		sCfg.TrustedProxies = parseTrustedProxies(os.Getenv("OPENSYNC_TRUSTED_PROXIES"))
+		sCfg.TrustedProxies = splitList(os.Getenv("OPENSYNC_TRUSTED_PROXIES"))
+		sCfg.AllowedOrigins = splitList(os.Getenv("OPENSYNC_ALLOWED_ORIGINS"))
 	}
 	sCfg.TLSCertFile = envStringConfigValue("OPENSYNC_TLS_CERT", sCfg.TLSCertFile)
 	sCfg.TLSKeyFile = envStringConfigValue("OPENSYNC_TLS_KEY", sCfg.TLSKeyFile)
@@ -234,15 +245,15 @@ func clampInt(value, min, max, fallback int) int {
 	return value
 }
 
-// parseTrustedProxies splits a comma-separated list of CIDRs / bare IPs.
-func parseTrustedProxies(value string) []string {
-	var proxies []string
+// splitList splits a comma-separated config value, dropping blank entries.
+func splitList(value string) []string {
+	var items []string
 	for _, part := range strings.Split(value, ",") {
 		if p := strings.TrimSpace(part); p != "" {
-			proxies = append(proxies, p)
+			items = append(items, p)
 		}
 	}
-	return proxies
+	return items
 }
 
 // IsTrustedProxy reports whether remoteAddr (host:port) is a loopback address
@@ -365,7 +376,7 @@ func envStringConfigValue(envName string, fallback string) string {
 var configManagedKeys = []string{
 	"bind", "port", "expires", "log_level", "console_level", "log_save",
 	"task_save", "task_timeout", "copy_concurrency", "scan_concurrency",
-	"max_retries", "trusted_proxies",
+	"max_retries", "trusted_proxies", "allowed_origins",
 }
 
 func configManagedValues(sCfg ServerConfig) map[string]string {
@@ -382,6 +393,7 @@ func configManagedValues(sCfg ServerConfig) map[string]string {
 		"scan_concurrency": strconv.Itoa(sCfg.ScanConcurrency),
 		"max_retries":      strconv.Itoa(sCfg.MaxRetries),
 		"trusted_proxies":  strings.Join(sCfg.TrustedProxies, ","),
+		"allowed_origins":  strings.Join(sCfg.AllowedOrigins, ","),
 	}
 }
 

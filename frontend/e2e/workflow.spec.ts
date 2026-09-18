@@ -103,7 +103,7 @@ test("sends a webhook template and preserves masked credentials when editing", a
   } finally {
     if (id)
       await fetch(
-        `http://127.0.0.1:3010/app/opensync/svr/notify?notifyId=${id}`,
+        `http://127.0.0.1:3020/app/opensync/svr/notify?notifyId=${id}`,
         { method: "DELETE" },
       );
   }

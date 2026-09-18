@@ -6,7 +6,7 @@ import (
 )
 
 func TestStaticRoutesRejectNeighborPrefix(t *testing.T) {
-	r := newRouter(false)
+	r := newRouter(false, nil)
 	for _, path := range []string{"/app/opensync-other", "/app/opensync/svr", "/app/opensync/svr/missing"} {
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
@@ -17,7 +17,7 @@ func TestStaticRoutesRejectNeighborPrefix(t *testing.T) {
 }
 
 func TestNativeRoutesDoNotExposeLegacyLogin(t *testing.T) {
-	r := newRouter(false)
+	r := newRouter(false, nil)
 	for _, path := range []string{"/svr/noAuth/login", "/app/opensync/svr/noAuth/init"} {
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, httptest.NewRequest("GET", path, nil))

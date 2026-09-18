@@ -30,7 +30,7 @@ export function Header({
 }) {
   return (
     <header className="page-toolbar" aria-label={`${title}操作`}>
-      <div className="page-tabs">{tabs}</div>
+      {tabs && <div className="page-tabs">{tabs}</div>}
       <div className="page-actions">{actions}</div>
     </header>
   );
