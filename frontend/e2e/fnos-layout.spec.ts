@@ -191,14 +191,20 @@ test("primary surface, cards and controls use consistent radii and full width", 
   const pageBox = await page.locator(".page").boundingBox();
   const sectionBox = await section.boundingBox();
   expect(sectionBox!.width).toBeGreaterThan(pageBox!.width - 60);
-  // 五个设置项合并成两张分组卡片，条目之间用分隔线而不是各自成卡。
+  // 五个设置项合并成两张分组卡片，条目不再各自成卡。
   await expect(page.locator(".settings-card")).toHaveCount(2);
   await expect(page.locator(".settings-card").first()).toHaveCSS(
     "border-top-width",
     "1px",
   );
-  await expect(page.locator(".settings-card-body .setting-row")).toHaveCount(5);
+  const rows = page.locator(".settings-card-body .setting-row");
+  await expect(rows).toHaveCount(5);
   await expect(page.locator(".settings-card .settings-card")).toHaveCount(0);
+  // 分组标题不带图标，卡片内部也不画分隔线。
+  await expect(page.locator(".settings-card .item-symbol")).toHaveCount(0);
+  await expect(page.locator(".settings-card-head .semi-icon")).toHaveCount(0);
+  await expect(rows.first()).toHaveCSS("border-top-width", "0px");
+  await expect(rows.first()).toHaveCSS("border-bottom-width", "0px");
 
   const input = page.getByRole("textbox", { name: "复制并发数", exact: true });
   await input.hover();
