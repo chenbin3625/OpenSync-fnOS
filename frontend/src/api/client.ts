@@ -73,9 +73,14 @@ export const api = {
     request("/alist", { method: edit ? "PUT" : "POST", data }),
   deleteEngine: (id: number) =>
     request("/alist", { method: "DELETE", params: { id } }),
-  jobs: (page: number, signal?: AbortSignal) =>
+  jobs: (page: number, signal?: AbortSignal, pageSize = 12) =>
     request<PageData<JobItem>>("/job", {
-      params: { pageNum: page, pageSize: 12 },
+      params: { pageNum: page, pageSize },
+      signal,
+    }),
+  jobMenu: (signal?: AbortSignal) =>
+    request<PageData<JobItem>>("/job", {
+      params: { pageNum: 1, pageSize: 100 },
       signal,
     }),
   saveJob: (data: unknown, signal?: AbortSignal) =>
