@@ -214,6 +214,10 @@ h3 {
   border-radius: var(--radius) var(--radius) 0 0;
   overflow: hidden;
 }
+/* 没有 tab 的页面不需要与内容分隔的底边，操作栏直接浮在页面上。 */
+.page-toolbar.no-tabs {
+  border-bottom: 0;
+}
 .page-tabs {
   min-width: 0;
 }
@@ -738,23 +742,6 @@ body .semi-modal-mask {
 }
 .setting-row > span {
   overflow-wrap: anywhere;
-}
-.settings-section {
-  width: 100%;
-  max-width: none;
-  margin-bottom: 32px;
-}
-.settings-section h2 {
-  margin-bottom: 16px;
-}
-.settings-section .setting-row + .setting-row {
-  border-top: 1px solid var(--surface);
-}
-.settings-section .setting-row:first-of-type {
-  border-radius: var(--radius) var(--radius) 0 0;
-}
-.settings-section .setting-row:last-of-type {
-  border-radius: 0 0 var(--radius) var(--radius);
 }
 .numeric-setting {
   display: flex;
@@ -1313,7 +1300,7 @@ html[data-theme="dark"] .semi-modal-mask {
 }
 .task-tab-content,
 .overview,
-.settings-section,
+.settings-page,
 .item-list,
 .local-storage {
   width: 100%;
@@ -1406,15 +1393,6 @@ html[data-theme="dark"] .semi-modal-mask {
 }
 .fnos-confirm .semi-modal-confirm-title-text {
   display: block;
-}
-.settings-section {
-  margin-bottom: 32px;
-}
-.settings-section .setting-row:first-of-type {
-  border-radius: var(--radius) var(--radius) 0 0;
-}
-.settings-section .setting-row:last-of-type {
-  border-radius: 0 0 var(--radius) var(--radius);
 }
 @media (max-width: 640px) {
   .app-shell {
@@ -1535,20 +1513,45 @@ html[data-theme="dark"] .semi-modal-mask {
   background-color: var(--accent) !important;
 }
 
-.settings-section .setting-row {
-  min-height: 68px;
-  padding: 20px 24px;
+/* 系统设置：整页只保留两张分组大卡片，条目在卡片内用分隔线区分，
+   不再让每个条目各自成为一张小卡片。 */
+.settings-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.settings-card {
+  width: 100%;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--surface);
+  overflow: hidden;
 }
 
-.settings-section .setting-row + .setting-row {
-  margin-top: 8px;
+.settings-card-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 20px 24px;
+}
+
+.settings-card-head .semi-icon {
+  font-size: 18px;
+}
+
+.settings-card-head h2 {
+  margin: 0;
+}
+
+.settings-card-body .setting-row {
+  min-height: 68px;
+  padding: 20px 24px;
   border-top: 1px solid var(--line);
+  border-radius: 0;
+  background: var(--surface);
 }
 
-.settings-section .setting-row:first-of-type,
-.settings-section .setting-row:last-of-type {
-  border-radius: var(--radius);
+.settings-card-note {
+  padding: 0 24px 20px;
 }
