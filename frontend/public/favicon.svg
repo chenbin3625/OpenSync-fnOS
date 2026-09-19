@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none">
   <defs>
-    <linearGradient id="bg" x1="8" y1="7" x2="56" y2="58" gradientUnits="userSpaceOnUse">
+    <linearGradient id="bg" x1="4" y1="3" x2="60" y2="62" gradientUnits="userSpaceOnUse">
       <stop stop-color="#E6FFF8"/>
       <stop offset="0.52" stop-color="#F7FBFF"/>
       <stop offset="1" stop-color="#E9F0FF"/>
@@ -10,8 +10,7 @@
       <stop offset="1" stop-color="#2F6DF6"/>
     </linearGradient>
   </defs>
-  <rect x="6" y="6" width="52" height="52" rx="16" fill="url(#bg)"/>
-  <rect x="7.5" y="7.5" width="49" height="49" rx="14.5" stroke="#0F766E" stroke-opacity="0.18" stroke-width="3"/>
+  <rect x="3" y="3" width="58" height="58" rx="14" fill="url(#bg)" stroke="#0F766E" stroke-opacity="0.18" stroke-width="1"/>
   <path d="M19 31.5c0-7.2 5.6-13 13-13 4.2 0 7.7 1.9 10 4.8" stroke="url(#sync)" stroke-linecap="round" stroke-width="5.6"/>
   <path d="M43 16.5V26h-9.5" stroke="#0F9F8D" stroke-linecap="round" stroke-linejoin="round" stroke-width="5.6"/>
   <path d="M45 32.5c0 7.2-5.6 13-13 13-4.2 0-7.7-1.9-10-4.8" stroke="url(#sync)" stroke-linecap="round" stroke-width="5.6"/>
