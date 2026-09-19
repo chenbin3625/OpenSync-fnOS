@@ -54,6 +54,14 @@ const statusTabs = [
   { key: -1, label: "其他", count: "other" },
 ] as const;
 
+const fileTableWidths = {
+  name: 360,
+  size: 96,
+  action: 76,
+  status: 124,
+  progress: 140,
+} as const;
+
 export function Realtime({ jobId }: { jobId: number }) {
   const demo = import.meta.env.DEV;
   const { currentTask, refreshCurrentTask } = useRealtimeTask(
@@ -449,6 +457,7 @@ export function FileTable({
     <>
       <div className="desktop-data">
         <Table<TaskItem>
+          className="file-table"
           dataSource={rows}
           loading={loading}
           rowKey={(record) =>
@@ -459,6 +468,8 @@ export function FileTable({
           columns={[
             {
               title: "文件 / 目录",
+              width: fileTableWidths.name,
+              className: "file-col-name",
               render: (_, record) => (
                 <div className="file-name">
                   <Tooltip content={getTaskDisplayName(record)} position="topLeft">
@@ -476,13 +487,15 @@ export function FileTable({
             },
             {
               title: "大小",
-              width: 110,
+              width: fileTableWidths.size,
+              className: "file-col-size",
               render: (_, record) =>
                 record.isPath ? "目录" : formatSize(record.fileSize || 0),
             },
             {
               title: "操作",
-              width: 80,
+              width: fileTableWidths.action,
+              className: "file-col-action",
               render: (_, record) => {
                 const name = taskTypeNames[record.type || 0] || "—";
                 const cls = record.type === 1 ? "task-tag task-tag--danger" : "task-tag";
@@ -493,7 +506,8 @@ export function FileTable({
               ? [
                   {
                     title: "状态",
-                    width: 160,
+                    width: fileTableWidths.status,
+                    className: "file-col-status",
                     render: (_: unknown, record: TaskItem) => (
                       <Status
                         status={record.status}
@@ -506,7 +520,8 @@ export function FileTable({
               : []),
             {
               title: "进度",
-              width: 150,
+              width: fileTableWidths.progress,
+              className: "file-col-progress",
               render: (_, record) => {
                 const status = record.status;
                 // 失败状态：展示错误原因

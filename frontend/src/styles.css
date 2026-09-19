@@ -812,6 +812,45 @@ body .semi-modal-mask {
 .desktop-data .semi-table-wrapper {
   overflow: auto;
 }
+.file-table .semi-table {
+  min-width: 702px;
+}
+.file-table table {
+  table-layout: fixed;
+}
+.file-table .file-col-name {
+  width: 360px;
+  min-width: 300px;
+  max-width: 420px;
+}
+.file-table .file-col-size {
+  width: 96px;
+  min-width: 84px;
+  max-width: 110px;
+}
+.file-table .file-col-action {
+  width: 76px;
+  min-width: 68px;
+  max-width: 90px;
+}
+.file-table .file-col-status {
+  width: 124px;
+  min-width: 112px;
+  max-width: 150px;
+}
+.file-table .file-col-progress {
+  width: 140px;
+  min-width: 132px;
+  max-width: 180px;
+}
+.file-table .file-col-size,
+.file-table .file-col-action,
+.file-table .file-col-status,
+.file-table .file-col-progress {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .detail-drawer .semi-sidesheet-body {
   display: flex;
   flex-direction: column;
