@@ -1,8 +1,9 @@
 name: Release
 
 on:
-  release:
-    types: [created]
+  push:
+    tags:
+      - "v*"
 
 permissions:
   contents: write
@@ -72,11 +73,12 @@ jobs:
         env:
           FNPACK: /usr/local/bin/fnpack
 
-      - name: Upload release assets
+      - name: Create release and upload assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "${{ github.event.release.tag_name }}" \
+          gh release create "${{ github.ref_name }}" \
             dist/*.fpk \
             dist/SHA256SUMS \
-            --clobber
+            --title "${{ github.ref_name }}" \
+            --generate-notes
