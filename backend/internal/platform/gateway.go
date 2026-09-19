@@ -107,7 +107,7 @@ type callerOrigin struct {
 	port   string // "" when absent or equal to the scheme's default port
 }
 
-// parseOriginValue parses an Origin header value into its host and port.
+// parseOriginValue parses an Origin header value into its scheme, host and port.
 // ok is false for empty, "null", relative, non-http(s) and host-less values —
 // all of which are unverifiable and therefore rejected in strict mode.
 func parseOriginValue(value string) (callerOrigin, bool) {
@@ -156,10 +156,10 @@ func parseAllowlistEntry(value string) (callerOrigin, bool) {
 	return callerOrigin{host: host, port: port}, true
 }
 
-// originAllowed reports whether the request origin matches the allow-list. An
-// entry without a port accepts any port; an entry with one accepts only that
-// port (or the origin's implicit default), so listing http://nas:5666 does not
-// also admit another app on http://nas:8096.
+// originAllowed reports whether the request origin matches the allow-list. A
+// full origin matches scheme and effective port exactly; a bare authority
+// without a port accepts any port, while one with a port matches only that
+// effective port.
 func originAllowed(origin callerOrigin, allowed []string) bool {
 	for _, value := range allowed {
 		entry, ok := parseAllowlistEntry(value)
@@ -169,11 +169,39 @@ func originAllowed(origin callerOrigin, allowed []string) bool {
 		if entry.host != origin.host {
 			continue
 		}
-		if entry.port == "" || entry.port == origin.port || entry.port == defaultPort(origin.scheme) {
+
+		originPort := effectiveOriginPort(origin)
+		if entry.scheme != "" {
+			// A full origin is exact: scheme must match, and an omitted port
+			// means that scheme's default port rather than any port.
+			if entry.scheme != origin.scheme {
+				continue
+			}
+			entryPort := entry.port
+			if entryPort == "" {
+				entryPort = defaultPort(entry.scheme)
+			}
+			if entryPort != originPort {
+				continue
+			}
+			return true
+		}
+
+		// A bare authority intentionally keeps the legacy host-only behavior:
+		// no port accepts any port, while an explicit port matches the
+		// request's effective port.
+		if entry.port == "" || entry.port == originPort {
 			return true
 		}
 	}
 	return false
+}
+
+func effectiveOriginPort(origin callerOrigin) string {
+	if origin.port != "" {
+		return origin.port
+	}
+	return defaultPort(origin.scheme)
 }
 
 // splitHostPort separates an optional port and strips IPv6 brackets.

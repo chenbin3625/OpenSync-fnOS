@@ -128,6 +128,39 @@ func TestValidateJobInputAcceptsManualJobWithRequiredFields(t *testing.T) {
 	ValidateJobInput(job)
 }
 
+func TestValidateJobInputRejectsOverlappingSourceAndDestinationPaths(t *testing.T) {
+	for name, paths := range map[string]struct {
+		src string
+		dst string
+	}{
+		"same path": {
+			src: "/data",
+			dst: "/data/",
+		},
+		"destination is inside source": {
+			src: "/data",
+			dst: "/data/archive",
+		},
+		"source is inside destination": {
+			src: "/data/archive",
+			dst: "/data",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			job := map[string]interface{}{
+				"srcPath": []string{paths.src},
+				"dstPath": []string{paths.dst},
+				"alistId": int64(1),
+				"isCron":  2,
+				"method":  1,
+			}
+			requirePublicPanic(t, func() {
+				ValidateJobInput(job)
+			})
+		})
+	}
+}
+
 func TestDstPathForSrcSelectionPreservesSourceDirWhenMultipleSelected(t *testing.T) {
 	got := dstPathForSrcSelection("/backup/", "/media/photos", []string{"/media/photos", "/archive/videos"})
 	want := "/backup/photos/"

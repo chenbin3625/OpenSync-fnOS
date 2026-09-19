@@ -282,6 +282,75 @@ func TestRemoveJobClientRejectsRunningJobWithoutStoppingIt(t *testing.T) {
 	}
 }
 
+func TestRemoveTaskRejectsRunningTaskWithoutDeletingIt(t *testing.T) {
+	testDB := newServiceTaskStatusTestDB(t)
+	restoreDB := mapper.SetDBForTest(testDB)
+	defer restoreDB()
+
+	client := &JobClient{
+		JobID: 1,
+		Job:   map[string]interface{}{"id": int64(1), "enable": 1, "isCron": 2},
+	}
+	task := &JobTask{TaskID: 10, JobClient: client}
+	task.initRuntime()
+	client.setCurrentTask(task)
+
+	jobClientListMu.Lock()
+	previousClients := jobClientList
+	jobClientList = map[int64]*JobClient{client.JobID: client}
+	jobClientListMu.Unlock()
+	defer func() {
+		jobClientListMu.Lock()
+		jobClientList = previousClients
+		jobClientListMu.Unlock()
+	}()
+
+	defer func() {
+		recovered := recover()
+		err, ok := recovered.(interface{ Error() string })
+		if !ok || err.Error() != msg.JobRunningCannotDelete {
+			t.Fatalf("RemoveTask() panic = %#v, want %q", recovered, msg.JobRunningCannotDelete)
+		}
+
+		var count int
+		if err := testDB.QueryRow("SELECT COUNT(*) FROM job_task WHERE id=10").Scan(&count); err != nil {
+			t.Fatalf("count job_task: %v", err)
+		}
+		if count != 1 {
+			t.Fatalf("job_task row count = %d, want 1", count)
+		}
+	}()
+
+	RemoveTask(10)
+}
+
+func TestRemoveTaskRejectsWaitingTaskFromDatabaseState(t *testing.T) {
+	testDB := newServiceTaskStatusTestDB(t)
+	restoreDB := mapper.SetDBForTest(testDB)
+	defer restoreDB()
+	if _, err := testDB.Exec("UPDATE job_task SET status=? WHERE id=10", taskStatusWaiting.Int()); err != nil {
+		t.Fatalf("set waiting status: %v", err)
+	}
+
+	defer func() {
+		recovered := recover()
+		err, ok := recovered.(interface{ Error() string })
+		if !ok || err.Error() != msg.JobRunningCannotDelete {
+			t.Fatalf("RemoveTask() panic = %#v, want %q", recovered, msg.JobRunningCannotDelete)
+		}
+
+		var count int
+		if err := testDB.QueryRow("SELECT COUNT(*) FROM job_task WHERE id=10").Scan(&count); err != nil {
+			t.Fatalf("count job_task: %v", err)
+		}
+		if count != 1 {
+			t.Fatalf("job_task row count = %d, want 1", count)
+		}
+	}()
+
+	RemoveTask(10)
+}
+
 // startCopyItem is reached from both the submit executor and the full-sync
 // relocation path. Every item must get a distinct DoingKey, otherwise entries
 // overwrite each other in Doing and the concurrency gate under-counts.

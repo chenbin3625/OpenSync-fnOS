@@ -175,6 +175,37 @@ func TestGatewayRejectsCrossSiteWrites(t *testing.T) {
 	}
 }
 
+func TestGatewayAllowlistRequiresMatchingSchemeAndEffectivePort(t *testing.T) {
+	for name, tc := range map[string]struct {
+		allowed []string
+		origin  string
+	}{
+		"https allowlist rejects http": {
+			allowed: []string{"https://nas.example.com"},
+			origin:  "http://nas.example.com",
+		},
+		"https default port rejects another port": {
+			allowed: []string{"https://nas.example.com"},
+			origin:  "https://nas.example.com:5666",
+		},
+		"explicit https port rejects http": {
+			allowed: []string{"https://nas.example.com:5666"},
+			origin:  "http://nas.example.com:5666",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := gatewayTestRouter(t, false, tc.allowed)
+			code := serveGatewayRequest(t, r, http.MethodPost, "http://app.sock/", map[string]string{
+				"Origin":         tc.origin,
+				"Sec-Fetch-Site": "same-origin",
+			}, true)
+			if code != http.StatusForbidden {
+				t.Fatalf("status=%d, want 403", code)
+			}
+		})
+	}
+}
+
 // Reads never mutate, and the UI loads through them before any write happens.
 func TestGatewayReadsAreNotSubjectToOriginChecks(t *testing.T) {
 	r := gatewayTestRouter(t, false, []string{"http://10.10.11.250:5666"})
