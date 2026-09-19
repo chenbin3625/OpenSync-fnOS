@@ -426,10 +426,36 @@ test("task cards follow the reference card style and fill the detail pane", asyn
 });
 
 test("empty pages render the reference folder asset", async ({ page }) => {
+  await page.route("**/app/opensync/svr/**", async (route) => {
+    const url = new URL(route.request().url());
+    const success = (data: unknown) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ code: 200, data, msg: "" }),
+      });
+    if (url.pathname.endsWith("/session"))
+      return success({ uid: 1, development: false, version: "test" });
+    if (url.pathname.endsWith("/job"))
+      return success({ dataList: [], count: 0 });
+    if (url.pathname.endsWith("/alist")) return success([]);
+    if (url.pathname.endsWith("/notify")) return success([]);
+    return success(null);
+  });
+  const layouts: Array<{ path: string; top: number; height: number; imageY: number }> = [];
   for (const path of ["tasks", "engines", "notifications"]) {
     await page.goto(`/app/opensync/${path}`);
     const empty = page.getByRole("status", { name: "空空如也", exact: true });
     await expect(empty).toBeVisible();
+    const emptyBox = await empty.boundingBox();
+    const imageBox = await empty.locator("img").boundingBox();
+    expect(emptyBox).not.toBeNull();
+    expect(imageBox).not.toBeNull();
+    layouts.push({
+      path,
+      top: emptyBox!.y,
+      height: emptyBox!.height,
+      imageY: imageBox!.y + imageBox!.height / 2,
+    });
     expect(
       await empty
         .locator("img")
@@ -437,6 +463,19 @@ test("empty pages render the reference folder asset", async ({ page }) => {
           (img: HTMLImageElement) => img.complete && img.naturalWidth > 0,
         ),
     ).toBe(true);
+  }
+  const [reference, ...others] = layouts;
+  for (const layout of others) {
+    expect.soft(layout.height, `${layout.path} empty height`).toBe(reference.height);
+    expect
+      .soft(Math.abs(layout.top - reference.top), `${layout.path} empty top`)
+      .toBeLessThanOrEqual(1);
+    expect
+      .soft(
+        Math.abs(layout.imageY - reference.imageY),
+        `${layout.path} empty image center`,
+      )
+      .toBeLessThanOrEqual(1);
   }
 });
 

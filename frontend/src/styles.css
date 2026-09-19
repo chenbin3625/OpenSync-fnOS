@@ -290,7 +290,9 @@ h3 {
   color: var(--muted);
   font-size: var(--font-size-body);
 }
-.page > .fnos-empty {
+.page > .fnos-empty,
+.task-workspace[data-empty] > .fnos-empty,
+.task-empty-detail > .fnos-empty {
   min-height: calc(100dvh - 140px);
 }
 .session-error {
