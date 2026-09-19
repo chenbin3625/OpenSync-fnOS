@@ -643,8 +643,7 @@ body .semi-modal-mask {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 0 0 16px;
-  border-bottom: 1px solid var(--line);
+  padding: 0;
 }
 .task-editor-stepbar h3 {
   margin: 0;
@@ -660,6 +659,13 @@ body .semi-modal-mask {
 }
 .task-editor-count strong {
   color: var(--accent);
+}
+.task-editor-progress {
+  margin: 12px 0 0;
+}
+.task-editor-progress .semi-progress-line-outer {
+  height: 4px !important;
+  border-radius: 2px;
 }
 .task-editor-step {
   min-height: 0;
@@ -685,6 +691,9 @@ body .semi-modal-mask {
 }
 .task-editor-actions {
   align-items: center;
+}
+.task-editor-actions > .semi-button:first-child {
+  margin-right: auto;
 }
 .editor-form .setting-row {
   border-radius: var(--radius);
