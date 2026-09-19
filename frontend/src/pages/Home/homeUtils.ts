@@ -13,25 +13,6 @@ export type ScheduleValues = {
 
 // ---- Constants ----
 
-export const jobStatusColors: Record<number, string> = {
-  0: "default",
-  1: "processing",
-};
-export const statusLabels: Record<number, string> = {
-  0: "禁用",
-  1: "启用",
-};
-export const taskStatusColors: Record<number, string> = {
-  0: "default",
-  1: "processing",
-  2: "success",
-  3: "warning",
-  4: "default",
-  5: "warning",
-  6: "error",
-  7: "error",
-  8: "default",
-};
 export const taskRecordStatusNames: Record<number, string> = {
   0: "等待中",
   1: "运行中",
@@ -42,18 +23,6 @@ export const taskRecordStatusNames: Record<number, string> = {
   6: "系统错误",
   7: "失败",
   8: "无需同步",
-};
-export const taskItemStatusColors: Record<number, string> = {
-  0: "default",
-  1: "processing",
-  2: "success",
-  3: "warning",
-  4: "default",
-  5: "error",
-  6: "error",
-  7: "error",
-  8: "default",
-  9: "default",
 };
 export const taskItemStatusNames: Record<number, string> = {
   0: "等待中",
@@ -110,9 +79,6 @@ export const defaultCronFields = {
   month: "*",
   day_of_week: "*",
 };
-
-export const compactItemStyle = { marginBottom: 12 };
-export const compactDividerStyle = { margin: "8px 0 12px" };
 
 export const defaultExclude = `# macOS
 .DS_Store
@@ -441,17 +407,6 @@ export const formatFileSizeRange = (
   return `不大于 ${formatSize(max)}`;
 };
 
-export function formatExcludePreview(value?: string | null): string {
-  const rules = String(value ?? "")
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith("#"));
-
-  if (rules.length === 0) return "仅注释";
-  const preview = rules.slice(0, 3).join("、");
-  return rules.length > 3 ? `${preview} 等 ${rules.length} 条` : preview;
-}
-
 export const getJobName = (job: JobItem) => job.remark || `同步任务 #${job.id}`;
 
 export const formatSchedule = (job: JobItem) => {
@@ -460,12 +415,6 @@ export const formatSchedule = (job: JobItem) => {
     return describeCronPlan(job);
   }
   return "仅手动触发";
-};
-
-export const formatCache = (useS: number | boolean, useT: number | boolean) => {
-  const s = useS ? "源端✓" : "源端✗";
-  const t = useT ? "目标✓" : "目标✗";
-  return `${s} / ${t}`;
 };
 
 export function formatDuration(seconds: number): string {

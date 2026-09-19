@@ -119,16 +119,6 @@ export default function Tasks() {
         }
         actions={
           tab === "overview" ? (
-            <>
-              <Button
-                icon={<IconPlay aria-hidden="true" />}
-                disabled={actions.busy || !jobs.data?.count}
-                onClick={() =>
-                  action(() => api.jobAction({}), "已提交执行全部任务")
-                }
-              >
-                执行全部
-              </Button>
               <Button
                 theme="solid"
                 icon={<IconPlusStroked aria-hidden="true" />}
@@ -136,7 +126,6 @@ export default function Tasks() {
               >
                 新建任务
               </Button>
-            </>
           ) : undefined
         }
       />
