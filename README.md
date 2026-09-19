@@ -4,8 +4,6 @@
 
 依赖 [OpenList](https://github.com/OpenListTeam/OpenList)（兼容 AList）作为存储引擎 — 在 OpenList 中添加本地存储和各类云盘（阿里云盘、百度网盘、OneDrive、S3、WebDAV 等）后，即可通过 OpenSync 在不同存储之间自动定期备份与同步文件。
 
-开源地址：https://github.com/chenbin3625/OpenSync-fnOS
-
 ## 功能
 
 - **存储引擎管理** — 添加、编辑、测试 AList / OpenList 引擎连接
@@ -22,35 +20,31 @@
 
 ## 使用方式
 
-### 开发
+### 1. 安装
 
-```bash
-# 安装前端依赖
-cd frontend && npm install && cd ..
+在飞牛 NAS 应用管理界面安装 OpenSync 的 `.fpk` 包，安装完成后在应用列表中打开。
 
-# 启动开发服务（前端 + 后端）
-npm run dev
-```
+### 2. 添加存储引擎
 
-打开 http://127.0.0.1:3020/app/opensync/ ，Ctrl-C 停止服务。
+进入「引擎管理」页面，点击「添加引擎」，填写 OpenList / AList 的地址和 API Token。添加后可点击「测试引擎」验证连接是否正常。
 
-### 构建
+### 3. 创建同步任务
 
-```bash
-# 构建前端
-cd frontend && npm run build
+进入「任务管理」页面，点击「新建任务」，按步骤配置：
 
-# 打包 fnOS 应用
-npm run package:amd64
-npm run package:arm64
+1. **引擎与路径** — 选择存储引擎，指定源目录和目标目录
+2. **同步与调度** — 选择同步模式（仅新增 / 全同步 / 移动），设置执行计划（定时间隔、Cron 表达式或仅手动）
+3. **文件过滤** — 按需设置文件大小限制和排除规则（gitignore 格式，已内置常见系统文件排除）
 
-# 完整发布（双架构 + 校验）
-node scripts/release.mjs
-```
+### 4. 查看执行状态
 
-### 部署到 fnOS
+- **总览** — 查看任务配置摘要，手动触发执行、暂停或编辑任务
+- **实时任务** — 查看当前正在执行的同步进度，包括传输速度、已完成大小、剩余时间和逐文件状态
+- **历史任务** — 按时间范围、状态、关键词筛选历史执行记录，点击查看每次执行的文件明细
 
-将打包生成的 `.fpk` 文件通过飞牛 NAS 应用管理界面安装。应用通过 Unix Socket 接入 fnOS 网关，访问路径为 `/app/opensync`。
+### 5. 配置通知（可选）
+
+进入「通知配置」页面，添加通知渠道（Webhook、Server酱、钉钉、企业微信或飞书），任务执行完成后自动推送结果通知。
 
 ## 技术栈
 

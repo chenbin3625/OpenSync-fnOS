@@ -1,7 +1,6 @@
 #!/usr/bin/env node
-// 一键发布：校验 → 全量测试 → 前端构建一次 → 双架构打包 → 校验和与产物清单。
+// 一键发布：校验 → 全量测试 → 前端构建一次 → 双架构打包 → 校验和与产物清单 → 推送 GitHub。
 // 用法：node scripts/release.mjs [--skip-tests]
-// 本脚本不修改 git 状态（不提交、不打 tag、不推送）。
 import { existsSync } from "node:fs";
 import { join, relative } from "node:path";
 import {
@@ -30,10 +29,9 @@ if (argv.includes("--help") || argv.includes("-h")) {
   node scripts/release.mjs [--skip-tests]
 
 依次执行：工作区检查 → 前端类型检查与单元测试 → Go 测试 →
-前端构建 → 交叉编译 amd64 / arm64 → fnpack 打包 → 输出校验和。
+前端构建 → 交叉编译 amd64 / arm64 → fnpack 打包 → 输出校验和 → 推送 GitHub。
 
   --skip-tests   跳过前后端测试（仅构建，出包更快）
-不改动 git：不提交、不打 tag、不推送。
 `);
   process.exit(0);
 }
@@ -41,7 +39,7 @@ const runTests = !argv.includes("--skip-tests");
 
 const step = (index, total, text) =>
   console.log(`\n\x1b[1m[${index}/${total}] ${text}\x1b[0m`);
-const TOTAL = 6;
+const TOTAL = 7;
 
 // ── 1. 工作区状态 ────────────────────────────────────────────────────────
 step(1, TOTAL, "检查工作区状态");
@@ -116,6 +114,25 @@ console.log(`  校验和  ${relative(root, checksumFile)}`);
 
 // 本机平台不匹配 ARM，无法执行产物，故只做存在性提醒。
 if (!existsSync(artifacts[0].file)) throw new Error("产物缺失");
+
+// ── 7. 推送 GitHub ──────────────────────────────────────────────────────
+step(7, TOTAL, "推送到 GitHub");
+const remote = (capture("git", ["remote", "get-url", "origin"]).stdout || "").trim();
+if (!remote) {
+  console.warn("\x1b[33m⚠ 未配置 origin 远程仓库，跳过推送。\x1b[0m");
+} else {
+  console.log(`远程仓库：${remote}`);
+  run("git", ["push", "origin", "HEAD"]);
+  // 推送版本 tag
+  const tag = `v${version}`;
+  const tagExists = capture("git", ["tag", "-l", tag]).stdout.trim() === tag;
+  if (!tagExists) {
+    run("git", ["tag", tag]);
+    console.log(`已创建 tag ${tag}`);
+  }
+  run("git", ["push", "origin", tag]);
+  console.log(`已推送 ${tag} 到 ${remote}`);
+}
 
 console.log(`
 ────────────────────────────────────────────────────────
