@@ -8,6 +8,7 @@ import InputNumber from "@douyinfe/semi-ui/lib/es/inputNumber";
 import Modal from "@douyinfe/semi-ui/lib/es/modal";
 import Select from "@douyinfe/semi-ui/lib/es/select";
 import Switch from "@douyinfe/semi-ui/lib/es/switch";
+import Progress from "@douyinfe/semi-ui/lib/es/progress";
 import Tabs from "@douyinfe/semi-ui/lib/es/tabs";
 import Tag from "@douyinfe/semi-ui/lib/es/tag";
 import TextArea from "@douyinfe/semi-ui/lib/es/input/textarea";
@@ -429,14 +430,14 @@ function JobEditor({
       dirty={dirty}
       footer={({ close }) => (
         <div className="editor-actions task-editor-actions">
-          <Button onClick={close} disabled={action.busy}>
-            取消
-          </Button>
           {step > 0 && (
             <Button onClick={previousStep} disabled={action.busy}>
               上一步
             </Button>
           )}
+          <Button onClick={close} disabled={action.busy}>
+            取消
+          </Button>
           <Button
             type="primary"
             theme="solid"
@@ -459,6 +460,12 @@ function JobEditor({
               步骤 <strong>{step + 1}</strong> / {taskEditorSteps.length}
             </div>
           </div>
+          <Progress
+            className="task-editor-progress"
+            percent={Math.round(((step + 1) / taskEditorSteps.length) * 100)}
+            showInfo={false}
+            size="small"
+          />
           <div className="task-editor-step">
             {step === 0 && (
               <div className="form-section">
