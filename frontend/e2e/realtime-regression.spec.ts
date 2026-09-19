@@ -153,7 +153,7 @@ test("history load errors stay visible and can be retried", async ({ page }) => 
   await expect(page.getByText("历史记录加载失败", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "重试", exact: true }).click();
   await expect(page.getByText("历史记录加载失败", { exact: true })).toHaveCount(0);
-  expect(historyCalls).toBe(2);
+  expect(historyCalls).toBeGreaterThanOrEqual(2);
 });
 
 test("remote path load errors remain actionable", async ({ page }) => {

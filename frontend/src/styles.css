@@ -159,7 +159,7 @@ h3 {
 .nav-submenu {
   display: grid;
   gap: 4px;
-  margin: 0 0 12px 0;
+  margin: 0;
 }
 .task-sub-link {
   display: flex;
@@ -729,7 +729,7 @@ body .semi-modal-mask {
 }
 .task-editor-step {
   min-height: 0;
-  padding: 16px 0 0;
+  padding: 0;
 }
 .task-editor-step .form-section {
   padding-top: 0;

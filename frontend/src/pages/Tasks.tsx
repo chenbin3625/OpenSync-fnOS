@@ -278,7 +278,8 @@ function Overview({
             <Tooltip content="手动执行" position="top">
               <Button
                 icon={<IconPlay aria-hidden="true" />}
-                theme="solid"
+                type="tertiary"
+                theme="borderless"
                 size="small"
                 disabled={busy}
                 onClick={onRun}
@@ -291,7 +292,7 @@ function Overview({
           <div className="flow-node">
             <div className="flow-name">
               <IconServerStroked aria-hidden="true" />
-              本地存储
+              源目录
             </div>
             <div className="flow-sub mono">
               {parseJobPathList(job.srcPath).join("\n") || "—"}
@@ -301,7 +302,7 @@ function Overview({
           <div className="flow-node">
             <div className="flow-name" title={engineHost || engineName}>
               <IconCloudStroked aria-hidden="true" />
-              {engineName}
+              目标目录
             </div>
             <div className="flow-sub mono">
               {parseJobPathList(job.dstPath).join("\n") || "—"}

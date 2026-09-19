@@ -92,6 +92,7 @@ const ranges = {
 export function validateJobFormStep(form: JobForm, step: number) {
   switch (step) {
     case 0:
+      if (!form.remark.trim()) return "请输入任务名称";
       if (!form.alistId) return "请选择存储引擎";
       if (!form.srcPath.length) return "请选择源目录";
       if (!form.dstPath.length) return "请选择目标目录";

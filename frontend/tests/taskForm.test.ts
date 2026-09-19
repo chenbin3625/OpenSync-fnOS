@@ -67,8 +67,9 @@ describe("existing synchronization contracts", () => {
     });
   });
   it("rejects missing paths, inverted sizes and invalid Cron ranges", () => {
-    expect(validateJobForm(defaultJobForm(7))).toContain("源目录");
-    const form = { ...defaultJobForm(7), srcPath: ["/a"], dstPath: ["/b"] };
+    const namedForm = { ...defaultJobForm(7), remark: "测试任务" };
+    expect(validateJobForm(namedForm)).toContain("源目录");
+    const form = { ...namedForm, srcPath: ["/a"], dstPath: ["/b"] };
     expect(
       validateJobForm({ ...form, minFileSize: 4, maxFileSize: 2 }),
     ).toContain("最大");

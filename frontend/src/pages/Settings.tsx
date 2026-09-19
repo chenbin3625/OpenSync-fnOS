@@ -21,6 +21,7 @@ const cardGroups = [
   {
     title: "任务执行",
     note: "并发数越大占用的系统资源越多，请按硬件配置调整。",
+    noteAfter: "scanConcurrency",
     keys: [
       "copyConcurrency",
       "scanConcurrency",
@@ -106,13 +107,21 @@ export default function Settings() {
     title: string,
     note: string,
     keys: readonly (typeof fields)[number]["key"][],
+    noteAfter?: string,
   ) => (
     <section className="settings-card card-base" key={title}>
       <div className="settings-card-head">
         <h2>{title}</h2>
       </div>
-      <div className="settings-card-body">{keys.map((key) => input(fieldOf(key)))}</div>
-      <div className="muted settings-card-note">{note}</div>
+      <div className="settings-card-body">
+        {keys.map((key) => (
+          <div key={key}>
+            {input(fieldOf(key))}
+            {noteAfter === key && <div className="muted settings-card-note">{note}</div>}
+          </div>
+        ))}
+      </div>
+      {!noteAfter && <div className="muted settings-card-note">{note}</div>}
     </section>
   );
   return (
@@ -140,7 +149,7 @@ export default function Settings() {
       {form && !resource.loading && !resource.error && (
         <>
           {cardGroups.map((group) =>
-            card(group.title, group.note, group.keys),
+            card(group.title, group.note, group.keys, "noteAfter" in group ? group.noteAfter : undefined),
           )}
         </>
       )}

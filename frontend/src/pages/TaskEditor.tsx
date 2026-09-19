@@ -124,6 +124,13 @@ export default function TaskEditor({
           <div className="task-editor-step">
             {step === 0 && (
               <div className="form-section">
+                <Field label="任务名称" required>
+                  <Input
+                    value={form.remark}
+                    onChange={(value) => change("remark", value)}
+                    placeholder="相册每日备份"
+                  />
+                </Field>
                 <Field label="存储引擎" required>
                   <Select
                     value={form.alistId}
@@ -150,6 +157,7 @@ export default function TaskEditor({
                       engineId={form.alistId}
                       value={form.srcPath}
                       onChange={(paths) => change("srcPath", paths)}
+                      multiple={false}
                     />
                     <SettingRow label="源端缓存" variant="bordered">
                       <Switch
@@ -164,6 +172,7 @@ export default function TaskEditor({
                       engineId={form.alistId}
                       value={form.dstPath}
                       onChange={(paths) => change("dstPath", paths)}
+                      multiple={false}
                     />
                     <SettingRow label="目标缓存" variant="bordered">
                       <Switch
@@ -173,13 +182,6 @@ export default function TaskEditor({
                     </SettingRow>
                   </Field>
                 </div>
-                <Field label="任务备注">
-                  <Input
-                    value={form.remark}
-                    onChange={(value) => change("remark", value)}
-                    placeholder="相册每日备份"
-                  />
-                </Field>
               </div>
             )}
             {step === 1 && (
