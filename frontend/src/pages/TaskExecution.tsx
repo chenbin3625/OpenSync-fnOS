@@ -635,7 +635,7 @@ function FileDetails({
       visible
       onCancel={onClose}
       placement="bottom"
-      height="90vh"
+      height="100%"
       className="detail-drawer"
     >
       <div className="detail-drawer-body">
