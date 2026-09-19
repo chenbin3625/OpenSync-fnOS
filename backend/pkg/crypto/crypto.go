@@ -1,7 +1,13 @@
 package crypto
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"errors"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -9,6 +15,64 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 )
+
+const encryptedValuePrefix = "enc:v1:"
+
+// EncryptString encrypts a value with AES-GCM using a key derived from the
+// persisted application secret. The versioned prefix supports future formats.
+func EncryptString(value, secret string) (string, error) {
+	if secret == "" {
+		return "", errors.New("encryption secret is empty")
+	}
+	key := sha256.Sum256([]byte(secret))
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	sealed := gcm.Seal(nonce, nonce, []byte(value), []byte(encryptedValuePrefix))
+	return encryptedValuePrefix + base64.RawStdEncoding.EncodeToString(sealed), nil
+}
+
+// DecryptString decrypts versioned ciphertext. Legacy plaintext is returned
+// unchanged with encrypted=false so callers can migrate it safely.
+func DecryptString(value, secret string) (plaintext string, encrypted bool, err error) {
+	if !strings.HasPrefix(value, encryptedValuePrefix) {
+		return value, false, nil
+	}
+	if secret == "" {
+		return "", true, errors.New("encryption secret is empty")
+	}
+	payload, err := base64.RawStdEncoding.DecodeString(strings.TrimPrefix(value, encryptedValuePrefix))
+	if err != nil {
+		return "", true, fmt.Errorf("decode encrypted value: %w", err)
+	}
+	key := sha256.Sum256([]byte(secret))
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return "", true, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", true, err
+	}
+	if len(payload) < gcm.NonceSize() {
+		return "", true, errors.New("encrypted value is truncated")
+	}
+	nonce, ciphertext := payload[:gcm.NonceSize()], payload[gcm.NonceSize():]
+	plaintextBytes, err := gcm.Open(nil, nonce, ciphertext, []byte(encryptedValuePrefix))
+	if err != nil {
+		return "", true, fmt.Errorf("decrypt encrypted value: %w", err)
+	}
+	return string(plaintextBytes), true, nil
+}
 
 const (
 	charset           = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"

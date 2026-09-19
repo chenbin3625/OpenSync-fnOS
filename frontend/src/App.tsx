@@ -15,13 +15,13 @@ import {
   useLocation,
   useNavigate,
 } from "react-router-dom";
-import Banner from "@douyinfe/semi-ui/lib/es/banner";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Spin from "@douyinfe/semi-ui/lib/es/spin";
 import {
   IconBellStroked,
   IconCloudStroked,
   IconFolderStroked,
+  IconServerStroked,
   IconSettingStroked,
   IconTreeTriangleDown,
   IconTreeTriangleRight,
@@ -44,7 +44,7 @@ const sections = [
   {
     path: "/engines",
     label: "引擎管理",
-    icon: <IconFolderStroked aria-hidden="true" />,
+    icon: <IconServerStroked aria-hidden="true" />,
   },
   {
     path: "/notifications",
@@ -74,6 +74,7 @@ function Shell({ children }: { children: ReactNode }) {
   const taskHref = (jobId: number) => {
     const next = new URLSearchParams(pathname.startsWith("/tasks") ? search : "");
     next.set("jobId", String(jobId));
+    next.delete("tab");
     return `/tasks?${next.toString()}`;
   };
   useEffect(() => {
@@ -105,6 +106,7 @@ function Shell({ children }: { children: ReactNode }) {
     window.addEventListener("opensync:jobs-changed", refresh);
     return () => window.removeEventListener("opensync:jobs-changed", refresh);
   }, [taskMenu.refresh]);
+  const tasksSelected = pathname.startsWith("/tasks") && !(taskMenuOpen && currentTaskId);
   return (
     <div className="app-shell">
       <aside className="app-sidebar" aria-label="主菜单">
@@ -112,7 +114,7 @@ function Shell({ children }: { children: ReactNode }) {
           {hasTaskItems ? (
             <button
               type="button"
-              className={`nav-link nav-menu-toggle${pathname.startsWith("/tasks") ? " selected" : ""}`}
+              className={`nav-link nav-menu-toggle${tasksSelected ? " selected" : ""}`}
               aria-expanded={taskMenuOpen}
               aria-controls="task-menu"
               onClick={() => {
@@ -230,7 +232,7 @@ function Workspace() {
     return (
       <div className="session-error">
         <img src="/app/opensync/favicon.svg" alt="OpenSync" />
-        <Banner type="danger" closeIcon={null} description={session.error} />
+        <p className="inline-error">{session.error}</p>
         <Button onClick={() => void session.refresh()}>重试</Button>
       </div>
     );

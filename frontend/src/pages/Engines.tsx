@@ -1,5 +1,4 @@
 import { useState } from "react";
-import Banner from "@douyinfe/semi-ui/lib/es/banner";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Input from "@douyinfe/semi-ui/lib/es/input";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
@@ -7,14 +6,14 @@ import {
   IconPlusStroked,
   IconEditStroked,
   IconDeleteStroked,
-  IconCopyStroked,
+  IconChainStroked,
 } from "@douyinfe/semi-icons";
 import { api } from "../api/client";
 import {
-  ActionMenu,
   Editor,
   Field,
   Header,
+  IconButton,
   LoadState,
   confirmDelete,
   errorToast,
@@ -26,6 +25,16 @@ import type { AlistItem } from "../types";
 export default function Engines() {
   const engines = useResource((signal) => api.engines(signal));
   const [editing, setEditing] = useState<AlistItem | null | undefined>();
+  const testAction = useAction();
+  const testEngine = (id: number) =>
+    void testAction.run(async () => {
+      try {
+        await api.testEngine(id);
+        Toast.success("引擎连接正常");
+      } catch (err) {
+        errorToast(err);
+      }
+    });
   return (
     <div className="page">
       <Header
@@ -50,7 +59,7 @@ export default function Engines() {
         {!engines.loading &&
           !engines.error &&
           engines.data?.map((engine) => (
-            <div className="engine-item" key={engine.id}>
+            <div className="engine-item card-base" key={engine.id}>
               <div className="item-content">
                 <h2>{engine.remark || engine.userName || `引擎 #${engine.id}`}</h2>
                 <div className="mono muted">{engine.url}</div>
@@ -60,38 +69,31 @@ export default function Engines() {
                 </div>
               </div>
               <div className="row-actions">
-                <ActionMenu
-                  actions={[
-                    {
-                      label: "复制引擎地址",
-                      icon: <IconCopyStroked aria-hidden="true" />,
-                      onClick: () => {
-                        void navigator.clipboard
-                          .writeText(engine.url)
-                          .then(() => Toast.success("地址已复制"))
-                          .catch(errorToast);
+                <IconButton
+                  label="测试引擎"
+                  icon={<IconChainStroked aria-hidden="true" />}
+                  disabled={testAction.busy}
+                  onClick={() => testEngine(engine.id)}
+                />
+                <IconButton
+                  label="编辑引擎"
+                  icon={<IconEditStroked aria-hidden="true" />}
+                  onClick={() => setEditing(engine)}
+                />
+                <IconButton
+                  label="删除引擎"
+                  icon={<IconDeleteStroked aria-hidden="true" />}
+                  danger
+                  onClick={() =>
+                    confirmDelete(
+                      "删除此存储引擎？",
+                      async () => {
+                        await api.deleteEngine(engine.id);
+                        await engines.refresh();
                       },
-                    },
-                    {
-                      label: "编辑引擎",
-                      icon: <IconEditStroked aria-hidden="true" />,
-                      onClick: () => setEditing(engine),
-                    },
-                    {
-                      label: "删除引擎",
-                      icon: <IconDeleteStroked aria-hidden="true" />,
-                      danger: true,
-                      onClick: () =>
-                        confirmDelete(
-                          "删除此存储引擎？",
-                          async () => {
-                            await api.deleteEngine(engine.id);
-                            await engines.refresh();
-                          },
-                          "关联同步任务需先删除；引擎中的文件不会被删除。",
-                        ),
-                    },
-                  ]}
+                      "关联同步任务需先删除；引擎中的文件不会被删除。",
+                    )
+                  }
                 />
               </div>
             </div>
@@ -124,8 +126,7 @@ function EngineEditor({
     remark: engine?.remark || "",
     token: "",
   });
-  const [dirty, setDirty] = useState(false),
-    [error, setError] = useState("");
+  const [dirty, setDirty] = useState(false);
   const action = useAction();
   const change = (key: keyof typeof form, value: string) => {
     setDirty(true);
@@ -136,11 +137,11 @@ function EngineEditor({
       const url = new URL(form.url);
       if (!["http:", "https:"].includes(url.protocol)) throw new Error();
     } catch {
-      setError("请输入有效的 HTTP / HTTPS 引擎地址");
+      Toast.warning("请输入有效的 HTTP / HTTPS 引擎地址");
       return;
     }
     if (!engine && !form.token.trim()) {
-      setError("请输入引擎 API Token");
+      Toast.warning("请输入引擎 API Token");
       return;
     }
     void action.run(async () => {
@@ -153,7 +154,7 @@ function EngineEditor({
         setDirty(false);
         onSaved();
       } catch (err) {
-        setError(err instanceof Error ? err.message : "连接失败");
+        errorToast(err);
       }
     });
   };
@@ -167,7 +168,6 @@ function EngineEditor({
       onSave={save}
     >
       <div className="editor-form">
-        {error && <Banner type="danger" description={error} closeIcon={null} />}
         <Field label="引擎地址" required>
           <Input
             value={form.url}

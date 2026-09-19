@@ -7,6 +7,7 @@ export const channelNames = [
   "企业微信",
   "飞书 / Lark",
 ];
+export const supportedWebhookMethods = ["POST", "GET", "PUT"] as const;
 export interface NotifyForm {
   method: number;
   enable: boolean;
@@ -121,6 +122,13 @@ export function validateNotifyForm(form: NotifyForm) {
       return "请输入有效的 Webhook URL";
     }
   }
+  if (
+    form.method === 0 &&
+    !supportedWebhookMethods.includes(
+      (form.httpMethod || "POST").trim().toUpperCase() as (typeof supportedWebhookMethods)[number],
+    )
+  )
+    return "请选择受支持的 HTTP 方法";
   if (form.method === 1 && !form.sendKey?.trim())
     return "请输入 Server酱 SendKey";
   if (

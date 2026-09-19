@@ -130,6 +130,43 @@ func TestGetJobTaskListAppliesHistoryFilters(t *testing.T) {
 	}
 }
 
+func TestGetJobTaskListUsesExclusiveEndTime(t *testing.T) {
+	testDB, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open() error: %v", err)
+	}
+	defer testDB.Close()
+	if _, err := testDB.Exec(`CREATE TABLE job_task(
+		id integer primary key,
+		jobId integer,
+		status integer,
+		runTime integer,
+		createTime integer
+	)`); err != nil {
+		t.Fatalf("create job_task: %v", err)
+	}
+	if _, err := testDB.Exec(`INSERT INTO job_task(id, jobId, status, runTime, createTime)
+		VALUES (1, 1, 2, 299, 299), (2, 1, 2, 300, 300)`); err != nil {
+		t.Fatalf("insert job tasks: %v", err)
+	}
+	restore := SetDBForTest(testDB)
+	defer restore()
+
+	result, err := GetJobTaskList(map[string]interface{}{
+		"id":               int64(1),
+		"endTimeExclusive": "300",
+		"pageSize":         "10",
+		"pageNum":          "1",
+	})
+	if err != nil {
+		t.Fatalf("GetJobTaskList() error: %v", err)
+	}
+	rows := result["dataList"].([]map[string]interface{})
+	if len(rows) != 1 || rows[0]["id"] != int64(1) {
+		t.Fatalf("exclusive end rows = %#v, want only id 1", rows)
+	}
+}
+
 func TestGetJobTaskListFiltersByStatusSet(t *testing.T) {
 	testDB, err := sql.Open("sqlite", ":memory:")
 	if err != nil {

@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import Banner from "@douyinfe/semi-ui/lib/es/banner";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Input from "@douyinfe/semi-ui/lib/es/input";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
@@ -10,8 +9,8 @@ import { useAction, useResource } from "../lib/hooks";
 import type { SystemSettings } from "../types";
 
 const fields = [
-  { key: "copyConcurrency", label: "复制并发数", min: 1, max: 100, unit: "" },
-  { key: "scanConcurrency", label: "扫描并发数", min: 1, max: 20, unit: "" },
+  { key: "copyConcurrency", label: "复制并发数", min: 1, max: 100, unit: "个" },
+  { key: "scanConcurrency", label: "扫描并发数", min: 1, max: 20, unit: "个" },
   { key: "maxRetries", label: "失败重试次数", min: 0, max: 10, unit: "次" },
   { key: "taskTimeout", label: "任务超时", min: 0, max: 8760, unit: "小时" },
   { key: "taskSave", label: "任务记录保留", min: 0, max: 3650, unit: "天" },
@@ -86,7 +85,7 @@ export default function Settings() {
     });
   };
   const input = (field: (typeof fields)[number]) => (
-    <SettingRow key={field.key} label={field.label}>
+    <SettingRow key={field.key} label={field.label} variant="compact">
       <div className="numeric-setting">
         <Input
           aria-label={field.label}
@@ -108,7 +107,7 @@ export default function Settings() {
     note: string,
     keys: readonly (typeof fields)[number]["key"][],
   ) => (
-    <section className="settings-card" key={title}>
+    <section className="settings-card card-base" key={title}>
       <div className="settings-card-head">
         <h2>{title}</h2>
       </div>
@@ -137,7 +136,7 @@ export default function Settings() {
         error={resource.error}
         retry={resource.refresh}
       />
-      {error && <Banner type="danger" description={error} closeIcon={null} />}
+      {error && <p className="inline-error">{error}</p>}
       {form && !resource.loading && !resource.error && (
         <>
           {cardGroups.map((group) =>

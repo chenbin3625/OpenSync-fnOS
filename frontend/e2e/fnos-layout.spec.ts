@@ -303,7 +303,7 @@ test("data fixture renders inspectable engine, task and notification rows", asyn
     await expect(engineCard.getByRole("heading", { name, exact: true })).toBeVisible();
     await expect(engineCard.locator(".item-symbol")).toHaveCount(0);
     await expect(
-      engineCard.getByRole("button", { name: "更多操作", exact: true }),
+      engineCard.getByRole("button", { name: "测试引擎", exact: true }),
     ).toBeVisible();
 
     await page.goto(`/app/opensync/tasks?jobId=${jobId}`);

@@ -35,6 +35,36 @@ func TestCheckPasswordRejectsNonBcryptHashes(t *testing.T) {
 	}
 }
 
+func TestEncryptStringRoundTripsAndRejectsWrongKey(t *testing.T) {
+	ciphertext, err := EncryptString("sensitive-value", "primary-key")
+	if err != nil {
+		t.Fatalf("EncryptString() error: %v", err)
+	}
+	if ciphertext == "sensitive-value" || strings.Contains(ciphertext, "sensitive-value") {
+		t.Fatalf("ciphertext exposes plaintext: %q", ciphertext)
+	}
+	plaintext, encrypted, err := DecryptString(ciphertext, "primary-key")
+	if err != nil {
+		t.Fatalf("DecryptString() error: %v", err)
+	}
+	if !encrypted || plaintext != "sensitive-value" {
+		t.Fatalf("DecryptString() = %q/%v, want sensitive-value/true", plaintext, encrypted)
+	}
+	if _, _, err := DecryptString(ciphertext, "wrong-key"); err == nil {
+		t.Fatal("DecryptString() accepted the wrong key")
+	}
+}
+
+func TestDecryptStringKeepsLegacyPlaintextReadable(t *testing.T) {
+	plaintext, encrypted, err := DecryptString("legacy-value", "primary-key")
+	if err != nil {
+		t.Fatalf("DecryptString() error: %v", err)
+	}
+	if encrypted || plaintext != "legacy-value" {
+		t.Fatalf("DecryptString() = %q/%v, want legacy-value/false", plaintext, encrypted)
+	}
+}
+
 func TestReadOrSetFileCreatesSecretWithOwnerOnlyPermissions(t *testing.T) {
 	secretPath := filepath.Join(t.TempDir(), "nested", "secret.key")
 

@@ -85,14 +85,8 @@ test("sends a webhook template and preserves masked credentials when editing", a
     const card = page
       .locator(".notification-item")
       .filter({ hasText: `通知 #${id}` });
-    const cardMenu = async () => {
-      await card
-        .getByRole("button", { name: "更多操作", exact: true })
-        .click();
-      return page.locator(".semi-dropdown-menu");
-    };
-    await (await cardMenu())
-      .getByText("编辑通知", { exact: true })
+    await card
+      .getByRole("button", { name: "编辑通知", exact: true })
       .click();
     await page
       .getByRole("switch", { name: "无变更时不发送", exact: true })
@@ -104,16 +98,13 @@ test("sends a webhook template and preserves masked credentials when editing", a
     await expect.poll(() => webhookCalls).toBe(initialCalls + 2);
     await page.getByRole("button", { name: "保存", exact: true }).click();
     await expect(page.getByRole("dialog")).not.toBeVisible();
-    await (await cardMenu())
-      .getByText("发送测试通知", { exact: true })
+    await card
+      .getByRole("button", { name: "发送测试通知", exact: true })
       .click();
     await expect.poll(() => webhookCalls).toBe(initialCalls + 3);
   } finally {
     if (id)
-      await fetch(
-        `http://127.0.0.1:3020/app/opensync/svr/notify?notifyId=${id}`,
-        { method: "DELETE" },
-      );
+      await request.delete(`/app/opensync/svr/notify?notifyId=${id}`);
   }
 });
 test.afterAll(async () => {
@@ -192,7 +183,6 @@ test("creates an engine and manual job, then edits without changing sync mode", 
       page.getByRole("combobox", { name: "调度方式", exact: true }),
     ).toHaveText("仅手动");
     await page.getByRole("button", { name: "下一步", exact: true }).click();
-    await page.getByRole("button", { name: "下一步", exact: true }).click();
     const posted = page.waitForRequest(
       (r) => r.url().endsWith("/svr/job") && r.method() === "POST",
     );
@@ -230,9 +220,6 @@ test("creates an engine and manual job, then edits without changing sync mode", 
     await page
       .getByRole("textbox", { name: "任务备注", exact: true })
       .fill(name + "-修改");
-    await page
-      .getByRole("button", { name: "下一步", exact: true })
-      .click({ force: forceMobileClick });
     await page
       .getByRole("button", { name: "下一步", exact: true })
       .click({ force: forceMobileClick });

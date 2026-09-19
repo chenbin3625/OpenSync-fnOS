@@ -318,6 +318,26 @@ func RemoveClient(alistID int64) {
 	}
 }
 
+// TestClient tests connectivity to an existing AList engine by creating a fresh
+// connection (bypassing the cache) so we know the engine is reachable right now.
+func TestClient(ctx context.Context, alistID int64) {
+	alist, err := getAlistByID(alistID)
+	if err != nil {
+		panicPublicIf(err, msg.AlistNotFound)
+	}
+	url, _ := alist["url"].(string)
+	token, _ := alist["token"].(string)
+	if url == "" {
+		panicPublic(msg.AlistURLInvalid)
+	}
+	client, err := newAlistClientContext(ctx, url, token, alistID)
+	if err != nil {
+		log.Printf("alist test failed: alistID=%d: %v", alistID, err)
+		panicPublic(msg.AlistConnectFail)
+	}
+	client.Close()
+}
+
 // GetChildPath gets child directory paths for path selector
 func GetChildPath(ctx context.Context, alistID int64, path string) []map[string]string {
 	client := GetClientByIDContext(ctx, alistID)

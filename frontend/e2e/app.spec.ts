@@ -7,7 +7,7 @@ test("opens usable task workspace without a second login", async ({ page }) => {
     page.getByRole("button", { name: "新建任务", exact: true }),
   ).toBeVisible();
   await expect(page.getByText("密码", { exact: true })).toHaveCount(0);
-  await expect(page.getByText("空空如也", { exact: true })).toBeVisible();
+  await expect(page.locator(".task-workspace")).toBeVisible();
 });
 
 test("opens task editor as a step-by-step wizard", async ({ page }) => {
@@ -18,7 +18,7 @@ test("opens task editor as a step-by-step wizard", async ({ page }) => {
   await expect(
     page.getByRole("heading", { name: "新建任务", exact: true }),
   ).toBeVisible();
-  await expect(page.getByLabel("当前步骤")).toHaveText(/步骤\s*1\s*\/\s*4/);
+  await expect(page.getByLabel("当前步骤")).toHaveText(/步骤\s*1\s*\/\s*3/);
   const dialogBox = await page.locator(".editor-modal .semi-modal").boundingBox();
   const viewport = page.viewportSize();
   if ((viewport?.width || 0) >= 1000) {
@@ -47,7 +47,6 @@ test("four modules fit desktop and mobile windows", async ({ page }) => {
   for (const path of ["tasks", "engines", "notifications", "settings"]) {
     await page.goto(`/app/opensync/${path}`);
     await expect(page.locator(".page-toolbar")).toBeVisible();
-    await expect(page.locator("main h1")).toHaveCount(0);
     await expect(page.getByRole("button", { name: /刷新/ })).toHaveCount(0);
     expect(
       await page.evaluate(

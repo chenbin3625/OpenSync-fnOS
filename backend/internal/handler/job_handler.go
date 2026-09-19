@@ -35,13 +35,14 @@ func GetJob(c *gin.Context) {
 		}
 		// Task list for this job
 		req := map[string]interface{}{
-			"id":        id,
-			"pageSize":  c.Query("pageSize"),
-			"pageNum":   c.Query("pageNum"),
-			"status":    c.Query("status"),
-			"keyword":   c.Query("keyword"),
-			"startTime": c.Query("startTime"),
-			"endTime":   c.Query("endTime"),
+			"id":               id,
+			"pageSize":         c.Query("pageSize"),
+			"pageNum":          c.Query("pageNum"),
+			"status":           c.Query("status"),
+			"keyword":          c.Query("keyword"),
+			"startTime":        c.Query("startTime"),
+			"endTime":          c.Query("endTime"),
+			"endTimeExclusive": c.Query("endTimeExclusive"),
 		}
 		if statusIn := c.QueryArray("statusIn"); len(statusIn) > 0 {
 			req["statusIn"] = statusIn

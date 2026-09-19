@@ -51,6 +51,22 @@ func UpdateAlist(c *gin.Context) {
 	c.JSON(http.StatusOK, model.Success(nil))
 }
 
+// TestAlist handles POST /svr/alist/test
+func TestAlist(c *gin.Context) {
+	idStr := c.Query("id")
+	if idStr == "" {
+		c.JSON(http.StatusOK, model.Error(msg.LostPart))
+		return
+	}
+	id, err := parseRequiredID(idStr, "id")
+	if err != nil {
+		c.JSON(http.StatusOK, model.Error(err.Error()))
+		return
+	}
+	service.TestClient(c.Request.Context(), id)
+	c.JSON(http.StatusOK, model.Success(nil))
+}
+
 // DeleteAlist handles DELETE /svr/alist
 func DeleteAlist(c *gin.Context) {
 	idStr := c.Query("id")

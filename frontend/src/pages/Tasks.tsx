@@ -1,24 +1,13 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import Banner from "@douyinfe/semi-ui/lib/es/banner";
 import Button from "@douyinfe/semi-ui/lib/es/button";
-import { Form } from "@douyinfe/semi-ui/lib/es/form";
-import Input from "@douyinfe/semi-ui/lib/es/input";
-import InputNumber from "@douyinfe/semi-ui/lib/es/inputNumber";
-import Modal from "@douyinfe/semi-ui/lib/es/modal";
-import Select from "@douyinfe/semi-ui/lib/es/select";
 import Switch from "@douyinfe/semi-ui/lib/es/switch";
-import Progress from "@douyinfe/semi-ui/lib/es/progress";
 import Tabs from "@douyinfe/semi-ui/lib/es/tabs";
-import Tag from "@douyinfe/semi-ui/lib/es/tag";
-import TextArea from "@douyinfe/semi-ui/lib/es/input/textarea";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
 import {
-  IconArrowRight,
+  IconChevronRightStroked,
   IconCloudStroked,
-  IconHistory,
-  IconPause,
   IconPlay,
   IconPlusStroked,
   IconServerStroked,
@@ -28,42 +17,34 @@ import {
 import { api } from "../api/client";
 import {
   ActionMenu,
-  Editor,
   EmptyState,
-  Field,
   Header,
   Info,
   LoadState,
-  SettingRow,
   confirmDelete,
   errorToast,
   type MenuAction,
 } from "../components/common";
-import { RemotePaths } from "../components/RemotePaths";
 import { useAction, useResource } from "../lib/hooks";
+import { selectJob } from "../lib/taskForm";
 import {
-  buildJobPayload,
-  defaultJobForm,
-  jobToForm,
-  validateJobForm,
-  type JobForm,
-} from "../lib/taskForm";
-import {
-  countJobPaths,
-  cronFields,
-  cronTypeNames,
   formatFileSizeRange,
   formatJobPaths,
   formatSchedule,
   formatSchedulePlan,
   getJobName,
   methodNames,
-  methodOptions,
   parseJobPathList,
 } from "./Home/homeUtils";
-import { fileSizeUnitOptions } from "./Home/fileSizeUnits";
 import type { AlistItem, JobItem } from "../types";
-import { History, Realtime } from "./TaskExecution";
+
+const Realtime = lazy(() =>
+  import("./TaskExecution").then((module) => ({ default: module.Realtime })),
+);
+const History = lazy(() =>
+  import("./TaskExecution").then((module) => ({ default: module.History })),
+);
+const JobEditor = lazy(() => import("./TaskEditor"));
 
 export default function Tasks() {
   const [params, setParams] = useSearchParams();
@@ -73,7 +54,7 @@ export default function Tasks() {
   )
     ? params.get("tab")!
     : "overview";
-  const jobs = useResource((signal) => api.jobs(1, signal, 100));
+  const jobs = useResource((signal) => api.jobMenu(signal));
   const engines = useResource((signal) => api.engines(signal));
   const [editor, setEditor] = useState<{ open: boolean; job: JobItem | null }>({
     open: false,
@@ -81,7 +62,13 @@ export default function Tasks() {
   });
   const actions = useAction();
   const list = jobs.data?.dataList || [];
-  const selected = list.find((j) => j.id === selectedId) || list[0];
+  const selected = selectJob(list, selectedId);
+  const currentTask = useResource(
+    (signal) =>
+      selected ? api.current(selected.id, signal) : Promise.resolve(null),
+    [selected?.id],
+  );
+  const hasCurrentTask = currentTask.loading || currentTask.data != null;
   const update = (values: Record<string, string | number | null>) => {
     const next = new URLSearchParams(params);
     for (const [key, value] of Object.entries(values))
@@ -90,6 +77,7 @@ export default function Tasks() {
   };
   const refreshJobs = async () => {
     await jobs.refresh();
+    await currentTask.refresh();
     window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
   };
   const action = (operation: () => Promise<unknown>, message: string) =>
@@ -113,33 +101,47 @@ export default function Tasks() {
             keepDOM={false}
           >
             <Tabs.TabPane tab="总览" itemKey="overview" />
-            <Tabs.TabPane tab="实时任务" itemKey="realtime" />
             <Tabs.TabPane tab="历史任务" itemKey="history" />
+            <Tabs.TabPane
+              tab={
+                !hasCurrentTask ? (
+                  <Tooltip content="当前没有运行中的任务" position="top">
+                    <span>实时任务</span>
+                  </Tooltip>
+                ) : (
+                  "实时任务"
+                )
+              }
+              itemKey="realtime"
+              disabled={!hasCurrentTask}
+            />
           </Tabs>
         }
         actions={
-          <>
-            <Button
-              icon={<IconPlay aria-hidden="true" />}
-              disabled={actions.busy || !jobs.data?.count}
-              onClick={() =>
-                action(() => api.jobAction({}), "已提交执行全部任务")
-              }
-            >
-              执行全部
-            </Button>
-            <Button
-              theme="solid"
-              icon={<IconPlusStroked aria-hidden="true" />}
-              onClick={() => setEditor({ open: true, job: null })}
-            >
-              新建任务
-            </Button>
-          </>
+          tab === "overview" ? (
+            <>
+              <Button
+                icon={<IconPlay aria-hidden="true" />}
+                disabled={actions.busy || !jobs.data?.count}
+                onClick={() =>
+                  action(() => api.jobAction({}), "已提交执行全部任务")
+                }
+              >
+                执行全部
+              </Button>
+              <Button
+                theme="solid"
+                icon={<IconPlusStroked aria-hidden="true" />}
+                onClick={() => setEditor({ open: true, job: null })}
+              >
+                新建任务
+              </Button>
+            </>
+          ) : undefined
         }
       />
       <div
-        className="task-workspace"
+        className="task-workspace flex-column"
         data-empty={
           (!jobs.loading && !jobs.error && !jobs.data?.count) || undefined
         }
@@ -147,7 +149,7 @@ export default function Tasks() {
         {!jobs.loading && !jobs.error && !jobs.data?.count ? (
           <EmptyState />
         ) : (
-          <section className="task-detail-pane">
+          <section className="task-detail-pane flex-column">
             <LoadState
               loading={jobs.loading}
               error={jobs.error}
@@ -177,7 +179,6 @@ export default function Tasks() {
                         "任务状态已更新",
                       )
                     }
-                    onHistory={() => update({ tab: "history" })}
                     onEdit={() => setEditor({ open: true, job: selected })}
                     onDelete={() =>
                       confirmDelete(
@@ -208,15 +209,17 @@ export default function Tasks() {
         )}
       </div>
       {editor.open && (
-        <JobEditor
-          job={editor.job}
-          engines={engines.data || []}
-          onClose={() => setEditor({ open: false, job: null })}
-          onSaved={() => {
-            setEditor({ open: false, job: null });
-            void refreshJobs();
-          }}
-        />
+        <Suspense fallback={null}>
+          <JobEditor
+            job={editor.job}
+            engines={engines.data || []}
+            onClose={() => setEditor({ open: false, job: null })}
+            onSaved={() => {
+              setEditor({ open: false, job: null });
+              void refreshJobs();
+            }}
+          />
+        </Suspense>
       )}
     </div>
   );
@@ -230,7 +233,6 @@ function Overview({
   onToggle,
   onEdit,
   onDelete,
-  onHistory,
 }: {
   job: JobItem;
   engines: AlistItem[];
@@ -239,7 +241,6 @@ function Overview({
   onToggle: () => void;
   onEdit: () => void;
   onDelete: () => void;
-  onHistory: () => void;
 }) {
   const engine = engines.find((e) => e.id === job.alistId);
   const engineName = engine
@@ -254,24 +255,6 @@ function Overview({
       onClick: onEdit,
     },
     {
-      label: "执行记录",
-      icon: <IconHistory aria-hidden="true" />,
-      onClick: onHistory,
-    },
-    ...(job.isCron !== 2
-      ? [
-          {
-            label: enabled ? "禁用" : "启用",
-            icon: enabled ? (
-              <IconPause aria-hidden="true" />
-            ) : (
-              <IconPlay aria-hidden="true" />
-            ),
-            onClick: onToggle,
-          },
-        ]
-      : []),
-    {
       label: "删除",
       icon: <IconDeleteStroked aria-hidden="true" />,
       onClick: onDelete,
@@ -280,13 +263,29 @@ function Overview({
   ];
   return (
     <div className="overview">
-      <section className="overview-card">
+      <section className="overview-card card-base">
         <div className="overview-head">
           <h2 title={getJobName(job)}>{getJobName(job)}</h2>
-          <Tag size="small" color={enabled ? "green" : "grey"}>
-            {enabled ? "已启用" : "已禁用"}
-          </Tag>
-          <ActionMenu actions={menu} disabled={busy} />
+          <div className="overview-head-actions">
+            {job.isCron !== 2 && (
+              <Switch
+                aria-label="启用任务"
+                checked={enabled}
+                disabled={busy}
+                onChange={() => onToggle()}
+              />
+            )}
+            <Tooltip content="手动执行" position="top">
+              <Button
+                icon={<IconPlay aria-hidden="true" />}
+                theme="solid"
+                size="small"
+                disabled={busy}
+                onClick={onRun}
+              />
+            </Tooltip>
+            <ActionMenu actions={menu} disabled={busy} />
+          </div>
         </div>
         <div className="overview-flow">
           <div className="flow-node">
@@ -298,7 +297,7 @@ function Overview({
               {parseJobPathList(job.srcPath).join("\n") || "—"}
             </div>
           </div>
-          <IconArrowRight className="flow-arrow" aria-hidden="true" />
+          <IconChevronRightStroked className="flow-arrow" aria-hidden="true" />
           <div className="flow-node">
             <div className="flow-name" title={engineHost || engineName}>
               <IconCloudStroked aria-hidden="true" />
@@ -313,37 +312,8 @@ function Overview({
             <div className="flow-sub">{formatSchedule(job)}</div>
           </div>
         </div>
-        <div className="overview-actions">
-          <span className="flow-sub">
-            {methodNames[job.method]} · 源目录 {countJobPaths(job.srcPath)} 个 ·
-            目标目录 {countJobPaths(job.dstPath)} 个
-          </span>
-          <Button
-            icon={<IconPlay aria-hidden="true" />}
-            theme="solid"
-            disabled={busy}
-            onClick={onRun}
-          >
-            手动执行
-          </Button>
-        </div>
-      </section>
-      <div className="overview-sections">
-        <section className="info-section">
-          <h3>存储与路径</h3>
-          <Info label="存储引擎">
-            {engine ? engine.remark || engine.userName : `引擎 #${job.alistId}`}
-          </Info>
-          <Info label="源目录" mono>
-            {formatJobPaths(job.srcPath, "\n")}
-          </Info>
-          <Info label="目标目录" mono>
-            {formatJobPaths(job.dstPath, "\n")}
-          </Info>
-          <Info label="源端缓存">{job.useCacheS ? "已开启" : "已关闭"}</Info>
-          <Info label="目标缓存">{job.useCacheT ? "已开启" : "已关闭"}</Info>
-        </section>
-        <section className="info-section">
+        <div className="overview-sections">
+          <section className="info-section">
           <h3>规则与调度</h3>
           <Info label="同步方式">{methodNames[job.method]}</Info>
           <Info label="执行计划">{formatSchedulePlan(job)}</Info>
@@ -357,7 +327,8 @@ function Overview({
             </details>
           </Info>
         </section>
-      </div>
+        </div>
+      </section>
     </div>
   );
 }
@@ -369,309 +340,4 @@ const engineHostOf = (url: string) => {
   } catch {
     return url;
   }
-};
-
-const taskEditorSteps = ["引擎与路径", "同步与调度", "文件过滤", "任务状态"];
-
-function JobEditor({
-  job,
-  engines,
-  onClose,
-  onSaved,
-}: {
-  job: JobItem | null;
-  engines: AlistItem[];
-  onClose: () => void;
-  onSaved: () => void;
-}) {
-  const [form, setForm] = useState<JobForm>(() =>
-    job ? jobToForm(job) : defaultJobForm(engines[0]?.id),
-  );
-  const [dirty, setDirty] = useState(false);
-  const [error, setError] = useState("");
-  const [step, setStep] = useState(0);
-  const action = useAction();
-  const activeStep = taskEditorSteps[step];
-  const lastStep = step === taskEditorSteps.length - 1;
-  const change = <K extends keyof JobForm>(key: K, value: JobForm[K]) => {
-    setDirty(true);
-    setForm((f) => ({ ...f, [key]: value }));
-  };
-  const nextStep = () => {
-    setError("");
-    setStep((current) => Math.min(current + 1, taskEditorSteps.length - 1));
-  };
-  const previousStep = () => {
-    setError("");
-    setStep((current) => Math.max(current - 1, 0));
-  };
-  const save = () => {
-    const validation = validateJobForm(form);
-    setError(validation);
-    if (validation) return;
-    void action.run(async () => {
-      try {
-        await api.saveJob(buildJobPayload(form));
-        setDirty(false);
-        Toast.success(job ? "编辑成功，下次任务生效" : "任务已创建");
-        onSaved();
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "保存失败");
-      }
-    });
-  };
-  return (
-    <Editor
-      title={job ? "编辑任务" : "新建任务"}
-      visible
-      busy={action.busy}
-      onClose={onClose}
-      onSave={save}
-      dirty={dirty}
-      footer={({ close }) => (
-        <div className="editor-actions task-editor-actions">
-          {step > 0 && (
-            <Button onClick={previousStep} disabled={action.busy}>
-              上一步
-            </Button>
-          )}
-          <Button onClick={close} disabled={action.busy}>
-            取消
-          </Button>
-          <Button
-            type="primary"
-            theme="solid"
-            loading={action.busy}
-            onClick={lastStep ? save : nextStep}
-          >
-            {lastStep ? "保存任务配置" : "下一步"}
-          </Button>
-        </div>
-      )}
-    >
-      <Form onSubmit={lastStep ? save : nextStep} className="editor-form">
-        <fieldset disabled={action.busy}>
-          {error && (
-            <Banner type="danger" description={error} closeIcon={null} />
-          )}
-          <div className="task-editor-stepbar">
-            <h3>{activeStep}</h3>
-            <div className="task-editor-count" aria-label="当前步骤">
-              步骤 <strong>{step + 1}</strong> / {taskEditorSteps.length}
-            </div>
-          </div>
-          <Progress
-            className="task-editor-progress"
-            percent={Math.round(((step + 1) / taskEditorSteps.length) * 100)}
-            showInfo={false}
-            size="small"
-          />
-          <div className="task-editor-step">
-            {step === 0 && (
-              <div className="form-section">
-                <Field label="存储引擎" required>
-                  <Select
-                    value={form.alistId}
-                    placeholder="请选择引擎"
-                    optionList={engines.map((e) => ({
-                      label: `${e.remark || e.userName} · ${e.url}`,
-                      value: e.id,
-                    }))}
-                    onChange={(value) => {
-                      setDirty(true);
-                      setForm((f) => ({
-                        ...f,
-                        alistId: Number(value),
-                        srcPath: [],
-                        dstPath: [],
-                      }));
-                    }}
-                    style={{ width: "100%" }}
-                  />
-                </Field>
-                <div className="form-grid">
-                  <Field label="源目录" required>
-                    <RemotePaths
-                      key={`src-${form.alistId}`}
-                      engineId={form.alistId}
-                      value={form.srcPath}
-                      onChange={(paths) => change("srcPath", paths)}
-                    />
-                    <SettingRow label="源端缓存">
-                      <Switch
-                        checked={form.useCacheS}
-                        onChange={(value) => change("useCacheS", value)}
-                      />
-                    </SettingRow>
-                  </Field>
-                  <Field label="目标目录" required>
-                    <RemotePaths
-                      key={`dst-${form.alistId}`}
-                      engineId={form.alistId}
-                      value={form.dstPath}
-                      onChange={(paths) => change("dstPath", paths)}
-                    />
-                    <SettingRow label="目标缓存">
-                      <Switch
-                        checked={form.useCacheT}
-                        onChange={(value) => change("useCacheT", value)}
-                      />
-                    </SettingRow>
-                  </Field>
-                </div>
-                <Field label="任务备注">
-                  <Input
-                    value={form.remark}
-                    onChange={(value) => change("remark", value)}
-                    placeholder="相册每日备份"
-                  />
-                </Field>
-              </div>
-            )}
-            {step === 1 && (
-              <div className="form-section">
-                <div className="form-grid">
-                  <Field label="同步方式">
-                    <Select
-                      value={form.method}
-                      style={{ width: "100%" }}
-                      optionList={methodOptions.map((m, value) => ({
-                        value,
-                        label: (
-                          <Tooltip content={m.description}>{m.name}</Tooltip>
-                        ),
-                      }))}
-                      onChange={(value) => change("method", Number(value))}
-                    />
-                  </Field>
-                  <Field label="调度方式">
-                    <Select
-                      value={form.isCron}
-                      style={{ width: "100%" }}
-                      optionList={cronTypeNames.map((label, value) => ({
-                        value,
-                        label,
-                      }))}
-                      onChange={(value) => change("isCron", Number(value))}
-                    />
-                  </Field>
-                </div>
-                {form.isCron === 0 && (
-                  <Field label="执行间隔（分钟）">
-                    <InputNumber
-                      min={1}
-                      value={form.interval}
-                      onChange={(value) => change("interval", Number(value))}
-                      style={{ width: "100%" }}
-                    />
-                  </Field>
-                )}
-                {form.isCron === 1 && (
-                  <div className="cron-grid">
-                    {cronFields.map((field) => (
-                      <Field key={field.name} label={field.label}>
-                        <Input
-                          value={form[field.name as keyof typeof rangesKeys]}
-                          onChange={(value) =>
-                            change(field.name as keyof typeof rangesKeys, value)
-                          }
-                        />
-                      </Field>
-                    ))}
-                  </div>
-                )}
-                <div className="schedule-preview">
-                  {formatSchedulePlan(form)}
-                </div>
-              </div>
-            )}
-            {step === 2 && (
-              <div className="form-section">
-                <div className="form-grid">
-                  {(["min", "max"] as const).map((kind) => (
-                    <Field
-                      key={kind}
-                      label={kind === "min" ? "最小文件大小" : "最大文件大小"}
-                      hint="0 表示不限"
-                    >
-                      <div className="unit-input">
-                        <InputNumber
-                          min={0}
-                          step={0.1}
-                          value={form[`${kind}FileSize`]}
-                          onChange={(value) =>
-                            change(`${kind}FileSize`, Number(value))
-                          }
-                        />
-                        <Select
-                          aria-label={
-                            kind === "min"
-                              ? "最小文件大小单位"
-                              : "最大文件大小单位"
-                          }
-                          value={form[`${kind}FileSizeUnit`]}
-                          optionList={fileSizeUnitOptions}
-                          onChange={(value) =>
-                            change(`${kind}FileSizeUnit`, String(value))
-                          }
-                        />
-                      </div>
-                    </Field>
-                  ))}
-                </div>
-                <Field label="排除规则（.gitignore 格式）">
-                  <TextArea
-                    value={form.exclude}
-                    onChange={(value) => change("exclude", value)}
-                    rows={5}
-                    className="mono"
-                  />
-                </Field>
-              </div>
-            )}
-            {step === 3 && (
-              <div className="form-section">
-                <SettingRow label="任务启用状态">
-                  <Switch
-                    disabled={form.isCron === 2}
-                    checked={form.isCron === 2 || form.enable}
-                    onChange={(value) => change("enable", value)}
-                  />
-                </SettingRow>
-                <div className="task-editor-review">
-                  <Info label="源目录" mono>
-                    {form.srcPath.join("\n") || "未选择"}
-                  </Info>
-                  <Info label="目标目录" mono>
-                    {form.dstPath.join("\n") || "未选择"}
-                  </Info>
-                  <Info label="同步方式">
-                    {methodNames[form.method] || "增量同步"}
-                  </Info>
-                  <Info label="执行计划">{formatSchedulePlan(form)}</Info>
-                  <Info label="文件大小">
-                    {formatFileSizeRange(
-                      form.minFileSize,
-                      form.maxFileSize,
-                    ) || "不限制"}
-                  </Info>
-                  <Info label="排除规则">
-                    {form.exclude?.trim() ? "已配置" : "无排除规则"}
-                  </Info>
-                </div>
-              </div>
-            )}
-          </div>
-        </fieldset>
-      </Form>
-    </Editor>
-  );
-}
-const rangesKeys = {
-  second: true,
-  minute: true,
-  hour: true,
-  day: true,
-  month: true,
-  day_of_week: true,
 };

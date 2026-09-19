@@ -39,7 +39,7 @@ export const taskRecordStatusNames: Record<number, string> = {
   3: "部分失败",
   4: "已停止",
   5: "超时",
-  6: "失败",
+  6: "系统错误",
   7: "失败",
   8: "无需同步",
 };

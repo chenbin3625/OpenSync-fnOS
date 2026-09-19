@@ -33,6 +33,14 @@ export function defaultJobForm(alistId?: number) {
   };
 }
 export type JobForm = ReturnType<typeof defaultJobForm>;
+export function selectJob<T extends { id: number }>(
+  jobs: T[],
+  selectedId: number | null,
+) {
+  return selectedId === null
+    ? jobs[0]
+    : jobs.find((job) => job.id === selectedId);
+}
 export function jobToForm(job: JobItem): JobForm {
   const min = splitBytesToFileSize(job.minFileSize),
     max = splitBytesToFileSize(job.maxFileSize);
@@ -81,44 +89,67 @@ const ranges = {
   month: [1, 12, "月"],
   day_of_week: [0, 6, "周"],
 } as const;
-export function validateJobForm(form: JobForm) {
-  if (!form.alistId) return "请选择存储引擎";
-  if (!form.srcPath.length) return "请选择源目录";
-  if (!form.dstPath.length) return "请选择目标目录";
-  if (
-    form.isCron === 0 &&
-    (!Number.isInteger(form.interval) || form.interval < 1)
-  )
-    return "执行间隔必须是大于 0 的整数";
-  if (
-    ![form.minFileSize, form.maxFileSize].every(
-      (n) => Number.isFinite(n) && n >= 0,
-    )
-  )
-    return "文件大小必须是有效的非负数";
-  const min = fileSizeToBytes(form.minFileSize, form.minFileSizeUnit),
-    max = fileSizeToBytes(form.maxFileSize, form.maxFileSizeUnit);
-  if (max > 0 && min > max) return "最大文件大小必须大于等于最小文件大小";
-  if (form.isCron === 1)
-    for (const [key, [low, high, label]] of Object.entries(ranges)) {
-      const value = form[key as keyof typeof ranges];
+export function validateJobFormStep(form: JobForm, step: number) {
+  switch (step) {
+    case 0:
+      if (!form.alistId) return "请选择存储引擎";
+      if (!form.srcPath.length) return "请选择源目录";
+      if (!form.dstPath.length) return "请选择目标目录";
+      return "";
+    case 1:
       if (
-        !value ||
-        !value.split(",").every((part) => {
-          if (part.trim() === "*") return true;
-          const match = part.trim().match(/^(\*|\d+)(?:-(\d+))?(?:\/(\d+))?$/);
-          if (!match) return false;
-          const start = match[1] === "*" ? low : Number(match[1]),
-            end = match[2] ? Number(match[2]) : start;
-          return (
-            start >= low &&
-            end <= high &&
-            start <= end &&
-            (!match[3] || (Number(match[3]) > 0 && Number(match[3]) <= high))
-          );
-        })
-      )
-        return `Cron「${label}」字段无效，范围 ${low}-${high}`;
+        form.isCron === 0 &&
+        (!Number.isInteger(form.interval) || form.interval < 1)
+      ) {
+        return "执行间隔必须是大于 0 的整数";
+      }
+      if (form.isCron === 1) {
+        for (const [key, [low, high, label]] of Object.entries(ranges)) {
+          const value = form[key as keyof typeof ranges];
+          if (
+            !value ||
+            !value.split(",").every((part) => {
+              if (part.trim() === "*") return true;
+              const match = part
+                .trim()
+                .match(/^(\*|\d+)(?:-(\d+))?(?:\/(\d+))?$/);
+              if (!match) return false;
+              const start = match[1] === "*" ? low : Number(match[1]),
+                end = match[2] ? Number(match[2]) : start;
+              return (
+                start >= low &&
+                end <= high &&
+                start <= end &&
+                (!match[3] || (Number(match[3]) > 0 && Number(match[3]) <= high))
+              );
+            })
+          ) {
+            return `Cron「${label}」字段无效，范围 ${low}-${high}`;
+          }
+        }
+      }
+      return "";
+    case 2: {
+      if (
+        ![form.minFileSize, form.maxFileSize].every(
+          (n) => Number.isFinite(n) && n >= 0,
+        )
+      ) {
+        return "文件大小必须是有效的非负数";
+      }
+      const min = fileSizeToBytes(form.minFileSize, form.minFileSizeUnit),
+        max = fileSizeToBytes(form.maxFileSize, form.maxFileSizeUnit);
+      if (max > 0 && min > max) return "最大文件大小必须大于等于最小文件大小";
+      return "";
     }
+    default:
+      return "";
+  }
+}
+export function validateJobForm(form: JobForm) {
+  for (const step of [0, 1, 2]) {
+    const err = validateJobFormStep(form, step);
+    if (err) return err;
+  }
   return "";
 }

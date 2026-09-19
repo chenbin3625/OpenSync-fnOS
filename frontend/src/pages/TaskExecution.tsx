@@ -1,5 +1,4 @@
-import { useState } from "react";
-import Banner from "@douyinfe/semi-ui/lib/es/banner";
+import { useEffect, useState } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import DatePicker from "@douyinfe/semi-ui/lib/es/datePicker";
 import Input from "@douyinfe/semi-ui/lib/es/input";
@@ -7,6 +6,7 @@ import Modal from "@douyinfe/semi-ui/lib/es/modal";
 import Pagination from "@douyinfe/semi-ui/lib/es/pagination";
 import Progress from "@douyinfe/semi-ui/lib/es/progress";
 import Select from "@douyinfe/semi-ui/lib/es/select";
+import SideSheet from "@douyinfe/semi-ui/lib/es/sideSheet";
 import Table from "@douyinfe/semi-ui/lib/es/table";
 import Tabs from "@douyinfe/semi-ui/lib/es/tabs";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
@@ -28,6 +28,7 @@ import {
   errorToast,
 } from "../components/common";
 import { useAction, useResource } from "../lib/hooks";
+import { historyRangeParams } from "../lib/historyFilters";
 import { useRealtimeTask } from "./Home/useRealtimeTask";
 import { useRealtimeTaskItems } from "./Home/useRealtimeTaskItems";
 import {
@@ -43,6 +44,7 @@ import type { TaskItem, TaskRecord } from "../types";
 
 const time = (value?: number) =>
   value ? dayjs.unix(value).format("YYYY-MM-DD HH:mm:ss") : "—";
+
 const statusTabs = [
   { key: 0, label: "等待", count: "wait" },
   { key: 1, label: "运行中", count: "running" },
@@ -63,15 +65,17 @@ export function Realtime({ jobId }: { jobId: number }) {
     pageSize: 20,
   });
   const action = useAction();
-  if (!currentTask)
-    return (
-      <div className="execution-empty">
-        <EmptyState />
-      </div>
-    );
-  const total = currentTask.doneSize + currentTask.remainSize;
+  if (!currentTask) {
+    return <EmptyState />;
+  }
+  const task = currentTask;
+  const activeTab = items.activeTab;
+  const tabItems =
+    activeTab === 1 ? items.pagedTabTaskList : items.tabTaskList;
+  const tabTotal = items.tabTaskTotal;
+  const total = task.doneSize + task.remainSize;
   const percent =
-    total > 0 ? Math.min(100, (currentTask.doneSize / total) * 100) : 0;
+    total > 0 ? Math.min(100, (task.doneSize / total) * 100) : 0;
   const stop = () =>
     Modal.confirm({
       width: 454,
@@ -80,10 +84,12 @@ export function Realtime({ jobId }: { jobId: number }) {
       content: "已完成的文件不会撤销。",
       okText: "停止任务",
       cancelText: "取消",
+      okButtonProps: { type: "danger", "aria-label": "停止任务" },
+      cancelButtonProps: { "aria-label": "取消" },
       onOk: () =>
         action.run(async () => {
           try {
-            await api.taskAction(currentTask.taskId, "stop");
+            await api.taskAction(task.taskId, "stop");
             Toast.success("已提交停止");
             await refreshCurrentTask();
           } catch (error) {
@@ -93,13 +99,14 @@ export function Realtime({ jobId }: { jobId: number }) {
         }),
     });
   return (
-    <div className="execution-view">
+    <div className="execution-view flex-column">
+      <div className="execution-top">
       <div className="execution-header">
         <div>
-          <h2>{currentTask.scanFinish ? "正在同步" : "正在扫描目录"}</h2>
+          <h2>{task.scanFinish ? "正在同步" : "正在扫描目录"}</h2>
           <span className="muted">
-            开始于 {time(currentTask.createTime)} · 已运行{" "}
-            {formatDuration(currentTask.duration)}
+            开始于 {time(task.createTime)} · 已运行{" "}
+            {formatDuration(task.duration)}
           </span>
         </div>
         <Button
@@ -116,35 +123,35 @@ export function Realtime({ jobId }: { jobId: number }) {
         <div>
           <span>传输速度</span>
           <strong>
-            {formatSize(currentTask.speed)}
+            {formatSize(task.speed)}
             <small>/s</small>
           </strong>
         </div>
         <div>
           <span>已完成</span>
-          <strong>{formatSize(currentTask.doneSize)}</strong>
+          <strong>{formatSize(task.doneSize)}</strong>
         </div>
         <div>
           <span>剩余大小</span>
-          <strong>{formatSize(currentTask.remainSize)}</strong>
+          <strong>{formatSize(task.remainSize)}</strong>
         </div>
         <div>
           <span>预计剩余</span>
           <strong>
-            {currentTask.remainTime > 0
-              ? formatDuration(currentTask.remainTime)
+            {task.remainTime > 0
+              ? formatDuration(task.remainTime)
               : "—"}
           </strong>
         </div>
       </div>
-      {!currentTask.scanFinish && currentTask.scan && (
+      {!task.scanFinish && task.scan && (
         <div className="scan-status">
-          已扫描 {currentTask.scan.scannedDirs} 个目录 · 待扫描{" "}
-          {currentTask.scan.remainingDirs} 个目录
+          已扫描 {task.scan.scannedDirs} 个目录 · 待扫描{" "}
+          {task.scan.remainingDirs} 个目录
         </div>
       )}
       <Tabs
-        activeKey={String(items.activeTab)}
+        activeKey={String(activeTab)}
         onChange={(key) => items.setActiveTab(Number(key))}
         className="execution-tabs"
       >
@@ -152,18 +159,20 @@ export function Realtime({ jobId }: { jobId: number }) {
           <Tabs.TabPane
             key={tab.key}
             itemKey={String(tab.key)}
-            tab={`${tab.label} ${tab.key === items.activeTab ? items.tabTaskTotal : currentTask.num?.[tab.count] || 0}`}
+            tab={`${tab.label} ${tab.key === activeTab ? tabTotal : task.num?.[tab.count] || 0}`}
           />
         ))}
       </Tabs>
+      </div>
+      <div className="execution-scroll">
       <FileTable
-        rows={
-          items.activeTab === 1 ? items.pagedTabTaskList : items.tabTaskList
-        }
+        rows={tabItems}
         loading={items.tabLoading}
+        hideStatus
       />
+      </div>
       <Pager
-        total={items.tabTaskTotal}
+        total={tabTotal}
         page={items.tabTaskPage}
         size={20}
         onChange={items.setTabTaskPage}
@@ -189,10 +198,7 @@ export function History({ jobId }: { jobId: number }) {
           pageSize: size,
           status,
           keyword,
-          startTime: range[0]
-            ? Math.floor(range[0].getTime() / 1000)
-            : undefined,
-          endTime: range[1] ? Math.floor(range[1].getTime() / 1000) : undefined,
+          ...historyRangeParams(range),
         },
         signal,
       ),
@@ -240,7 +246,7 @@ export function History({ jobId }: { jobId: number }) {
     </div>
   );
   return (
-    <div className="history-view">
+    <div className="history-view flex-column">
       <div className="filter-bar">
         <Input
           prefix={<IconSearchStroked aria-hidden="true" />}
@@ -287,7 +293,7 @@ export function History({ jobId }: { jobId: number }) {
           }}
         />
         <DatePicker
-          type="dateTimeRange"
+          type="dateRange"
           value={range}
           onChange={(value) => {
             setRange(Array.isArray(value) ? value.map((v) => new Date(v)) : []);
@@ -296,9 +302,14 @@ export function History({ jobId }: { jobId: number }) {
           showClear
         />
       </div>
-      {resource.error && (
-        <Banner type="danger" description={resource.error} closeIcon={null} />
-      )}
+      <div className="history-scroll">
+      <LoadState
+        loading={false}
+        error={resource.error}
+        retry={resource.refresh}
+      />
+      {!resource.error && (
+      <>
       <div className="desktop-data">
         <Table<TaskRecord>
           dataSource={rows}
@@ -368,6 +379,9 @@ export function History({ jobId }: { jobId: number }) {
           ))
         )}
       </div>
+      </>
+      )}
+      </div>
       <Pager
         total={resource.data?.count || 0}
         page={page}
@@ -388,9 +402,11 @@ export function History({ jobId }: { jobId: number }) {
 export function FileTable({
   rows,
   loading = false,
+  hideStatus = false,
 }: {
   rows: TaskItem[];
   loading?: boolean;
+  hideStatus?: boolean;
 }) {
   return (
     <>
@@ -431,17 +447,21 @@ export function FileTable({
               width: 70,
               render: (_, record) => taskTypeNames[record.type || 0] || "—",
             },
-            {
-              title: "状态",
-              width: 160,
-              render: (_, record) => (
-                <Status
-                  status={record.status}
-                  label={taskItemStatusNames[record.status]}
-                  error={record.errMsg}
-                />
-              ),
-            },
+            ...(!hideStatus
+              ? [
+                  {
+                    title: "状态",
+                    width: 160,
+                    render: (_: unknown, record: TaskItem) => (
+                      <Status
+                        status={record.status}
+                        label={taskItemStatusNames[record.status]}
+                        error={record.errMsg}
+                      />
+                    ),
+                  },
+                ]
+              : []),
             {
               title: "进度",
               width: 130,
@@ -471,10 +491,12 @@ export function FileTable({
               <summary>
                 <div className="record-title">
                   <strong>{getTaskDisplayName(record)}</strong>
-                  <Status
-                    status={record.status}
-                    label={taskItemStatusNames[record.status]}
-                  />
+                  {!hideStatus && (
+                    <Status
+                      status={record.status}
+                      label={taskItemStatusNames[record.status]}
+                    />
+                  )}
                 </div>
                 <div className="record-footer">
                   <span className="muted">
@@ -501,11 +523,10 @@ export function FileTable({
                   <p className="mono">{record.dstPath || "—"}</p>
                 </div>
                 {record.errMsg && (
-                  <Banner
-                    type="danger"
-                    description={record.errMsg}
-                    closeIcon={null}
-                  />
+                  <div className="inline-error">
+                    <span>错误信息</span>
+                    <p>{record.errMsg}</p>
+                  </div>
                 )}
               </div>
             </details>
@@ -549,16 +570,19 @@ function FileDetails({
     [taskId, page, size, status, type, object, hasError, keyword],
     true,
   );
+  useEffect(() => {
+    if (resource.error) Toast.error(resource.error);
+  }, [resource.error]);
   return (
-    <Modal
+    <SideSheet
       title="执行明细"
       visible
       onCancel={onClose}
-      width={454}
-      className="editor-modal detail-modal"
-      footer={null}
-      centered
+      placement="bottom"
+      height="90vh"
+      className="detail-drawer"
     >
+      <div className="detail-drawer-body">
       <div className="filter-bar">
         <Input
           aria-label="搜索文件明细"
@@ -653,13 +677,11 @@ function FileDetails({
           重置
         </Button>
       </div>
-      {resource.error && (
-        <Banner type="danger" description={resource.error} closeIcon={null} />
-      )}
       <FileTable
         rows={resource.data?.dataList || []}
         loading={resource.loading}
       />
+      </div>
       <Pager
         total={resource.data?.count || 0}
         page={page}
@@ -670,7 +692,7 @@ function FileDetails({
           setPage(1);
         }}
       />
-    </Modal>
+    </SideSheet>
   );
 }
 

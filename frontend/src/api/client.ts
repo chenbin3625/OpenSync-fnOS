@@ -60,6 +60,24 @@ export async function request<T>(
   return result.data;
 }
 
+async function requestAllJobs(signal?: AbortSignal) {
+  const pageSize = 500;
+  const first = await request<PageData<JobItem>>("/job", {
+    params: { pageNum: 1, pageSize },
+    signal,
+  });
+  const dataList = [...first.dataList];
+  const pageCount = Math.ceil(first.count / pageSize);
+  for (let page = 2; page <= pageCount; page += 1) {
+    const next = await request<PageData<JobItem>>("/job", {
+      params: { pageNum: page, pageSize },
+      signal,
+    });
+    dataList.push(...next.dataList);
+  }
+  return { dataList, count: first.count };
+}
+
 export const api = {
   session: () =>
     request<{ uid: number; development: boolean; version: string }>("/session"),
@@ -73,16 +91,14 @@ export const api = {
     request("/alist", { method: edit ? "PUT" : "POST", data }),
   deleteEngine: (id: number) =>
     request("/alist", { method: "DELETE", params: { id } }),
+  testEngine: (id: number) =>
+    request("/alist/test", { method: "POST", params: { id } }),
   jobs: (page: number, signal?: AbortSignal, pageSize = 12) =>
     request<PageData<JobItem>>("/job", {
       params: { pageNum: page, pageSize },
       signal,
     }),
-  jobMenu: (signal?: AbortSignal) =>
-    request<PageData<JobItem>>("/job", {
-      params: { pageNum: 1, pageSize: 100 },
-      signal,
-    }),
+  jobMenu: (signal?: AbortSignal) => requestAllJobs(signal),
   saveJob: (data: unknown, signal?: AbortSignal) =>
     request("/job", { method: "POST", data, signal }),
   jobAction: (data: unknown) => request("/job", { method: "PUT", data }),

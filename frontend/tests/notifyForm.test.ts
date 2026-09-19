@@ -35,7 +35,7 @@ describe("notification compatibility", () => {
       httpMethod: "PUT",
     });
   });
-  it("preserves all existing custom webhook controls and legacy HTTP method", () => {
+  it("rejects webhook methods that the backend does not support", () => {
     const form = notifyToForm({
       id: 2,
       method: 0,
@@ -43,13 +43,7 @@ describe("notification compatibility", () => {
       params:
         '{"method":"PATCH","contentType":"application/x-www-form-urlencoded","needContent":false,"titleName":"subject","contentName":"message","url":"https://example.com"}',
     });
-    expect(buildNotifyParams(form)).toMatchObject({
-      httpMethod: "PATCH",
-      contentType: "application/x-www-form-urlencoded",
-      needContent: false,
-      titleName: "subject",
-      contentName: "message",
-    });
+    expect(validateNotifyForm(form)).toContain("HTTP 方法");
   });
   it("restores legacy corporate parameter aliases and webhook JSON objects", () => {
     expect(

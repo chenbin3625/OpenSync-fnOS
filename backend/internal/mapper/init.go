@@ -119,6 +119,9 @@ func InitSQL() {
 			}
 		}
 		ensureIndexes(db)
+		if err := migrateStoredCredentials(db); err != nil {
+			log.Fatalf("Failed to initialize credential encryption: %v", err)
+		}
 
 		log.Printf("Database initialized; waiting for web account setup")
 		return
@@ -137,6 +140,9 @@ func InitSQL() {
 		}
 	}
 	ensureIndexes(db)
+	if err := migrateStoredCredentials(db); err != nil {
+		log.Fatalf("Failed to migrate stored credentials: %v", err)
+	}
 }
 
 func schemaVersion(db *sql.DB) int64 {

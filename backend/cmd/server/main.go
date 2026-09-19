@@ -75,6 +75,7 @@ func newRouter(development bool, allowedOrigins []string) *gin.Engine {
 	})
 	api.GET("/alist", handler.GetAlist)
 	api.POST("/alist", handler.AddAlist)
+	api.POST("/alist/test", handler.TestAlist)
 	api.PUT("/alist", handler.UpdateAlist)
 	api.DELETE("/alist", handler.DeleteAlist)
 	api.GET("/job", handler.GetJob)

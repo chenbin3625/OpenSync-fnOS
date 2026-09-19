@@ -145,6 +145,13 @@ func GetJobTaskList(params map[string]interface{}) (map[string]interface{}, erro
 			args = append(args, end)
 		}
 	}
+	if endTime, ok := params["endTimeExclusive"]; ok {
+		end := util.ToInt(endTime)
+		if end > 0 {
+			where += " AND COALESCE(NULLIF(runTime, 0), createTime) < ?"
+			args = append(args, end)
+		}
+	}
 	if keyword, ok := params["keyword"]; ok {
 		kw := strings.TrimSpace(fmt.Sprintf("%v", keyword))
 		if kw != "" {

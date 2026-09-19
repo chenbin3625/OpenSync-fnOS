@@ -8,7 +8,14 @@ import (
 
 // GetAlistList gets all alist entries
 func GetAlistList() ([]map[string]interface{}, error) {
-	return FetchAllToTable("SELECT * FROM alist_list")
+	rows, err := FetchAllToTable("SELECT * FROM alist_list")
+	if err != nil {
+		return nil, err
+	}
+	if err := decryptCredentialColumn(rows, "token"); err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 // GetAlistByID gets alist by ID
@@ -19,6 +26,9 @@ func GetAlistByID(alistID int64) (map[string]interface{}, error) {
 	}
 	if len(rst) == 0 {
 		return nil, errors.New(msg.AlistNotFound)
+	}
+	if err := decryptCredentialColumn(rst, "token"); err != nil {
+		return nil, err
 	}
 	return rst[0], nil
 }
@@ -34,16 +44,24 @@ func CountJobsByAlistID(alistID int64) (int64, error) {
 
 // AddAlist inserts a new alist entry
 func AddAlist(remark, url, userName, token string) (int64, error) {
+	encryptedToken, err := encryptCredential(token)
+	if err != nil {
+		return 0, err
+	}
 	return ExecuteInsert(
 		"INSERT INTO alist_list (remark, url, userName, token) VALUES (?, ?, ?, ?)",
-		remark, url, userName, token,
+		remark, url, userName, encryptedToken,
 	)
 }
 
 // UpdateAlist updates an alist entry
 func UpdateAlist(id int64, remark, url string, token *string) error {
 	if token != nil {
-		return ExecuteUpdate("UPDATE alist_list SET remark=?, url=?, token=? WHERE id=?", remark, url, *token, id)
+		encryptedToken, err := encryptCredential(*token)
+		if err != nil {
+			return err
+		}
+		return ExecuteUpdate("UPDATE alist_list SET remark=?, url=?, token=? WHERE id=?", remark, url, encryptedToken, id)
 	}
 	return ExecuteUpdate("UPDATE alist_list SET remark=?, url=? WHERE id=?", remark, url, id)
 }

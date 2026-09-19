@@ -3,6 +3,7 @@ import {
   buildJobPayload,
   defaultJobForm,
   jobToForm,
+  selectJob,
   validateJobForm,
 } from "../src/lib/taskForm";
 
@@ -73,5 +74,10 @@ describe("existing synchronization contracts", () => {
     ).toContain("最大");
     expect(validateJobForm({ ...form, hour: "25" })).toContain("时");
     expect(validateJobForm(form)).toBe("");
+  });
+  it("does not substitute another task for an explicit unknown task id", () => {
+    const jobs = [{ id: 1 }, { id: 2 }];
+    expect(selectJob(jobs, null)).toEqual({ id: 1 });
+    expect(selectJob(jobs, 999)).toBeUndefined();
   });
 });

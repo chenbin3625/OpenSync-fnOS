@@ -100,7 +100,6 @@ export function RemotePaths({
             (Array.isArray(next) ? next : next ? [next] : []).map(String),
           )
         }
-        style={{ width: "100%" }}
         dropdownStyle={{ maxWidth: "calc(100vw - 32px)" }}
         maxTagCount={2}
         showClear

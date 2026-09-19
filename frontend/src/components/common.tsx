@@ -5,7 +5,6 @@ import {
   useId,
   type ReactNode,
 } from "react";
-import Banner from "@douyinfe/semi-ui/lib/es/banner";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Dropdown from "@douyinfe/semi-ui/lib/es/dropdown";
 import Empty from "@douyinfe/semi-ui/lib/es/empty";
@@ -14,7 +13,7 @@ import Spin from "@douyinfe/semi-ui/lib/es/spin";
 import Tag from "@douyinfe/semi-ui/lib/es/tag";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
-import { IconRefresh, IconClose, IconMoreStroked } from "@douyinfe/semi-icons";
+import { IconRefresh, IconCrossStroked, IconMoreStroked } from "@douyinfe/semi-icons";
 import { getHost } from "../lib/host";
 
 export function errorToast(error: unknown) {
@@ -31,7 +30,7 @@ export function Header({
 }) {
   return (
     <header className="page-toolbar" aria-label={`${title}操作`}>
-      {tabs && <div className="page-tabs">{tabs}</div>}
+      {tabs ? <div className="page-tabs">{tabs}</div> : <h1 className="page-title">{title}</h1>}
       <div className="page-actions">{actions}</div>
     </header>
   );
@@ -93,6 +92,7 @@ export function ActionMenu({
       }))}
     >
       <Button
+        title={label}
         aria-label={label}
         icon={<IconMoreStroked aria-hidden="true" />}
         theme="borderless"
@@ -126,7 +126,7 @@ export function LoadState({
   if (error)
     return (
       <div className="state-panel">
-        <Banner type="danger" description={error} closeIcon={null} />
+        <p className="inline-error">{error}</p>
         <Button
           icon={<IconRefresh aria-hidden="true" />}
           onClick={() => retry()}
@@ -185,12 +185,14 @@ export function Field({
 export function SettingRow({
   label,
   children,
+  variant,
 }: {
   label: string;
   children: ReactNode;
+  variant?: "bordered" | "compact";
 }) {
   return (
-    <div className="setting-row">
+    <div className={`setting-row${variant ? ` setting-row--${variant}` : ""}`}>
       <span>{label}</span>
       {children}
     </div>
@@ -249,18 +251,20 @@ export function confirmDelete(
   action: () => Promise<unknown>,
   content = "删除后无法恢复，是否继续？",
 ) {
-  Modal.confirm({
+  Modal.warning({
     width: 454,
     className: "fnos-confirm",
+    closable: false,
     title,
     content,
-    okText: "确认删除",
+    okText: "删除",
     cancelText: "取消",
-    okButtonProps: { type: "danger", "aria-label": "确认删除" },
+    okButtonProps: { type: "danger", "aria-label": "删除" },
     cancelButtonProps: { "aria-label": "取消" },
     onOk: async () => {
       try {
         await action();
+        Toast.success("已删除");
       } catch (error) {
         errorToast(error);
         throw error;
@@ -319,7 +323,7 @@ export function Editor({
         title: "放弃未保存的修改？",
         okText: "放弃修改",
         cancelText: "继续编辑",
-        okButtonProps: { "aria-label": "放弃修改" },
+        okButtonProps: { type: "danger", "aria-label": "放弃修改" },
         cancelButtonProps: { "aria-label": "继续编辑" },
         onOk: onClose,
       });
@@ -336,7 +340,7 @@ export function Editor({
       closable={!busy}
       closeOnEsc={!busy}
       onCancel={close}
-      closeIcon={<IconClose aria-hidden="true" />}
+      closeIcon={<IconCrossStroked aria-hidden="true" />}
       footer={
         typeof footer === "function" ? (
           footer({ close })

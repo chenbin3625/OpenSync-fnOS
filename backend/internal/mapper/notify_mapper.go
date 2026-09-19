@@ -2,15 +2,26 @@ package mapper
 
 import (
 	"errors"
+	"fmt"
 	"opensync/internal/msg"
 )
 
 // GetNotifyList gets notify list, optionally only enabled ones
 func GetNotifyList(needEnable bool) ([]map[string]interface{}, error) {
+	var rows []map[string]interface{}
+	var err error
 	if needEnable {
-		return FetchAllToTable("SELECT * FROM notify WHERE enable=1")
+		rows, err = FetchAllToTable("SELECT * FROM notify WHERE enable=1")
+	} else {
+		rows, err = FetchAllToTable("SELECT * FROM notify")
 	}
-	return FetchAllToTable("SELECT * FROM notify")
+	if err != nil {
+		return nil, err
+	}
+	if err := decryptCredentialColumn(rows, "params"); err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 // GetNotifyByID gets a single notify config by ID (raw params, internal use only).
@@ -22,22 +33,33 @@ func GetNotifyByID(notifyID int64) (map[string]interface{}, error) {
 	if len(rows) == 0 {
 		return nil, nil
 	}
+	if err := decryptCredentialColumn(rows, "params"); err != nil {
+		return nil, err
+	}
 	return rows[0], nil
 }
 
 // AddNotify inserts a new notify config
 func AddNotify(notify map[string]interface{}) (int64, error) {
+	params, err := encryptCredential(fmt.Sprintf("%v", notify["params"]))
+	if err != nil {
+		return 0, err
+	}
 	return ExecuteInsert(
 		"INSERT INTO notify(enable, method, params) VALUES (?, ?, ?)",
-		notify["enable"], notify["method"], notify["params"],
+		notify["enable"], notify["method"], params,
 	)
 }
 
 // EditNotify updates a notify config
 func EditNotify(notify map[string]interface{}) error {
+	params, err := encryptCredential(fmt.Sprintf("%v", notify["params"]))
+	if err != nil {
+		return err
+	}
 	return executeNotifyUpdate(
 		"UPDATE notify SET enable=?, method=?, params=? WHERE id=?",
-		notify["enable"], notify["method"], notify["params"], notify["id"],
+		notify["enable"], notify["method"], params, notify["id"],
 	)
 }
 

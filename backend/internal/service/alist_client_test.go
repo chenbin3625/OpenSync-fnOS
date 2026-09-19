@@ -129,6 +129,40 @@ func TestGetClientByIDCoalescesConcurrentLoads(t *testing.T) {
 	}
 }
 
+func TestClientUsesFreshConnectionAndClosesIt(t *testing.T) {
+	oldGet := getAlistByID
+	oldNew := newAlistClientContext
+	defer func() {
+		getAlistByID = oldGet
+		newAlistClientContext = oldNew
+	}()
+
+	getAlistByID = func(alistID int64) (map[string]interface{}, error) {
+		return map[string]interface{}{
+			"url":   "https://example.test",
+			"token": "stored-token",
+		}, nil
+	}
+	transport := &closeTrackingTransport{}
+	var gotID int64
+	newAlistClientContext = func(ctx context.Context, alistURL string, token string, alistID int64) (*AlistClient, error) {
+		gotID = alistID
+		if alistURL != "https://example.test" || token != "stored-token" {
+			t.Fatalf("connection args = %q/%q, want stored engine credentials", alistURL, token)
+		}
+		return &AlistClient{client: &http.Client{Transport: transport}}, nil
+	}
+
+	TestClient(context.Background(), 42)
+
+	if gotID != 42 {
+		t.Fatalf("tested engine id = %d, want 42", gotID)
+	}
+	if !transport.closed.Load() {
+		t.Fatal("fresh test client was not closed")
+	}
+}
+
 func TestGetClientByIDContextPassesCancellationToInitialLoad(t *testing.T) {
 	alistClientListMu.Lock()
 	oldList := alistClientList

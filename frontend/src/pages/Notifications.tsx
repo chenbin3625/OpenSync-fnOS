@@ -1,10 +1,8 @@
 import { useState } from "react";
-import Banner from "@douyinfe/semi-ui/lib/es/banner";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Input from "@douyinfe/semi-ui/lib/es/input";
 import Select from "@douyinfe/semi-ui/lib/es/select";
 import Switch from "@douyinfe/semi-ui/lib/es/switch";
-import Tag from "@douyinfe/semi-ui/lib/es/tag";
 import TextArea from "@douyinfe/semi-ui/lib/es/input/textarea";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import {
@@ -15,10 +13,10 @@ import {
 } from "@douyinfe/semi-icons";
 import { api } from "../api/client";
 import {
-  ActionMenu,
   Editor,
   Field,
   Header,
+  IconButton,
   LoadState,
   SettingRow,
   confirmDelete,
@@ -31,6 +29,7 @@ import {
   channelNames,
   defaultNotifyForm,
   notifyToForm,
+  supportedWebhookMethods,
   validateNotifyForm,
   type NotifyForm,
 } from "../lib/notifyForm";
@@ -39,17 +38,36 @@ import type { NotifyItem } from "../types";
 export default function Notifications() {
   const resource = useResource((signal) => api.notifications(signal));
   const [editing, setEditing] = useState<NotifyItem | null | undefined>();
-  const action = useAction();
-  const perform = (operation: () => Promise<unknown>, text: string) =>
-    void action.run(async () => {
-      try {
-        await operation();
-        Toast.success(text);
-        await resource.refresh();
-      } catch (error) {
-        errorToast(error);
-      }
-    });
+  const [testingId, setTestingId] = useState<number | null>(null);
+  const [togglingId, setTogglingId] = useState<number | null>(null);
+  const testNotify = async (item: NotifyItem) => {
+    setTestingId(item.id);
+    try {
+      await api.testNotification({
+        id: item.id,
+        method: item.method,
+        enable: item.enable,
+        params: buildNotifyParams(notifyToForm(item)),
+      });
+      Toast.success("测试通知已发送");
+    } catch (error) {
+      errorToast(error);
+    } finally {
+      setTestingId(null);
+    }
+  };
+  const toggleNotify = async (id: number, checked: boolean) => {
+    setTogglingId(id);
+    try {
+      await api.toggleNotification(id, checked ? 1 : 0);
+      Toast.success("通知状态已更新");
+      await resource.refresh();
+    } catch (error) {
+      errorToast(error);
+    } finally {
+      setTogglingId(null);
+    }
+  };
   return (
     <div className="page">
       <Header
@@ -76,13 +94,10 @@ export default function Notifications() {
         {!resource.loading &&
           !resource.error &&
           resource.data?.map((item) => (
-            <div className="notification-item" key={item.id}>
+            <div className="notification-item card-base" key={item.id}>
               <div className="item-content">
                 <h2>
-                  {channelNames[item.method]}{" "}
-                  <Tag size="small" color={item.enable ? "green" : "grey"}>
-                    {item.enable ? "已启用" : "已关闭"}
-                  </Tag>
+                  {channelNames[item.method]}
                 </h2>
                 <div className="item-meta">
                   通知 #{item.id} · 创建于 {formatTimestamp(item.createTime)}
@@ -92,48 +107,32 @@ export default function Notifications() {
                 <Switch
                   aria-label={`通知 ${item.id} 开关`}
                   checked={item.enable === 1}
-                  disabled={action.busy}
+                  disabled={togglingId === item.id}
                   onChange={(checked) =>
-                    perform(
-                      () => api.toggleNotification(item.id, checked ? 1 : 0),
-                      "通知状态已更新",
-                    )
+                    void toggleNotify(item.id, checked)
                   }
                 />
-                <ActionMenu
-                  disabled={action.busy}
-                  actions={[
-                    {
-                      label: "发送测试通知",
-                      icon: <IconSendStroked aria-hidden="true" />,
-                      onClick: () =>
-                        perform(
-                          () =>
-                            api.testNotification({
-                              id: item.id,
-                              method: item.method,
-                              enable: item.enable,
-                              params: buildNotifyParams(notifyToForm(item)),
-                            }),
-                          "测试通知已发送",
-                        ),
-                    },
-                    {
-                      label: "编辑通知",
-                      icon: <IconEditStroked aria-hidden="true" />,
-                      onClick: () => setEditing(item),
-                    },
-                    {
-                      label: "删除通知",
-                      icon: <IconDeleteStroked aria-hidden="true" />,
-                      danger: true,
-                      onClick: () =>
-                        confirmDelete("删除此通知渠道？", async () => {
-                          await api.deleteNotification(item.id);
-                          await resource.refresh();
-                        }),
-                    },
-                  ]}
+                <IconButton
+                  label="发送测试通知"
+                  icon={<IconSendStroked aria-hidden="true" />}
+                  disabled={testingId === item.id}
+                  onClick={() => void testNotify(item)}
+                />
+                <IconButton
+                  label="编辑通知"
+                  icon={<IconEditStroked aria-hidden="true" />}
+                  onClick={() => setEditing(item)}
+                />
+                <IconButton
+                  label="删除通知"
+                  icon={<IconDeleteStroked aria-hidden="true" />}
+                  danger
+                  onClick={() =>
+                    confirmDelete("删除此通知渠道？", async () => {
+                      await api.deleteNotification(item.id);
+                      await resource.refresh();
+                    })
+                  }
                 />
               </div>
             </div>
@@ -164,8 +163,7 @@ function NotificationEditor({
   const [form, setForm] = useState<NotifyForm>(() =>
     item ? notifyToForm(item) : defaultNotifyForm(),
   );
-  const [dirty, setDirty] = useState(false),
-    [error, setError] = useState("");
+  const [dirty, setDirty] = useState(false);
   const action = useAction();
   const change = <K extends keyof NotifyForm>(key: K, value: NotifyForm[K]) => {
     setDirty(true);
@@ -173,8 +171,10 @@ function NotificationEditor({
   };
   const submit = (test: boolean) => {
     const validation = validateNotifyForm(form);
-    setError(validation);
-    if (validation) return;
+    if (validation) {
+      Toast.warning(validation);
+      return;
+    }
     void action.run(async () => {
       try {
         const data = {
@@ -193,7 +193,7 @@ function NotificationEditor({
           onSaved();
         }
       } catch (err) {
-        setError(err instanceof Error ? err.message : "操作失败");
+        errorToast(err);
       }
     });
   };
@@ -205,9 +205,30 @@ function NotificationEditor({
       dirty={dirty}
       onClose={onClose}
       onSave={() => submit(false)}
+      footer={({ close }) => (
+        <div className="editor-actions task-editor-actions">
+          <Button
+            icon={<IconSendStroked aria-hidden="true" />}
+            disabled={action.busy}
+            onClick={() => submit(true)}
+          >
+            发送测试通知
+          </Button>
+          <Button onClick={close} disabled={action.busy}>
+            取消
+          </Button>
+          <Button
+            type="primary"
+            theme="solid"
+            loading={action.busy}
+            onClick={() => submit(false)}
+          >
+            保存
+          </Button>
+        </div>
+      )}
     >
       <div className="editor-form">
-        {error && <Banner type="danger" description={error} closeIcon={null} />}
         <Field label="通知渠道" required>
           <Select
             value={form.method}
@@ -229,7 +250,7 @@ function NotificationEditor({
               <Field label="HTTP 方法">
                 <Select
                   value={form.httpMethod}
-                  optionList={["POST", "GET", "PUT", "PATCH", "DELETE"].map(
+                  optionList={supportedWebhookMethods.map(
                     (value) => ({ label: value, value }),
                   )}
                   onChange={(v) => change("httpMethod", String(v))}
@@ -260,7 +281,7 @@ function NotificationEditor({
                 />
               </Field>
             </div>
-            <SettingRow label="包含正文">
+            <SettingRow label="包含正文" variant="bordered">
               <Switch
                 aria-label="包含正文"
                 checked={form.needContent ?? true}
@@ -329,27 +350,20 @@ function NotificationEditor({
             ))}
           </>
         )}
-        <SettingRow label="启用通知">
+        <SettingRow label="启用通知" variant="bordered">
           <Switch
             aria-label="启用通知"
             checked={form.enable}
             onChange={(v) => change("enable", v)}
           />
         </SettingRow>
-        <SettingRow label="无变更时不发送">
+        <SettingRow label="无变更时不发送" variant="bordered">
           <Switch
             aria-label="无变更时不发送"
             checked={Boolean(form.notSendNull)}
             onChange={(v) => change("notSendNull", v)}
           />
         </SettingRow>
-        <Button
-          icon={<IconSendStroked aria-hidden="true" />}
-          disabled={action.busy}
-          onClick={() => submit(true)}
-        >
-          发送测试通知
-        </Button>
       </div>
     </Editor>
   );
