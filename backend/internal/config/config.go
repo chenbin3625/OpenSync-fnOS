@@ -28,7 +28,8 @@ type ServerConfig struct {
 	PasswdStr       string
 	// AllowedOrigins lists the origins allowed to perform mutations. Entries are
 	// full origins ("http://nas.example:5666") or bare hosts ("nas.example");
-	// ports are ignored. Configuring it retires the Referer-based same-origin
+	// full origins match scheme and effective port exactly, while bare hosts
+	// accept any port. Configuring it retires the Referer-based same-origin
 	// fallback in platform.GatewayRequired, so a deployment that sets it must
 	// list the address the NAS is actually reached at — otherwise the UI's own
 	// writes are rejected.

@@ -49,6 +49,29 @@ func normalizePathListForStorage(value interface{}) string {
 	return encodePathList(parsePathList(value))
 }
 
+func syncPathsOverlap(srcPaths, dstPaths []string) bool {
+	for _, src := range srcPaths {
+		for _, dst := range dstPaths {
+			if syncPathContains(src, dst) || syncPathContains(dst, src) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func syncPathContains(parent, candidate string) bool {
+	parent = path.Clean(strings.TrimSpace(parent))
+	candidate = path.Clean(strings.TrimSpace(candidate))
+	if parent == candidate {
+		return true
+	}
+	if parent == "/" {
+		return true
+	}
+	return strings.HasPrefix(candidate, parent+"/")
+}
+
 // cleanPathList drops blank entries and duplicates. Duplicates matter because a
 // path repeated in the selection is compared against itself when the shared
 // parent is derived, which yields a suffix carrying a leading slash.

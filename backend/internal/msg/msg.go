@@ -25,6 +25,7 @@ const (
 	JobRunning              = "当前有任务执行中，请稍后再试"
 	JobRunningCannotDelete  = "当前同步任务正在执行中，不能删除"
 	JobDeleteWaitTimeout    = "任务仍在停止中，请稍后重试删除"
+	SyncPathOverlap         = "来源目录和目标目录不能相同或互相嵌套"
 	IntervalLost            = "创建间隔型作业时，间隔必填"
 	CronLost                = "创建cron型任务时，至少有一项不为空"
 	CannotResumeLostJob     = "作业不存在无法恢复，请删除后重新创建"

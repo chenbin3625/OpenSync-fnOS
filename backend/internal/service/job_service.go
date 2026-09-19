@@ -167,6 +167,9 @@ func ValidateJobInput(job map[string]interface{}) {
 		util.ToInt64(job["alistId"]) <= 0 {
 		panicPublic(msg.LostPart)
 	}
+	if syncPathsOverlap(parsePathList(job["srcPath"]), parsePathList(job["dstPath"])) {
+		panicPublic(msg.SyncPathOverlap)
+	}
 
 	if enable, ok := job["enable"]; ok {
 		enableInt := util.ToInt(enable)
@@ -559,6 +562,25 @@ func GetTaskItemList(req map[string]interface{}) map[string]interface{} {
 
 // RemoveTask deletes a task
 func RemoveTask(taskID int64) {
+	task, err := mapper.GetJobTaskByID(taskID)
+	if err != nil {
+		panicPublicIf(err, msg.TaskNotFound)
+	}
+	status := taskStatusFromValue(task["status"])
+	if status == taskStatusWaiting || status == taskStatusRunning {
+		panicPublic(msg.JobRunningCannotDelete)
+	}
+
+	jobID := util.ToInt64(task["jobId"])
+	jobClientListMu.RLock()
+	client := jobClientList[jobID]
+	jobClientListMu.RUnlock()
+	if client != nil {
+		if current := client.currentTask(); current != nil && current.TaskID == taskID {
+			panicPublic(msg.JobRunningCannotDelete)
+		}
+	}
+
 	if err := mapper.DeleteJobTaskByTaskID(taskID); err != nil {
 		panic(err.Error())
 	}
