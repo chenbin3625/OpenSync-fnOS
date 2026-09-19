@@ -1,5 +1,5 @@
 appname=opensync
-version=0.0.2
+version=0.0.3
 display_name=OpenSync
 desc=飞牛 NAS 文件同步管理工具。首先添加存储引擎（支持 AList/OpenList），然后创建同步任务，即可在不同存储之间自动同步文件。支持定时任务、多种同步模式、实时进度查看与多渠道通知。
 platform=x86
@@ -15,4 +15,4 @@ micro_app=true
 ctl_stop=true
 checkport=false
 disable_authorization_path=false
-changelog=v0.0.2：优化实时任务面板紧凑度与进度展示，历史任务演示数据，引擎/通知按钮按条目禁用，路径选择器展示完整路径，错误提示改用 Toast，筛选圆角修复，表格与设置行高度统一。
+changelog=v0.0.3：标题栏固定顶部不随滚动，演示数据仅 dev 模式展示，错误提示统一 Toast。

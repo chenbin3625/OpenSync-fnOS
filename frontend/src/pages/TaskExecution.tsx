@@ -53,7 +53,8 @@ const statusTabs = [
   { key: -1, label: "其他", count: "other" },
 ] as const;
 
-export function Realtime({ jobId, demo = false }: { jobId: number; demo?: boolean }) {
+export function Realtime({ jobId }: { jobId: number }) {
+  const demo = import.meta.env.DEV;
   const { currentTask, refreshCurrentTask } = useRealtimeTask(
     String(jobId),
     true,
@@ -210,7 +211,8 @@ export function Realtime({ jobId, demo = false }: { jobId: number; demo?: boolea
   );
 }
 
-export function History({ jobId, demo = false }: { jobId: number; demo?: boolean }) {
+export function History({ jobId }: { jobId: number }) {
+  const demo = import.meta.env.DEV;
   const [page, setPage] = useState(1),
     [size, setSize] = useState(10);
   const [status, setStatus] = useState<number | undefined>(),
@@ -252,8 +254,9 @@ export function History({ jobId, demo = false }: { jobId: number; demo?: boolean
     { id: 9012, status: 7, errMsg: "认证失败：token 已过期", createTime: now - 1036800, runTime: now - 1036800 + 3, successNum: 0, failNum: 1, allNum: 1 },
   ] : [];
 
-  const rows = demo ? demoRecords : (resource.data?.dataList || []);
-  const totalCount = demo ? demoRecords.length : (resource.data?.count || 0);
+  const realRows = resource.data?.dataList || [];
+  const rows = demo && realRows.length === 0 ? demoRecords : realRows;
+  const totalCount = demo && !resource.data?.count ? demoRecords.length : (resource.data?.count || 0);
   const retry = (record: TaskRecord) =>
     void action.run(async () => {
       try {
