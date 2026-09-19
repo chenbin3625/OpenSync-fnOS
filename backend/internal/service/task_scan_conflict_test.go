@@ -91,6 +91,30 @@ func TestFullSyncDeletesConflictingDestinationDirectoryBeforeQueueingFile(t *tes
 	}
 }
 
+func TestRetryDeleteDirectoryPreservesObjectTypeWithoutTrailingSlash(t *testing.T) {
+	jt := &JobTask{
+		Job: map[string]interface{}{
+			"scanIntervalT": 0,
+		},
+	}
+	jt.initRuntime()
+
+	jt.retryTaskItem(map[string]interface{}{
+		"type":     taskItemTypeDelete.Int(),
+		"isPath":   taskItemPath.Int(),
+		"dstPath":  "/dst/",
+		"fileName": "old-dir",
+	})
+
+	waiting := jt.Waiting.snapshot()
+	if len(waiting) != 1 {
+		t.Fatalf("waiting len = %d, want one queued delete", len(waiting))
+	}
+	if waiting[0].IsPath != taskItemPath {
+		t.Fatalf("queued delete IsPath = %d, want path", waiting[0].IsPath)
+	}
+}
+
 func TestFullSyncSkipsEquivalentEscapedDestinationFileNameWithSameSize(t *testing.T) {
 	var persisted []map[string]interface{}
 	restorePersist := stubPersistJobTaskItems(t, &persisted, nil)

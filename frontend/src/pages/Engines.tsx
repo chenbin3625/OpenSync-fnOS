@@ -19,7 +19,7 @@ import {
   errorToast,
 } from "../components/common";
 import { useAction, useResource } from "../lib/hooks";
-import { formatTimestamp } from "../utils/date";
+
 import type { AlistItem } from "../types";
 
 export default function Engines() {
@@ -63,8 +63,7 @@ export default function Engines() {
                 <h2>{engine.remark || engine.userName || `引擎 #${engine.id}`}</h2>
                 <div className="mono muted">{engine.url}</div>
                 <div className="item-meta">
-                  账号 {engine.userName || "—"} · 创建于{" "}
-                  {formatTimestamp(engine.createTime)}
+                  账号 {engine.userName || "—"}
                 </div>
               </div>
               <div className="row-actions">

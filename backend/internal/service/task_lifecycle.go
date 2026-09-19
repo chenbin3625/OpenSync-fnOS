@@ -24,18 +24,17 @@ func (jt *JobTask) finishSubmittedTask(persistErr error) {
 }
 
 func (jt *JobTask) finishSuccessfulTask() {
-	// Mark the job idle and clear the current task BEFORE persisting status +
-	// sending notifications. finishJobTaskStatus -> SendTaskNotification makes
-	// synchronous HTTP calls (up to 30s per notify config) and would otherwise
-	// keep the job "doing", blocking the next scheduled run and manual/retry/
-	// delete operations until all webhooks are delivered.
-	jt.JobClient.markDone()
-	jt.JobClient.clearCurrentTask(jt)
-	if err := jt.updateTaskStatus(); err != nil {
+	status, taskNum, duration, err := jt.updateTaskStatus()
+	if err != nil {
 		jt.finishFailedTask(taskStatusUpdateErrorMessage(err))
 		return
 	}
+	// Mark the job idle after the DB update succeeds, before synchronous
+	// notification delivery can block the next run.
+	jt.JobClient.markDone()
+	jt.JobClient.clearCurrentTask(jt)
 	jt.notifyProgressNow()
+	SendTaskNotification(jt.TaskID, status.Int(), taskNum, duration, jt.CreateTime)
 }
 
 func taskPersistenceErrorMessage(err error) string {
@@ -62,7 +61,7 @@ func (jt *JobTask) finishFailedTask(errMsg string) {
 	}
 }
 
-func (jt *JobTask) updateTaskStatus() error {
+func (jt *JobTask) updateTaskStatus() (taskStatus, map[string]interface{}, int, error) {
 	taskNum := GetCuTaskNum(jt.TaskID)
 	failOrOtherNum := util.ToInt(taskNum["failNum"]) + util.ToInt(taskNum["otherNum"])
 	allNum := util.ToInt(taskNum["allNum"])
@@ -72,7 +71,7 @@ func (jt *JobTask) updateTaskStatus() error {
 	taskNum["scanFinish"] = jt.ScanFinish.Load()
 	taskNum["scan"] = jt.scanProgress()
 
-	return finishJobTaskStatus(jt.TaskID, status, nil, taskNum, duration, jt.CreateTime)
+	return status, taskNum, duration, finishJobTaskStatus(jt.TaskID, status, nil, taskNum)
 }
 
 func finalTaskStatus(isBreak bool, ctxErr error, allNum, failOrOtherNum int) taskStatus {
@@ -91,14 +90,11 @@ func finalTaskStatus(isBreak bool, ctxErr error, allNum, failOrOtherNum int) tas
 	return taskStatusSuccess
 }
 
-func finishJobTaskStatus(taskID int64, status taskStatus, errMsg *string, taskNum map[string]interface{}, duration int, createTime float64) error {
+func finishJobTaskStatus(taskID int64, status taskStatus, errMsg *string, taskNum map[string]interface{}) error {
 	taskNumJSON, _ := json.Marshal(taskNum)
 	if err := mapper.UpdateJobTaskStatusAndNum(taskID, status.Int(), errMsg, string(taskNumJSON)); err != nil {
 		return err
 	}
-
-	// Send notifications
-	SendTaskNotification(taskID, status.Int(), taskNum, duration, createTime)
 	return nil
 }
 

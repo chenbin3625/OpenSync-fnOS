@@ -38,6 +38,7 @@ export function useResource<T>(
       }
     }
   }, []);
+  const depsKey = JSON.stringify(dependencies);
   useEffect(() => {
     setData(null);
     void refresh();
@@ -52,7 +53,8 @@ export function useResource<T>(
       requestRef.current++;
       clearInterval(interval);
     };
-  }, [...dependencies, poll, refresh]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [depsKey, poll, refresh]);
   return { data, loading, error, refresh };
 }
 

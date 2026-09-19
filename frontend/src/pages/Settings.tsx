@@ -9,7 +9,7 @@ import { useAction, useResource } from "../lib/hooks";
 import type { SystemSettings } from "../types";
 
 const fields = [
-  { key: "copyConcurrency", label: "复制并发数", min: 1, max: 100, unit: "个" },
+  { key: "copyConcurrency", label: "操作并发数", min: 1, max: 100, unit: "个" },
   { key: "scanConcurrency", label: "扫描并发数", min: 1, max: 20, unit: "个" },
   { key: "maxRetries", label: "失败重试次数", min: 0, max: 10, unit: "次" },
   { key: "taskTimeout", label: "任务超时", min: 0, max: 8760, unit: "小时" },

@@ -192,7 +192,16 @@ func cloneJobConfig(job map[string]interface{}) map[string]interface{} {
 	}
 	cloned := make(map[string]interface{}, len(job))
 	for key, value := range job {
-		cloned[key] = value
+		switch v := value.(type) {
+		case map[string]interface{}:
+			cloned[key] = cloneJobConfig(v)
+		case []interface{}:
+			cp := make([]interface{}, len(v))
+			copy(cp, v)
+			cloned[key] = cp
+		default:
+			cloned[key] = value
+		}
 	}
 	return cloned
 }
@@ -335,9 +344,14 @@ func (jc *JobClient) runMarkedJobConfig(sourceTaskID int64, statuses []taskStatu
 }
 
 // DoJob executes the job, waiting until any current run has finished.
+// Gives up after 30 attempts (~5 minutes) to avoid blocking a goroutine forever.
 func (jc *JobClient) DoJob() {
-	for !jc.tryMarkDoing() {
-		if !jc.enabled() {
+	const maxAttempts = 30
+	for attempt := 0; !jc.tryMarkDoing(); attempt++ {
+		if !jc.enabled() || attempt >= maxAttempts {
+			if attempt >= maxAttempts {
+				log.Printf("DoJob: gave up waiting for job %d after %d attempts", jc.JobID, maxAttempts)
+			}
 			return
 		}
 		jc.waitUntilIdle(10 * time.Second)

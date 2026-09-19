@@ -32,7 +32,6 @@ func TestConfigFileInvalidNumbersKeepDefaults(t *testing.T) {
 	configPath := filepath.Join("data", "config.ini")
 	if err := os.WriteFile(configPath, []byte(`[opensync]
 port=not-a-number
-expires=5
 task_timeout=also-bad
 `), 0644); err != nil {
 		t.Fatalf("WriteFile(config.ini) error: %v", err)
@@ -44,9 +43,6 @@ task_timeout=also-bad
 	}
 	if cfg.Server.Port != 8023 {
 		t.Fatalf("Port = %d, want default 8023 for invalid config value", cfg.Server.Port)
-	}
-	if cfg.Server.Expires != 5 {
-		t.Fatalf("Expires = %d, want valid config override 5", cfg.Server.Expires)
 	}
 	if cfg.Server.Timeout != 48 {
 		t.Fatalf("Timeout = %d, want default 48 for invalid config value", cfg.Server.Timeout)
@@ -75,7 +71,6 @@ func TestEnvironmentInvalidNumbersKeepDefaultsAndLog(t *testing.T) {
 	}
 	t.Setenv("OPENSYNC_PORT", "not-a-number")
 	t.Setenv("OPENSYNC_BIND", "0.0.0.0")
-	t.Setenv("OPENSYNC_EXPIRES", "6")
 	t.Setenv("OPENSYNC_TASK_TIMEOUT", "also-bad")
 
 	var logBuf bytes.Buffer
@@ -89,9 +84,6 @@ func TestEnvironmentInvalidNumbersKeepDefaultsAndLog(t *testing.T) {
 	}
 	if cfg.Server.Port != 8023 {
 		t.Fatalf("Port = %d, want default 8023 for invalid env value", cfg.Server.Port)
-	}
-	if cfg.Server.Expires != 6 {
-		t.Fatalf("Expires = %d, want valid env override 6", cfg.Server.Expires)
 	}
 	if cfg.Server.Timeout != 48 {
 		t.Fatalf("Timeout = %d, want default 48 for invalid env value", cfg.Server.Timeout)
@@ -142,7 +134,7 @@ allowed_origins = http://10.10.11.250:5666, nas.example.com
 
 	// Saving unrelated settings must not drop the key or the file's comments.
 	if err := UpdateSystemSettings(SystemSettings{
-		Expires: 7, TaskTimeout: 48, TaskSave: 30,
+		TaskTimeout: 48, TaskSave: 30,
 		CopyConcurrency: 5, ScanConcurrency: 8, MaxRetries: 2,
 	}); err != nil {
 		t.Fatalf("UpdateSystemSettings() error: %v", err)

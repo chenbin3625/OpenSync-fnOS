@@ -637,7 +637,7 @@ func TestUpdateTaskStatusReturnsPersistenceErrors(t *testing.T) {
 	jt.initRuntime()
 	jt.ScanFinish.Store(true)
 
-	err := jt.updateTaskStatus()
+	_, _, _, err := jt.updateTaskStatus()
 	if err == nil {
 		t.Fatalf("updateTaskStatus() error = nil, want database write error")
 	}
@@ -777,6 +777,74 @@ func TestNewTaskContextFallsBackToCancelableContextWhenTimeoutDisabled(t *testin
 	cancel()
 	if err := ctx.Err(); err != context.Canceled {
 		t.Fatalf("ctx.Err() = %v, want context.Canceled", err)
+	}
+}
+
+func TestFinishSuccessfulTaskReleasesJobBeforeSlowNotifications(t *testing.T) {
+	testDB := newServiceTaskStatusTestDB(t)
+	restoreDB := mapperDBForServiceTest(testDB)
+	defer restoreDB()
+	if _, err := testDB.Exec(`CREATE TABLE job(
+		id integer primary key,
+		srcPath text,
+		dstPath text
+	)`); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if _, err := testDB.Exec(`CREATE TABLE notify(
+		id integer primary key,
+		enable integer,
+		method integer,
+		params text
+	)`); err != nil {
+		t.Fatalf("create notify: %v", err)
+	}
+
+	requestStarted := make(chan struct{})
+	releaseResponse := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(requestStarted)
+		<-releaseResponse
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+	defer close(releaseResponse)
+
+	if _, err := testDB.Exec("INSERT INTO job(id, srcPath, dstPath) VALUES (1, '/src/', '/dst/')"); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+	if _, err := testDB.Exec("INSERT INTO notify(id, enable, method, params) VALUES (1, 1, 0, ?)", `{"url":"`+server.URL+`"}`); err != nil {
+		t.Fatalf("insert notify: %v", err)
+	}
+
+	client := &JobClient{JobID: 1, Job: map[string]interface{}{"id": int64(1), "enable": 1}}
+	if !client.tryMarkDoing() {
+		t.Fatalf("tryMarkDoing() = false, want true")
+	}
+	jt := &JobTask{
+		TaskID:         10,
+		JobClient:      client,
+		Job:            map[string]interface{}{"id": int64(1), "srcPath": "/src/", "dstPath": "/dst/"},
+		CreateTime:     float64(time.Now().Unix()),
+		FinishedCounts: make(map[taskStatus]int),
+		FinishedSizes:  make(map[taskStatus]int64),
+	}
+	jt.initRuntime()
+	client.setCurrentTask(jt)
+
+	done := make(chan struct{})
+	go func() {
+		jt.finishSuccessfulTask()
+		close(done)
+	}()
+
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatalf("notification request did not start")
+	}
+	if client.isBusy() {
+		t.Fatalf("job still busy while notification is blocked")
 	}
 }
 

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"database/sql"
 	"errors"
 	"opensync/internal/mapper"
 	"opensync/internal/msg"
@@ -203,30 +204,31 @@ func TestDoAllJobManualPropagatesMapperErrors(t *testing.T) {
 	DoAllJobManual()
 }
 
-func TestGetUserUsesSentinelForUserNotFound(t *testing.T) {
-	oldGetUserByName := getUserByName
-	oldGetUserByID := getUserByID
+func TestDoAllJobManualSkipsJobClientCreationPanic(t *testing.T) {
+	oldGetEnableJobList := getEnableJobList
+	previousClients := jobClientList
 	defer func() {
-		getUserByName = oldGetUserByName
-		getUserByID = oldGetUserByID
+		getEnableJobList = oldGetEnableJobList
+		jobClientListMu.Lock()
+		jobClientList = previousClients
+		jobClientListMu.Unlock()
 	}()
-
-	getUserByName = func(string) (map[string]interface{}, error) {
-		return nil, mapper.ErrUserNotFound
+	getEnableJobList = func() ([]map[string]interface{}, error) {
+		return []map[string]interface{}{{"id": int64(999)}}, nil
 	}
-	getUserByID = mapper.GetUserByID
+	jobClientListMu.Lock()
+	jobClientList = map[int64]*JobClient{}
+	jobClientListMu.Unlock()
 
-	defer func() {
-		recovered := recover()
-		if recovered == nil {
-			t.Fatalf("GetUser() did not panic")
-		}
-		if err, ok := recovered.(interface{ Error() string }); !ok || err.Error() != msg.UserNotFound {
-			t.Fatalf("GetUser() panic = %#v, want public user_not_found", recovered)
-		}
-	}()
+	testDB, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open() error: %v", err)
+	}
+	defer testDB.Close()
+	restoreDB := mapper.SetDBForTest(testDB)
+	defer restoreDB()
 
-	GetUser(0, "missing")
+	DoAllJobManual()
 }
 
 func TestRemoveJobClientRejectsRunningJobWithoutStoppingIt(t *testing.T) {

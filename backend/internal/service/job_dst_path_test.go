@@ -2,6 +2,16 @@ package service
 
 import "testing"
 
+func requirePublicPanic(t *testing.T, fn func()) {
+	t.Helper()
+	defer func() {
+		if recovered := recover(); recovered == nil {
+			t.Fatalf("expected panic")
+		}
+	}()
+	fn()
+}
+
 func TestParsePathListPreservesColonInJSONPaths(t *testing.T) {
 	got := parsePathList(`["/movies/director:cut","/backup"]`)
 	want := []string{"/movies/director:cut", "/backup"}

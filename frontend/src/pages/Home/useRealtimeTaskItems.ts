@@ -6,6 +6,7 @@ import {
   mergeTaskItems,
   normalizeTaskItemPage,
   pageTaskItems,
+  realtimeRunningSnapshotIsComplete,
   shouldReplaceRealtimeRows,
   shouldResetRealtimeSnapshot,
   sortTaskItemsByCreateTimeDesc,
@@ -96,7 +97,7 @@ export function useRealtimeTaskItems({
     const replaceRows = shouldReplaceRealtimeRows(lastLoaded, loadKey);
     const resetSnapshot = shouldResetRealtimeSnapshot(lastLoaded, loadKey);
 
-    if (activeTab === 1) {
+    if (activeTab === 1 && realtimeRunningSnapshotIsComplete(currentTask)) {
       // Invalidate any in-flight server fetch and reset the fetch throttle so
       // returning to a non-running tab always fetches fresh.
       requestRef.current += 1;
@@ -121,7 +122,8 @@ export function useRealtimeTaskItems({
       return;
     }
 
-    // Non-running tabs fetch server-side rows. Throttle to at most one request
+    // Non-running tabs, and running tabs without a complete live snapshot, fetch
+    // server-side rows. Throttle to at most one request
     // per poll interval per view: currentTask changes on every SSE push, and
     // refetching on each push would pile up requests against a slow backend.
     // A fresh view (new tab / task / page) always fetches immediately.
@@ -163,8 +165,8 @@ export function useRealtimeTaskItems({
           {
             id: jobId,
             status: activeTab,
-            pageSize,
-            pageNum: tabTaskPage,
+            pageSize: activeTab === 1 ? undefined : pageSize,
+            pageNum: activeTab === 1 ? undefined : tabTaskPage,
           },
           { silent: true, signal: controller.signal },
         );

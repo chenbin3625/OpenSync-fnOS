@@ -412,7 +412,7 @@ func (jt *JobTask) executeFullSyncPlan(plan *fullSyncPlan) {
 			continue
 		}
 		item := plan.extraDeletes[key]
-		jt.delFile(item.dir, item.name, item.metadata.Size)
+		jt.queueDelFile(item.dir, item.name, item.metadata.Size, strings.HasSuffix(item.name, "/"))
 	}
 }
 

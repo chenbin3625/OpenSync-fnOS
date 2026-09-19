@@ -39,7 +39,6 @@ func TestConfigFileReadsRuntimeSystemSettings(t *testing.T) {
 
 	configPath := filepath.Join("data", "config.ini")
 	if err := os.WriteFile(configPath, []byte(`[opensync]
-expires=9
 task_save=30
 task_timeout=12
 copy_concurrency=13
@@ -50,9 +49,6 @@ max_retries=4
 	}
 
 	cfg := GetConfig()
-	if cfg.Server.Expires != 9 {
-		t.Fatalf("Expires = %d, want 9", cfg.Server.Expires)
-	}
 	if cfg.Server.TaskSave != 30 {
 		t.Fatalf("TaskSave = %d, want 30", cfg.Server.TaskSave)
 	}
@@ -75,7 +71,6 @@ func TestUpdateSystemSettingsPersistsAndUpdatesMemory(t *testing.T) {
 	_ = GetConfig()
 
 	settings := SystemSettings{
-		Expires:         6,
 		TaskTimeout:     48,
 		TaskSave:        15,
 		CopyConcurrency: 11,
@@ -97,7 +92,6 @@ func TestUpdateSystemSettingsPersistsAndUpdatesMemory(t *testing.T) {
 	}
 	text := string(content)
 	for _, want := range []string{
-		"expires=6",
 		"task_timeout=48",
 		"task_save=15",
 		"copy_concurrency=11",
@@ -116,7 +110,6 @@ func TestUpdateSystemSettingsRejectsScanConcurrencyAboveTwenty(t *testing.T) {
 
 	before := GetSystemSettings()
 	err := UpdateSystemSettings(SystemSettings{
-		Expires:         before.Expires,
 		TaskTimeout:     before.TaskTimeout,
 		TaskSave:        before.TaskSave,
 		CopyConcurrency: before.CopyConcurrency,
@@ -138,7 +131,6 @@ func TestUpdateSystemSettingsRejectsMaxRetriesAboveTen(t *testing.T) {
 
 	before := GetSystemSettings()
 	err := UpdateSystemSettings(SystemSettings{
-		Expires:         before.Expires,
 		TaskTimeout:     before.TaskTimeout,
 		TaskSave:        before.TaskSave,
 		CopyConcurrency: before.CopyConcurrency,
@@ -167,7 +159,6 @@ func TestSystemSettingsCanBeReadWhileUpdated(t *testing.T) {
 		<-start
 		for i := 0; i < 200; i++ {
 			settings := SystemSettings{
-				Expires:         6 + i%3,
 				TaskTimeout:     24 + i%5,
 				TaskSave:        15 + i%7,
 				CopyConcurrency: 3 + i%5,

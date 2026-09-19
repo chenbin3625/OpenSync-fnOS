@@ -1,17 +1,5 @@
 package model
 
-// User represents user_list table. Sensitive fields intentionally have no json
-// tag: the structs must never be serialized to an API response by accident
-// (handlers pass explicit public maps instead).
-type User struct {
-	ID          int64  `db:"id"`
-	UserName    string `db:"userName"`
-	Passwd      string `db:"passwd"`
-	RecoveryKey string `db:"recoveryKey"`
-	SQLVersion  int64  `db:"sqlVersion"`
-	CreateTime  int64  `db:"createTime"`
-}
-
 // Alist represents alist_list table
 type Alist struct {
 	ID         int64  `db:"id"`
@@ -123,9 +111,4 @@ func Success(data interface{}) Response {
 // Error returns an error response
 func Error(msg string) Response {
 	return Response{Code: 500, Data: nil, Msg: msg}
-}
-
-// Unauthorized returns a 401 response
-func Unauthorized(msg string) Response {
-	return Response{Code: 401, Data: nil, Msg: msg}
 }

@@ -65,6 +65,85 @@ test("realtime view can transition from idle to an active task", async ({ page }
   expect(errors).toEqual([]);
 });
 
+test("realtime view loads running rows when the live snapshot is missing", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(globalThis, "ReadableStream", { value: undefined });
+    Object.defineProperty(globalThis, "EventSource", { value: undefined });
+  });
+  const activeTask = {
+    taskId: 8,
+    scanFinish: true,
+    createTime: 1,
+    duration: 1,
+    num: { wait: 0, running: 1, success: 0, fail: 0, other: 0 },
+    size: { wait: 0, running: 1, success: 0, fail: 0, other: 0 },
+    doneSize: 0,
+    remainSize: 1,
+    speed: 1,
+    speedAvg: 1,
+    remainTime: 1,
+  };
+
+  await page.route("**/app/opensync/svr/**", async (route) => {
+    const url = new URL(route.request().url());
+    const success = (data: unknown) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ code: 200, data, msg: "" }),
+      });
+    if (url.pathname.endsWith("/session"))
+      return success({ uid: 1, development: false, version: "test" });
+    if (url.pathname.endsWith("/alist")) return success([]);
+    if (url.pathname.endsWith("/job") && url.searchParams.get("current")) {
+      if (url.searchParams.get("status") === "1") {
+        return success({
+          dataList: [
+            {
+              id: 10,
+              fileName: "mobile-running-file.txt",
+              srcPath: "/src",
+              dstPath: "/dst",
+              fileSize: 1024,
+              type: 0,
+              status: 1,
+              progress: 42,
+            },
+          ],
+          count: 1,
+        });
+      }
+      return success(activeTask);
+    }
+    if (url.pathname.endsWith("/job")) {
+      return success({
+        dataList: [
+          {
+            id: 1,
+            enable: 1,
+            remark: "手机实时任务",
+            srcPath: '["/src"]',
+            dstPath: '["/dst"]',
+            alistId: 1,
+            useCacheT: 0,
+            useCacheS: 0,
+            method: 0,
+            interval: 0,
+            isCron: 2,
+          },
+        ],
+        count: 1,
+      });
+    }
+    return success(null);
+  });
+
+  await page.goto("/app/opensync/tasks?jobId=1&tab=realtime");
+
+  const mobileList = page.locator(".mobile-data").last();
+  await expect(mobileList.getByText("mobile-running-file.txt")).toBeVisible();
+  await expect(mobileList.getByText("42%")).toBeVisible();
+});
+
 test("engine connectivity checks are serialized", async ({ page }) => {
   let releaseRequest: (() => void) | undefined;
   const requestStarted = new Promise<void>((resolve) => {

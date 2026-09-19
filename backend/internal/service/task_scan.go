@@ -169,7 +169,7 @@ func (jt *JobTask) retryTaskItem(item map[string]interface{}) {
 
 	switch copyType {
 	case taskItemTypeDelete:
-		jt.delFile(dstPath, fileName, fileSize)
+		jt.queueDelFile(dstPath, fileName, fileSize, isPath)
 	case taskItemTypeCopy, taskItemTypeMove:
 		if isPath {
 			jt.retryMkdir(srcPath, dstPath, copyType)
@@ -339,6 +339,28 @@ func (jt *JobTask) delFile(path, fileName string, size interface{}) taskStatus {
 	}
 	jt.DelHook(path, fileName, delSize, status, errMsg, boolToTaskItemObject(isPath), createTime)
 	return status
+}
+
+// queueDelFile enqueues a delete operation into the waiting queue so the
+// executor goroutine runs it concurrently, just like copy/move items.
+func (jt *JobTask) queueDelFile(path, fileName string, size interface{}, isPath bool) {
+	if jt.isBreak() {
+		return
+	}
+	name := fileName
+	if isPath {
+		name = strings.TrimSuffix(fileName, "/")
+	}
+	var delSize interface{}
+	if !isPath {
+		delSize = size
+	}
+	ci := newCopyItem(jt, jt.AlistClient, "", path, name, delSize, taskItemTypeDelete)
+	ci.IsPath = boolToTaskItemObject(isPath)
+	if !jt.Waiting.pushWait(jt.context(), ci) {
+		ci.setStatus(taskStatusStopped)
+		jt.DelHook(path, fileName, delSize, taskStatusStopped, nil, boolToTaskItemObject(isPath), ci.CreateTime)
+	}
 }
 
 func (jt *JobTask) listDir(path string, firstDst bool, spec *ignore.GitIgnore, rootPath string, isSrc bool) (FileListResult, error) {

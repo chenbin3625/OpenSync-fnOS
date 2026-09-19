@@ -217,7 +217,10 @@ export default function TaskEditor({
                     <Input
                       inputMode="numeric"
                       value={String(form.interval)}
-                      onChange={(value) => change("interval", Number(value))}
+                      onChange={(value) => {
+                        const n = Number(value);
+                        change("interval", Number.isFinite(n) ? n : 0);
+                      }}
                     />
                   </Field>
                 )}
@@ -256,9 +259,13 @@ export default function TaskEditor({
                         <Input
                           inputMode="decimal"
                           value={String(form[`${kind}FileSize`])}
-                          onChange={(value) =>
-                            change(`${kind}FileSize`, Number(value))
-                          }
+                          onChange={(value) => {
+                            const n = Number(value);
+                            change(
+                              `${kind}FileSize`,
+                              Number.isFinite(n) ? n : 0,
+                            );
+                          }}
                         />
                         <Select
                           aria-label={

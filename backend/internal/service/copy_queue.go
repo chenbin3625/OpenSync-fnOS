@@ -146,6 +146,12 @@ func (q *copyQueue) subWaitStatsLocked(item *CopyItem) {
 	}
 	q.waitCount--
 	q.waitSize -= item.countableWaitSize()
+	if q.waitCount < 0 {
+		q.waitCount = 0
+	}
+	if q.waitSize < 0 {
+		q.waitSize = 0
+	}
 }
 
 func (q *copyQueue) compactLocked() {

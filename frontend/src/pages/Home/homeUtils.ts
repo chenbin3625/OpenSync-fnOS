@@ -33,8 +33,8 @@ export const taskItemStatusNames: Record<number, string> = {
   5: "出错（将重试）",
   6: "失败中",
   7: "已失败",
-  8: "等待重试中",
-  9: "等待重试前",
+  10: "等待重试中",
+  11: "等待重试前",
 };
 export const taskItemStatusOptions = Object.entries(taskItemStatusNames).map(
   ([value, label]) => ({ value: Number(value), label }),

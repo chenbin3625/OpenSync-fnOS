@@ -90,7 +90,13 @@ export function buildNotifyParams(form: NotifyForm) {
 export function notifyToForm(
   item: Pick<NotifyItem, "id" | "method" | "enable" | "params">,
 ): NotifyForm {
-  const params = JSON.parse(item.params || "{}");
+  const params = (() => {
+    try {
+      return JSON.parse(item.params || "{}");
+    } catch {
+      return {};
+    }
+  })();
   return {
     ...defaultNotifyForm(),
     ...params,

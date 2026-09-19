@@ -171,6 +171,14 @@ export function normalizeTaskItemPage(
   return { rows: [], total: 0 };
 }
 
+export function realtimeRunningSnapshotIsComplete(
+  task: Pick<CurrentTaskData, "doingTask" | "num">,
+): boolean {
+  const runningCount = Number(task.num?.running || 0);
+  const snapshotCount = task.doingTask?.length || 0;
+  return runningCount <= 0 || snapshotCount >= runningCount;
+}
+
 export function sortTaskItemsByCreateTimeDesc(rows: TaskItem[]): TaskItem[] {
   return [...rows].sort((a, b) => {
     const left = Number(a.createTime || 0);

@@ -174,10 +174,17 @@ func (jt *JobTask) markWaitingAsAborted() {
 	for _, item := range items {
 		item.setStatus(taskStatusStopped)
 		item.mu.RLock()
-		taskItems = append(taskItems, NewCopyJobTaskItem(
-			jt.TaskID, item.SrcPath, item.DstPath, item.FileName, item.FileSize,
-			item.AlistTaskID, taskStatusStopped, item.ErrMsg, taskItemFile, item.CopyType, item.CreateTime,
-		))
+		if item.CopyType == taskItemTypeDelete {
+			taskItems = append(taskItems, NewDeleteJobTaskItem(
+				jt.TaskID, item.DstPath, item.FileName, item.FileSize,
+				taskStatusStopped, item.ErrMsg, item.IsPath, item.CreateTime,
+			))
+		} else {
+			taskItems = append(taskItems, NewCopyJobTaskItem(
+				jt.TaskID, item.SrcPath, item.DstPath, item.FileName, item.FileSize,
+				item.AlistTaskID, taskStatusStopped, item.ErrMsg, item.IsPath, item.CopyType, item.CreateTime,
+			))
+		}
 		item.mu.RUnlock()
 	}
 	jt.appendFinishMany(taskItems)

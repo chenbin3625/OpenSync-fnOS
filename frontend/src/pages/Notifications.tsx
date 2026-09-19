@@ -23,7 +23,7 @@ import {
   errorToast,
 } from "../components/common";
 import { useAction, useResource } from "../lib/hooks";
-import { formatTimestamp } from "../utils/date";
+
 import {
   buildNotifyParams,
   channelNames,
@@ -100,7 +100,7 @@ export default function Notifications() {
                   {channelNames[item.method]}
                 </h2>
                 <div className="item-meta">
-                  通知 #{item.id} · 创建于 {formatTimestamp(item.createTime)}
+                  通知 #{item.id}
                 </div>
               </div>
               <div className="row-actions">

@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	"log"
-	"net"
 	"opensync/internal/msg"
 	"opensync/pkg/crypto"
 	"os"
@@ -18,7 +17,6 @@ import (
 type ServerConfig struct {
 	Bind            string
 	Port            int
-	Expires         int
 	LogLevel        int
 	ConsoleLevel    int
 	LogSave         int
@@ -28,10 +26,6 @@ type ServerConfig struct {
 	ScanConcurrency int
 	MaxRetries      int
 	PasswdStr       string
-	// TrustedProxies lists CIDR ranges (or bare IPs) whose X-Forwarded-Proto
-	// header may be honored when deciding whether to mark the auth cookie
-	// Secure behind a TLS-terminating reverse proxy.
-	TrustedProxies []string
 	// AllowedOrigins lists the origins allowed to perform mutations. Entries are
 	// full origins ("http://nas.example:5666") or bare hosts ("nas.example");
 	// ports are ignored. Configuring it retires the Referer-based same-origin
@@ -63,15 +57,12 @@ var (
 const (
 	defaultBind         = "0.0.0.0"
 	defaultPort         = 8023
-	defaultExpires      = 7
 	defaultLogLevel     = 1
 	defaultConsoleLevel = 2
 	defaultLogSave      = 7
 	defaultTaskSave     = 30
 	defaultTaskTimeout  = 48
 
-	minExpires     = 1
-	maxExpires     = 365
 	minTaskSave    = 0
 	maxTaskSave    = 3650
 	minTaskTimeout = 0
@@ -93,7 +84,6 @@ const (
 
 // SystemSettings is the subset of backend settings exposed for runtime editing.
 type SystemSettings struct {
-	Expires         int `json:"expires"`
 	TaskTimeout     int `json:"taskTimeout"`
 	TaskSave        int `json:"taskSave"`
 	CopyConcurrency int `json:"copyConcurrency"`
@@ -135,7 +125,6 @@ func GetConfig() *Config {
 	sCfg := ServerConfig{
 		Bind:            defaultBind,
 		Port:            defaultPort,
-		Expires:         defaultExpires,
 		LogLevel:        defaultLogLevel,
 		ConsoleLevel:    defaultConsoleLevel,
 		LogSave:         defaultLogSave,
@@ -156,9 +145,6 @@ func GetConfig() *Config {
 			}
 			if v, ok := opensync["port"]; ok {
 				sCfg.Port = intConfigValue(v, sCfg.Port, "port")
-			}
-			if v, ok := opensync["expires"]; ok {
-				sCfg.Expires = intConfigValue(v, sCfg.Expires, "expires")
 			}
 			if v, ok := opensync["log_level"]; ok {
 				sCfg.LogLevel = intConfigValue(v, sCfg.LogLevel, "log_level")
@@ -184,9 +170,6 @@ func GetConfig() *Config {
 			if v, ok := opensync["max_retries"]; ok {
 				sCfg.MaxRetries = intConfigValue(v, sCfg.MaxRetries, "max_retries")
 			}
-			if v, ok := opensync["trusted_proxies"]; ok {
-				sCfg.TrustedProxies = splitList(v)
-			}
 			if v, ok := opensync["allowed_origins"]; ok {
 				sCfg.AllowedOrigins = splitList(v)
 			}
@@ -195,7 +178,6 @@ func GetConfig() *Config {
 		// Read from environment variables
 		sCfg.Bind = envStringConfigValue("OPENSYNC_BIND", sCfg.Bind)
 		sCfg.Port = envIntConfigValue("OPENSYNC_PORT", sCfg.Port)
-		sCfg.Expires = envIntConfigValue("OPENSYNC_EXPIRES", sCfg.Expires)
 		sCfg.LogLevel = envIntConfigValue("OPENSYNC_LOG_LEVEL", sCfg.LogLevel)
 		sCfg.ConsoleLevel = envIntConfigValue("OPENSYNC_CONSOLE_LEVEL", sCfg.ConsoleLevel)
 		sCfg.LogSave = envIntConfigValue("OPENSYNC_LOG_SAVE", sCfg.LogSave)
@@ -204,7 +186,6 @@ func GetConfig() *Config {
 		sCfg.CopyConcurrency = envIntConfigValue("OPENSYNC_COPY_CONCURRENCY", sCfg.CopyConcurrency)
 		sCfg.ScanConcurrency = envIntConfigValue("OPENSYNC_SCAN_CONCURRENCY", sCfg.ScanConcurrency)
 		sCfg.MaxRetries = envIntConfigValue("OPENSYNC_MAX_RETRIES", sCfg.MaxRetries)
-		sCfg.TrustedProxies = splitList(os.Getenv("OPENSYNC_TRUSTED_PROXIES"))
 		sCfg.AllowedOrigins = splitList(os.Getenv("OPENSYNC_ALLOWED_ORIGINS"))
 	}
 	sCfg.TLSCertFile = envStringConfigValue("OPENSYNC_TLS_CERT", sCfg.TLSCertFile)
@@ -226,7 +207,6 @@ func GetConfig() *Config {
 // timeout).
 func clampServerConfig(sCfg *ServerConfig) {
 	sCfg.Bind = stringConfigValue(sCfg.Bind, defaultBind)
-	sCfg.Expires = clampInt(sCfg.Expires, minExpires, maxExpires, defaultExpires)
 	sCfg.Timeout = clampInt(sCfg.Timeout, minTaskTimeout, maxTaskTimeout, defaultTaskTimeout)
 	sCfg.TaskSave = clampInt(sCfg.TaskSave, minTaskSave, maxTaskSave, defaultTaskSave)
 	sCfg.CopyConcurrency = clampInt(sCfg.CopyConcurrency, MinCopyConcurrency, MaxCopyConcurrency, DefaultCopyConcurrency)
@@ -256,38 +236,6 @@ func splitList(value string) []string {
 	return items
 }
 
-// IsTrustedProxy reports whether remoteAddr (host:port) is a loopback address
-// or falls within a configured trusted-proxy CIDR / equals a configured bare IP.
-// Used to decide whether X-Forwarded-Proto may be honored for the Secure cookie
-// attribute when the app is deployed behind a TLS-terminating reverse proxy.
-func (s *ServerConfig) IsTrustedProxy(remoteAddr string) bool {
-	host, _, err := net.SplitHostPort(remoteAddr)
-	if err != nil {
-		host = remoteAddr
-	}
-	ip := net.ParseIP(strings.TrimSpace(host))
-	if ip == nil {
-		return false
-	}
-	if ip.IsLoopback() {
-		return true
-	}
-	for _, entry := range s.TrustedProxies {
-		entry = strings.TrimSpace(entry)
-		if entry == "" {
-			continue
-		}
-		if strings.Contains(entry, "/") {
-			if _, network, parseErr := net.ParseCIDR(entry); parseErr == nil && network.Contains(ip) {
-				return true
-			}
-		} else if entry == ip.String() {
-			return true
-		}
-	}
-	return false
-}
-
 // SetConfigForTest swaps the process config for tests in other packages.
 func SetConfigForTest(cfg *Config) {
 	configMu.Lock()
@@ -299,7 +247,6 @@ func SetConfigForTest(cfg *Config) {
 func GetSystemSettings() SystemSettings {
 	cfg := GetConfig()
 	return SystemSettings{
-		Expires:         cfg.Server.Expires,
 		TaskTimeout:     cfg.Server.Timeout,
 		TaskSave:        cfg.Server.TaskSave,
 		CopyConcurrency: cfg.Server.CopyConcurrency,
@@ -320,7 +267,6 @@ func UpdateSystemSettings(settings SystemSettings) error {
 
 	cfg := sysConfig
 	nextServer := cfg.Server
-	nextServer.Expires = settings.Expires
 	nextServer.Timeout = settings.TaskTimeout
 	nextServer.TaskSave = settings.TaskSave
 	nextServer.CopyConcurrency = settings.CopyConcurrency
@@ -343,7 +289,6 @@ func validateSystemSettings(settings SystemSettings) error {
 		value    int
 		min, max int
 	}{
-		{msg.SettingsExpires, settings.Expires, minExpires, maxExpires},
 		{msg.SettingsTaskTimeout, settings.TaskTimeout, minTaskTimeout, maxTaskTimeout},
 		{msg.SettingsTaskSave, settings.TaskSave, minTaskSave, maxTaskSave},
 		{msg.SettingsCopyConcurrency, settings.CopyConcurrency, MinCopyConcurrency, MaxCopyConcurrency},
@@ -374,16 +319,15 @@ func envStringConfigValue(envName string, fallback string) string {
 // other line in config.ini — comments, unknown keys, other sections — is
 // preserved verbatim when settings are updated at runtime.
 var configManagedKeys = []string{
-	"bind", "port", "expires", "log_level", "console_level", "log_save",
+	"bind", "port", "log_level", "console_level", "log_save",
 	"task_save", "task_timeout", "copy_concurrency", "scan_concurrency",
-	"max_retries", "trusted_proxies", "allowed_origins",
+	"max_retries", "allowed_origins",
 }
 
 func configManagedValues(sCfg ServerConfig) map[string]string {
 	return map[string]string{
 		"bind":             sCfg.Bind,
 		"port":             strconv.Itoa(sCfg.Port),
-		"expires":          strconv.Itoa(sCfg.Expires),
 		"log_level":        strconv.Itoa(sCfg.LogLevel),
 		"console_level":    strconv.Itoa(sCfg.ConsoleLevel),
 		"log_save":         strconv.Itoa(sCfg.LogSave),
@@ -392,7 +336,6 @@ func configManagedValues(sCfg ServerConfig) map[string]string {
 		"copy_concurrency": strconv.Itoa(sCfg.CopyConcurrency),
 		"scan_concurrency": strconv.Itoa(sCfg.ScanConcurrency),
 		"max_retries":      strconv.Itoa(sCfg.MaxRetries),
-		"trusted_proxies":  strings.Join(sCfg.TrustedProxies, ","),
 		"allowed_origins":  strings.Join(sCfg.AllowedOrigins, ","),
 	}
 }

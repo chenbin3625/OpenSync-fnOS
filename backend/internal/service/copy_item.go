@@ -45,6 +45,7 @@ type CopyItem struct {
 	FileName    string
 	FileSize    interface{}
 	CopyType    taskItemType
+	IsPath      taskItemObject
 	AlistTaskID string
 	Status      taskStatus
 	Progress    float64
@@ -175,8 +176,14 @@ func (ci *CopyItem) ToMap(taskID int64) map[string]interface{} {
 	ci.mu.RLock()
 	defer ci.mu.RUnlock()
 
+	if ci.CopyType == taskItemTypeDelete {
+		itemMap := NewDeleteJobTaskItem(taskID, ci.DstPath, ci.FileName, ci.FileSize,
+			ci.Status, ci.ErrMsg, ci.IsPath, ci.CreateTime).ToMap()
+		itemMap["progress"] = ci.Progress
+		return itemMap
+	}
 	itemMap := NewCopyJobTaskItem(taskID, ci.SrcPath, ci.DstPath, ci.FileName, ci.FileSize,
-		ci.AlistTaskID, ci.Status, ci.ErrMsg, taskItemFile, ci.CopyType, ci.CreateTime).ToMap()
+		ci.AlistTaskID, ci.Status, ci.ErrMsg, ci.IsPath, ci.CopyType, ci.CreateTime).ToMap()
 	itemMap["progress"] = ci.Progress
 	return itemMap
 }
@@ -212,6 +219,11 @@ func (ci *CopyItem) DoIt() {
 		}
 
 		ci.setTaskID(taskID)
+		// Delete operations are synchronous API calls — success means done.
+		if ci.CopyType == taskItemTypeDelete {
+			ci.setProgress(taskStatusSuccess, 100, nil)
+			break
+		}
 		if taskID == "" && !ci.confirmSynchronousCopy(runtime, client) {
 			// AList accepted the request but returned no task id, and the file
 			// never arrived at the destination. Treat the attempt as failed so
@@ -247,10 +259,18 @@ func (ci *CopyItem) DoIt() {
 }
 
 func (ci *CopyItem) startTransfer(ctx context.Context, client copyItemClient) (string, error) {
-	if ci.CopyType == taskItemTypeMove {
+	switch ci.CopyType {
+	case taskItemTypeDelete:
+		scanIntervalT := 0
+		if cfg := ci.copyRuntime().jobConfig(); cfg != nil {
+			scanIntervalT = util.ToInt(cfg["scanIntervalT"])
+		}
+		return "", client.DeleteFileContext(ctx, ci.DstPath, []string{ci.FileName}, scanIntervalT)
+	case taskItemTypeMove:
 		return client.MoveFileContext(ctx, ci.SrcPath, ci.DstPath, ci.FileName)
+	default:
+		return client.CopyFileContext(ctx, ci.SrcPath, ci.DstPath, ci.FileName)
 	}
-	return client.CopyFileContext(ctx, ci.SrcPath, ci.DstPath, ci.FileName)
 }
 
 // confirmSynchronousCopy handles a copy/move response with no task id: some

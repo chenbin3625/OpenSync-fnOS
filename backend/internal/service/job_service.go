@@ -312,10 +312,17 @@ func DoAllJobManual() {
 		panicPublic(msg.NoJobForRun)
 	}
 	for _, jobItem := range jobList {
-		client := GetJobClientByID(util.ToInt64(jobItem["id"]))
-		if client.enabled() {
-			client.DoManual()
-		}
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("DoAllJobManual: job %v skipped: %v", jobItem["id"], r)
+				}
+			}()
+			client := GetJobClientByID(util.ToInt64(jobItem["id"]))
+			if client.enabled() {
+				client.DoManual()
+			}
+		}()
 	}
 }
 

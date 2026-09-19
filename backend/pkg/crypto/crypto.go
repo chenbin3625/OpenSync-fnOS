@@ -12,8 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"golang.org/x/crypto/bcrypt"
 )
 
 const encryptedValuePrefix = "enc:v1:"
@@ -74,10 +72,7 @@ func DecryptString(value, secret string) (plaintext string, encrypted bool, err 
 	return string(plaintextBytes), true, nil
 }
 
-const (
-	charset           = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	recoveryKeyLength = 24
-)
+const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
 // GeneratePassword generates a random password of given length
 func GeneratePassword(length int) string {
@@ -90,35 +85,6 @@ func GeneratePassword(length int) string {
 		b[i] = charset[n.Int64()]
 	}
 	return string(b)
-}
-
-// GenerateRecoveryKey creates a one-time recovery key shown only to the user.
-func GenerateRecoveryKey() string {
-	return GeneratePassword(recoveryKeyLength)
-}
-
-// HashPassword creates a bcrypt password hash for newly stored passwords.
-func HashPassword(passwd string) (string, error) {
-	hash, err := bcrypt.GenerateFromPassword([]byte(passwd), bcrypt.DefaultCost)
-	if err != nil {
-		return "", err
-	}
-	return string(hash), nil
-}
-
-// CheckPassword validates modern bcrypt password hashes.
-func CheckPassword(passwd string, storedHash string) bool {
-	if !IsModernPasswordHash(storedHash) {
-		return false
-	}
-	return bcrypt.CompareHashAndPassword([]byte(storedHash), []byte(passwd)) == nil
-}
-
-// IsModernPasswordHash reports whether a stored hash uses the current format.
-func IsModernPasswordHash(storedHash string) bool {
-	return strings.HasPrefix(storedHash, "$2a$") ||
-		strings.HasPrefix(storedHash, "$2b$") ||
-		strings.HasPrefix(storedHash, "$2y$")
 }
 
 // ReadOrSetFile reads file content, creating it with defaultValue when it does

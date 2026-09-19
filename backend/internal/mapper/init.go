@@ -8,15 +8,15 @@ import (
 	"strings"
 )
 
-const currentVersion = 260614
+const currentVersion = 260920
 
 // InitSQL initializes the database schema and runs migrations
 func InitSQL() {
 	db := GetDB()
 
-	// Check if user_list table exists
+	// Check if schema already exists (schema_version for new installs, user_list for legacy)
 	var name string
-	err := db.QueryRow("SELECT name FROM sqlite_master WHERE name='user_list'").Scan(&name)
+	err := db.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('schema_version', 'user_list') ORDER BY name LIMIT 1").Scan(&name)
 
 	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
@@ -27,15 +27,8 @@ func InitSQL() {
 		}
 		// First run - create all tables
 		stmts := []string{
-			fmt.Sprintf(`CREATE TABLE user_list(
-				id integer primary key autoincrement,
-				userName text,
-				passwd text,
-				recoveryKey text,
-				sqlVersion integer DEFAULT %d,
-				createTime integer DEFAULT (strftime('%%s', 'now')),
-				UNIQUE (userName)
-			)`, currentVersion),
+			fmt.Sprintf(`CREATE TABLE schema_version(version INTEGER NOT NULL DEFAULT %d)`, currentVersion),
+			fmt.Sprintf(`INSERT INTO schema_version(version) VALUES(%d)`, currentVersion),
 
 			`CREATE TABLE alist_list(
 				id integer primary key autoincrement,
@@ -123,7 +116,7 @@ func InitSQL() {
 			log.Fatalf("Failed to initialize credential encryption: %v", err)
 		}
 
-		log.Printf("Database initialized; waiting for web account setup")
+		log.Printf("Database initialized")
 		return
 	}
 
@@ -146,24 +139,17 @@ func InitSQL() {
 }
 
 func schemaVersion(db *sql.DB) int64 {
+	// Try new schema_version table first
+	var version int64
+	if err := db.QueryRow("SELECT version FROM schema_version LIMIT 1").Scan(&version); err == nil {
+		return version
+	}
+	// Fall back to legacy user_list for databases not yet migrated
 	if !tableHasColumnDB(db, "user_list", "sqlVersion") {
 		return 0
 	}
-
-	var sqlVersion int64
-	err := db.QueryRow("SELECT sqlVersion FROM user_list LIMIT 1").Scan(&sqlVersion)
-	if err == nil {
-		return sqlVersion
-	}
-	if err == sql.ErrNoRows {
-		// user_list exists with the sqlVersion column but has no rows. This can
-		// happen when an older binary created the table (with sqlVersion but
-		// missing newer columns) and web setup was never completed. Returning 0
-		// runs the idempotent migrations to bring the schema up to date before
-		// first-run setup; migrateDBTx(0) on an already-current schema is a
-		// no-op. Returning currentVersion here would skip migrations and leave
-		// the schema stale, breaking InitializeUser (e.g. missing recoveryKey).
-		return 0
+	if err := db.QueryRow("SELECT sqlVersion FROM user_list LIMIT 1").Scan(&version); err == nil {
+		return version
 	}
 	return 0
 }
@@ -270,7 +256,17 @@ func migrationStatements(fromVersion int64) []string {
 	if fromVersion >= 260611 && fromVersion < 260614 {
 		stmts = append(stmts, rebuildJobTaskItemFTSStatements()...)
 	}
-	stmts = append(stmts, fmt.Sprintf("UPDATE user_list SET sqlVersion=%d", currentVersion))
+	if fromVersion < 260920 {
+		// Migrate version tracking from user_list to dedicated schema_version table,
+		// then drop user_list (auth is now handled by the fnOS gateway).
+		stmts = append(stmts,
+			"CREATE TABLE IF NOT EXISTS schema_version(version INTEGER NOT NULL)",
+			"DELETE FROM schema_version",
+			fmt.Sprintf("INSERT INTO schema_version(version) VALUES(%d)", currentVersion),
+			"DROP TABLE IF EXISTS user_list",
+		)
+	}
+	stmts = append(stmts, fmt.Sprintf("UPDATE schema_version SET version=%d", currentVersion))
 	return stmts
 }
 
@@ -368,7 +364,9 @@ func migrateDBTx(db *sql.DB, fromVersion int64) error {
 
 func shouldSkipMigrationStatement(tx *sql.Tx, stmt string) bool {
 	if tableName, columnName, ok := parseAlterTableAddColumn(stmt); ok {
-		return txTableHasColumn(tx, tableName, columnName)
+		// Skip if the target table does not exist (e.g. user_list after migration to schema_version)
+		// or if the column is already present.
+		return !txTableExists(tx, tableName) || txTableHasColumn(tx, tableName, columnName)
 	}
 
 	switch stmt {

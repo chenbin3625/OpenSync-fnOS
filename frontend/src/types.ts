@@ -9,22 +9,7 @@ export interface PageData<T> {
   count: number;
 }
 
-export interface UserInfo {
-  id: number;
-  userName: string;
-  createTime: number;
-}
-
-export interface InitUserInfo extends UserInfo {
-  recoveryKey: string;
-}
-
-export interface InitStatus {
-  initialized: boolean;
-}
-
 export interface SystemSettings {
-  expires: number;
   taskTimeout: number;
   taskSave: number;
   copyConcurrency: number;

@@ -305,7 +305,8 @@ h3 {
   height: 48px;
 }
 .mobile-navigation,
-.mobile-data {
+.mobile-data,
+.mobile-job-bar {
   display: none;
 }
 .task-page {
@@ -982,6 +983,12 @@ body .semi-modal-mask {
   .task-detail-pane {
     display: block;
   }
+  .execution-scroll,
+  .history-scroll {
+    flex: none;
+    min-height: auto;
+    overflow-y: visible;
+  }
   .page-actions {
     gap: 6px;
   }
@@ -1055,6 +1062,36 @@ body .semi-modal-mask {
   }
   .task-page {
     min-height: 0;
+  }
+  .mobile-job-bar {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding: 0 0 12px;
+    margin: -8px 0 0;
+  }
+  .mobile-job-bar::-webkit-scrollbar {
+    display: none;
+  }
+  .mobile-job-chip {
+    flex: 0 0 auto;
+    padding: 6px 14px;
+    border-radius: 16px;
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.2;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+  }
+  .mobile-job-chip.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
   }
   .task-workspace {
     min-height: 0;
@@ -1165,6 +1202,10 @@ body .semi-modal-mask {
   }
   .table-pagination {
     justify-content: flex-end;
+    position: sticky;
+    bottom: 0;
+    background: var(--surface);
+    z-index: 2;
   }
   .table-pagination > .muted {
     margin-right: auto;

@@ -97,15 +97,17 @@ func TestFullSyncPlanExecutesDestinationMoveBeforeDeletingOldTree(t *testing.T) 
 		t.Fatal("sync did not mark scanning complete")
 	}
 
-	if waiting := jt.Waiting.snapshot(); len(waiting) != 0 {
-		t.Fatalf("waiting copies = %#v, want none after successful target-side move", waiting)
+	// Extra deletes are now queued (not synchronous); expect one pending delete.
+	if waiting := jt.Waiting.snapshot(); len(waiting) != 1 {
+		t.Fatalf("waiting items = %d, want 1 queued delete", len(waiting))
+	} else if waiting[0].CopyType != taskItemTypeDelete {
+		t.Fatalf("waiting item type = %d, want delete (%d)", waiting[0].CopyType, taskItemTypeDelete)
 	}
 	wantCalls := []string{
 		"mkdir:/dst/new/",
 		"mkdir:/dst/new/archive/",
 		"move:/dst/old/archive/->/dst/new/archive/movie.mkv",
 		"get:/dst/new/archive/movie.mkv",
-		"remove:/dst/old",
 	}
 	mu.Lock()
 	defer mu.Unlock()

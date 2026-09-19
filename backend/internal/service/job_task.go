@@ -271,11 +271,16 @@ func (jt *JobTask) finishCopyItem(item *CopyItem) {
 	status := item.Status
 	errMsg := item.ErrMsg
 	copyType := item.CopyType
+	isPath := item.IsPath
 	createTime := item.CreateTime
 	item.mu.RUnlock()
 
-	jt.CopyHook(srcPath, dstPath, fileName, fileSize, alistTaskID,
-		status, errMsg, taskItemFile, copyType, createTime)
+	if copyType == taskItemTypeDelete {
+		jt.DelHook(dstPath, fileName, fileSize, status, errMsg, isPath, createTime)
+	} else {
+		jt.CopyHook(srcPath, dstPath, fileName, fileSize, alistTaskID,
+			status, errMsg, isPath, copyType, createTime)
+	}
 
 	jt.DoingMu.Lock()
 	delete(jt.Doing, item.DoingKey)

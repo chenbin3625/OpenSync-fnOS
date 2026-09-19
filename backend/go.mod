@@ -4,11 +4,9 @@ go 1.26.6
 
 require (
 	github.com/gin-gonic/gin v1.12.0
-	github.com/gorilla/securecookie v1.1.2
 	github.com/quic-go/quic-go v0.62.0
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/sabhiram/go-gitignore v0.0.0-20210923224102-525f6e181f06
-	golang.org/x/crypto v0.57.0
 	modernc.org/sqlite v1.59.0
 )
 
@@ -40,6 +38,7 @@ require (
 	github.com/ugorji/go/codec v1.3.2 // indirect
 	go.mongodb.org/mongo-driver/v2 v2.9.1 // indirect
 	golang.org/x/arch v0.31.0 // indirect
+	golang.org/x/crypto v0.57.0 // indirect
 	golang.org/x/net v0.59.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect

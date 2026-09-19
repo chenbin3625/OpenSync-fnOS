@@ -129,6 +129,22 @@ export default function Tasks() {
           ) : undefined
         }
       />
+      {list.length > 1 && (
+        <div className="mobile-job-bar" role="tablist" aria-label="任务列表">
+          {list.map((job) => (
+            <button
+              key={job.id}
+              type="button"
+              role="tab"
+              aria-selected={selected?.id === job.id}
+              className={`mobile-job-chip${selected?.id === job.id ? " active" : ""}`}
+              onClick={() => update({ jobId: job.id })}
+            >
+              {getJobName(job)}
+            </button>
+          ))}
+        </div>
+      )}
       <div
         className="task-workspace flex-column"
         data-empty={
