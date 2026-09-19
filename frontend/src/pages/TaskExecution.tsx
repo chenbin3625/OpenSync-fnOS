@@ -144,15 +144,10 @@ export function Realtime({ jobId }: { jobId: number }) {
     <div className="execution-view flex-column">
       <div className="execution-top">
       <div className="execution-header">
-        <div>
-          <h2>{task.scanFinish ? "正在同步" : "正在扫描目录"}</h2>
-          <span className="muted">
-            开始于 {time(task.createTime)} · 已运行{" "}
-            {formatDuration(task.duration)}
-          </span>
-        </div>
+        <h2>{task.scanFinish ? "正在同步" : "正在扫描目录"}</h2>
         <Button
           type="danger"
+          size="small"
           icon={<IconPause aria-hidden="true" />}
           onClick={stop}
           disabled={action.busy}
@@ -160,32 +155,14 @@ export function Realtime({ jobId }: { jobId: number }) {
           停止任务
         </Button>
       </div>
-      <Progress percent={Math.round(percent)} showInfo strokeColor="var(--accent)" />
       <div className="execution-metrics">
-        <div>
-          <span>传输速度</span>
-          <strong>
-            {formatSize(task.speed)}
-            <small>/s</small>
-          </strong>
-        </div>
-        <div>
-          <span>已完成</span>
-          <strong>{formatSize(task.doneSize)}</strong>
-        </div>
-        <div>
-          <span>剩余大小</span>
-          <strong>{formatSize(task.remainSize)}</strong>
-        </div>
-        <div>
-          <span>预计剩余</span>
-          <strong>
-            {task.remainTime > 0
-              ? formatDuration(task.remainTime)
-              : "—"}
-          </strong>
-        </div>
+        <span>{formatSize(task.speed)}/s</span>
+        <span className="metric-sep" />
+        <span>已完成 {formatSize(task.doneSize)} / {formatSize(task.doneSize + task.remainSize)}</span>
+        <span className="metric-sep" />
+        <span>已运行 {formatDuration(task.duration)}</span>
       </div>
+      <Progress percent={Math.round(percent)} showInfo strokeColor="var(--accent)" />
       {!task.scanFinish && task.scan && (
         <div className="scan-status">
           已扫描 {task.scan.scannedDirs} 个目录 · 待扫描{" "}

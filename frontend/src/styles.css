@@ -755,36 +755,29 @@ body .semi-modal-mask {
   gap: 8px;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 4px;
 }
 .execution-header h2 {
-  font-size: 14px;
+  font-size: var(--font-size-section-title);
 }
 .execution-metrics {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 4px;
-  margin: 4px 0;
-}
-.execution-metrics > div {
-  display: grid;
-  gap: 2px;
-}
-.execution-metrics span {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 0;
   color: var(--muted);
   font-size: var(--font-size-small);
+  margin: 2px 0 4px;
 }
-.execution-metrics strong {
-  font-size: 14px;
-  font-weight: 500;
-  overflow-wrap: anywhere;
-}
-.execution-metrics small {
-  font-size: var(--font-size-small);
-  font-weight: 400;
+.metric-sep {
+  display: inline-block;
+  width: 1px;
+  height: 10px;
+  background: var(--line);
+  margin: 0 8px;
 }
 .scan-status {
   color: var(--muted);
+  font-size: var(--font-size-small);
   margin-bottom: 4px;
 }
 .filter-bar {
@@ -1151,10 +1144,6 @@ body .semi-modal-mask {
     flex-wrap: wrap;
     gap: 8px;
   }
-  .execution-metrics {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    row-gap: 8px;
-  }
   .desktop-data {
     display: none;
   }
@@ -1247,6 +1236,10 @@ body .semi-modal-mask {
 .execution-tabs .semi-tabs-bar {
   border-bottom: 1px solid var(--line) !important;
   background-color: transparent !important;
+}
+.execution-tabs .semi-tabs-tab {
+  font-size: var(--font-size-body);
+  font-weight: 500;
 }
 .execution-tabs .semi-tabs-bar-line {
   background-color: transparent !important;
