@@ -13,7 +13,7 @@ import Spin from "@douyinfe/semi-ui/lib/es/spin";
 import Tag from "@douyinfe/semi-ui/lib/es/tag";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
-import { IconRefresh, IconCrossStroked, IconMoreStroked } from "@douyinfe/semi-icons";
+import { IconAlertTriangle, IconRefresh, IconCrossStroked, IconMoreStroked } from "@douyinfe/semi-icons";
 import { getHost } from "../lib/host";
 
 export function errorToast(error: unknown) {
@@ -238,9 +238,7 @@ export function Status({
       </Tag>
       {error && (
         <Tooltip content={<div className="error-detail">{error}</div>}>
-          <button className="error-indicator" aria-label="查看错误原因">
-            !
-          </button>
+          <IconAlertTriangle className="error-indicator" aria-label="查看错误原因" size="small" />
         </Tooltip>
       )}
     </span>

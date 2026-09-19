@@ -127,7 +127,7 @@ export default function Settings() {
   return (
     <div className="page settings-page">
       <Header
-        title="系统设置"
+        title="设置"
         actions={
           <Button
             theme="solid"

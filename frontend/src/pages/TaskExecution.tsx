@@ -62,7 +62,7 @@ export function Realtime({ jobId, demo = false }: { jobId: number; demo?: boolea
     jobId: String(jobId),
     enabled: true,
     currentTask,
-    pageSize: 20,
+    pageSize: 10,
   });
   const action = useAction();
 
@@ -203,16 +203,16 @@ export function Realtime({ jobId, demo = false }: { jobId: number; demo?: boolea
       <Pager
         total={tabTotal}
         page={items.tabTaskPage}
-        size={20}
+        size={10}
         onChange={items.setTabTaskPage}
       />
     </div>
   );
 }
 
-export function History({ jobId }: { jobId: number }) {
+export function History({ jobId, demo = false }: { jobId: number; demo?: boolean }) {
   const [page, setPage] = useState(1),
-    [size, setSize] = useState(20);
+    [size, setSize] = useState(10);
   const [status, setStatus] = useState<number | undefined>(),
     [input, setInput] = useState(""),
     [keyword, setKeyword] = useState("");
@@ -234,6 +234,26 @@ export function History({ jobId }: { jobId: number }) {
     [jobId, page, size, status, keyword, range],
   );
   const action = useAction();
+
+  // 演示数据
+  const now = Math.floor(Date.now() / 1000);
+  const demoRecords: TaskRecord[] = demo ? [
+    { id: 9001, status: 2, createTime: now - 86400, runTime: now - 86400 + 245, successNum: 128, failNum: 0, allNum: 128 },
+    { id: 9002, status: 7, errMsg: "连接超时：引擎无响应", createTime: now - 172800, runTime: now - 172800 + 63, successNum: 45, failNum: 12, allNum: 57 },
+    { id: 9003, status: 2, createTime: now - 259200, runTime: now - 259200 + 1820, successNum: 1024, failNum: 0, allNum: 1024 },
+    { id: 9004, status: 7, errMsg: "目标路径不存在", createTime: now - 345600, runTime: now - 345600 + 5, successNum: 0, failNum: 3, allNum: 3 },
+    { id: 9005, status: 2, createTime: now - 432000, runTime: now - 432000 + 480, successNum: 256, failNum: 0, allNum: 256 },
+    { id: 9006, status: 8, createTime: now - 518400, runTime: now - 518400 + 120, successNum: 30, failNum: 0, allNum: 88 },
+    { id: 9007, status: 2, createTime: now - 604800, runTime: now - 604800 + 3600, successNum: 2048, failNum: 0, allNum: 2048 },
+    { id: 9008, status: 2, createTime: now - 691200, runTime: now - 691200 + 150, successNum: 64, failNum: 0, allNum: 64 },
+    { id: 9009, status: 7, errMsg: "磁盘空间不足", createTime: now - 777600, runTime: now - 777600 + 12, successNum: 8, failNum: 5, allNum: 13 },
+    { id: 9010, status: 2, createTime: now - 864000, runTime: now - 864000 + 920, successNum: 512, failNum: 0, allNum: 512 },
+    { id: 9011, status: 2, createTime: now - 950400, runTime: now - 950400 + 60, successNum: 32, failNum: 0, allNum: 32 },
+    { id: 9012, status: 7, errMsg: "认证失败：token 已过期", createTime: now - 1036800, runTime: now - 1036800 + 3, successNum: 0, failNum: 1, allNum: 1 },
+  ] : [];
+
+  const rows = demo ? demoRecords : (resource.data?.dataList || []);
+  const totalCount = demo ? demoRecords.length : (resource.data?.count || 0);
   const retry = (record: TaskRecord) =>
     void action.run(async () => {
       try {
@@ -244,7 +264,6 @@ export function History({ jobId }: { jobId: number }) {
         errorToast(error);
       }
     });
-  const rows = resource.data?.dataList || [];
   const controls = (record: TaskRecord) => (
     <div className="row-actions">
       <IconButton
@@ -412,14 +431,10 @@ export function History({ jobId }: { jobId: number }) {
       )}
       </div>
       <Pager
-        total={resource.data?.count || 0}
+        total={totalCount}
         page={page}
         size={size}
         onChange={setPage}
-        onSize={(value) => {
-          setSize(value);
-          setPage(1);
-        }}
       />
       {detail !== null && (
         <FileDetails taskId={detail} onClose={() => setDetail(null)} />
@@ -725,10 +740,6 @@ function FileDetails({
         page={page}
         size={size}
         onChange={setPage}
-        onSize={(value) => {
-          setSize(value);
-          setPage(1);
-        }}
       />
     </SideSheet>
   );
@@ -739,13 +750,11 @@ function Pager({
   page,
   size,
   onChange,
-  onSize,
 }: {
   total: number;
   page: number;
   size: number;
   onChange: (page: number) => void;
-  onSize?: (size: number) => void;
 }) {
   return (
     <div className="table-pagination">
@@ -755,10 +764,8 @@ function Pager({
         currentPage={page}
         pageSize={size}
         size="small"
-        showSizeChanger={!!onSize}
-        pageSizeOpts={[10, 20, 50, 100]}
+        hideOnSinglePage={false}
         onPageChange={onChange}
-        onPageSizeChange={onSize}
       />
     </div>
   );

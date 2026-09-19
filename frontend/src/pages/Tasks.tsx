@@ -197,7 +197,7 @@ export default function Tasks() {
                   <Realtime key={selected.id} jobId={selected.id} demo />
                 )}
                 {tab === "history" && (
-                  <History key={selected.id} jobId={selected.id} />
+                  <History key={selected.id} jobId={selected.id} demo />
                 )}
               </div>
             ) : (

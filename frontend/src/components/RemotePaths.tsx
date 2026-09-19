@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import Banner from "@douyinfe/semi-ui/lib/es/banner";
-import Button from "@douyinfe/semi-ui/lib/es/button";
+import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import TreeSelect from "@douyinfe/semi-ui/lib/es/treeSelect";
 import type { TreeNodeData } from "@douyinfe/semi-ui/lib/es/tree/interface";
 import { api } from "../api/client";
@@ -51,7 +50,6 @@ export function RemotePaths({
 }) {
   const [nodes, setNodes] = useState<TreeNodeData[]>(() => seed(value));
   const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
-  const [error, setError] = useState("");
   const controller = useRef<AbortController | null>(null);
   const engineRef = useRef(engineId);
   const nodesRef = useRef(nodes);
@@ -63,7 +61,6 @@ export function RemotePaths({
       if (!engineId) return;
       const signal = controller.current?.signal;
       const path = String(node?.value || "/");
-      setError("");
       try {
         const result = await api.paths(engineId, path, signal);
         if (signal?.aborted || engineRef.current !== engineId) return;
@@ -79,7 +76,7 @@ export function RemotePaths({
         }
       } catch (err) {
         if (!signal?.aborted && engineRef.current === engineId)
-          setError(err instanceof Error ? err.message : "目录加载失败");
+          Toast.error(err instanceof Error ? err.message : "目录加载失败");
       }
     },
     [engineId],
@@ -154,20 +151,6 @@ export function RemotePaths({
         maxTagCount={2}
         showClear
       />
-      {error && (
-        <Banner
-          type="danger"
-          closeIcon={null}
-          description={
-            <span>
-              {error}{" "}
-              <Button size="small" onClick={() => void load()}>
-                重试
-              </Button>
-            </span>
-          }
-        />
-      )}
     </div>
   );
 }

@@ -53,7 +53,7 @@ const sections = [
   },
   {
     path: "/settings",
-    label: "系统设置",
+    label: "设置",
     icon: <IconSettingStroked aria-hidden="true" />,
   },
 ];
@@ -190,7 +190,7 @@ function Shell({ children }: { children: ReactNode }) {
             }
           >
             {sections.at(-1)?.icon}
-            <span className="nav-label">系统设置</span>
+            <span className="nav-label">设置</span>
           </NavLink>
         </div>
       </aside>
