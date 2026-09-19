@@ -838,6 +838,11 @@ body .semi-modal-mask {
   max-height: none;
   overflow: visible;
 }
+/* 所有下拉选项列表展示全部内容，不滚动 */
+.semi-select-option-list {
+  max-height: none !important;
+  overflow: visible !important;
+}
 .semi-table-thead > tr > th {
   background: var(--surface-soft);
   font-weight: 500;

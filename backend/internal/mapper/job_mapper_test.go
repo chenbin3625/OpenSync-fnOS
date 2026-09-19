@@ -246,11 +246,12 @@ func TestUpdateJobTaskStatusAndNumWritesStatusAndTaskNumTogether(t *testing.T) {
 		id integer primary key autoincrement,
 		status integer,
 		errMsg text,
-		taskNum text
+		taskNum text,
+		runTime integer DEFAULT 0
 	)`); err != nil {
 		t.Fatalf("create job_task: %v", err)
 	}
-	if _, err := testDB.Exec("INSERT INTO job_task(id, status) VALUES (10, 1)"); err != nil {
+	if _, err := testDB.Exec("INSERT INTO job_task(id, status, runTime) VALUES (10, 1, 100)"); err != nil {
 		t.Fatalf("insert job_task: %v", err)
 	}
 
@@ -268,11 +269,15 @@ func TestUpdateJobTaskStatusAndNumWritesStatusAndTaskNumTogether(t *testing.T) {
 	var status int
 	var gotErrMsg string
 	var taskNum string
-	if err := testDB.QueryRow("SELECT status, errMsg, taskNum FROM job_task WHERE id=10").Scan(&status, &gotErrMsg, &taskNum); err != nil {
+	var runTime int64
+	if err := testDB.QueryRow("SELECT status, errMsg, taskNum, runTime FROM job_task WHERE id=10").Scan(&status, &gotErrMsg, &taskNum, &runTime); err != nil {
 		t.Fatalf("read job_task: %v", err)
 	}
 	if status != 3 || gotErrMsg != errMsg || taskNum != `{"failNum":1}` {
 		t.Fatalf("row = status %d errMsg %q taskNum %q, want 3/%q/{failNum}", status, gotErrMsg, taskNum, errMsg)
+	}
+	if runTime <= 100 {
+		t.Fatalf("runTime = %d, expected > 100 (should be updated to current time)", runTime)
 	}
 }
 

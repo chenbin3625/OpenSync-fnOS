@@ -347,7 +347,7 @@ func UpdateJobTaskNumMany(taskNums []map[string]interface{}) error {
 
 // UpdateJobTaskStatusAndNum updates final status and cached counts in one write.
 func UpdateJobTaskStatusAndNum(taskID int64, status int, errMsg *string, taskNum string) error {
-	return ExecuteUpdate("UPDATE job_task SET status=?, errMsg=?, taskNum=? WHERE id=?", status, errMsg, taskNum, taskID)
+	return ExecuteUpdate("UPDATE job_task SET status=?, errMsg=?, taskNum=?, runTime=strftime('%s','now') WHERE id=?", status, errMsg, taskNum, taskID)
 }
 
 // --- Job Task Item ---
