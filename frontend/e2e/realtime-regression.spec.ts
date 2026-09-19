@@ -144,6 +144,102 @@ test("realtime view loads running rows when the live snapshot is missing", async
   await expect(mobileList.getByText("42%")).toBeVisible();
 });
 
+test("realtime file columns keep the name readable at 1100px desktop width", async ({
+  page,
+}) => {
+  test.skip(page.viewportSize()?.width !== 1100, "1100px desktop layout only");
+  await page.addInitScript(() => {
+    Object.defineProperty(globalThis, "ReadableStream", { value: undefined });
+    Object.defineProperty(globalThis, "EventSource", { value: undefined });
+  });
+  const activeTask = {
+    taskId: 9,
+    scanFinish: true,
+    createTime: 1,
+    duration: 1,
+    num: { wait: 0, running: 0, success: 0, fail: 1, other: 0 },
+    size: { wait: 0, running: 0, success: 0, fail: 1, other: 0 },
+    doneSize: 0,
+    remainSize: 1,
+    speed: 1,
+    speedAvg: 1,
+    remainTime: 1,
+    doingTask: [],
+  };
+
+  await page.route("**/app/opensync/svr/**", async (route) => {
+    const url = new URL(route.request().url());
+    const success = (data: unknown) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ code: 200, data, msg: "" }),
+      });
+    if (url.pathname.endsWith("/session"))
+      return success({ uid: 1, development: false, version: "test" });
+    if (url.pathname.endsWith("/alist")) return success([]);
+    if (url.pathname.endsWith("/job") && url.searchParams.get("current")) {
+      if (url.searchParams.get("status") === "7") {
+        return success({
+          dataList: [
+            {
+              id: 11,
+              fileName: "annual-audit-source-archive-with-readable-name.tar.gz",
+              srcPath: "/source/path/with/a/readable/file/name",
+              dstPath: "/backup/path/with/a/readable/file/name",
+              fileSize: 1024,
+              type: 0,
+              status: 7,
+              progress: 0,
+              errMsg:
+                "目标端返回了一个非常长的错误说明，包含路径、重试建议、服务端响应和多段上下文信息，需要在进度列内被截断而不是把文件名列挤没。",
+            },
+          ],
+          count: 1,
+        });
+      }
+      return success(activeTask);
+    }
+    if (url.pathname.endsWith("/job")) {
+      return success({
+        dataList: [
+          {
+            id: 1,
+            enable: 1,
+            remark: "桌面实时任务",
+            srcPath: '["/src"]',
+            dstPath: '["/dst"]',
+            alistId: 1,
+            useCacheT: 0,
+            useCacheS: 0,
+            method: 0,
+            interval: 0,
+            isCron: 2,
+          },
+        ],
+        count: 1,
+      });
+    }
+    return success(null);
+  });
+
+  await page.goto("/app/opensync/tasks?jobId=1&tab=realtime");
+  await page.getByRole("tab", { name: /失败/ }).click();
+  const desktopTable = page.locator(".desktop-data").last();
+  await expect(
+    desktopTable.getByText("annual-audit-source-archive-with-readable-name.tar.gz"),
+  ).toBeVisible();
+
+  const row = desktopTable.locator(".semi-table-tbody tr").first();
+  const fileCell = row.locator("td").nth(0);
+  const progressCell = row.locator("td").nth(3);
+  const fileBox = await fileCell.boundingBox();
+  const progressBox = await progressCell.boundingBox();
+  expect(fileBox).not.toBeNull();
+  expect(progressBox).not.toBeNull();
+  expect(fileBox!.width).toBeGreaterThanOrEqual(260);
+  expect(progressBox!.width).toBeLessThanOrEqual(180);
+});
+
 test("engine connectivity checks are serialized", async ({ page }) => {
   let releaseRequest: (() => void) | undefined;
   const requestStarted = new Promise<void>((resolve) => {
