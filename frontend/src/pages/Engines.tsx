@@ -25,16 +25,15 @@ import type { AlistItem } from "../types";
 export default function Engines() {
   const engines = useResource((signal) => api.engines(signal));
   const [editing, setEditing] = useState<AlistItem | null | undefined>();
-  const testAction = useAction();
-  const testEngine = (id: number) =>
-    void testAction.run(async () => {
-      try {
-        await api.testEngine(id);
-        Toast.success("引擎连接正常");
-      } catch (err) {
-        errorToast(err);
-      }
-    });
+  const [testingId, setTestingId] = useState<number | null>(null);
+  const testEngine = (id: number) => {
+    setTestingId(id);
+    api
+      .testEngine(id)
+      .then(() => Toast.success("引擎连接正常"))
+      .catch(errorToast)
+      .finally(() => setTestingId(null));
+  };
   return (
     <div className="page">
       <Header
@@ -72,7 +71,7 @@ export default function Engines() {
                 <IconButton
                   label="测试引擎"
                   icon={<IconChainStroked aria-hidden="true" />}
-                  disabled={testAction.busy}
+                  disabled={testingId === engine.id}
                   onClick={() => testEngine(engine.id)}
                 />
                 <IconButton
@@ -133,6 +132,10 @@ function EngineEditor({
     setForm((f) => ({ ...f, [key]: value }));
   };
   const save = () => {
+    if (!form.remark.trim()) {
+      Toast.warning("请输入引擎名称");
+      return;
+    }
     try {
       const url = new URL(form.url);
       if (!["http:", "https:"].includes(url.protocol)) throw new Error();
@@ -168,6 +171,14 @@ function EngineEditor({
       onSave={save}
     >
       <div className="editor-form">
+        <Field label="引擎名称" required>
+          <Input
+            value={form.remark}
+            onChange={(v) => change("remark", v)}
+            maxLength={200}
+            placeholder="我的 NAS 引擎"
+          />
+        </Field>
         <Field label="引擎地址" required>
           <Input
             value={form.url}
@@ -181,13 +192,6 @@ function EngineEditor({
             value={form.token}
             onChange={(v) => change("token", v)}
             placeholder={engine ? "留空保留原 Token" : "OpenList / AList Token"}
-          />
-        </Field>
-        <Field label="名称">
-          <Input
-            value={form.remark}
-            onChange={(v) => change("remark", v)}
-            maxLength={200}
           />
         </Field>
       </div>

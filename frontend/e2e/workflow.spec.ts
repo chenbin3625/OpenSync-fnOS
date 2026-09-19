@@ -144,7 +144,9 @@ test("creates an engine and manual job, then edits without changing sync mode", 
     const dialog = page.getByRole("dialog");
     const trees = dialog.locator(".remote-paths");
     await trees.nth(0).locator('[role="combobox"]').click();
-    await page.locator(".semi-tree-option-expand-icon").first().click();
+    const sourceRoot = page.locator('.semi-tree-option[data-key="/"]').first();
+    if ((await sourceRoot.getAttribute("aria-expanded")) !== "true")
+      await sourceRoot.locator(".semi-tree-option-expand-icon").click();
     await page
       .locator(".semi-tree-option")
       .filter({ hasText: /^Photos$/ })
@@ -159,7 +161,9 @@ test("creates an engine and manual job, then edits without changing sync mode", 
     expect(sourceCacheBox!.y).toBeGreaterThan(sourcePathBox!.y);
     expect(sourceCacheBox!.y).toBeLessThan(sourcePathBox!.y + 120);
     await trees.nth(1).locator('[role="combobox"]').click();
-    await page.locator(".semi-tree-option-expand-icon").first().click();
+    const targetRoot = page.locator('.semi-tree-option[data-key="/"]').first();
+    if ((await targetRoot.getAttribute("aria-expanded")) !== "true")
+      await targetRoot.locator(".semi-tree-option-expand-icon").click();
     await page
       .locator(".semi-tree-option")
       .filter({ hasText: /^Backup$/ })
@@ -174,7 +178,7 @@ test("creates an engine and manual job, then edits without changing sync mode", 
     expect(targetCacheBox!.y).toBeGreaterThan(targetPathBox!.y);
     expect(targetCacheBox!.y).toBeLessThan(targetPathBox!.y + 120);
     await page
-      .getByRole("textbox", { name: "任务备注", exact: true })
+      .getByRole("textbox", { name: "任务名称", exact: true })
       .fill(name);
     await page.getByRole("button", { name: "下一步", exact: true }).click();
     await page.getByRole("combobox", { name: "调度方式", exact: true }).click();
@@ -218,7 +222,7 @@ test("creates an engine and manual job, then edits without changing sync mode", 
     await expect(editButton).toBeVisible();
     await editButton.click({ force: forceMobileClick });
     await page
-      .getByRole("textbox", { name: "任务备注", exact: true })
+      .getByRole("textbox", { name: "任务名称", exact: true })
       .fill(name + "-修改");
     await page
       .getByRole("button", { name: "下一步", exact: true })

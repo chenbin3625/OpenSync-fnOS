@@ -53,7 +53,7 @@ const statusTabs = [
   { key: -1, label: "其他", count: "other" },
 ] as const;
 
-export function Realtime({ jobId }: { jobId: number }) {
+export function Realtime({ jobId, demo = false }: { jobId: number; demo?: boolean }) {
   const { currentTask, refreshCurrentTask } = useRealtimeTask(
     String(jobId),
     true,
@@ -65,14 +65,43 @@ export function Realtime({ jobId }: { jobId: number }) {
     pageSize: 20,
   });
   const action = useAction();
-  if (!currentTask) {
+
+  // 演示数据
+  const demoTask = demo && !currentTask ? {
+    taskId: 99999,
+    scanFinish: true,
+    createTime: Math.floor(Date.now() / 1000) - 320,
+    duration: 320,
+    num: { wait: 3, running: 2, success: 18, fail: 1, other: 0 },
+    size: { wait: 0, running: 0, success: 0, fail: 0, other: 0 },
+    doneSize: 1536 * 1024 * 1024,
+    remainSize: 640 * 1024 * 1024,
+    speed: 12.5 * 1024 * 1024,
+    speedAvg: 8.7 * 1024 * 1024,
+    remainTime: 52,
+    doingTask: [
+      { id: 1, fileName: "2024-summer-vacation-photos-collection-final-v2.zip", srcPath: "/photos/2024/summer", dstPath: "/backup/photos/2024/summer", fileSize: 256 * 1024 * 1024, type: 1, status: 1, progress: 67 },
+      { id: 2, fileName: "project-report-2024-Q3-department-review.pdf", srcPath: "/documents/reports", dstPath: "/backup/documents/reports", fileSize: 48 * 1024 * 1024, type: 1, status: 1, progress: 23 },
+    ],
+  } as unknown as NonNullable<typeof currentTask> : null;
+
+  const demoItems: TaskItem[] = demo && !currentTask ? [
+    { id: 1, fileName: "2024-summer-vacation-photos-collection-final-v2.zip", srcPath: "/photos/2024/summer", dstPath: "/backup/photos/2024/summer", fileSize: 256 * 1024 * 1024, type: 1, status: 1, progress: 67 },
+    { id: 2, fileName: "project-report-2024-Q3-department-review.pdf", srcPath: "/documents/reports", dstPath: "/backup/documents/reports", fileSize: 48 * 1024 * 1024, type: 1, status: 1, progress: 23 },
+    { id: 3, fileName: "家庭相册-全家福-20240815-高清原图.jpg", srcPath: "/photos/family", dstPath: "/backup/photos/family", fileSize: 18 * 1024 * 1024, type: 1, status: 0, progress: 0 },
+    { id: 4, fileName: "system-backup-incremental-20240901.tar.gz", srcPath: "/system/backups", dstPath: "/backup/system", fileSize: 512 * 1024 * 1024, type: 1, status: 0, progress: 0 },
+    { id: 5, fileName: "meeting-recording-2024-09-15-weekly-standup.mp4", srcPath: "/videos/meetings", dstPath: "/backup/videos/meetings", fileSize: 890 * 1024 * 1024, type: 1, status: 2, progress: 100 },
+  ] : [];
+
+  const activeTask = currentTask || demoTask;
+  if (!activeTask) {
     return <EmptyState />;
   }
-  const task = currentTask;
+  const task = activeTask;
   const activeTab = items.activeTab;
   const tabItems =
-    activeTab === 1 ? items.pagedTabTaskList : items.tabTaskList;
-  const tabTotal = items.tabTaskTotal;
+    demoItems.length > 0 ? demoItems : activeTab === 1 ? items.pagedTabTaskList : items.tabTaskList;
+  const tabTotal = demoItems.length > 0 ? demoItems.length : items.tabTaskTotal;
   const total = task.doneSize + task.remainSize;
   const percent =
     total > 0 ? Math.min(100, (task.doneSize / total) * 100) : 0;
@@ -118,7 +147,7 @@ export function Realtime({ jobId }: { jobId: number }) {
           停止任务
         </Button>
       </div>
-      <Progress percent={Math.round(percent)} />
+      <Progress percent={Math.round(percent)} showInfo strokeColor="var(--accent)" />
       <div className="execution-metrics">
         <div>
           <span>传输速度</span>
@@ -444,8 +473,12 @@ export function FileTable({
             },
             {
               title: "操作",
-              width: 70,
-              render: (_, record) => taskTypeNames[record.type || 0] || "—",
+              width: 80,
+              render: (_, record) => {
+                const name = taskTypeNames[record.type || 0] || "—";
+                const cls = record.type === 1 ? "task-tag task-tag--danger" : "task-tag";
+                return <span className={cls}>{name}</span>;
+              },
             },
             ...(!hideStatus
               ? [
@@ -464,15 +497,20 @@ export function FileTable({
               : []),
             {
               title: "进度",
-              width: 130,
-              render: (_, record) => (
-                <Progress
-                  percent={Math.max(
-                    0,
-                    Math.min(100, Number(record.progress) || 0),
-                  )}
-                />
-              ),
+              width: 150,
+              render: (_, record) => {
+                const pct = Math.max(0, Math.min(100, Number(record.progress) || 0));
+                return (
+                  <div className="file-progress">
+                    <span className="file-progress-pct">{pct}%</span>
+                    <Progress
+                      percent={pct}
+                      showInfo={false}
+                      strokeColor="var(--accent)"
+                    />
+                  </div>
+                );
+              },
             },
           ]}
         />

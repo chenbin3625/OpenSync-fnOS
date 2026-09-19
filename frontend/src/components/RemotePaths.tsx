@@ -70,12 +70,12 @@ export function RemotePaths({
         const children = (result || []).map((n) => {
           const name = n.name || n.path || "";
           const full = path === "/" ? "/" + name : path + "/" + name;
-          return { label: name, value: full, key: full, isLeaf: false };
+          return { label: full, value: full, key: full, isLeaf: false };
         });
         setNodes((prev) => update(prev, path, children));
-        // 根目录加载完成后，自动展开一级节点
+        // 根目录加载完成后，只展开根节点（显示一级目录）
         if (path === "/") {
-          setExpandedKeys(children.map((c) => String(c.key)));
+          setExpandedKeys(["/"]);
         }
       } catch (err) {
         if (!signal?.aborted && engineRef.current === engineId)

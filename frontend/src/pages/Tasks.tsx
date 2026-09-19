@@ -68,7 +68,7 @@ export default function Tasks() {
       selected ? api.current(selected.id, signal) : Promise.resolve(null),
     [selected?.id],
   );
-  const hasCurrentTask = currentTask.loading || currentTask.data != null;
+  const hasCurrentTask = true; // demo 模式：始终可用
   const update = (values: Record<string, string | number | null>) => {
     const next = new URLSearchParams(params);
     for (const [key, value] of Object.entries(values))
@@ -194,7 +194,7 @@ export default function Tasks() {
                   />
                 )}
                 {tab === "realtime" && (
-                  <Realtime key={selected.id} jobId={selected.id} />
+                  <Realtime key={selected.id} jobId={selected.id} demo />
                 )}
                 {tab === "history" && (
                   <History key={selected.id} jobId={selected.id} />

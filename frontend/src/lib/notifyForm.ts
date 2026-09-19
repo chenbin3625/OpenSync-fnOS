@@ -29,7 +29,7 @@ export interface NotifyForm {
 }
 export function defaultNotifyForm(): NotifyForm {
   return {
-    method: 0,
+    method: -1,
     enable: true,
     notSendNull: false,
     httpMethod: "POST",
@@ -113,6 +113,7 @@ export function notifyToForm(
   };
 }
 export function validateNotifyForm(form: NotifyForm) {
+  if (form.method < 0) return "请选择通知渠道";
   if ([0, 2, 4].includes(form.method)) {
     try {
       const url = new URL(form.url || "");

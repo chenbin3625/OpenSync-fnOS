@@ -57,7 +57,7 @@ func newRouter(development bool, allowedOrigins []string) *gin.Engine {
 	})
 	api := r.Group(prefix+"/svr", platform.GatewayRequired(development, allowedOrigins))
 	api.GET("/session", func(c *gin.Context) {
-		c.JSON(200, model.Success(gin.H{"uid": c.GetInt64("uid"), "development": development, "version": "0.1.0"}))
+		c.JSON(200, model.Success(gin.H{"uid": c.GetInt64("uid"), "development": development, "version": "0.0.1"}))
 	})
 	api.GET("/system/config", handler.GetSystemConfig)
 	api.PUT("/system/config", func(c *gin.Context) {

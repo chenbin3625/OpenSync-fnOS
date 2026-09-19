@@ -231,7 +231,8 @@ function NotificationEditor({
       <div className="editor-form">
         <Field label="通知渠道" required>
           <Select
-            value={form.method}
+            value={form.method >= 0 ? form.method : undefined}
+            placeholder="请选择通知渠道"
             optionList={channelNames.map((label, value) => ({ label, value }))}
             onChange={(value) => {
               setDirty(true);

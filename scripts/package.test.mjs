@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 const root = fileURLToPath(new URL("../", import.meta.url));
 test("package declares rootless gateway and minimum API scopes", () => {
@@ -28,4 +28,22 @@ test("package declares rootless gateway and minimum API scopes", () => {
   assert.equal(entry.allUsers, false);
   assert.equal(entry.type, "iframe");
   assert.equal(entry.control.accessPerm, "readonly");
+});
+
+test("lifecycle scripts are executable in the package template", () => {
+  const scripts = [
+    "install_init",
+    "install_callback",
+    "main",
+    "upgrade_init",
+    "upgrade_callback",
+    "uninstall_init",
+    "uninstall_callback",
+    "config_init",
+    "config_callback",
+  ];
+  for (const name of scripts) {
+    const mode = statSync(root + `fnos/cmd/${name}`).mode;
+    assert.ok(mode & 0o111, `fnos/cmd/${name} must be executable`);
+  }
 });

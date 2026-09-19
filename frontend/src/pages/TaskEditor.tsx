@@ -151,7 +151,7 @@ export default function TaskEditor({
                   />
                 </Field>
                 <div className="form-grid">
-                  <Field label="源目录" required>
+                  <Field label="源路径" required>
                     <RemotePaths
                       key={`src-${form.alistId}`}
                       engineId={form.alistId}
@@ -166,7 +166,7 @@ export default function TaskEditor({
                       />
                     </SettingRow>
                   </Field>
-                  <Field label="目标目录" required>
+                  <Field label="目标路径" required>
                     <RemotePaths
                       key={`dst-${form.alistId}`}
                       engineId={form.alistId}
