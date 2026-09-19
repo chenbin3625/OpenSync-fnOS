@@ -343,8 +343,8 @@ function NotificationEditor({
             onChange={(v) => change("notSendNull", v)}
           />
         </SettingRow>
-          <Button
-            icon={<IconSendStroked aria-hidden="true" />}
+        <Button
+          icon={<IconSendStroked aria-hidden="true" />}
           disabled={action.busy}
           onClick={() => submit(true)}
         >
