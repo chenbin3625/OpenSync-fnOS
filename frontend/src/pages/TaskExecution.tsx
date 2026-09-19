@@ -255,8 +255,9 @@ export function History({ jobId }: { jobId: number }) {
   ] : [];
 
   const realRows = resource.data?.dataList || [];
-  const rows = demo && realRows.length === 0 ? demoRecords : realRows;
-  const totalCount = demo && !resource.data?.count ? demoRecords.length : (resource.data?.count || 0);
+  const showDemo = demo && !resource.loading && !resource.data;
+  const rows = showDemo ? demoRecords : realRows;
+  const totalCount = showDemo ? demoRecords.length : (resource.data?.count || 0);
   const retry = (record: TaskRecord) =>
     void action.run(async () => {
       try {

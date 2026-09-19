@@ -207,17 +207,15 @@ h3 {
   overflow: auto;
 }
 .page {
-  padding: 0 20px 20px;
+  padding: 20px;
   min-height: 100%;
-  display: flex;
-  flex-direction: column;
 }
 .page-toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  margin: 0 -20px;
+  margin: -20px -20px 20px;
   padding: 0 20px;
   min-height: 56px;
   border-radius: var(--radius) var(--radius) 0 0;
@@ -226,7 +224,6 @@ h3 {
   top: 0;
   z-index: 10;
   background: var(--surface);
-  flex-shrink: 0;
 }
 .page-toolbar:has(.page-tabs) {
   border-bottom: 1px solid var(--line);
@@ -345,7 +342,7 @@ h3 {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 20px;
+  padding-top: 4px;
 }
 .history-view,
 .execution-view {
@@ -918,14 +915,14 @@ body .semi-modal-mask {
   color: var(--text-tertiary);
 }
 .mobile-record {
-  padding: 18px 0;
+  padding: 10px 0;
   border-bottom: 1px solid var(--line);
 }
 .record-title {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
 }
 .record-title > strong {
   min-width: 0;
@@ -937,8 +934,8 @@ body .semi-modal-mask {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  margin-top: 12px;
+  gap: 8px;
+  margin-top: 6px;
 }
 .file-record summary {
   list-style: none;
@@ -1003,7 +1000,7 @@ body .semi-modal-mask {
   }
   .page-toolbar {
     flex-wrap: wrap;
-    margin: 0 -16px;
+    margin: -20px -16px 20px;
     padding: 12px 16px;
     gap: 8px;
   }
@@ -1046,8 +1043,8 @@ body .semi-modal-mask {
     min-height: 36px;
   }
   .row-actions .semi-button {
-    width: 40px;
-    height: 40px;
+    width: 36px;
+    height: 36px;
   }
   .task-page {
     min-height: 0;
@@ -1077,7 +1074,7 @@ body .semi-modal-mask {
   .engine-item,
   .notification-item {
     flex-wrap: wrap;
-    gap: 12px;
+    gap: 8px;
   }
   .item-list .row-actions {
     margin-left: auto;
@@ -1138,11 +1135,11 @@ body .semi-modal-mask {
   }
   .execution-header {
     flex-wrap: wrap;
-    gap: 12px;
+    gap: 8px;
   }
   .execution-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    row-gap: 24px;
+    row-gap: 8px;
   }
   .desktop-data {
     display: none;
@@ -1302,7 +1299,7 @@ body .semi-modal-mask {
   gap: 12px;
 }
 .settings-page > .page-toolbar {
-  margin-bottom: 0;
+  margin-bottom: 8px;
 }
 .settings-card-head {
   display: flex;
