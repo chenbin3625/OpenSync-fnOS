@@ -10,6 +10,7 @@ import SideSheet from "@douyinfe/semi-ui/lib/es/sideSheet";
 import Table from "@douyinfe/semi-ui/lib/es/table";
 import Tabs from "@douyinfe/semi-ui/lib/es/tabs";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
+import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
 import {
   IconDeleteStroked,
   IconEyeOpenedStroked,
@@ -73,7 +74,7 @@ export function Realtime({ jobId }: { jobId: number }) {
     scanFinish: true,
     createTime: Math.floor(Date.now() / 1000) - 320,
     duration: 320,
-    num: { wait: 3, running: 2, success: 18, fail: 1, other: 0 },
+    num: { wait: 1, running: 2, success: 1, fail: 1, other: 1 },
     size: { wait: 0, running: 0, success: 0, fail: 0, other: 0 },
     doneSize: 1536 * 1024 * 1024,
     remainSize: 640 * 1024 * 1024,
@@ -90,8 +91,9 @@ export function Realtime({ jobId }: { jobId: number }) {
     { id: 1, fileName: "2024-summer-vacation-photos-collection-final-v2.zip", srcPath: "/photos/2024/summer", dstPath: "/backup/photos/2024/summer", fileSize: 256 * 1024 * 1024, type: 1, status: 1, progress: 67 },
     { id: 2, fileName: "project-report-2024-Q3-department-review.pdf", srcPath: "/documents/reports", dstPath: "/backup/documents/reports", fileSize: 48 * 1024 * 1024, type: 1, status: 1, progress: 23 },
     { id: 3, fileName: "家庭相册-全家福-20240815-高清原图.jpg", srcPath: "/photos/family", dstPath: "/backup/photos/family", fileSize: 18 * 1024 * 1024, type: 1, status: 0, progress: 0 },
-    { id: 4, fileName: "system-backup-incremental-20240901.tar.gz", srcPath: "/system/backups", dstPath: "/backup/system", fileSize: 512 * 1024 * 1024, type: 1, status: 0, progress: 0 },
+    { id: 4, fileName: "system-backup-incremental-20240901.tar.gz", srcPath: "/system/backups", dstPath: "/backup/system", fileSize: 512 * 1024 * 1024, type: 1, status: 7, progress: 0, errMsg: "连接超时：目标引擎无响应，请检查引擎地址和网络连接" },
     { id: 5, fileName: "meeting-recording-2024-09-15-weekly-standup.mp4", srcPath: "/videos/meetings", dstPath: "/backup/videos/meetings", fileSize: 890 * 1024 * 1024, type: 1, status: 2, progress: 100 },
+    { id: 6, fileName: "database-dump-20240910-prod.sql.gz", srcPath: "/database/backups", dstPath: "/backup/database", fileSize: 64 * 1024 * 1024, type: 1, status: 5, progress: 35, errMsg: "写入失败：目标磁盘空间不足" },
   ] : [];
 
   const activeTask = currentTask || demoTask;
@@ -100,9 +102,19 @@ export function Realtime({ jobId }: { jobId: number }) {
   }
   const task = activeTask;
   const activeTab = items.activeTab;
+  const filteredDemo = demoItems.length > 0
+    ? demoItems.filter((item) =>
+        activeTab === -1
+          ? ![0, 1, 2, 7].includes(item.status)
+          : item.status === activeTab,
+      )
+    : [];
   const tabItems =
-    demoItems.length > 0 ? demoItems : activeTab === 1 ? items.pagedTabTaskList : items.tabTaskList;
-  const tabTotal = demoItems.length > 0 ? demoItems.length : items.tabTaskTotal;
+    filteredDemo.length > 0 || demoItems.length > 0
+      ? filteredDemo
+      : activeTab === 1 ? items.pagedTabTaskList : items.tabTaskList;
+  const tabTotal =
+    demoItems.length > 0 ? filteredDemo.length : items.tabTaskTotal;
   const total = task.doneSize + task.remainSize;
   const percent =
     total > 0 ? Math.min(100, (task.doneSize / total) * 100) : 0;
@@ -472,15 +484,16 @@ export function FileTable({
               title: "文件 / 目录",
               render: (_, record) => (
                 <div className="file-name">
-                  <strong title={getTaskDisplayName(record)}>
-                    {getTaskDisplayName(record)}
-                  </strong>
-                  <span
-                    className="mono muted"
-                    title={record.dstPath || record.srcPath || ""}
-                  >
-                    {record.dstPath || record.srcPath || "—"}
-                  </span>
+                  <Tooltip content={getTaskDisplayName(record)} position="topLeft">
+                    <strong>
+                      {getTaskDisplayName(record)}
+                    </strong>
+                  </Tooltip>
+                  <Tooltip content={record.dstPath || record.srcPath || "—"} position="topLeft">
+                    <span className="mono muted">
+                      {record.dstPath || record.srcPath || "—"}
+                    </span>
+                  </Tooltip>
                 </div>
               ),
             },
@@ -518,6 +531,17 @@ export function FileTable({
               title: "进度",
               width: 150,
               render: (_, record) => {
+                const status = record.status;
+                // 失败状态：展示错误原因
+                if ([5, 6, 7].includes(status) && record.errMsg) {
+                  return (
+                    <Tooltip content={record.errMsg} position="topLeft">
+                      <span className="inline-error-text">{record.errMsg}</span>
+                    </Tooltip>
+                  );
+                }
+                // 仅运行中展示进度条
+                if (status !== 1) return null;
                 const pct = Math.max(0, Math.min(100, Number(record.progress) || 0));
                 return (
                   <div className="file-progress">
@@ -547,7 +571,9 @@ export function FileTable({
             >
               <summary>
                 <div className="record-title">
-                  <strong>{getTaskDisplayName(record)}</strong>
+                  <Tooltip content={getTaskDisplayName(record)} position="topLeft">
+                    <strong>{getTaskDisplayName(record)}</strong>
+                  </Tooltip>
                   {!hideStatus && (
                     <Status
                       status={record.status}
@@ -560,15 +586,22 @@ export function FileTable({
                     {taskTypeNames[record.type || 0]} ·{" "}
                     {record.isPath ? "目录" : formatSize(record.fileSize || 0)}
                   </span>
-                  <span>{Number(record.progress) || 0}%</span>
-                </div>
-                <Progress
-                  percent={Math.max(
-                    0,
-                    Math.min(100, Number(record.progress) || 0),
+                  {record.status === 1 && (
+                    <span>{Number(record.progress) || 0}%</span>
                   )}
-                  showInfo={false}
-                />
+                </div>
+                {record.status === 1 && (
+                  <Progress
+                    percent={Math.max(
+                      0,
+                      Math.min(100, Number(record.progress) || 0),
+                    )}
+                    showInfo={false}
+                  />
+                )}
+                {[5, 6, 7].includes(record.status) && record.errMsg && (
+                  <div className="inline-error-text muted">{record.errMsg}</div>
+                )}
               </summary>
               <div className="file-expanded">
                 <div>

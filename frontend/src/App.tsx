@@ -21,6 +21,7 @@ import {
   IconBellStroked,
   IconCloudStroked,
   IconFolderStroked,
+  IconGithubLogo,
   IconServerStroked,
   IconSettingStroked,
   IconTreeTriangleDown,
@@ -183,6 +184,15 @@ function Shell({ children }: { children: ReactNode }) {
           ))}
         </nav>
         <div className="sidebar-settings">
+          <a
+            className="nav-link"
+            href="https://github.com/chenbin3625/OpenSync-fnOS"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <IconGithubLogo aria-hidden="true" />
+            <span className="nav-label">GitHub</span>
+          </a>
           <NavLink
             to="/settings"
             className={({ isActive }) =>

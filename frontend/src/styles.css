@@ -961,6 +961,15 @@ body .semi-modal-mask {
   font-size: var(--font-size-small);
   overflow-wrap: anywhere;
 }
+.inline-error-text {
+  color: var(--danger);
+  font-size: var(--font-size-small);
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
 .file-expanded .inline-error span {
   color: var(--muted);
 }
