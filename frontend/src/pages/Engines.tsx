@@ -8,7 +8,6 @@ import {
   IconEditStroked,
   IconDeleteStroked,
   IconCopyStroked,
-  IconFolderStroked,
 } from "@douyinfe/semi-icons";
 import { api } from "../api/client";
 import {
@@ -16,12 +15,12 @@ import {
   Editor,
   Field,
   Header,
-  IconButton,
   LoadState,
   confirmDelete,
   errorToast,
 } from "../components/common";
 import { useAction, useResource } from "../lib/hooks";
+import { formatTimestamp } from "../utils/date";
 import type { AlistItem } from "../types";
 
 export default function Engines() {
@@ -52,47 +51,47 @@ export default function Engines() {
           !engines.error &&
           engines.data?.map((engine) => (
             <div className="engine-item" key={engine.id}>
-              <div className="item-symbol">
-                <IconFolderStroked aria-hidden="true" />
-              </div>
               <div className="item-content">
                 <h2>{engine.remark || engine.userName || `引擎 #${engine.id}`}</h2>
                 <div className="mono muted">{engine.url}</div>
-                <div className="muted">{engine.userName}</div>
+                <div className="item-meta">
+                  账号 {engine.userName || "—"} · 创建于{" "}
+                  {formatTimestamp(engine.createTime)}
+                </div>
               </div>
               <div className="row-actions">
-                <IconButton
-                  aria-hidden="true"
-                  label="复制引擎地址"
-                  icon={<IconCopyStroked aria-hidden="true" />}
-                  onClick={() => {
-                    void navigator.clipboard
-                      .writeText(engine.url)
-                      .then(() => Toast.success("地址已复制"))
-                      .catch(errorToast);
-                  }}
-                />
-                <IconButton
-                  aria-hidden="true"
-                  label="编辑引擎"
-                  icon={<IconEditStroked aria-hidden="true" />}
-                  onClick={() => setEditing(engine)}
-                />
-                <IconButton
-                  aria-hidden="true"
-                  label="删除引擎"
-                  danger
-                  icon={<IconDeleteStroked aria-hidden="true" />}
-                  onClick={() =>
-                    confirmDelete(
-                      "删除此存储引擎？",
-                      async () => {
-                        await api.deleteEngine(engine.id);
-                        await engines.refresh();
+                <ActionMenu
+                  actions={[
+                    {
+                      label: "复制引擎地址",
+                      icon: <IconCopyStroked aria-hidden="true" />,
+                      onClick: () => {
+                        void navigator.clipboard
+                          .writeText(engine.url)
+                          .then(() => Toast.success("地址已复制"))
+                          .catch(errorToast);
                       },
-                      "关联同步任务需先删除；引擎中的文件不会被删除。",
-                    )
-                  }
+                    },
+                    {
+                      label: "编辑引擎",
+                      icon: <IconEditStroked aria-hidden="true" />,
+                      onClick: () => setEditing(engine),
+                    },
+                    {
+                      label: "删除引擎",
+                      icon: <IconDeleteStroked aria-hidden="true" />,
+                      danger: true,
+                      onClick: () =>
+                        confirmDelete(
+                          "删除此存储引擎？",
+                          async () => {
+                            await api.deleteEngine(engine.id);
+                            await engines.refresh();
+                          },
+                          "关联同步任务需先删除；引擎中的文件不会被删除。",
+                        ),
+                    },
+                  ]}
                 />
               </div>
             </div>
