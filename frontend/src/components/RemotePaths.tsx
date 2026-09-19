@@ -67,7 +67,7 @@ export function RemotePaths({
         const children = (result || []).map((n) => {
           const name = n.name || n.path || "";
           const full = path === "/" ? "/" + name : path + "/" + name;
-          return { label: full, value: full, key: full, isLeaf: false };
+          return { label: name, value: full, key: full, isLeaf: false };
         });
         setNodes((prev) => update(prev, path, children));
         // 根目录加载完成后，只展开根节点（显示一级目录）
@@ -138,6 +138,7 @@ export function RemotePaths({
         treeData={nodes}
         value={multiple ? value : value[0]}
         multiple={multiple}
+        treeNodeLabelProp="value"
         checkRelation="unRelated"
         disabled={!engineId}
         filterTreeNode
