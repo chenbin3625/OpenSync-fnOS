@@ -18,7 +18,7 @@ type copyQueue struct {
 }
 
 func newCopyQueue() *copyQueue {
-	return newCopyQueueWithCapacity(maxQueuedCopyItems)
+	return newCopyQueueWithCapacity(0)
 }
 
 func newCopyQueueWithCapacity(capacity int) *copyQueue {

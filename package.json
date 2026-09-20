@@ -1,6 +1,6 @@
 {
   "name": "opensync-fnos",
-  "version": "0.0.9",
+  "version": "0.0.10",
   "private": true,
   "type": "module",
   "description": "OpenSync 飞牛 Native 应用的本地预览与打包入口",

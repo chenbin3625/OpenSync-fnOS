@@ -673,6 +673,22 @@ body .semi-modal-mask {
 .unit-input .semi-select {
   flex: 0 0 82px;
 }
+/* 文件夹过滤树 */
+.exclude-tree {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 8px;
+  background: var(--surface-soft);
+}
+.exclude-tree .semi-tree {
+  background: transparent;
+}
+.exclude-tree-empty {
+  padding: 24px 0;
+  text-align: center;
+}
 .editor-form fieldset {
   border: 0;
   padding: 0;
@@ -820,6 +836,14 @@ body .semi-modal-mask {
 .file-table table {
   table-layout: fixed;
 }
+/* 固定表头 */
+.execution-scroll .file-table thead th,
+.detail-drawer-body .file-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface);
+}
 .file-table .file-col-name {
   width: 360px;
   min-width: 300px;
@@ -836,19 +860,13 @@ body .semi-modal-mask {
   max-width: 90px;
 }
 .file-table .file-col-status {
-  width: 124px;
-  min-width: 112px;
-  max-width: 150px;
-}
-.file-table .file-col-progress {
-  width: 140px;
-  min-width: 132px;
-  max-width: 180px;
+  width: 160px;
+  min-width: 140px;
+  max-width: 200px;
 }
 .file-table .file-col-size,
 .file-table .file-col-action,
-.file-table .file-col-status,
-.file-table .file-col-progress {
+.file-table .file-col-status {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

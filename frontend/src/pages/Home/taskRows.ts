@@ -188,18 +188,19 @@ export function sortTaskItemsByCreateTimeDesc(rows: TaskItem[]): TaskItem[] {
   });
 }
 
-// Running rows arrive as a complete SSE snapshot and need client-side paging.
-// Every other status is already paged and ordered by the server, so slicing
-// those rows again would make every page after the first appear empty.
+// Realtime running rows arrive as a complete snapshot and must stay complete.
+// Other statuses are already paged and ordered by the server, so this helper
+// keeps every tab's input unchanged.
 export function pageTaskItems(
   rows: TaskItem[],
   status: number,
   page: number,
   pageSize: number,
 ): TaskItem[] {
-  if (status !== 1) return rows;
-  const start = Math.max(0, (page - 1) * pageSize);
-  return rows.slice(start, start + pageSize);
+  void status;
+  void page;
+  void pageSize;
+  return rows;
 }
 
 export function shouldReplaceRealtimeRows(

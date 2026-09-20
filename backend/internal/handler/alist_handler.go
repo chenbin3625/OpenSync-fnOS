@@ -1,8 +1,6 @@
 package handler
 
 import (
-	"net/http"
-	"opensync/internal/model"
 	"opensync/internal/msg"
 	"opensync/internal/service"
 
@@ -17,54 +15,52 @@ func GetAlist(c *gin.Context) {
 	if alistIDStr != "" && path != "" {
 		alistID, err := parseRequiredID(alistIDStr, "alistId")
 		if err != nil {
-			c.JSON(http.StatusOK, model.Error(err.Error()))
+			respondError(c, err.Error())
 			return
 		}
 		result := service.GetChildPath(c.Request.Context(), alistID, path)
-		c.JSON(http.StatusOK, model.Success(result))
+		respondOK(c, result)
 		return
 	}
 	// Return client list
 	result := service.GetClientList()
-	c.JSON(http.StatusOK, model.Success(result))
+	respondOK(c, result)
 }
 
 // AddAlist handles POST /svr/alist
 func AddAlist(c *gin.Context) {
 	var req map[string]interface{}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusOK, model.Error(msg.LostPart))
+	if !bindJSON(c, &req) {
 		return
 	}
 	service.AddClient(req)
-	c.JSON(http.StatusOK, model.Success(nil))
+	respondOK(c, nil)
 }
 
 // UpdateAlist handles PUT /svr/alist
 func UpdateAlist(c *gin.Context) {
 	var req map[string]interface{}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusOK, model.Error(msg.LostPart))
+	if !bindJSON(c, &req) {
 		return
 	}
 	service.UpdateClient(req)
-	c.JSON(http.StatusOK, model.Success(nil))
+	respondOK(c, nil)
 }
 
 // TestAlist handles POST /svr/alist/test
 func TestAlist(c *gin.Context) {
 	idStr := c.Query("id")
 	if idStr == "" {
-		c.JSON(http.StatusOK, model.Error(msg.LostPart))
+		respondError(c, msg.LostPart)
 		return
 	}
 	id, err := parseRequiredID(idStr, "id")
 	if err != nil {
-		c.JSON(http.StatusOK, model.Error(err.Error()))
+		respondError(c, err.Error())
 		return
 	}
 	service.TestClient(c.Request.Context(), id)
-	c.JSON(http.StatusOK, model.Success(nil))
+	respondOK(c, nil)
 }
 
 // DeleteAlist handles DELETE /svr/alist
@@ -75,14 +71,14 @@ func DeleteAlist(c *gin.Context) {
 		idStr = c.PostForm("id")
 	}
 	if idStr == "" {
-		c.JSON(http.StatusOK, model.Error(msg.LostPart))
+		respondError(c, msg.LostPart)
 		return
 	}
 	id, err := parseRequiredID(idStr, "id")
 	if err != nil {
-		c.JSON(http.StatusOK, model.Error(err.Error()))
+		respondError(c, err.Error())
 		return
 	}
 	service.RemoveClient(id)
-	c.JSON(http.StatusOK, model.Success(nil))
+	respondOK(c, nil)
 }

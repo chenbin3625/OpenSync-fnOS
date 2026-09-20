@@ -99,8 +99,15 @@ export default function Notifications() {
                 <h2>
                   {channelNames[item.method]}
                 </h2>
-                <div className="item-meta">
-                  通知 #{item.id}
+                <div className="item-meta mono">
+                  {(() => {
+                    try {
+                      const p = JSON.parse(item.params || "{}");
+                      return p.url || p.webhook || "";
+                    } catch {
+                      return "";
+                    }
+                  })() || "—"}
                 </div>
               </div>
               <div className="row-actions">

@@ -2,9 +2,13 @@ package handler
 
 import (
 	"errors"
+	"net/http"
+	"opensync/internal/model"
 	"opensync/internal/msg"
 	"strconv"
 	"strings"
+
+	"github.com/gin-gonic/gin"
 )
 
 func parseRequiredID(value, field string) (int64, error) {
@@ -16,6 +20,22 @@ func parseRequiredID(value, field string) (int64, error) {
 		return 0, errors.New(msg.LostPart)
 	}
 	return id, nil
+}
+
+func respondOK(c *gin.Context, data interface{}) {
+	c.JSON(http.StatusOK, model.Success(data))
+}
+
+func respondError(c *gin.Context, message string) {
+	c.JSON(http.StatusOK, model.Error(message))
+}
+
+func bindJSON(c *gin.Context, target interface{}) bool {
+	if err := c.ShouldBindJSON(target); err != nil {
+		respondError(c, msg.LostPart)
+		return false
+	}
+	return true
 }
 
 func parseEnableValue(value interface{}) (int, error) {

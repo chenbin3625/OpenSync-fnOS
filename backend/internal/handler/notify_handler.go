@@ -1,8 +1,6 @@
 package handler
 
 import (
-	"net/http"
-	"opensync/internal/model"
 	"opensync/internal/msg"
 	"opensync/internal/service"
 	"opensync/pkg/util"
@@ -13,7 +11,7 @@ import (
 // GetNotify handles GET /svr/notify
 func GetNotify(c *gin.Context) {
 	result := service.GetNotifyList()
-	c.JSON(http.StatusOK, model.Success(result))
+	respondOK(c, result)
 }
 
 // AddNotify handles POST /svr/notify
@@ -21,8 +19,11 @@ func AddNotify(c *gin.Context) {
 	var req struct {
 		Notify *map[string]interface{} `json:"notify"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil || req.Notify == nil {
-		c.JSON(http.StatusOK, model.Error(msg.LostPart))
+	if !bindJSON(c, &req) {
+		return
+	}
+	if req.Notify == nil {
+		respondError(c, msg.LostPart)
 		return
 	}
 
@@ -30,11 +31,11 @@ func AddNotify(c *gin.Context) {
 	if _, hasEnable := notify["enable"]; !hasEnable {
 		// A create request without `enable` is ambiguous; test sends belong on
 		// POST /svr/notify/test so this cannot silently fire a real message.
-		c.JSON(http.StatusOK, model.Error(msg.LostPart))
+		respondError(c, msg.LostPart)
 		return
 	}
 	service.AddNewNotify(notify)
-	c.JSON(http.StatusOK, model.Success(nil))
+	respondOK(c, nil)
 }
 
 // TestNotify handles POST /svr/notify/test
@@ -42,19 +43,21 @@ func TestNotify(c *gin.Context) {
 	var req struct {
 		Notify *map[string]interface{} `json:"notify"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil || req.Notify == nil {
-		c.JSON(http.StatusOK, model.Error(msg.LostPart))
+	if !bindJSON(c, &req) {
+		return
+	}
+	if req.Notify == nil {
+		respondError(c, msg.LostPart)
 		return
 	}
 	service.TestNotify(*req.Notify)
-	c.JSON(http.StatusOK, model.Success(nil))
+	respondOK(c, nil)
 }
 
 // UpdateNotify handles PUT /svr/notify
 func UpdateNotify(c *gin.Context) {
 	var req map[string]interface{}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusOK, model.Error(msg.LostPart))
+	if !bindJSON(c, &req) {
 		return
 	}
 
@@ -62,17 +65,17 @@ func UpdateNotify(c *gin.Context) {
 		// Update status
 		notifyID, err := parseRequiredID(util.StringValue(notifyIDStr), "notifyId")
 		if err != nil {
-			c.JSON(http.StatusOK, model.Error(err.Error()))
+			respondError(c, err.Error())
 			return
 		}
 		enableRaw, ok := req["enable"]
 		if !ok {
-			c.JSON(http.StatusOK, model.Error(msg.LostPart))
+			respondError(c, msg.LostPart)
 			return
 		}
 		enable, err := parseEnableValue(enableRaw)
 		if err != nil {
-			c.JSON(http.StatusOK, model.Error(err.Error()))
+			respondError(c, err.Error())
 			return
 		}
 		service.UpdateNotifyStatus(notifyID, enable)
@@ -81,28 +84,28 @@ func UpdateNotify(c *gin.Context) {
 		if nMap, ok := notify.(map[string]interface{}); ok {
 			service.EditNotify(nMap)
 		} else {
-			c.JSON(http.StatusOK, model.Error(msg.LostPart))
+			respondError(c, msg.LostPart)
 			return
 		}
 	} else {
-		c.JSON(http.StatusOK, model.Error(msg.LostPart))
+		respondError(c, msg.LostPart)
 		return
 	}
-	c.JSON(http.StatusOK, model.Success(nil))
+	respondOK(c, nil)
 }
 
 // DeleteNotify handles DELETE /svr/notify
 func DeleteNotify(c *gin.Context) {
 	notifyIDStr := c.Query("notifyId")
 	if notifyIDStr == "" {
-		c.JSON(http.StatusOK, model.Error(msg.LostPart))
+		respondError(c, msg.LostPart)
 		return
 	}
 	notifyID, err := parseRequiredID(notifyIDStr, "notifyId")
 	if err != nil {
-		c.JSON(http.StatusOK, model.Error(err.Error()))
+		respondError(c, err.Error())
 		return
 	}
 	service.DeleteNotify(notifyID)
-	c.JSON(http.StatusOK, model.Success(nil))
+	respondOK(c, nil)
 }

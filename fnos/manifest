@@ -1,5 +1,5 @@
 appname=opensync
-version=0.0.9
+version=0.0.10
 display_name=OpenSync
 desc=群晖 Cloud Sync 平替，飞牛上的文件同步与备份工具。依赖 OpenList（兼容 AList）作为存储引擎，添加本地存储与各类云盘后即可实现跨存储自动同步。三种同步模式（仅新增 / 全同步 / 移动），灵活调度（Cron / 固定间隔 / 手动），gitignore 格式过滤，实时进度推送，执行历史查询，支持 Webhook / Server酱 / 钉钉 / 企业微信 / 飞书通知。开源地址：https://github.com/chenbin3625/OpenSync-fnOS
 platform=x86
@@ -15,4 +15,4 @@ micro_app=true
 ctl_stop=true
 checkport=false
 disable_authorization_path=false
-changelog=v0.0.9：修复严格来源白名单校验、阻止源目录与目标目录重叠，并禁止删除执行中的历史任务。
+changelog=v0.0.10：移除实时任务列表 5000 条上限，新增全量实时展示；优化扫描与同步执行性能；新增文件夹过滤选择器；清理后端冗余代码并补充回归测试。

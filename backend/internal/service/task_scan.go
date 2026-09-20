@@ -61,10 +61,22 @@ func (jt *JobTask) tryAcquireScanBranchSlot() bool {
 	if jt.isBreak() {
 		return false
 	}
+	// Try non-blocking first.
 	select {
 	case jt.scanBranchSem <- struct{}{}:
 		return true
 	default:
+	}
+	// Wait briefly before falling back to sequential execution, giving
+	// sibling branches a chance to finish and free a slot.
+	timer := time.NewTimer(100 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case jt.scanBranchSem <- struct{}{}:
+		return true
+	case <-timer.C:
+		return false
+	case <-jt.context().Done():
 		return false
 	}
 }
@@ -110,26 +122,42 @@ func (jt *JobTask) sync() {
 
 	dstPaths := parsePathList(jt.Job["dstPath"])
 	fullSync := util.ToInt(jt.Job["method"]) == 1
+
+	// Collect all top-level (src, dst) pairs.
+	var works []scanWork
 	for _, srcItem := range srcPaths {
 		srcItem = normalizeDirPath(srcItem)
 		for i, dstItem := range dstPaths {
 			dstItem = normalizeDirPath(dstItem)
 			resolvedDstPath := dstPathForSrcSelection(dstItem, srcItem, srcPaths)
-			work := scanWork{
+			works = append(works, scanWork{
 				SrcPath:     srcItem,
 				DstPath:     resolvedDstPath,
 				SrcRootPath: srcItem,
 				DstRootPath: resolvedDstPath,
 				FirstDst:    i == 0,
 				Mode:        scanWorkCompare,
-			}
+			})
+		}
+	}
+
+	// Run top-level pairs concurrently so independent source/destination
+	// trees overlap their network I/O instead of waiting in sequence.
+	var wg sync.WaitGroup
+	for _, work := range works {
+		work := work
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer jt.recoverWorkerPanic("scan-root", nil)
 			if fullSync {
 				jt.syncFull(work, spec)
 			} else {
 				jt.runScanWork(work, spec)
 			}
-		}
+		}()
 	}
+	wg.Wait()
 	jt.markScanFinished()
 }
 
@@ -188,7 +216,10 @@ func (jt *JobTask) retryMkdir(srcPath, dstPath string, copyType taskItemType) {
 		jt.CopyHook(srcPath, dstPath, "", nil, "", taskStatusFailed, &errMsg, taskItemPath, copyType, time.Now().Unix())
 		return
 	}
+	jt.mkdirAndRecord(srcPath, dstPath, copyType)
+}
 
+func (jt *JobTask) mkdirAndRecord(srcPath, dstPath string, copyType taskItemType) taskStatus {
 	status := taskStatusSuccess
 	var errMsg *string
 	scanIntervalT := util.ToInt(jt.Job["scanIntervalT"])
@@ -198,6 +229,7 @@ func (jt *JobTask) retryMkdir(srcPath, dstPath string, copyType taskItemType) {
 		errMsg = &e
 	}
 	jt.CopyHook(srcPath, dstPath, "", nil, "", status, errMsg, taskItemPath, copyType, time.Now().Unix())
+	return status
 }
 
 func dstPathForSrcSelection(dstPath, srcPath string, srcPaths []string) string {
@@ -620,17 +652,7 @@ func (jt *JobTask) syncWithoutHave(work scanWork, spec *ignore.GitIgnore) {
 		return
 	}
 
-	status := taskStatusSuccess
-	var errMsg *string
-	scanIntervalT := util.ToInt(jt.Job["scanIntervalT"])
-	err := jt.AlistClient.MkdirContext(jt.context(), work.DstPath, scanIntervalT)
-	if err != nil {
-		status = taskStatusFailed
-		e := err.Error()
-		errMsg = &e
-	}
-
-	jt.CopyHook(work.SrcPath, work.DstPath, "", nil, "", status, errMsg, taskItemPath, taskItemTypeCopy, time.Now().Unix())
+	status := jt.mkdirAndRecord(work.SrcPath, work.DstPath, taskItemTypeCopy)
 	if status != taskStatusSuccess {
 		jt.finishScanWork()
 		return

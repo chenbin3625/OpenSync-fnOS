@@ -3,12 +3,17 @@ import {
   buildJobPayload,
   defaultJobForm,
   jobToForm,
+  parseExcludeFolders,
   selectJob,
+  updateExcludeFolders,
   validateJobForm,
 } from "../src/lib/taskForm";
+import { methodNames } from "../src/pages/Home/homeUtils";
 
 describe("existing synchronization contracts", () => {
   it("keeps multi-source, multi-target and all three synchronization modes", () => {
+    expect(methodNames).toEqual(["仅新增", "全同步", "移动模式"]);
+
     for (const method of [0, 1, 2]) {
       const form = {
         ...defaultJobForm(7),
@@ -80,5 +85,23 @@ describe("existing synchronization contracts", () => {
     const jobs = [{ id: 1 }, { id: 2 }];
     expect(selectJob(jobs, null)).toEqual({ id: 1 });
     expect(selectJob(jobs, 999)).toBeUndefined();
+  });
+
+  it("updates generated folder exclude rules without changing manual rules", () => {
+    const manualRules = "*.tmp\n!important.tmp";
+    const withFolders = updateExcludeFolders(manualRules, [
+      "photos/raw/",
+      "cache/",
+    ]);
+
+    expect(withFolders).toContain(manualRules);
+    expect(parseExcludeFolders(withFolders)).toEqual([
+      "photos/raw/",
+      "cache/",
+    ]);
+    expect(updateExcludeFolders(withFolders, ["logs/"])).toBe(
+      "*.tmp\n!important.tmp\n\n# --- 文件夹过滤（自动生成，请勿手动编辑）---\nlogs/\n# --- 文件夹过滤结束 ---",
+    );
+    expect(updateExcludeFolders(withFolders, [])).toBe(manualRules);
   });
 });

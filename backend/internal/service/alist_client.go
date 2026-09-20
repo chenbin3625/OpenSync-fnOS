@@ -279,10 +279,6 @@ func (c *AlistClient) GetContext(ctx context.Context, apiPath string, params map
 	return c.doRequestContext(ctx, "GET", apiPath, nil, params)
 }
 
-func (c *AlistClient) getUser() error {
-	return c.getUserContext(context.Background())
-}
-
 func (c *AlistClient) getUserContext(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -304,6 +300,13 @@ func (c *AlistClient) getUserContext(ctx context.Context) error {
 }
 
 func (c *AlistClient) CheckWaitContext(ctx context.Context, path string, scanInterval int) error {
+	return c.checkWaitContextN(ctx, path, scanInterval, 1)
+}
+
+// checkWaitContextN is like CheckWaitContext but divides the per-bucket
+// interval by concurrency so N concurrent callers share the window instead
+// of queueing sequentially (0s, interval, 2*interval, …).
+func (c *AlistClient) checkWaitContextN(ctx context.Context, path string, scanInterval, concurrency int) error {
 	if scanInterval <= 0 {
 		return nil
 	}
@@ -316,8 +319,17 @@ func (c *AlistClient) CheckWaitContext(ctx context.Context, path string, scanInt
 		return nil
 	}
 
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	// Spread N concurrent requests evenly across the interval so total
+	// throughput matches the configured rate while parallelism is preserved.
+	interval := time.Duration(scanInterval) * time.Second / time.Duration(concurrency)
+	if interval < time.Millisecond {
+		interval = time.Millisecond
+	}
+
 	now := time.Now()
-	interval := time.Duration(scanInterval) * time.Second
 	waitUntil := now
 
 	c.mu.Lock()

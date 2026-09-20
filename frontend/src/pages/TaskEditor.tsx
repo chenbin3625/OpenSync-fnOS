@@ -14,12 +14,15 @@ import {
   SettingRow,
   errorToast,
 } from "../components/common";
+import { ExcludeTree } from "../components/ExcludeTree";
 import { RemotePaths } from "../components/RemotePaths";
 import { useAction } from "../lib/hooks";
 import {
   buildJobPayload,
   defaultJobForm,
   jobToForm,
+  parseExcludeFolders,
+  updateExcludeFolders,
   validateJobForm,
   validateJobFormStep,
   type JobForm,
@@ -283,6 +286,19 @@ export default function TaskEditor({
                     </Field>
                   ))}
                 </div>
+                <Field label="文件夹过滤" hint="勾选要忽略的文件夹，源和目标同时生效">
+                  <ExcludeTree
+                    engineId={form.alistId}
+                    srcPaths={form.srcPath}
+                    excludedPaths={parseExcludeFolders(form.exclude)}
+                    onChange={(folders) =>
+                      change(
+                        "exclude",
+                        updateExcludeFolders(form.exclude, folders),
+                      )
+                    }
+                  />
+                </Field>
                 <Field label="排除规则（.gitignore 格式）">
                   <TextArea
                     value={form.exclude}

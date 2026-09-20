@@ -102,6 +102,26 @@ func TestCopyQueueRejectsPushWhenCapacityIsFull(t *testing.T) {
 	}
 }
 
+func TestDefaultCopyQueueIsUnboundedForRealtimeTaskList(t *testing.T) {
+	queue := newCopyQueue()
+	const legacyQueuedCopyItemLimit = 5000
+
+	for i := 0; i < legacyQueuedCopyItemLimit; i++ {
+		if ok := queue.pushWait(context.Background(), &CopyItem{FileName: "queued.txt"}); !ok {
+			t.Fatalf("push %d returned false, want true", i)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if ok := queue.pushWait(ctx, &CopyItem{FileName: "beyond-legacy-limit.txt"}); !ok {
+		t.Fatalf("push beyond legacy 5000 item limit returned false, want true")
+	}
+	if got := queue.len(); got != legacyQueuedCopyItemLimit+1 {
+		t.Fatalf("queue.len() = %d, want %d", got, legacyQueuedCopyItemLimit+1)
+	}
+}
+
 func TestCopyItemUsesRuntimeAndClientInterfaces(t *testing.T) {
 	var _ copyItemRuntime = (*JobTask)(nil)
 	var _ copyItemClient = (*AlistClient)(nil)
@@ -185,8 +205,8 @@ func TestRuntimeTaskLimitsClampInvalidConfiguredValues(t *testing.T) {
 	if limits.CopyConcurrency != config.DefaultCopyConcurrency {
 		t.Fatalf("CopyConcurrency = %d, want default %d", limits.CopyConcurrency, config.DefaultCopyConcurrency)
 	}
-	if limits.ScanConcurrency != 20 {
-		t.Fatalf("ScanConcurrency = %d, want max 20", limits.ScanConcurrency)
+	if limits.ScanConcurrency != config.MaxScanConcurrency {
+		t.Fatalf("ScanConcurrency = %d, want max %d", limits.ScanConcurrency, config.MaxScanConcurrency)
 	}
 	if limits.MaxRetries != config.MaxRetryAttempts {
 		t.Fatalf("MaxRetries = %d, want max %d", limits.MaxRetries, config.MaxRetryAttempts)

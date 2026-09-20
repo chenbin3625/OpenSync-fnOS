@@ -57,7 +57,7 @@ func (jt *JobTask) stopCopyExecutorIfBroken() bool {
 
 func (jt *JobTask) startAvailableCopyItems() bool {
 	started := false
-	limits := runtimeTaskLimits()
+	limits := jt.taskLimits()
 	for jt.doingLen() < limits.CopyConcurrency {
 		if jt.isBreak() {
 			jt.markWaitingAsAborted()
@@ -88,8 +88,8 @@ func (jt *JobTask) waitForCopyExecutorSignal(tick <-chan time.Time) {
 }
 
 func (jt *JobTask) doingLen() int {
-	jt.DoingMu.Lock()
-	defer jt.DoingMu.Unlock()
+	jt.DoingMu.RLock()
+	defer jt.DoingMu.RUnlock()
 	return len(jt.Doing)
 }
 
@@ -160,8 +160,8 @@ func (jt *JobTask) failCopyItemIfStillDoing(item *CopyItem, errMsg string) {
 }
 
 func (jt *JobTask) copyItemStillDoing(item *CopyItem) bool {
-	jt.DoingMu.Lock()
-	defer jt.DoingMu.Unlock()
+	jt.DoingMu.RLock()
+	defer jt.DoingMu.RUnlock()
 	return item != nil && jt.Doing[item.DoingKey] == item
 }
 
@@ -173,19 +173,7 @@ func (jt *JobTask) markWaitingAsAborted() {
 	taskItems := make([]JobTaskItem, 0, len(items))
 	for _, item := range items {
 		item.setStatus(taskStatusStopped)
-		item.mu.RLock()
-		if item.CopyType == taskItemTypeDelete {
-			taskItems = append(taskItems, NewDeleteJobTaskItem(
-				jt.TaskID, item.DstPath, item.FileName, item.FileSize,
-				taskStatusStopped, item.ErrMsg, item.IsPath, item.CreateTime,
-			))
-		} else {
-			taskItems = append(taskItems, NewCopyJobTaskItem(
-				jt.TaskID, item.SrcPath, item.DstPath, item.FileName, item.FileSize,
-				item.AlistTaskID, taskStatusStopped, item.ErrMsg, item.IsPath, item.CopyType, item.CreateTime,
-			))
-		}
-		item.mu.RUnlock()
+		taskItems = append(taskItems, item.ToJobTaskItem(jt.TaskID))
 	}
 	jt.appendFinishMany(taskItems)
 }

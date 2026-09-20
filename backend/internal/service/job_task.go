@@ -25,15 +25,16 @@ type JobTask struct {
 	FinishedCounts map[taskStatus]int
 	FinishedSizes  map[taskStatus]int64
 	Doing          map[int64]*CopyItem
-	DoingMu        sync.Mutex
+	DoingMu        sync.RWMutex
 	Waiting        *copyQueue
 
 	LastWatching atomic.Int64
 	// QueueNum is incremented by both the submit executor and the full-sync
 	// relocation path, so it has to be atomic: a plain ++ let two items share a
 	// DoingKey and silently overwrite each other in Doing.
-	QueueNum   atomic.Int64
-	ScanFinish atomic.Bool
+	QueueNum      atomic.Int64
+	ScanFinish    atomic.Bool
+	cachedLimits  *taskRuntimeLimits
 	FirstSync     atomic.Int64
 	BreakFlag     atomic.Bool
 	scanSem       chan struct{}
@@ -72,6 +73,7 @@ func NewJobTask(taskID int64, jc *JobClient) *JobTask {
 
 func newJobTask(taskID int64, jc *JobClient) *JobTask {
 	job := jc.jobSnapshot()
+	limits := runtimeTaskLimits()
 	jt := &JobTask{
 		TaskID:         taskID,
 		JobClient:      jc,
@@ -82,11 +84,21 @@ func newJobTask(taskID int64, jc *JobClient) *JobTask {
 		Doing:          make(map[int64]*CopyItem),
 		Waiting:        newCopyQueue(),
 		scanSem:        make(chan struct{}, scanConcurrencyLimit()),
-		scanBranchSem:  make(chan struct{}, scanConcurrencyLimit()),
+		scanBranchSem:  make(chan struct{}, scanBranchLimit()),
+		cachedLimits:   &limits,
 	}
 	jt.ctx, jt.cancel = newTaskContext(config.GetConfig().Server.Timeout)
 	jt.AlistClient = GetClientByIDContext(jt.ctx, util.ToInt64(job["alistId"]))
 	return jt
+}
+
+// taskLimits returns the cached runtime limits for this task, avoiding
+// repeated config reads on hot paths (copy executor loop, retry decisions).
+func (jt *JobTask) taskLimits() taskRuntimeLimits {
+	if jt.cachedLimits != nil {
+		return *jt.cachedLimits
+	}
+	return runtimeTaskLimits()
 }
 
 func newTaskContext(timeoutHours int) (context.Context, context.CancelFunc) {
@@ -170,6 +182,10 @@ func scanConcurrencyLimit() int {
 		limit = runtime.NumCPU()
 	}
 	return intInRangeOrDefault(limit, config.MinScanConcurrency, config.MaxScanConcurrency, config.DefaultScanConcurrency)
+}
+
+func scanBranchLimit() int {
+	return scanConcurrencyLimit() * 3
 }
 
 func (jt *JobTask) initRuntime() {

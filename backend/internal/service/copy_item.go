@@ -174,18 +174,25 @@ func (ci *CopyItem) toStreamItem() streamDoingItem {
 
 func (ci *CopyItem) ToMap(taskID int64) map[string]interface{} {
 	ci.mu.RLock()
-	defer ci.mu.RUnlock()
-
-	if ci.CopyType == taskItemTypeDelete {
-		itemMap := NewDeleteJobTaskItem(taskID, ci.DstPath, ci.FileName, ci.FileSize,
-			ci.Status, ci.ErrMsg, ci.IsPath, ci.CreateTime).ToMap()
-		itemMap["progress"] = ci.Progress
-		return itemMap
-	}
-	itemMap := NewCopyJobTaskItem(taskID, ci.SrcPath, ci.DstPath, ci.FileName, ci.FileSize,
-		ci.AlistTaskID, ci.Status, ci.ErrMsg, ci.IsPath, ci.CopyType, ci.CreateTime).ToMap()
+	itemMap := ci.toJobTaskItemLocked(taskID).ToMap()
 	itemMap["progress"] = ci.Progress
+	ci.mu.RUnlock()
 	return itemMap
+}
+
+func (ci *CopyItem) ToJobTaskItem(taskID int64) JobTaskItem {
+	ci.mu.RLock()
+	defer ci.mu.RUnlock()
+	return ci.toJobTaskItemLocked(taskID)
+}
+
+func (ci *CopyItem) toJobTaskItemLocked(taskID int64) JobTaskItem {
+	if ci.CopyType == taskItemTypeDelete {
+		return NewDeleteJobTaskItem(taskID, ci.DstPath, ci.FileName, ci.FileSize,
+			ci.Status, ci.ErrMsg, ci.IsPath, ci.CreateTime)
+	}
+	return NewCopyJobTaskItem(taskID, ci.SrcPath, ci.DstPath, ci.FileName, ci.FileSize,
+		ci.AlistTaskID, ci.Status, ci.ErrMsg, ci.IsPath, ci.CopyType, ci.CreateTime)
 }
 
 // DoIt executes the copy operation in a goroutine.

@@ -104,7 +104,7 @@ func TestUpdateSystemSettingsPersistsAndUpdatesMemory(t *testing.T) {
 	}
 }
 
-func TestUpdateSystemSettingsRejectsScanConcurrencyAboveTwenty(t *testing.T) {
+func TestUpdateSystemSettingsRejectsScanConcurrencyAboveLimit(t *testing.T) {
 	withTempConfigDir(t)
 	_ = GetConfig()
 
@@ -113,7 +113,7 @@ func TestUpdateSystemSettingsRejectsScanConcurrencyAboveTwenty(t *testing.T) {
 		TaskTimeout:     before.TaskTimeout,
 		TaskSave:        before.TaskSave,
 		CopyConcurrency: before.CopyConcurrency,
-		ScanConcurrency: 21,
+		ScanConcurrency: MaxScanConcurrency + 1,
 		MaxRetries:      before.MaxRetries,
 	})
 	if err == nil {

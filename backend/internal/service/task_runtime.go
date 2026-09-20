@@ -8,7 +8,6 @@ import (
 )
 
 const (
-	maxQueuedCopyItems     = 5000
 	retryTaskItemBatchSize = 500
 	persistBatchSize       = 100
 	persistFlushInterval   = 500 * time.Millisecond

@@ -2,12 +2,10 @@ package service
 
 import (
 	"fmt"
-	"opensync/pkg/util"
 	"path"
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	ignore "github.com/sabhiram/go-gitignore"
 )
@@ -57,6 +55,7 @@ type fullSyncPlan struct {
 	src *fullSyncSnapshot
 	dst *fullSyncSnapshot
 
+	mu           sync.Mutex
 	newDirs      map[string]fullSyncDir
 	newFiles     map[string]*fullSyncFile
 	changed      []*fullSyncFile
@@ -201,6 +200,10 @@ func (plan *fullSyncPlan) compareDir(job map[string]interface{}, srcRelDir, dstR
 	srcDir := plan.src.root + srcRelDir
 	dstDir := plan.dst.root + dstRelDir
 
+	// Collect child directory pairs for concurrent comparison.
+	type childPair struct{ srcRel, dstRel string }
+	var children []childPair
+
 	for _, name := range sortedFileListKeys(srcItems) {
 		metadata := srcItems[name]
 		if !strings.HasSuffix(name, "/") {
@@ -224,7 +227,7 @@ func (plan *fullSyncPlan) compareDir(job map[string]interface{}, srcRelDir, dstR
 			if exists {
 				matchedDst[dstName] = struct{}{}
 				if fileChanged(metadata, dstMetadata) {
-					plan.changed = append(plan.changed, newFullSyncFile(srcDir, dstDir, name, metadata))
+					plan.addChanged(newFullSyncFile(srcDir, dstDir, name, metadata))
 				}
 				continue
 			}
@@ -240,7 +243,7 @@ func (plan *fullSyncPlan) compareDir(job map[string]interface{}, srcRelDir, dstR
 		dstName, _, exists := dstIndex.find(name, srcIndex)
 		if exists {
 			matchedDst[dstName] = struct{}{}
-			plan.compareDir(job, srcRelDir+name, dstRelDir+dstName)
+			children = append(children, childPair{srcRelDir + name, dstRelDir + dstName})
 			continue
 		}
 		plan.collectSourceOnly(job, srcRelDir+name, dstRelDir+name)
@@ -258,12 +261,28 @@ func (plan *fullSyncPlan) compareDir(job map[string]interface{}, srcRelDir, dstR
 		}
 		plan.addExtraFile(dstDir, name, metadata, deleteRoot)
 	}
+
+	// Recurse into child directories concurrently.
+	if len(children) > 1 {
+		var wg sync.WaitGroup
+		for _, child := range children {
+			child := child
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				plan.compareDir(job, child.srcRel, child.dstRel)
+			}()
+		}
+		wg.Wait()
+	} else if len(children) == 1 {
+		plan.compareDir(job, children[0].srcRel, children[0].dstRel)
+	}
 }
 
 func (plan *fullSyncPlan) collectSourceOnly(job map[string]interface{}, srcRelDir, dstRelDir string) {
 	srcDir := plan.src.root + srcRelDir
 	dstDir := plan.dst.root + dstRelDir
-	plan.newDirs[normalizeDirPath(dstDir)] = fullSyncDir{srcDir: srcDir, dstDir: dstDir}
+	plan.addNewDir(normalizeDirPath(dstDir), fullSyncDir{srcDir: srcDir, dstDir: dstDir})
 
 	for _, name := range sortedFileListKeys(plan.src.dirs[srcRelDir]) {
 		metadata := plan.src.dirs[srcRelDir][name]
@@ -290,11 +309,14 @@ func (plan *fullSyncPlan) collectDestinationFiles(dstRelDir, deleteRoot string) 
 }
 
 func (plan *fullSyncPlan) addNewFile(file *fullSyncFile) {
+	plan.mu.Lock()
 	plan.newFiles[file.target] = file
+	plan.mu.Unlock()
 }
 
 func (plan *fullSyncPlan) addExtraFile(dir, name string, metadata FileMetadata, deleteRoot string) {
 	object := fullSyncObjectPath(dir, name)
+	plan.mu.Lock()
 	plan.extraFiles[object] = &fullSyncExtraFile{
 		dir:        dir,
 		name:       name,
@@ -302,21 +324,25 @@ func (plan *fullSyncPlan) addExtraFile(dir, name string, metadata FileMetadata, 
 		object:     object,
 		deleteRoot: deleteRoot,
 	}
+	plan.mu.Unlock()
 }
 
 func (plan *fullSyncPlan) addExtraDelete(dir, name string, metadata FileMetadata) string {
 	object := fullSyncObjectPath(dir, name)
+	plan.mu.Lock()
 	plan.extraDeletes[object] = fullSyncDelete{
 		dir:      dir,
 		name:     name,
 		metadata: metadata,
 		object:   object,
 	}
+	plan.mu.Unlock()
 	return object
 }
 
 func (plan *fullSyncPlan) addBlocker(dir, name string, metadata FileMetadata, blocksPath string) {
 	object := fullSyncObjectPath(dir, name)
+	plan.mu.Lock()
 	plan.blockers[object] = fullSyncDelete{
 		dir:        dir,
 		name:       name,
@@ -324,6 +350,19 @@ func (plan *fullSyncPlan) addBlocker(dir, name string, metadata FileMetadata, bl
 		object:     object,
 		blocksPath: blocksPath,
 	}
+	plan.mu.Unlock()
+}
+
+func (plan *fullSyncPlan) addChanged(file *fullSyncFile) {
+	plan.mu.Lock()
+	plan.changed = append(plan.changed, file)
+	plan.mu.Unlock()
+}
+
+func (plan *fullSyncPlan) addNewDir(key string, dir fullSyncDir) {
+	plan.mu.Lock()
+	plan.newDirs[key] = dir
+	plan.mu.Unlock()
 }
 
 func newFullSyncFile(srcDir, dstDir, name string, metadata FileMetadata) *fullSyncFile {
@@ -468,7 +507,7 @@ func (jt *JobTask) runFullSyncRelocations(relocations []fullSyncRelocation) {
 	if len(relocations) == 0 {
 		return
 	}
-	limit := runtimeTaskLimits().CopyConcurrency
+	limit := jt.taskLimits().CopyConcurrency
 	if limit < 1 {
 		limit = 1
 	}
@@ -487,16 +526,7 @@ func (jt *JobTask) runFullSyncRelocations(relocations []fullSyncRelocation) {
 }
 
 func (jt *JobTask) createFullSyncDir(item fullSyncDir) taskStatus {
-	status := taskStatusSuccess
-	var errMsg *string
-	err := jt.AlistClient.MkdirContext(jt.context(), item.dstDir, util.ToInt(jt.Job["scanIntervalT"]))
-	if err != nil {
-		status = taskStatusFailed
-		message := err.Error()
-		errMsg = &message
-	}
-	jt.CopyHook(item.srcDir, item.dstDir, "", nil, "", status, errMsg, taskItemPath, taskItemTypeCopy, time.Now().Unix())
-	return status
+	return jt.mkdirAndRecord(item.srcDir, item.dstDir, taskItemTypeCopy)
 }
 
 func fullSyncRelocationKey(name string, metadata FileMetadata) string {
@@ -520,11 +550,24 @@ func normalizeBlockedPath(value string) string {
 }
 
 func fullSyncPathBlocked(value string, blocked map[string]struct{}) bool {
+	if len(blocked) == 0 {
+		return false
+	}
 	value = normalizeBlockedPath(value)
-	for prefix := range blocked {
-		if value == prefix || strings.HasPrefix(value, prefix+"/") {
+	// Check exact match first (O(1)).
+	if _, ok := blocked[value]; ok {
+		return true
+	}
+	// Walk ancestors upward: O(depth) instead of O(len(blocked)).
+	for {
+		parent := path.Dir(value)
+		if parent == value || parent == "." || parent == "/" {
+			break
+		}
+		if _, ok := blocked[parent]; ok {
 			return true
 		}
+		value = parent
 	}
 	return false
 }

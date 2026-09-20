@@ -154,3 +154,51 @@ export function validateJobForm(form: JobForm) {
   }
   return "";
 }
+
+// ---- 文件夹过滤标记块 ----
+
+const FOLDER_BLOCK_START =
+  "# --- 文件夹过滤（自动生成，请勿手动编辑）---";
+const FOLDER_BLOCK_END = "# --- 文件夹过滤结束 ---";
+
+/** 从 exclude 文本的标记块中提取文件夹路径列表 */
+export function parseExcludeFolders(exclude: string): string[] {
+  const startIdx = exclude.indexOf(FOLDER_BLOCK_START);
+  const endIdx = exclude.indexOf(FOLDER_BLOCK_END);
+  if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) return [];
+  const block = exclude.slice(
+    startIdx + FOLDER_BLOCK_START.length,
+    endIdx,
+  );
+  return block
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith("#"));
+}
+
+/** 更新 exclude 文本中的标记块内容，保留手动规则不变 */
+export function updateExcludeFolders(
+  exclude: string,
+  folders: string[],
+): string {
+  const startIdx = exclude.indexOf(FOLDER_BLOCK_START);
+  const endIdx = exclude.indexOf(FOLDER_BLOCK_END);
+
+  const block =
+    folders.length > 0
+      ? [FOLDER_BLOCK_START, ...folders, FOLDER_BLOCK_END].join("\n")
+      : "";
+
+  // 已有标记块 — 替换
+  if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+    const before = exclude.slice(0, startIdx).trimEnd();
+    const after = exclude.slice(endIdx + FOLDER_BLOCK_END.length).trimStart();
+    const parts = [before, block, after].filter(Boolean);
+    return parts.join("\n\n");
+  }
+
+  // 无标记块 — 追加到末尾
+  if (!block) return exclude;
+  const trimmed = exclude.trimEnd();
+  return trimmed ? trimmed + "\n\n" + block : block;
+}

@@ -36,7 +36,7 @@ type alistCopyMoveRequest struct {
 }
 
 func (c *AlistClient) FileListApiContext(ctx context.Context, path string, useCache int, scanInterval int) (FileListResult, error) {
-	if err := c.CheckWaitContext(ctx, path, scanInterval); err != nil {
+	if err := c.checkWaitContextN(ctx, path, scanInterval, scanConcurrencyLimit()); err != nil {
 		return nil, err
 	}
 

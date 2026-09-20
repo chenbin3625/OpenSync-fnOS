@@ -341,8 +341,8 @@ func (jt *JobTask) waitingTaskMaps() []map[string]interface{} {
 }
 
 func (jt *JobTask) doingStreamItems() []streamDoingItem {
-	jt.DoingMu.Lock()
-	defer jt.DoingMu.Unlock()
+	jt.DoingMu.RLock()
+	defer jt.DoingMu.RUnlock()
 
 	doing := make([]streamDoingItem, 0, len(jt.Doing))
 	for _, item := range jt.Doing {
@@ -352,8 +352,8 @@ func (jt *JobTask) doingStreamItems() []streamDoingItem {
 }
 
 func (jt *JobTask) doingTaskMaps() []map[string]interface{} {
-	jt.DoingMu.Lock()
-	defer jt.DoingMu.Unlock()
+	jt.DoingMu.RLock()
+	defer jt.DoingMu.RUnlock()
 
 	dos := make([]map[string]interface{}, 0, len(jt.Doing))
 	for _, d := range jt.Doing {
@@ -386,16 +386,6 @@ func sortTaskMapsByCreateTimeDesc(tasks []map[string]interface{}) {
 		}
 		return left > right
 	})
-}
-
-func taskListSize(tasks []map[string]interface{}) int64 {
-	var totalSize int64
-	for _, task := range tasks {
-		if task["fileSize"] != nil && taskItemTypeFromValue(task["type"]) != taskItemTypeDelete {
-			totalSize += util.ToInt64(task["fileSize"])
-		}
-	}
-	return totalSize
 }
 
 func (jt *JobTask) copyItemToMap(item *CopyItem) map[string]interface{} {

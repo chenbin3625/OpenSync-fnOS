@@ -530,6 +530,22 @@ func sendNotifyRequestBytes(client *http.Client, req *http.Request) []byte {
 	return bodyBytes
 }
 
+func sendJSONNotify(client *http.Client, urlStr string, body interface{}, errorFields ...string) []byte {
+	jsonData, err := json.Marshal(body)
+	if err != nil {
+		panic(err.Error())
+	}
+	req, err := buildNotifyRequest(http.MethodPost, urlStr, bytes.NewReader(jsonData), "application/json")
+	if err != nil {
+		panic(err.Error())
+	}
+	respBody := sendNotifyRequestBytes(client, req)
+	if err := notifyProviderError(respBody, errorFields...); err != nil {
+		panic(err.Error())
+	}
+	return respBody
+}
+
 // notifyProviderError returns a non-nil error when the provider's JSON response
 // body indicates failure via one of the given fields being non-zero. Returns nil
 // for non-JSON bodies (e.g. custom webhooks) or when no recognized field is
@@ -694,18 +710,7 @@ func sendServerChan(client *http.Client, params map[string]interface{}, title, c
 		"title": title,
 		"desp":  content,
 	}
-	jsonData, err := json.Marshal(body)
-	if err != nil {
-		panic(err.Error())
-	}
-	req, err := buildNotifyRequest(http.MethodPost, urlStr, bytes.NewReader(jsonData), "application/json")
-	if err != nil {
-		panic(err.Error())
-	}
-	respBody := sendNotifyRequestBytes(client, req)
-	if err := notifyProviderError(respBody, "code", "errno"); err != nil {
-		panic(err.Error())
-	}
+	sendJSONNotify(client, urlStr, body, "code", "errno")
 }
 
 func sendDingTalk(client *http.Client, params map[string]interface{}, title, content string) {
@@ -716,18 +721,7 @@ func sendDingTalk(client *http.Client, params map[string]interface{}, title, con
 			"content": title + "\n" + content,
 		},
 	}
-	jsonData, err := json.Marshal(body)
-	if err != nil {
-		panic(err.Error())
-	}
-	req, err := buildNotifyRequest(http.MethodPost, webhook, bytes.NewReader(jsonData), "application/json")
-	if err != nil {
-		panic(err.Error())
-	}
-	respBody := sendNotifyRequestBytes(client, req)
-	if err := notifyProviderError(respBody, "errcode"); err != nil {
-		panic(err.Error())
-	}
+	sendJSONNotify(client, webhook, body, "errcode")
 }
 
 func sendWeCom(client *http.Client, params map[string]interface{}, title, content string) {
@@ -774,21 +768,10 @@ func sendWeCom(client *http.Client, params map[string]interface{}, title, conten
 			"content": title + "\n" + content,
 		},
 	}
-	jsonData, err := json.Marshal(msgBody)
-	if err != nil {
-		panic(err.Error())
-	}
 	msgURL := "https://qyapi.weixin.qq.com/cgi-bin/message/send?" + url.Values{
 		"access_token": {tokenResult.AccessToken},
 	}.Encode()
-	msgReq, err := buildNotifyRequest(http.MethodPost, msgURL, bytes.NewReader(jsonData), "application/json")
-	if err != nil {
-		panic(err.Error())
-	}
-	msgRespBody := sendNotifyRequestBytes(client, msgReq)
-	if err := notifyProviderError(msgRespBody, "errcode"); err != nil {
-		panic(err.Error())
-	}
+	sendJSONNotify(client, msgURL, msgBody, "errcode")
 }
 
 func sendLark(client *http.Client, params map[string]interface{}, title, content string) {
@@ -810,18 +793,7 @@ func sendLark(client *http.Client, params map[string]interface{}, title, content
 			},
 		},
 	}
-	jsonData, err := json.Marshal(body)
-	if err != nil {
-		panic(err.Error())
-	}
-	req, err := buildNotifyRequest(http.MethodPost, webhook, bytes.NewReader(jsonData), "application/json")
-	if err != nil {
-		panic(err.Error())
-	}
-	respBody := sendNotifyRequestBytes(client, req)
-	if err := notifyProviderError(respBody, "code", "StatusCode"); err != nil {
-		panic(err.Error())
-	}
+	sendJSONNotify(client, webhook, body, "code", "StatusCode")
 }
 
 func paramString(params map[string]interface{}, keys ...string) string {

@@ -5,7 +5,6 @@ import (
 	"math"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // ConvertBytes converts bytes to human-readable string
@@ -32,20 +31,6 @@ func ConvertSeconds(seconds int) (int, int, int) {
 	minutes := remaining / 60
 	secs := remaining % 60
 	return hours, minutes, secs
-}
-
-// StampToTime converts unix timestamp to formatted string
-func StampToTime(stamp int64) string {
-	return time.Unix(stamp, 0).Format("2006-01-02 15:04:05")
-}
-
-// TimeToStamp converts formatted time string to unix timestamp
-func TimeToStamp(timeStr string) (int64, error) {
-	t, err := time.ParseInLocation("2006-01-02 15:04:05", timeStr, time.Local)
-	if err != nil {
-		return 0, err
-	}
-	return t.Unix(), nil
 }
 
 // ToInt converts various types to int

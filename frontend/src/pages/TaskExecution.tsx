@@ -58,8 +58,7 @@ const fileTableWidths = {
   name: 360,
   size: 96,
   action: 76,
-  status: 124,
-  progress: 140,
+  status: 160,
 } as const;
 
 export function Realtime({ jobId }: { jobId: number }) {
@@ -120,7 +119,7 @@ export function Realtime({ jobId }: { jobId: number }) {
   const tabItems =
     filteredDemo.length > 0 || demoItems.length > 0
       ? filteredDemo
-      : activeTab === 1 ? items.pagedTabTaskList : items.tabTaskList;
+      : items.tabTaskList;
   const tabTotal =
     demoItems.length > 0 ? filteredDemo.length : items.tabTaskTotal;
   const total = task.doneSize + task.remainSize;
@@ -152,7 +151,7 @@ export function Realtime({ jobId }: { jobId: number }) {
     <div className="execution-view flex-column">
       <div className="execution-top">
       <div className="execution-header">
-        <h2>{task.scanFinish ? "正在同步" : "正在扫描目录"}</h2>
+        <h2>{task.scanFinish ? "正在同步" : task.firstSync ? "正在同步（扫描中）" : "正在扫描目录"}</h2>
         <Button
           type="danger"
           size="small"
@@ -195,15 +194,16 @@ export function Realtime({ jobId }: { jobId: number }) {
       <FileTable
         rows={tabItems}
         loading={items.tabLoading}
-        hideStatus
       />
       </div>
-      <Pager
-        total={tabTotal}
-        page={items.tabTaskPage}
-        size={10}
-        onChange={items.setTabTaskPage}
-      />
+      {activeTab !== 1 && (
+        <Pager
+          total={tabTotal}
+          page={items.tabTaskPage}
+          size={10}
+          onChange={items.setTabTaskPage}
+        />
+      )}
     </div>
   );
 }
@@ -447,11 +447,9 @@ export function History({ jobId }: { jobId: number }) {
 export function FileTable({
   rows,
   loading = false,
-  hideStatus = false,
 }: {
   rows: TaskItem[];
   loading?: boolean;
-  hideStatus?: boolean;
 }) {
   return (
     <>
@@ -502,48 +500,32 @@ export function FileTable({
                 return <span className={cls}>{name}</span>;
               },
             },
-            ...(!hideStatus
-              ? [
-                  {
-                    title: "状态",
-                    width: fileTableWidths.status,
-                    className: "file-col-status",
-                    render: (_: unknown, record: TaskItem) => (
-                      <Status
-                        status={record.status}
-                        label={taskItemStatusNames[record.status]}
-                        error={record.errMsg}
-                      />
-                    ),
-                  },
-                ]
-              : []),
             {
-              title: "进度",
-              width: fileTableWidths.progress,
-              className: "file-col-progress",
-              render: (_, record) => {
-                const status = record.status;
-                // 失败状态：展示错误原因
-                if ([5, 6, 7].includes(status) && record.errMsg) {
+              title: "状态",
+              width: fileTableWidths.status,
+              className: "file-col-status",
+              render: (_: unknown, record: TaskItem) => {
+                // 运行中：展示实时进度
+                if (record.status === 1) {
+                  const pct = Math.max(0, Math.min(100, Number(record.progress) || 0));
                   return (
-                    <Tooltip content={record.errMsg} position="topLeft">
-                      <span className="inline-error-text">{record.errMsg}</span>
-                    </Tooltip>
+                    <div className="file-progress">
+                      <span className="file-progress-pct">{pct}%</span>
+                      <Progress
+                        percent={pct}
+                        showInfo={false}
+                        strokeColor="var(--accent)"
+                      />
+                    </div>
                   );
                 }
-                // 仅运行中展示进度条
-                if (status !== 1) return null;
-                const pct = Math.max(0, Math.min(100, Number(record.progress) || 0));
+                // 其他状态：展示状态标签 + 错误提示图标
                 return (
-                  <div className="file-progress">
-                    <span className="file-progress-pct">{pct}%</span>
-                    <Progress
-                      percent={pct}
-                      showInfo={false}
-                      strokeColor="var(--accent)"
-                    />
-                  </div>
+                  <Status
+                    status={record.status}
+                    label={taskItemStatusNames[record.status]}
+                    error={record.errMsg}
+                  />
                 );
               },
             },
@@ -566,12 +548,11 @@ export function FileTable({
                   <Tooltip content={getTaskDisplayName(record)} position="topLeft">
                     <strong>{getTaskDisplayName(record)}</strong>
                   </Tooltip>
-                  {!hideStatus && (
-                    <Status
-                      status={record.status}
-                      label={taskItemStatusNames[record.status]}
-                    />
-                  )}
+                  <Status
+                    status={record.status}
+                    label={taskItemStatusNames[record.status]}
+                    error={record.errMsg}
+                  />
                 </div>
                 <div className="record-footer">
                   <span className="muted">
@@ -590,9 +571,6 @@ export function FileTable({
                     )}
                     showInfo={false}
                   />
-                )}
-                {[5, 6, 7].includes(record.status) && record.errMsg && (
-                  <div className="inline-error-text muted">{record.errMsg}</div>
                 )}
               </summary>
               <div className="file-expanded">

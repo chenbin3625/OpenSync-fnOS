@@ -120,48 +120,55 @@ func DeleteJob(jobID int64) error {
 // GetJobTaskList gets paginated task list for a job
 func GetJobTaskList(params map[string]interface{}) (map[string]interface{}, error) {
 	jobID := params["id"]
-	where := "WHERE jobId=?"
-	args := []interface{}{jobID}
+	where := newWhereBuilder("WHERE jobId=?", jobID)
 
 	if status, ok := params["status"]; ok {
-		where += " AND status=?"
-		args = append(args, util.ToInt(status))
+		where.and("status=?", util.ToInt(status))
 	} else if statuses := parseStatusList(params["statusIn"]); len(statuses) > 0 {
 		clause, statusArgs := statusInClause(statuses)
-		where += fmt.Sprintf(" AND status IN (%s)", clause)
-		args = append(args, statusArgs...)
+		where.and(fmt.Sprintf("status IN (%s)", clause), statusArgs...)
 	}
 	if startTime, ok := params["startTime"]; ok {
 		start := util.ToInt(startTime)
 		if start > 0 {
-			where += " AND COALESCE(NULLIF(runTime, 0), createTime) >= ?"
-			args = append(args, start)
+			where.and("COALESCE(NULLIF(runTime, 0), createTime) >= ?", start)
 		}
 	}
 	if endTime, ok := params["endTime"]; ok {
 		end := util.ToInt(endTime)
 		if end > 0 {
-			where += " AND COALESCE(NULLIF(runTime, 0), createTime) <= ?"
-			args = append(args, end)
+			where.and("COALESCE(NULLIF(runTime, 0), createTime) <= ?", end)
 		}
 	}
 	if endTime, ok := params["endTimeExclusive"]; ok {
 		end := util.ToInt(endTime)
 		if end > 0 {
-			where += " AND COALESCE(NULLIF(runTime, 0), createTime) < ?"
-			args = append(args, end)
+			where.and("COALESCE(NULLIF(runTime, 0), createTime) < ?", end)
 		}
 	}
 	if keyword, ok := params["keyword"]; ok {
 		kw := strings.TrimSpace(fmt.Sprintf("%v", keyword))
 		if kw != "" {
-			where += " AND CAST(id AS TEXT) LIKE ? ESCAPE '\\'"
-			args = append(args, "%"+escapeLike(kw)+"%")
+			where.and("CAST(id AS TEXT) LIKE ? ESCAPE '\\'", "%"+escapeLike(kw)+"%")
 		}
 	}
 
-	baseSQL := fmt.Sprintf("SELECT * FROM job_task %s ORDER BY createTime DESC", where)
-	return FetchAllToPage(baseSQL, params, args...)
+	baseSQL := fmt.Sprintf("SELECT * FROM job_task %s ORDER BY createTime DESC", where.clause)
+	return FetchAllToPage(baseSQL, params, where.args...)
+}
+
+type whereBuilder struct {
+	clause string
+	args   []interface{}
+}
+
+func newWhereBuilder(clause string, args ...interface{}) whereBuilder {
+	return whereBuilder{clause: clause, args: args}
+}
+
+func (b *whereBuilder) and(condition string, args ...interface{}) {
+	b.clause += " AND " + condition
+	b.args = append(b.args, args...)
 }
 
 func parseStatusList(value interface{}) []int {
@@ -379,43 +386,39 @@ func AddJobTaskItemMany(items []map[string]interface{}) error {
 // GetJobTaskItemList gets paginated task item list
 func GetJobTaskItemList(params map[string]interface{}) (map[string]interface{}, error) {
 	taskID := params["taskId"]
-	where := "WHERE taskId=?"
-	args := []interface{}{taskID}
+	where := newWhereBuilder("WHERE taskId=?", taskID)
 
 	if status, ok := params["status"]; ok {
 		if util.ToInt(status) == -1 {
-			where += " AND status NOT IN (0,1,2,7)"
+			where.and("status NOT IN (0,1,2,7)")
 		} else {
-			where += " AND status=?"
-			args = append(args, status)
+			where.and("status=?", status)
 		}
 	}
 	if typ, ok := params["type"]; ok {
-		where += " AND type=?"
-		args = append(args, typ)
+		where.and("type=?", typ)
 	}
 	if isPath, ok := params["isPath"]; ok {
-		where += " AND isPath=?"
-		args = append(args, isPath)
+		where.and("isPath=?", isPath)
 	}
 	if hasError, ok := params["hasError"]; ok {
 		if util.ToInt(hasError) == 1 {
-			where += " AND errMsg IS NOT NULL AND errMsg<>''"
+			where.and("errMsg IS NOT NULL AND errMsg<>''")
 		} else {
-			where += " AND (errMsg IS NULL OR errMsg='')"
+			where.and("(errMsg IS NULL OR errMsg='')")
 		}
 	}
 	if keyword, ok := params["keyword"]; ok {
 		kw := strings.TrimSpace(fmt.Sprintf("%v", keyword))
 		if kw != "" {
 			filterSQL, filterArgs := taskItemKeywordFilter(kw)
-			where += filterSQL
-			args = append(args, filterArgs...)
+			where.clause += filterSQL
+			where.args = append(where.args, filterArgs...)
 		}
 	}
 
-	baseSQL := fmt.Sprintf("SELECT %s FROM job_task_item %s ORDER BY createTime DESC", jobTaskItemListColumns, where)
-	return FetchAllToPage(baseSQL, params, args...)
+	baseSQL := fmt.Sprintf("SELECT %s FROM job_task_item %s ORDER BY createTime DESC", jobTaskItemListColumns, where.clause)
+	return FetchAllToPage(baseSQL, params, where.args...)
 }
 
 // CountJobTaskItemsByStatuses counts task items matching any of the given statuses.
