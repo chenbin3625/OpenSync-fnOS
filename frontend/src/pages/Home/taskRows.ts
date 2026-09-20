@@ -1,6 +1,7 @@
 import type {
   CurrentTaskData,
   PageData,
+  RealtimeTaskItemPage,
   TaskItem,
 } from "../../types";
 
@@ -16,12 +17,52 @@ export function getRealtimeTaskIdentity(task: CurrentTaskIdentity): string {
   return `${Number(task?.taskId || 0)}:${Number(task?.createTime || 0)}`;
 }
 
+type RealtimeTaskPageIdentity = {
+  taskId?: number | string | null;
+  createTime?: number | string | null;
+  status?: number | string | null;
+  pageNum?: number | string | null;
+  pageSize?: number | string | null;
+};
+
+function sameNumber(
+  actual: number | string | null | undefined,
+  expected: number | string | null | undefined,
+): boolean {
+  if (expected === undefined || expected === null || expected === "") {
+    return true;
+  }
+  if (actual === undefined || actual === null || actual === "") {
+    return true;
+  }
+  return Number(actual) === Number(expected);
+}
+
+export function realtimeTaskPageMatches(
+  page: RealtimeTaskItemPage,
+  expected?: RealtimeTaskPageIdentity,
+): boolean {
+  if (page.stale) return false;
+  if (!expected) return true;
+  return (
+    sameNumber(page.taskId, expected.taskId) &&
+    sameNumber(page.createTime, expected.createTime) &&
+    sameNumber(page.status, expected.status) &&
+    sameNumber(page.pageNum, expected.pageNum) &&
+    sameNumber(page.pageSize, expected.pageSize)
+  );
+}
+
 export function normalizeTaskItemPage(
   data: CurrentTaskData | PageData<TaskItem> | TaskItem[] | null | undefined,
+  expected?: RealtimeTaskPageIdentity,
 ): { rows: TaskItem[]; total: number } {
   if (!data) return { rows: [], total: 0 };
   if (Array.isArray(data)) return { rows: data, total: data.length };
   if ("dataList" in data && Array.isArray(data.dataList)) {
+    if (!realtimeTaskPageMatches(data as RealtimeTaskItemPage, expected)) {
+      return { rows: [], total: 0 };
+    }
     return { rows: data.dataList, total: Number(data.count || 0) };
   }
   return { rows: [], total: 0 };

@@ -9,6 +9,15 @@ export interface PageData<T> {
   count: number;
 }
 
+export interface RealtimeTaskItemPage extends PageData<TaskItem> {
+  taskId?: number;
+  createTime?: number;
+  status?: number;
+  pageNum?: number;
+  pageSize?: number;
+  stale?: boolean;
+}
+
 export interface SystemSettings {
   taskTimeout: number;
   taskSave: number;

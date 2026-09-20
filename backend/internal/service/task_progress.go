@@ -241,10 +241,10 @@ func (jt *JobTask) GetCurrentByStatusPage(status, pageSize, pageNum int) map[str
 	jt.initRuntime()
 	statusValue := taskStatusFromValue(status)
 	if statusValue == taskStatusWaiting {
-		return jt.waitingTaskPage(pageSize, pageNum)
+		return jt.withCurrentTaskPageMeta(jt.waitingTaskPage(pageSize, pageNum), status, pageSize, pageNum, false)
 	}
 	if statusValue != taskStatusWaiting && statusValue != taskStatusRunning {
-		return jt.finishedTaskPageFromDB(status, pageSize, pageNum)
+		return jt.withCurrentTaskPageMeta(jt.finishedTaskPageFromDB(status, pageSize, pageNum), status, pageSize, pageNum, false)
 	}
 	tasks := jt.currentTasksForStatus(status)
 	count := len(tasks)
@@ -265,10 +265,36 @@ func (jt *JobTask) GetCurrentByStatusPage(status, pageSize, pageNum int) map[str
 			tasks = tasks[start:end]
 		}
 	}
-	return map[string]interface{}{
+	return jt.withCurrentTaskPageMeta(map[string]interface{}{
 		"dataList": tasks,
 		"count":    count,
+	}, status, pageSize, pageNum, false)
+}
+
+func (jt *JobTask) emptyCurrentTaskPage(status, pageSize, pageNum int, stale bool) map[string]interface{} {
+	return jt.withCurrentTaskPageMeta(map[string]interface{}{
+		"dataList": []map[string]interface{}{},
+		"count":    int64(0),
+	}, status, pageSize, pageNum, stale)
+}
+
+func (jt *JobTask) withCurrentTaskPageMeta(page map[string]interface{}, status, pageSize, pageNum int, stale bool) map[string]interface{} {
+	if page == nil {
+		page = map[string]interface{}{}
 	}
+	if _, ok := page["dataList"]; !ok {
+		page["dataList"] = []map[string]interface{}{}
+	}
+	if _, ok := page["count"]; !ok {
+		page["count"] = int64(0)
+	}
+	page["taskId"] = jt.TaskID
+	page["createTime"] = int64(jt.CreateTime)
+	page["status"] = status
+	page["pageSize"] = pageSize
+	page["pageNum"] = pageNum
+	page["stale"] = stale
+	return page
 }
 
 func (jt *JobTask) waitingTaskPage(pageSize, pageNum int) map[string]interface{} {

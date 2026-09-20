@@ -1,5 +1,5 @@
 appname=opensync
-version=0.0.16
+version=0.0.17
 display_name=OpenSync
 desc=<div><p><strong>OpenSync</strong> 是运行在飞牛 fnOS 上的文件同步与备份工具，可作为群晖 Cloud Sync 的替代方案。</p><p>应用依赖 <strong>OpenList / AList</strong> 作为存储引擎。添加本地存储、阿里云盘、百度网盘、OneDrive、S3、WebDAV 等存储后，即可在不同存储之间自动同步文件。</p><ul><li>支持增量同步与全量同步，满足备份和镜像场景。</li><li>支持 Cron、固定间隔和手动触发。</li><li>支持 gitignore 格式过滤、文件类型过滤、系统目录过滤和文件大小限制。</li><li>提供实时进度、执行历史、失败重试和任务超时控制。</li><li>支持 Webhook、Server酱、钉钉、企业微信、飞书通知。</li></ul><p>开源地址：<a href="https://github.com/chenbin3625/OpenSync-fnOS">https://github.com/chenbin3625/OpenSync-fnOS</a></p></div>
 platform=x86
@@ -16,4 +16,4 @@ ctl_stop=true
 install_type=
 checkport=false
 disable_authorization_path=true
-changelog=v0.0.16：恢复实时任务页面 3 秒 HTTP 轮询，任务快照和当前明细页会定期刷新；明细轮询保持当前 Tab 与分页，不取消慢请求，刷新结果直接替换当前页以避免残留脏数据。
+changelog=v0.0.17：修复实时任务页面切换状态 Tab 时可能残留上一页脏数据的问题；实时明细请求会携带当前任务身份，后端返回明细归属信息并在任务切换时标记过期响应，前端仅渲染匹配当前任务、状态和分页的数据。

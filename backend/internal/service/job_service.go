@@ -435,12 +435,24 @@ func GetJobCurrent(jobID int64, params map[string]interface{}) interface{} {
 		statusInt := util.ToInt(status)
 		pageSize := util.ToInt(params["pageSize"])
 		pageNum := util.ToInt(params["pageNum"])
+		if currentRequestStale(taskClient, params) {
+			return taskClient.emptyCurrentTaskPage(statusInt, pageSize, pageNum, true)
+		}
 		if pageSize > 0 && pageNum > 0 {
 			return taskClient.GetCurrentByStatusPage(statusInt, pageSize, pageNum)
 		}
 		return taskClient.GetCurrentByStatus(statusInt)
 	}
 	return nil
+}
+
+func currentRequestStale(taskClient *JobTask, params map[string]interface{}) bool {
+	expectedTaskID := util.ToInt64(params["expectedTaskId"])
+	if expectedTaskID > 0 && expectedTaskID != taskClient.TaskID {
+		return true
+	}
+	expectedCreateTime := util.ToInt64(params["expectedCreateTime"])
+	return expectedCreateTime > 0 && expectedCreateTime != int64(taskClient.CreateTime)
 }
 
 // GetTaskList returns paginated task list with task num info

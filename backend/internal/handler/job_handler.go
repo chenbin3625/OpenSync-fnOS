@@ -22,9 +22,11 @@ func GetJob(c *gin.Context) {
 		current := c.Query("current")
 		if current != "" {
 			req := map[string]interface{}{
-				"status":   c.Query("status"),
-				"pageSize": c.Query("pageSize"),
-				"pageNum":  c.Query("pageNum"),
+				"status":             c.Query("status"),
+				"pageSize":           c.Query("pageSize"),
+				"pageNum":            c.Query("pageNum"),
+				"expectedTaskId":     c.Query("expectedTaskId"),
+				"expectedCreateTime": c.Query("expectedCreateTime"),
 			}
 			removeEmptyStringValues(req)
 			result := service.GetJobCurrent(id, req)

@@ -12,6 +12,7 @@ type RealtimeTaskItemsParams = {
 };
 
 type RealtimeTaskPage = {
+  key: string;
   rows: TaskItem[];
   total: number;
 };
@@ -40,25 +41,49 @@ export function useRealtimeTaskItems({
   const taskIdentity = currentTask
     ? getRealtimeTaskIdentity(currentTask)
     : "";
+  const queryKey = [
+    jobId,
+    taskIdentity,
+    activeTab,
+    tabTaskPage,
+    pageSize,
+  ].join(":");
+  const requestIdentity = currentTask
+    ? {
+        taskId: currentTask.taskId,
+        createTime: currentTask.createTime,
+        status: activeTab,
+        pageNum: tabTaskPage,
+        pageSize,
+      }
+    : undefined;
   const resource = useResource<RealtimeTaskPage | null>(
     async (signal) => {
       if (!enabled || !jobId || !taskIdentity) {
-        return { rows: [], total: 0 };
+        return { key: queryKey, rows: [], total: 0 };
       }
       const response = await jobGetTaskCurrent(
         {
           id: jobId,
+          expectedTaskId: currentTask?.taskId,
+          expectedCreateTime: currentTask?.createTime,
           status: activeTab,
           pageSize,
           pageNum: tabTaskPage,
         },
         { signal },
       );
-      return normalizeTaskItemPage(response);
+      return {
+        key: queryKey,
+        ...normalizeTaskItemPage(response, requestIdentity),
+      };
     },
-    [activeTab, enabled, jobId, pageSize, tabTaskPage, taskIdentity],
+    [enabled, queryKey],
     enabled && Boolean(taskIdentity),
   );
+  const currentPage = resource.data?.key === queryKey ? resource.data : null;
+  const pendingCurrentPage =
+    enabled && Boolean(taskIdentity) && !currentPage && !resource.error;
 
   const setActiveTab = useCallback((status: number) => {
     setActiveTabValue(status);
@@ -78,13 +103,13 @@ export function useRealtimeTaskItems({
   return {
     activeTab,
     setActiveTab,
-    tabTaskList: resource.data?.rows || [],
-    tabTaskTotal: resource.data?.total || 0,
+    tabTaskList: currentPage?.rows || [],
+    tabTaskTotal: currentPage?.total || 0,
     tabTaskPage,
     setTabTaskPage,
     pageSize,
     setPageSize,
-    tabLoading: resource.loading,
+    tabLoading: resource.loading || pendingCurrentPage,
     tabError: resource.error,
     retryTabTasks,
   };

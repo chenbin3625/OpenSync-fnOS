@@ -806,6 +806,139 @@ test("realtime snapshot refresh keeps the selected status view", async ({
   );
 });
 
+test("realtime status tabs ignore stale task detail responses", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(globalThis, "ReadableStream", { value: undefined });
+    Object.defineProperty(globalThis, "EventSource", { value: undefined });
+  });
+  const activeTask = {
+    taskId: 31,
+    scanFinish: true,
+    createTime: 100,
+    duration: 1,
+    num: { wait: 0, running: 1, success: 1, fail: 0, other: 0 },
+    size: { wait: 0, running: 1, success: 1, fail: 0, other: 0 },
+    doneSize: 1,
+    remainSize: 1,
+    speed: 1,
+    speedAvg: 1,
+    remainTime: 1,
+  };
+  let successRequestIdentity = { taskId: "", createTime: "" };
+
+  await page.route("**/app/opensync/svr/**", async (route) => {
+    const url = new URL(route.request().url());
+    const success = (data: unknown) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ code: 200, data, msg: "" }),
+      });
+    if (url.pathname.endsWith("/session"))
+      return success({ uid: 1, development: false, version: "test" });
+    if (url.pathname.endsWith("/alist")) return success([]);
+    if (url.pathname.endsWith("/job") && url.searchParams.get("current")) {
+      if (url.searchParams.get("status") === "2") {
+        successRequestIdentity = {
+          taskId: url.searchParams.get("expectedTaskId") || "",
+          createTime: url.searchParams.get("expectedCreateTime") || "",
+        };
+        return success({
+          taskId: 999,
+          createTime: 999,
+          status: 2,
+          pageNum: 1,
+          pageSize: 10,
+          stale: true,
+          dataList: [
+            {
+              id: 310,
+              fileName: "stale-success-detail.txt",
+              srcPath: "/src",
+              dstPath: "/dst",
+              fileSize: 1024,
+              type: 0,
+              status: 2,
+            },
+          ],
+          count: 1,
+        });
+      }
+      if (url.searchParams.has("status")) {
+        return success({
+          taskId: 31,
+          createTime: 100,
+          status: 1,
+          pageNum: 1,
+          pageSize: 10,
+          stale: false,
+          dataList: [
+            {
+              id: 311,
+              fileName: "running-detail.txt",
+              srcPath: "/src",
+              dstPath: "/dst",
+              fileSize: 1024,
+              type: 0,
+              status: 1,
+              progress: 50,
+            },
+          ],
+          count: 1,
+        });
+      }
+      return success(activeTask);
+    }
+    if (url.pathname.endsWith("/job")) {
+      return success({
+        dataList: [
+          {
+            id: 1,
+            enable: 1,
+            remark: "过期明细任务",
+            srcPath: '["/src"]',
+            dstPath: '["/dst"]',
+            alistId: 1,
+            useCacheT: 0,
+            useCacheS: 0,
+            method: 0,
+            interval: 0,
+            isCron: 2,
+          },
+        ],
+        count: 1,
+      });
+    }
+    return success(null);
+  });
+
+  await page.goto("/app/opensync/tasks?jobId=1&tab=realtime");
+  const realtimeTable = page
+    .locator(".desktop-data:visible, .mobile-data:visible")
+    .last();
+  await expect(realtimeTable.getByText("running-detail.txt")).toBeVisible();
+
+  const staleResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return (
+      url.pathname.endsWith("/job") &&
+      url.searchParams.get("current") === "1" &&
+      url.searchParams.get("status") === "2"
+    );
+  });
+  await page.getByRole("tab", { name: /成功/ }).click();
+  await staleResponse;
+
+  expect(successRequestIdentity).toEqual({
+    taskId: "31",
+    createTime: "100",
+  });
+  await expect(
+    realtimeTable.getByText("stale-success-detail.txt"),
+  ).toHaveCount(0);
+});
+
 test("realtime file columns keep the name readable at 1100px desktop width", async ({
   page,
 }) => {
@@ -1111,4 +1244,103 @@ test("remote path load errors remain actionable", async ({ page }) => {
   await page.getByRole("button", { name: "新建任务", exact: true }).click();
   await expect(page.getByText("目录暂时不可用").first()).toBeVisible();
   await expect(page.getByRole("button", { name: "重试" }).first()).toBeVisible();
+});
+
+test("switching realtime tab clears the previous tab rows immediately", async ({
+  page,
+}) => {
+  test.setTimeout(20000);
+  await page.addInitScript(() => {
+    Object.defineProperty(globalThis, "ReadableStream", { value: undefined });
+    Object.defineProperty(globalThis, "EventSource", { value: undefined });
+  });
+  const activeTask = {
+    taskId: 27,
+    scanFinish: true,
+    createTime: 1,
+    duration: 1,
+    num: { wait: 0, running: 1, success: 1, fail: 0, other: 0 },
+    size: { wait: 0, running: 1, success: 1, fail: 0, other: 0 },
+    doneSize: 1,
+    remainSize: 1,
+    speed: 1,
+    speedAvg: 1,
+    remainTime: 1,
+  };
+
+  await page.route("**/app/opensync/svr/**", async (route) => {
+    const url = new URL(route.request().url());
+    const success = (data: unknown) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ code: 200, data, msg: "" }),
+      });
+    if (url.pathname.endsWith("/session"))
+      return success({ uid: 1, development: false, version: "test" });
+    if (url.pathname.endsWith("/alist")) return success([]);
+    if (url.pathname.endsWith("/job") && url.searchParams.get("current")) {
+      const status = url.searchParams.get("status");
+      // 运行中：立即返回
+      if (status === "1") {
+        return success({
+          dataList: [
+            { id: 271, fileName: "running-file.txt", status: 1, type: 0 },
+          ],
+          count: 1,
+        });
+      }
+      // 成功：故意延迟，留出观察脏数据的窗口
+      if (status === "2") {
+        await new Promise((resolve) => setTimeout(resolve, 4000));
+        return success({
+          dataList: [
+            { id: 272, fileName: "success-file.txt", status: 2, type: 0 },
+          ],
+          count: 1,
+        });
+      }
+      if (status !== null) return success({ dataList: [], count: 0 });
+      return success(activeTask);
+    }
+    if (url.pathname.endsWith("/job")) {
+      return success({
+        dataList: [
+          {
+            id: 1,
+            enable: 1,
+            remark: "切换 tab 任务",
+            srcPath: '["/src"]',
+            dstPath: '["/dst"]',
+            alistId: 1,
+            method: 0,
+            interval: 0,
+            isCron: 2,
+          },
+        ],
+        count: 1,
+      });
+    }
+    return success(null);
+  });
+
+  await page.goto("/app/opensync/tasks?jobId=1&tab=realtime");
+  const visibleList = page
+    .locator(".desktop-data:visible, .mobile-data:visible")
+    .last();
+  await expect(visibleList.getByText("running-file.txt")).toBeVisible({
+    timeout: 8000,
+  });
+
+  await page.getByRole("tab", { name: /成功/ }).click();
+
+  // 成功 tab 的响应还在路上，运行中的行必须立刻消失，
+  // 否则就是上一个 tab 的脏数据残留。
+  await expect(visibleList.getByText("running-file.txt")).toBeHidden({
+    timeout: 1200,
+  });
+
+  // 新数据到达后正常渲染
+  await expect(visibleList.getByText("success-file.txt")).toBeVisible({
+    timeout: 8000,
+  });
 });

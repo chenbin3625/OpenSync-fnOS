@@ -68,3 +68,67 @@ func TestGetTaskListFillsMissingTaskNumsInBatch(t *testing.T) {
 		t.Fatalf("task 20 counts = %#v, want wait/running/all 1/1/2", byID[20])
 	}
 }
+
+func TestGetJobCurrentReturnsStalePageWhenExpectedTaskIDDiffers(t *testing.T) {
+	previousClients := jobClientList
+	jobClientListMu.Lock()
+	jobClientList = map[int64]*JobClient{}
+	jobClientListMu.Unlock()
+	defer func() {
+		jobClientListMu.Lock()
+		jobClientList = previousClients
+		jobClientListMu.Unlock()
+	}()
+
+	task := &JobTask{
+		TaskID:         123,
+		CreateTime:     456,
+		Waiting:        newCopyQueue(),
+		Doing:          make(map[int64]*CopyItem),
+		FinishedCounts: make(map[taskStatus]int),
+		FinishedSizes:  make(map[taskStatus]int64),
+	}
+	task.Doing[1] = &CopyItem{
+		SrcPath:    "/src/",
+		DstPath:    "/dst/",
+		FileName:   "running.txt",
+		FileSize:   int64(10),
+		CopyType:   taskItemTypeCopy,
+		Status:     taskStatusRunning,
+		Progress:   50,
+		CreateTime: 100,
+	}
+
+	jobClientListMu.Lock()
+	jobClientList[1] = &JobClient{JobID: 1, CurrentJobTask: task}
+	jobClientListMu.Unlock()
+
+	result := GetJobCurrent(1, map[string]interface{}{
+		"status":             "1",
+		"pageSize":           "10",
+		"pageNum":            "1",
+		"expectedTaskId":     "999",
+		"expectedCreateTime": "456",
+	})
+
+	page, ok := result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("result = %#v, want page map", result)
+	}
+	if page["stale"] != true {
+		t.Fatalf("stale = %v, want true", page["stale"])
+	}
+	if page["taskId"] != int64(123) || page["createTime"] != int64(456) {
+		t.Fatalf("identity = %v/%v, want 123/456", page["taskId"], page["createTime"])
+	}
+	if page["count"] != int64(0) {
+		t.Fatalf("count = %v, want 0", page["count"])
+	}
+	items, ok := page["dataList"].([]map[string]interface{})
+	if !ok {
+		t.Fatalf("dataList = %#v, want task item maps", page["dataList"])
+	}
+	if len(items) != 0 {
+		t.Fatalf("dataList len = %d, want 0", len(items))
+	}
+}
