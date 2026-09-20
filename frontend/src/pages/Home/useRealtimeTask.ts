@@ -38,6 +38,7 @@ export function useRealtimeTask(
         : null;
     },
     [enabled, jobId],
+    enabled && Boolean(jobId),
   );
 
   return {

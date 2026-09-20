@@ -57,6 +57,7 @@ export function useRealtimeTaskItems({
       return normalizeTaskItemPage(response);
     },
     [activeTab, enabled, jobId, pageSize, tabTaskPage, taskIdentity],
+    enabled && Boolean(taskIdentity),
   );
 
   const setActiveTab = useCallback((status: number) => {

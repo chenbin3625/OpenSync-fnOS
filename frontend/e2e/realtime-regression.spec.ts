@@ -504,10 +504,10 @@ test("realtime status load failure can be retried", async ({ page }) => {
   expect(successRequests).toBe(2);
 });
 
-test("realtime detail stays unchanged until the user changes the view", async ({
+test("realtime detail refreshes without changing the current view", async ({
   page,
 }) => {
-  test.setTimeout(10000);
+  test.setTimeout(15000);
   await page.addInitScript(() => {
     Object.defineProperty(globalThis, "ReadableStream", { value: undefined });
     Object.defineProperty(globalThis, "EventSource", { value: undefined });
@@ -564,7 +564,7 @@ test("realtime detail stays unchanged until the user changes the view", async ({
           {
             id: 1,
             enable: 1,
-            remark: "不自动刷新的实时任务",
+            remark: "定期刷新的实时任务",
             srcPath: '["/src"]',
             dstPath: '["/dst"]',
             alistId: 1,
@@ -587,15 +587,223 @@ test("realtime detail stays unchanged until the user changes the view", async ({
     .last();
   await expect(realtimeTable.getByText("detail-version-1.txt")).toBeVisible();
 
-  await page.waitForTimeout(3500);
-
-  await expect(realtimeTable.getByText("detail-version-1.txt")).toBeVisible();
-  await expect(realtimeTable.getByText("detail-version-2.txt")).toHaveCount(0);
-  expect(detailRequests).toBe(1);
-
-  await page.getByRole("tab", { name: /成功/ }).click();
   await expect(realtimeTable.getByText("detail-version-2.txt")).toBeVisible();
+  await expect(realtimeTable.getByText("detail-version-1.txt")).toHaveCount(0);
   expect(detailRequests).toBe(2);
+});
+
+test("realtime detail refresh keeps the selected page", async ({ page }) => {
+  test.setTimeout(15000);
+  await page.addInitScript(() => {
+    Object.defineProperty(globalThis, "ReadableStream", { value: undefined });
+    Object.defineProperty(globalThis, "EventSource", { value: undefined });
+  });
+  const activeTask = {
+    taskId: 25,
+    scanFinish: true,
+    createTime: 1,
+    duration: 1,
+    num: { wait: 0, running: 12, success: 0, fail: 0, other: 0 },
+    size: { wait: 0, running: 12, success: 0, fail: 0, other: 0 },
+    doneSize: 0,
+    remainSize: 12,
+    speed: 1,
+    speedAvg: 1,
+    remainTime: 12,
+  };
+  const pageRequestsAfterPageTwo: string[] = [];
+  let pageTwoVisible = false;
+  let pageTwoRequests = 0;
+
+  await page.route("**/app/opensync/svr/**", async (route) => {
+    const url = new URL(route.request().url());
+    const success = (data: unknown) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ code: 200, data, msg: "" }),
+      });
+    if (url.pathname.endsWith("/session"))
+      return success({ uid: 1, development: false, version: "test" });
+    if (url.pathname.endsWith("/alist")) return success([]);
+    if (url.pathname.endsWith("/job") && url.searchParams.get("current")) {
+      if (url.searchParams.has("status")) {
+        const pageNum = url.searchParams.get("pageNum") || "1";
+        if (pageTwoVisible) pageRequestsAfterPageTwo.push(pageNum);
+        const version =
+          pageNum === "2" ? String(++pageTwoRequests) : "1";
+        return success({
+          dataList: [
+            {
+              id: 250 + Number(pageNum),
+              fileName: `running-page-${pageNum}-v${version}.txt`,
+              srcPath: "/src",
+              dstPath: "/dst",
+              fileSize: 1024,
+              type: 0,
+              status: 1,
+              progress: 50,
+            },
+          ],
+          count: 12,
+        });
+      }
+      return success(activeTask);
+    }
+    if (url.pathname.endsWith("/job")) {
+      return success({
+        dataList: [
+          {
+            id: 1,
+            enable: 1,
+            remark: "分页刷新任务",
+            srcPath: '["/src"]',
+            dstPath: '["/dst"]',
+            alistId: 1,
+            useCacheT: 0,
+            useCacheS: 0,
+            method: 0,
+            interval: 0,
+            isCron: 2,
+          },
+        ],
+        count: 1,
+      });
+    }
+    return success(null);
+  });
+
+  await page.goto("/app/opensync/tasks?jobId=1&tab=realtime");
+  const realtimeTable = page
+    .locator(".desktop-data:visible, .mobile-data:visible")
+    .last();
+  await expect(realtimeTable.getByText("running-page-1-v1.txt")).toBeVisible();
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(realtimeTable.getByText("running-page-2-v1.txt")).toBeVisible();
+  pageTwoVisible = true;
+
+  await expect(realtimeTable.getByText("running-page-2-v2.txt")).toBeVisible();
+  await expect(realtimeTable.getByText("running-page-1-v1.txt")).toHaveCount(0);
+  expect(pageRequestsAfterPageTwo.length).toBeGreaterThan(0);
+  expect(pageRequestsAfterPageTwo.every((pageNum) => pageNum === "2")).toBe(
+    true,
+  );
+});
+
+test("realtime snapshot refresh keeps the selected status view", async ({
+  page,
+}) => {
+  test.setTimeout(15000);
+  await page.addInitScript(() => {
+    Object.defineProperty(globalThis, "ReadableStream", { value: undefined });
+    Object.defineProperty(globalThis, "EventSource", { value: undefined });
+  });
+  const snapshot = (version: number) => ({
+    taskId: 24,
+    scanFinish: true,
+    createTime: 1,
+    duration: version,
+    num: {
+      wait: 0,
+      running: version === 1 ? 1 : 0,
+      success: version,
+      fail: 0,
+      other: 0,
+    },
+    size: {
+      wait: 0,
+      running: version === 1 ? 1 : 0,
+      success: version,
+      fail: 0,
+      other: 0,
+    },
+    doneSize: version,
+    remainSize: version === 1 ? 1 : 0,
+    speed: version,
+    speedAvg: version,
+    remainTime: version === 1 ? 1 : 0,
+  });
+  let allowSnapshotUpdate = false;
+  let successTabSelected = false;
+  const statusesAfterSuccessTab: string[] = [];
+
+  await page.route("**/app/opensync/svr/**", async (route) => {
+    const url = new URL(route.request().url());
+    const success = (data: unknown) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ code: 200, data, msg: "" }),
+      });
+    if (url.pathname.endsWith("/session"))
+      return success({ uid: 1, development: false, version: "test" });
+    if (url.pathname.endsWith("/alist")) return success([]);
+    if (url.pathname.endsWith("/job") && url.searchParams.get("current")) {
+      if (url.searchParams.has("status")) {
+        const status = url.searchParams.get("status") || "";
+        if (successTabSelected) statusesAfterSuccessTab.push(status);
+        return success({
+          dataList: [
+            {
+              id: 240 + Number(status || 0),
+              fileName:
+                status === "2"
+                  ? "success-view-file.txt"
+                  : "running-view-file.txt",
+              srcPath: "/src",
+              dstPath: "/dst",
+              fileSize: 1024,
+              type: 0,
+              status: Number(status),
+              progress: 100,
+            },
+          ],
+          count: status === "2" ? 2 : 1,
+        });
+      }
+      return success(snapshot(allowSnapshotUpdate ? 2 : 1));
+    }
+    if (url.pathname.endsWith("/job")) {
+      return success({
+        dataList: [
+          {
+            id: 1,
+            enable: 1,
+            remark: "快照刷新任务",
+            srcPath: '["/src"]',
+            dstPath: '["/dst"]',
+            alistId: 1,
+            useCacheT: 0,
+            useCacheS: 0,
+            method: 0,
+            interval: 0,
+            isCron: 2,
+          },
+        ],
+        count: 1,
+      });
+    }
+    return success(null);
+  });
+
+  await page.goto("/app/opensync/tasks?jobId=1&tab=realtime");
+  await expect(page.getByRole("tab", { name: "成功 1" })).toBeVisible();
+  successTabSelected = true;
+  await page.getByRole("tab", { name: "成功 1" }).click();
+  allowSnapshotUpdate = true;
+  const realtimeTable = page
+    .locator(".desktop-data:visible, .mobile-data:visible")
+    .last();
+  await expect(realtimeTable.getByText("success-view-file.txt")).toBeVisible();
+
+  const refreshedSuccessTab = page.getByRole("tab", { name: "成功 2" });
+  await expect(refreshedSuccessTab).toBeVisible();
+  await expect(refreshedSuccessTab).toHaveClass(/semi-tabs-tab-active/);
+  await expect(
+    realtimeTable.getByText("running-view-file.txt"),
+  ).toHaveCount(0);
+  expect(statusesAfterSuccessTab.length).toBeGreaterThan(0);
+  expect(statusesAfterSuccessTab.every((status) => status === "2")).toBe(
+    true,
+  );
 });
 
 test("realtime file columns keep the name readable at 1100px desktop width", async ({
