@@ -2,6 +2,7 @@ package handler
 
 import (
 	"opensync/internal/config"
+	"opensync/internal/model"
 	"opensync/internal/service"
 
 	"github.com/gin-gonic/gin"
@@ -15,11 +16,12 @@ func GetSystemConfig(c *gin.Context) {
 // UpdateSystemConfig handles PUT /svr/system/config
 func UpdateSystemConfig(c *gin.Context) {
 	var req config.SystemSettings
-	if !bindJSON(c, &req) {
+	if c.ShouldBindJSON(&req) != nil {
+		c.JSON(400, model.Error("配置参数无效"))
 		return
 	}
 	if err := config.UpdateSystemSettings(req); err != nil {
-		respondError(c, err.Error())
+		c.JSON(400, model.Error(err.Error()))
 		return
 	}
 	service.RunTaskRetentionCleanup()

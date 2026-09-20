@@ -36,6 +36,16 @@ func TestCopyQueueStatsTracksWaitTotals(t *testing.T) {
 	}
 }
 
+func TestJobTaskRuntimeInitializesScanBranchSemaphoreLimit(t *testing.T) {
+	jt := &JobTask{}
+
+	jt.initRuntime()
+
+	if got, want := cap(jt.scanBranchSem), scanBranchLimit(); got != want {
+		t.Fatalf("scanBranchSem cap = %d, want %d", got, want)
+	}
+}
+
 func TestCopyQueueKeepsFIFOAndCompacts(t *testing.T) {
 	queue := newCopyQueue()
 

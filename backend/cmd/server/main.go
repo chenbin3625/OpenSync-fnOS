@@ -60,19 +60,7 @@ func newRouter(development bool, allowedOrigins []string) *gin.Engine {
 		c.JSON(200, model.Success(gin.H{"uid": c.GetInt64("uid"), "development": development, "version": "0.0.1"}))
 	})
 	api.GET("/system/config", handler.GetSystemConfig)
-	api.PUT("/system/config", func(c *gin.Context) {
-		var values config.SystemSettings
-		if c.ShouldBindJSON(&values) != nil {
-			c.JSON(400, model.Error("配置参数无效"))
-			return
-		}
-		if err := config.UpdateSystemSettings(values); err != nil {
-			c.JSON(400, model.Error(err.Error()))
-			return
-		}
-		service.RunTaskRetentionCleanup()
-		c.JSON(200, model.Success(config.GetSystemSettings()))
-	})
+	api.PUT("/system/config", handler.UpdateSystemConfig)
 	api.GET("/alist", handler.GetAlist)
 	api.POST("/alist", handler.AddAlist)
 	api.POST("/alist/test", handler.TestAlist)
