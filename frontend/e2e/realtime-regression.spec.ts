@@ -144,6 +144,127 @@ test("realtime view loads running rows when the live snapshot is missing", async
   await expect(mobileList.getByText("42%")).toBeVisible();
 });
 
+test("realtime status pages refresh independently of SSE summary updates", async ({
+  page,
+}) => {
+  test.setTimeout(15000);
+  const activeTask = {
+    taskId: 18,
+    scanFinish: true,
+    createTime: 1,
+    duration: 1,
+    num: { wait: 0, running: 0, success: 21, fail: 0, other: 0 },
+    size: { wait: 0, running: 0, success: 21, fail: 0, other: 0 },
+    doneSize: 21,
+    remainSize: 0,
+    speed: 0,
+    speedAvg: 0,
+    remainTime: 0,
+  };
+  await page.addInitScript((task) => {
+    Object.defineProperty(globalThis, "ReadableStream", { value: undefined });
+    class StableEventSource {
+      onmessage: ((event: MessageEvent<string>) => void) | null = null;
+      onerror: (() => void) | null = null;
+
+      constructor() {
+        setTimeout(() => {
+          this.onmessage?.(
+            new MessageEvent("message", {
+              data: JSON.stringify({ code: 200, data: task, msg: "" }),
+            }),
+          );
+        });
+      }
+
+      close() {}
+    }
+    Object.defineProperty(globalThis, "EventSource", {
+      value: StableEventSource,
+    });
+  }, activeTask);
+
+  let pageTwoVersion = 1;
+  const successRequests: number[] = [];
+  await page.route("**/app/opensync/svr/**", async (route) => {
+    const url = new URL(route.request().url());
+    const success = (data: unknown) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ code: 200, data, msg: "" }),
+      });
+    if (url.pathname.endsWith("/session"))
+      return success({ uid: 1, development: false, version: "test" });
+    if (url.pathname.endsWith("/alist")) return success([]);
+    if (
+      url.pathname.endsWith("/job") &&
+      url.searchParams.get("current") &&
+      url.searchParams.get("status") === "2"
+    ) {
+      const pageNum = Number(url.searchParams.get("pageNum"));
+      successRequests.push(pageNum);
+      return success({
+        dataList: [
+          {
+            id: pageNum * 100 + pageTwoVersion,
+            fileName:
+              pageNum === 2
+                ? `success-page-2-v${pageTwoVersion}.txt`
+                : "success-page-1.txt",
+            status: 2,
+            type: 0,
+          },
+        ],
+        count: 21,
+      });
+    }
+    if (url.pathname.endsWith("/job") && url.searchParams.get("current")) {
+      return success({ dataList: [], count: 0 });
+    }
+    if (url.pathname.endsWith("/job")) {
+      return success({
+        dataList: [
+          {
+            id: 1,
+            enable: 1,
+            remark: "分页刷新任务",
+            srcPath: '["/src"]',
+            dstPath: '["/dst"]',
+            alistId: 1,
+            useCacheT: 0,
+            useCacheS: 0,
+            method: 0,
+            interval: 0,
+            isCron: 2,
+          },
+        ],
+        count: 1,
+      });
+    }
+    return success(null);
+  });
+
+  await page.goto("/app/opensync/tasks?jobId=1&tab=realtime");
+  await page.getByRole("tab", { name: /成功/ }).click();
+  const realtimeTable = page
+    .locator(".desktop-data:visible, .mobile-data:visible")
+    .last();
+  await expect(realtimeTable.getByText("success-page-1.txt")).toBeVisible();
+
+  await page
+    .locator(".table-pagination")
+    .getByRole("button", { name: "Next" })
+    .click();
+  await expect(realtimeTable.getByText("success-page-2-v1.txt")).toBeVisible();
+  expect(successRequests.slice(0, 2)).toEqual([1, 2]);
+
+  pageTwoVersion = 2;
+  await expect(realtimeTable.getByText("success-page-2-v2.txt")).toBeVisible({
+    timeout: 7000,
+  });
+  expect(successRequests.at(-1)).toBe(2);
+});
+
 test("realtime file columns keep the name readable at 1100px desktop width", async ({
   page,
 }) => {

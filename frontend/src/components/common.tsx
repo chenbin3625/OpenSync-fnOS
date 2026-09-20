@@ -146,16 +146,20 @@ export function LoadState({
 }
 export function Field({
   label,
+  ariaLabel,
   required,
   children,
   hint,
 }: {
-  label: string;
+  label: ReactNode;
+  ariaLabel?: string;
   required?: boolean;
   children: ReactNode;
   hint?: string;
 }) {
   const id = useId();
+  const controlLabel =
+    ariaLabel || (typeof label === "string" ? label : undefined);
   return (
     <div className="field">
       <label id={id + "-label"} htmlFor={id}>
@@ -174,7 +178,7 @@ export function Field({
       }>(children)
         ? cloneElement(children, {
             id: children.props.id || id,
-            "aria-label": label,
+            "aria-label": controlLabel,
             "aria-labelledby": id + "-label",
           })
         : children}

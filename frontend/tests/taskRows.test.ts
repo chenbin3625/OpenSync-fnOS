@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   pageTaskItems,
   realtimeRunningSnapshotIsComplete,
+  taskProgressPercent,
 } from "../src/pages/Home/taskRows";
 
 describe("realtime task rows", () => {
@@ -28,5 +30,23 @@ describe("realtime task rows", () => {
     ];
 
     expect(pageTaskItems(rows, 1, 2, 2)).toEqual(rows);
+  });
+
+  it("formats running progress as an integer percent", () => {
+    expect(taskProgressPercent(66.6)).toBe(67);
+    expect(taskProgressPercent("23.2")).toBe(23);
+    expect(taskProgressPercent(-12)).toBe(0);
+    expect(taskProgressPercent(120)).toBe(100);
+  });
+
+  it("stacks the progress percent above the progress bar", () => {
+    const css = readFileSync(
+      new URL("../src/styles.css", import.meta.url),
+      "utf8",
+    );
+    const rule = /\.file-progress\s*\{(?<body>[^}]+)\}/.exec(css)?.groups
+      ?.body;
+
+    expect(rule).toContain("flex-direction: column");
   });
 });

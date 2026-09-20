@@ -33,6 +33,12 @@ export function defaultJobForm(alistId?: number) {
   };
 }
 export type JobForm = ReturnType<typeof defaultJobForm>;
+const supportedJobMethods = new Set([0, 1]);
+
+function normalizeJobMethod(method: unknown) {
+  return supportedJobMethods.has(Number(method)) ? Number(method) : 0;
+}
+
 export function selectJob<T extends { id: number }>(
   jobs: T[],
   selectedId: number | null,
@@ -47,6 +53,7 @@ export function jobToForm(job: JobItem): JobForm {
   return {
     ...defaultJobForm(job.alistId),
     ...job,
+    method: normalizeJobMethod(job.method),
     srcPath: parseJobPathList(job.srcPath),
     dstPath: parseJobPathList(job.dstPath),
     remark: job.remark || "",

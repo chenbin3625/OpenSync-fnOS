@@ -68,6 +68,30 @@ test("desktop sidebar is 220px with icon menus and bottom settings", async ({
   ).toBe("1px");
 });
 
+test("desktop shell does not overflow a short host window", async ({ page }) => {
+  await page.setViewportSize({ width: 1100, height: 400 });
+  await page.goto("/app/opensync/tasks");
+  await page.locator(".app-shell").waitFor();
+
+  const layout = await page.evaluate(() => {
+    const root = document.documentElement;
+    const shell = document.querySelector<HTMLElement>(".app-shell")!;
+    const workspace = document.querySelector<HTMLElement>(".app-workspace")!;
+    return {
+      viewportHeight: window.innerHeight,
+      documentClientHeight: root.clientHeight,
+      documentScrollHeight: root.scrollHeight,
+      shellClientHeight: shell.clientHeight,
+      shellScrollHeight: shell.scrollHeight,
+      workspaceBottom: workspace.getBoundingClientRect().bottom,
+    };
+  });
+
+  expect(layout.documentScrollHeight).toBe(layout.documentClientHeight);
+  expect(layout.shellScrollHeight).toBe(layout.shellClientHeight);
+  expect(layout.workspaceBottom).toBeLessThanOrEqual(layout.viewportHeight);
+});
+
 test("task management expands in the sidebar and lists task names", async ({
   page,
   request,

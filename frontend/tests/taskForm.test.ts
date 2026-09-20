@@ -8,13 +8,23 @@ import {
   updateExcludeFolders,
   validateJobForm,
 } from "../src/lib/taskForm";
-import { methodNames } from "../src/pages/Home/homeUtils";
+import { methodNames, methodOptions } from "../src/pages/Home/homeUtils";
+import {
+  initialExcludeExpandedKeys,
+  normalizeExcludeRootPath,
+} from "../src/lib/excludeTree";
 
 describe("existing synchronization contracts", () => {
-  it("keeps multi-source, multi-target and all three synchronization modes", () => {
-    expect(methodNames).toEqual(["仅新增", "全同步", "移动模式"]);
+  it("keeps multi-source, multi-target and the two supported synchronization modes", () => {
+    expect(methodNames).toEqual(["增量同步", "全量同步"]);
+    expect(methodOptions.map((method) => method.description).join("\n")).toContain(
+      "不会删除目标端多余文件",
+    );
+    expect(methodOptions.map((method) => method.description).join("\n")).toContain(
+      "会删除目标端多余文件",
+    );
 
-    for (const method of [0, 1, 2]) {
+    for (const method of [0, 1]) {
       const form = {
         ...defaultJobForm(7),
         method,
@@ -28,6 +38,14 @@ describe("existing synchronization contracts", () => {
         dstPath: form.dstPath,
       });
     }
+  });
+
+  it("expands selected source roots by default for folder filtering", () => {
+    expect(initialExcludeExpandedKeys(["/Photos", "/Docs/"])).toEqual([
+      "/Photos",
+      "/Docs",
+    ]);
+    expect(normalizeExcludeRootPath("///")).toBe("/");
   });
   it("keeps manual-only jobs enabled and translates file size units", () => {
     const payload = buildJobPayload({
@@ -48,7 +66,7 @@ describe("existing synchronization contracts", () => {
       srcPath: '["/a","/b"]',
       dstPath: '["/c"]',
       remark: "test",
-      method: 2,
+      method: 1,
       isCron: 1,
       interval: 33,
       useCacheS: 1,
@@ -70,6 +88,17 @@ describe("existing synchronization contracts", () => {
       srcPath: ["/a", "/b"],
       dstPath: ["/c"],
     });
+  });
+  it("normalizes unsupported legacy synchronization methods when editing", () => {
+    const form = jobToForm({
+      id: 9,
+      alistId: 7,
+      srcPath: '["/a"]',
+      dstPath: '["/b"]',
+      method: 2,
+    });
+
+    expect(form.method).toBe(0);
   });
   it("rejects missing paths, inverted sizes and invalid Cron ranges", () => {
     const namedForm = { ...defaultJobForm(7), remark: "测试任务" };

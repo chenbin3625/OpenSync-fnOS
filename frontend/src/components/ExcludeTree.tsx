@@ -3,6 +3,10 @@ import Tree from "@douyinfe/semi-ui/lib/es/tree";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import type { TreeNodeData } from "@douyinfe/semi-ui/lib/es/tree/interface";
 import { api } from "../api/client";
+import {
+  initialExcludeExpandedKeys,
+  normalizeExcludeRootPath,
+} from "../lib/excludeTree";
 
 /** 将 API 返回的子目录列表转为 TreeNodeData */
 function toChildren(
@@ -40,10 +44,12 @@ function patchTree(
  * 例如 srcPath="/data", abs="/data/photos/raw" → "photos/raw/"
  */
 function toRelative(srcPath: string, abs: string): string {
-  const root = srcPath.replace(/\/+$/, "");
+  const root = normalizeExcludeRootPath(srcPath);
   let rel = abs.startsWith(root + "/")
     ? abs.slice(root.length + 1)
-    : abs.startsWith(root)
+    : root === "/"
+      ? abs.slice(1)
+      : abs.startsWith(root)
       ? abs.slice(root.length)
       : abs;
   rel = rel.replace(/^\/+/, "");
@@ -79,17 +85,18 @@ export function ExcludeTree({
       return;
     }
 
-    const roots: TreeNodeData[] = srcPaths.map((p) => ({
+    const rootPaths = initialExcludeExpandedKeys(srcPaths);
+    const roots: TreeNodeData[] = rootPaths.map((p) => ({
       label: p,
       value: p,
       key: p,
       isLeaf: false,
     }));
     setTreeData(roots);
-    setExpandedKeys([]);
+    setExpandedKeys(rootPaths);
 
     // 自动加载每个根节点的子目录
-    for (const sp of srcPaths) {
+    for (const sp of rootPaths) {
       void loadChildren(sp, engineId, controllerRef.current.signal);
     }
 
@@ -132,9 +139,9 @@ export function ExcludeTree({
   // 将 excludedPaths 相对路径转换为绝对 key 用于勾选
   const checkedKeys = excludedPaths.flatMap((rel) =>
     srcPaths.map((sp) => {
-      const root = sp.replace(/\/+$/, "");
+      const root = normalizeExcludeRootPath(sp);
       const clean = rel.replace(/^\/+/, "").replace(/\/+$/, "");
-      return root + "/" + clean;
+      return root === "/" ? "/" + clean : root + "/" + clean;
     }),
   );
 
@@ -145,8 +152,12 @@ export function ExcludeTree({
       const relSet = new Set<string>();
       for (const abs of checked) {
         for (const sp of srcPaths) {
-          const root = sp.replace(/\/+$/, "");
-          if (abs.startsWith(root + "/") || abs === root) {
+          const root = normalizeExcludeRootPath(sp);
+          if (
+            (root === "/" && abs.startsWith("/")) ||
+            abs.startsWith(root + "/") ||
+            abs === root
+          ) {
             relSet.add(toRelative(sp, abs));
             break;
           }

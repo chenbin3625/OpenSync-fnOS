@@ -47,6 +47,7 @@ import {
   taskRecordStatusNames,
   taskTypeNames,
 } from "./Home/homeUtils";
+import { taskProgressPercent } from "./Home/taskRows";
 import type { TaskItem, TaskRecord } from "../types";
 
 const time = (value?: number) =>
@@ -482,7 +483,7 @@ export function FileTable({
               render: (_: unknown, record: TaskItem) => {
                 // 运行中：展示实时进度
                 if (record.status === 1) {
-                  const pct = Math.max(0, Math.min(100, Number(record.progress) || 0));
+                  const pct = taskProgressPercent(record.progress);
                   return (
                     <div className="file-progress">
                       <span className="file-progress-pct">{pct}%</span>
@@ -555,15 +556,12 @@ function MobileFileRecord({ record }: { record: TaskItem }) {
             {record.isPath ? "目录" : formatSize(record.fileSize || 0)}
           </span>
           {record.status === 1 && (
-            <span>{Number(record.progress) || 0}%</span>
+            <span>{taskProgressPercent(record.progress)}%</span>
           )}
         </div>
         {record.status === 1 && (
           <Progress
-            percent={Math.max(
-              0,
-              Math.min(100, Number(record.progress) || 0),
-            )}
+            percent={taskProgressPercent(record.progress)}
             showInfo={false}
           />
         )}

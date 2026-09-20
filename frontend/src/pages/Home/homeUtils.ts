@@ -46,19 +46,14 @@ export const taskTypeNames: Record<number, string> = {
 };
 export const methodOptions = [
   {
-    name: "仅新增",
+    name: "增量同步",
     description:
-      "复制源目录中目标端不存在或内容变化的文件，不删除目标端多余文件，适合增量备份。",
+      "复制源目录中目标端不存在或内容变化的文件，不会删除目标端多余文件，适合持续备份。",
   },
   {
-    name: "全同步",
+    name: "全量同步",
     description:
       "目标目录与源目录保持一致，会删除目标端多余文件；源文件换位置时优先复用目标端相同内容，避免重传。",
-  },
-  {
-    name: "移动模式",
-    description:
-      "按移动任务处理新增/变更文件，适合把文件从源端迁移到目标端，用于归档或腾挪空间。",
   },
 ];
 export const methodNames = methodOptions.map((method) => method.name);

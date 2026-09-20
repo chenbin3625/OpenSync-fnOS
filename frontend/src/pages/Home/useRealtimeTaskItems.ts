@@ -10,14 +10,9 @@ import {
   type RealtimeTaskLoadKey,
 } from "./taskRows";
 
-// Running tab fetches from the server-paged endpoint too, but at a faster
-// cadence than the DB-backed tabs so the UI stays reasonably responsive.
-const RUNNING_POLL_INTERVAL_MS = 3000;
-
-// Non-running tabs (success/fail/other/... ) fetch from the DB-backed server
-// page; slowing them down avoids hammering the sqlite aggregation queries on
-// very large task item sets while each tab is simply being watched.
-const NON_RUNNING_POLL_INTERVAL_MS = 15000;
+// Item pages need their own refresh clock. SSE only reports summary changes,
+// so using summary object updates as the clock can leave the selected page stale.
+const ITEMS_POLL_INTERVAL_MS = 3000;
 
 type RealtimeTaskItemsParams = {
   jobId: string;
@@ -48,12 +43,14 @@ export function useRealtimeTaskItems({
   const [tabTaskPage, setTabTaskPageValue] = useState(1);
   const [pageSize, setPageSizeValue] = useState(initialPageSize);
   const [tabLoading, setTabLoading] = useState(false);
+  const [refreshTick, setRefreshTick] = useState(0);
   const requestRef = useRef(0);
   const lastLoadedRef = useRef<RealtimeTaskLoadKey | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const tabFetchingRef = useRef(false);
   const lastFetchKeyRef = useRef<string | null>(null);
   const lastFetchAtRef = useRef<number | null>(null);
+  const lastRefreshTickRef = useRef(0);
 
   const setActiveTab = useCallback((status: number) => {
     setActiveTabValue(status);
@@ -69,12 +66,27 @@ export function useRealtimeTaskItems({
     setTabTaskPageValue(1);
   }, []);
 
+  const taskIdentity = currentTask
+    ? getRealtimeTaskIdentity(currentTask)
+    : "";
+
+  useEffect(() => {
+    if (!enabled || !jobId || !taskIdentity) return undefined;
+    const interval = setInterval(() => {
+      if (document.visibilityState !== "hidden") {
+        setRefreshTick((value) => value + 1);
+      }
+    }, ITEMS_POLL_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [activeTab, enabled, jobId, taskIdentity]);
+
   useEffect(() => {
     if (!enabled || !jobId || !currentTask) {
       requestRef.current += 1;
       lastLoadedRef.current = null;
       lastFetchKeyRef.current = null;
       lastFetchAtRef.current = null;
+      lastRefreshTickRef.current = refreshTick;
       abortRef.current?.abort();
       setTabTaskList([]);
       setTabTaskTotal(0);
@@ -82,7 +94,6 @@ export function useRealtimeTaskItems({
       return;
     }
 
-    const taskIdentity = getRealtimeTaskIdentity(currentTask);
     const lastLoaded = lastLoadedRef.current;
     const mustResetPage =
       !lastLoaded ||
@@ -105,18 +116,15 @@ export function useRealtimeTaskItems({
     const replaceRows = shouldReplaceRealtimeRows(lastLoaded, loadKey);
     const resetSnapshot = shouldResetRealtimeSnapshot(lastLoaded, loadKey);
 
-    // All tabs (including running) fetch from the server-paged endpoint.
-    // Running tab uses a faster poll interval so the UI stays responsive.
-    const pollInterval = activeTab === 1
-      ? RUNNING_POLL_INTERVAL_MS
-      : NON_RUNNING_POLL_INTERVAL_MS;
     const fetchKey = `${loadKey.status}:${loadKey.taskIdentity}:${loadKey.page}:${pageSize}`;
     const now = Date.now();
     const changedView = lastFetchKeyRef.current !== fetchKey;
+    const scheduledRefresh = lastRefreshTickRef.current !== refreshTick;
     if (
       !changedView &&
+      !scheduledRefresh &&
       lastFetchAtRef.current != null &&
-      now - lastFetchAtRef.current < pollInterval
+      now - lastFetchAtRef.current < ITEMS_POLL_INTERVAL_MS
     ) {
       return;
     }
@@ -126,6 +134,7 @@ export function useRealtimeTaskItems({
     if (tabFetchingRef.current) abortRef.current?.abort();
     lastFetchKeyRef.current = fetchKey;
     lastFetchAtRef.current = now;
+    lastRefreshTickRef.current = refreshTick;
 
     const requestID = ++requestRef.current;
     lastLoadedRef.current = loadKey;
@@ -173,7 +182,16 @@ export function useRealtimeTaskItems({
     }
 
     loadTabTasks();
-  }, [activeTab, currentTask, enabled, jobId, pageSize, tabTaskPage]);
+  }, [
+    activeTab,
+    currentTask,
+    enabled,
+    jobId,
+    pageSize,
+    refreshTick,
+    tabTaskPage,
+    taskIdentity,
+  ]);
 
   // Abort any in-flight tab fetch when the component unmounts (job switch /
   // tab teardown remounts TaskList via `key`).

@@ -7,6 +7,7 @@ import Switch from "@douyinfe/semi-ui/lib/es/switch";
 import TextArea from "@douyinfe/semi-ui/lib/es/input/textarea";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
+import { IconHelpCircleStroked } from "@douyinfe/semi-icons";
 import { api } from "../api/client";
 import {
   Editor,
@@ -37,6 +38,15 @@ import { fileSizeUnitOptions } from "./Home/fileSizeUnits";
 import type { AlistItem, JobItem } from "../types";
 
 const taskEditorSteps = ["引擎与路径", "同步与调度", "文件过滤"];
+const syncMethodTip = (
+  <div className="sync-method-tip">
+    {methodOptions.map((method) => (
+      <div key={method.name}>
+        <strong>{method.name}</strong>：{method.description}
+      </div>
+    ))}
+  </div>
+);
 
 export default function TaskEditor({
   job,
@@ -190,16 +200,28 @@ export default function TaskEditor({
             {step === 1 && (
               <div className="form-section">
                 <div className="form-grid">
-                  <Field label="同步方式">
+                  <Field
+                    label={
+                      <span className="field-label-with-tip">
+                        同步方式
+                        <Tooltip content={syncMethodTip} trigger="hover">
+                          <span
+                            className="field-tip-icon"
+                            aria-label="同步方式说明"
+                            tabIndex={0}
+                          >
+                            <IconHelpCircleStroked aria-hidden="true" />
+                          </span>
+                        </Tooltip>
+                      </span>
+                    }
+                    ariaLabel="同步方式"
+                  >
                     <Select
                       value={form.method}
                       optionList={methodOptions.map((method, value) => ({
                         value,
-                        label: (
-                          <Tooltip content={method.description}>
-                            {method.name}
-                          </Tooltip>
-                        ),
+                        label: method.name,
                       }))}
                       onChange={(value) => change("method", Number(value))}
                     />
@@ -286,7 +308,10 @@ export default function TaskEditor({
                     </Field>
                   ))}
                 </div>
-                <Field label="文件夹过滤" hint="勾选要忽略的文件夹，源和目标同时生效">
+                <Field
+                  label="文件夹过滤"
+                  hint="仅针对源目录，勾选要忽略的子文件夹"
+                >
                   <ExcludeTree
                     engineId={form.alistId}
                     srcPaths={form.srcPath}

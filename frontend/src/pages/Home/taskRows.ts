@@ -200,6 +200,12 @@ export function pageTaskItems(
   return rows;
 }
 
+export function taskProgressPercent(progress: unknown): number {
+  const value = Number(progress);
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
 export function shouldReplaceRealtimeRows(
   previous: RealtimeTaskLoadKey | null,
   next: RealtimeTaskLoadKey,
