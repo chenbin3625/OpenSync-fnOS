@@ -73,13 +73,11 @@ func TestParsePageParamsAllowsUnpaginatedRequests(t *testing.T) {
 	}
 }
 
-func TestCheckAndAddSQLRejectsUnsafeColumnNames(t *testing.T) {
-	_, _, err := CheckAndAddSQL("UPDATE job SET", []string{"remark; DROP TABLE job;--"}, map[string]interface{}{
-		"id":                        1,
-		"remark; DROP TABLE job;--": "bad",
-	})
-	if err == nil {
-		t.Fatalf("CheckAndAddSQL() error = nil, want unsafe column rejection")
+func TestIsSafeSQLIdentifierRejectsUnsafeColumnNames(t *testing.T) {
+	for _, name := range []string{"", "remark; DROP TABLE job;--", "1name", "name-with-dash"} {
+		if isSafeSQLIdentifier(name) {
+			t.Fatalf("isSafeSQLIdentifier(%q) = true, want false", name)
+		}
 	}
 }
 

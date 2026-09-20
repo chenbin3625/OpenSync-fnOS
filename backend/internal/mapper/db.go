@@ -3,7 +3,6 @@ package mapper
 import (
 	"database/sql"
 	"errors"
-	"fmt"
 	"log"
 	"math"
 	"net/url"
@@ -348,10 +347,6 @@ func pageOffset(pageSize, pageNum int) (int64, error) {
 	return index * size, nil
 }
 
-func withDefaultLimit(baseSQL string) string {
-	return baseSQL + fmt.Sprintf(" LIMIT %d", defaultUnpagedLimit)
-}
-
 func parsePageParams(params map[string]interface{}) (pageSize, pageNum int, paginated bool, err error) {
 	pageSizeVal, hasPageSize := params["pageSize"]
 	pageNumVal, hasPageNum := params["pageNum"]
@@ -401,32 +396,6 @@ func positiveInt(v interface{}) (int, error) {
 		return 0, errors.New(msg.LostPart)
 	}
 	return int(n), nil
-}
-
-// CheckAndAddSQL builds dynamic update SQL from params
-func CheckAndAddSQL(baseSQL string, params []string, data map[string]interface{}) (string, []interface{}, error) {
-	var setClauses []string
-	var args []interface{}
-	flag := 0
-	for _, item := range params {
-		if !isSafeSQLIdentifier(item) {
-			return "", nil, errors.New(msg.LostPart)
-		}
-		if v, ok := data[item]; ok {
-			setClauses = append(setClauses, fmt.Sprintf("%s=?", item))
-			args = append(args, v)
-			flag++
-		}
-	}
-	if flag == 0 {
-		return "", nil, errors.New(msg.LostPart)
-	}
-	if _, ok := data["id"]; !ok {
-		return "", nil, errors.New(msg.LostPart)
-	}
-	sql := baseSQL + " " + strings.Join(setClauses, ", ") + " WHERE id=?"
-	args = append(args, data["id"])
-	return sql, args, nil
 }
 
 func isSafeSQLIdentifier(name string) bool {

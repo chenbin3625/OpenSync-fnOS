@@ -61,6 +61,22 @@ func TestParseEnableValueAcceptsExplicitBooleanOrBinaryValues(t *testing.T) {
 	}
 }
 
+func TestUpdateSystemConfigRejectsInvalidJSONWithBadRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.PUT("/svr/system/config", UpdateSystemConfig)
+
+	req := httptest.NewRequest(http.MethodPut, "/svr/system/config", strings.NewReader(`{`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
 func TestUpdateNotifyRejectsUnknownPayloadShape(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()

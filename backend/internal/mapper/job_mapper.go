@@ -224,11 +224,6 @@ func AddJobTask(jobID int64, runTime int64) (int64, error) {
 	return ExecuteInsert("INSERT INTO job_task (jobId, runTime) VALUES (?, ?)", jobID, runTime)
 }
 
-// UpdateJobTaskStatus updates task status
-func UpdateJobTaskStatus(taskID int64, status int, errMsg *string) error {
-	return ExecuteUpdate("UPDATE job_task SET status=?, errMsg=? WHERE id=?", status, errMsg, taskID)
-}
-
 // UpdateJobTaskStatusByStatus updates incomplete tasks to aborted (for restart)
 func UpdateJobTaskStatusByStatus() error {
 	return ExecuteUpdate("UPDATE job_task SET status=4 WHERE status IN (0, 1)")

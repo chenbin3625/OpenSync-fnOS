@@ -491,20 +491,3 @@ func tableHasColumnDB(db *sql.DB, tableName, columnName string) bool {
 	}
 	return false
 }
-
-// UpdateAbnormalTasks updates incomplete tasks to aborted status on startup
-func UpdateAbnormalTasks() {
-	if err := UpdateJobTaskStatusByStatus(); err != nil {
-		log.Printf("Failed to update abnormal tasks: %v", err)
-	}
-}
-
-// GetEnabledJobs returns all enabled jobs for scheduler startup
-func GetEnabledJobs() []map[string]interface{} {
-	jobs, err := GetEnableJobList()
-	if err != nil {
-		log.Printf("Failed to get enabled jobs: %v", err)
-		return nil
-	}
-	return jobs
-}

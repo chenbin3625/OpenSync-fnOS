@@ -211,7 +211,7 @@ func (jt *JobTask) ensureRuntimeLocked() {
 		jt.scanSem = make(chan struct{}, scanConcurrencyLimit())
 	}
 	if jt.scanBranchSem == nil {
-		jt.scanBranchSem = make(chan struct{}, scanConcurrencyLimit())
+		jt.scanBranchSem = make(chan struct{}, scanBranchLimit())
 	}
 	if jt.ctx == nil || jt.cancel == nil {
 		jt.ctx, jt.cancel = newTaskContext(config.GetConfig().Server.Timeout)
