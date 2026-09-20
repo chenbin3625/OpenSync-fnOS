@@ -1,5 +1,7 @@
 #!/bin/bash
+set -eu
 
-### This script is called after the user uninstalls the application.
+### This script is called before the user uninstalls the application.
 
-exit 0
+CMD_DIR="$(cd "$(dirname "$0")" && pwd)"
+"${CMD_DIR}/main" stop

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import Button from "@douyinfe/semi-ui/lib/es/button";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import TreeSelect from "@douyinfe/semi-ui/lib/es/treeSelect";
+import { IconRefresh } from "@douyinfe/semi-icons";
 import type { TreeNodeData } from "@douyinfe/semi-ui/lib/es/tree/interface";
 import { api } from "../api/client";
 import { buildPathTreeData } from "../pages/Home/homeUtils";
@@ -50,6 +52,7 @@ export function RemotePaths({
 }) {
   const [nodes, setNodes] = useState<TreeNodeData[]>(() => seed(value));
   const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
+  const [loadFailed, setLoadFailed] = useState(false);
   const controller = useRef<AbortController | null>(null);
   const engineRef = useRef(engineId);
   const nodesRef = useRef(nodes);
@@ -64,6 +67,7 @@ export function RemotePaths({
       try {
         const result = await api.paths(engineId, path, signal);
         if (signal?.aborted || engineRef.current !== engineId) return;
+        setLoadFailed(false);
         const children = (result || []).map((n) => {
           const name = n.name || n.path || "";
           const full = path === "/" ? "/" + name : path + "/" + name;
@@ -75,8 +79,11 @@ export function RemotePaths({
           setExpandedKeys(["/"]);
         }
       } catch (err) {
-        if (!signal?.aborted && engineRef.current === engineId)
-          Toast.error(err instanceof Error ? err.message : "目录加载失败");
+        if (!signal?.aborted && engineRef.current === engineId) {
+          const message = err instanceof Error ? err.message : "目录加载失败";
+          setLoadFailed(true);
+          Toast.error({ content: message, duration: 5 });
+        }
       }
     },
     [engineId],
@@ -152,6 +159,16 @@ export function RemotePaths({
         maxTagCount={2}
         showClear
       />
+      {loadFailed && (
+        <Button
+          size="small"
+          icon={<IconRefresh aria-hidden="true" />}
+          onClick={() => void load()}
+          style={{ marginTop: 8 }}
+        >
+          重试
+        </Button>
+      )}
     </div>
   );
 }

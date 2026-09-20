@@ -70,7 +70,7 @@ export default function Engines() {
                 <IconButton
                   label="测试引擎"
                   icon={<IconChainStroked aria-hidden="true" />}
-                  disabled={testingId === engine.id}
+                  disabled={testingId !== null}
                   onClick={() => testEngine(engine.id)}
                 />
                 <IconButton

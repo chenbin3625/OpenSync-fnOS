@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   buildJobPayload,
   defaultJobForm,
+  fileTypeFilterGroups,
+  isExcludePatternEnabled,
   jobToForm,
   parseExcludeFolders,
   selectJob,
+  systemDirFilterGroups,
   updateExcludeFolders,
   validateJobForm,
 } from "../src/lib/taskForm";
@@ -62,6 +65,29 @@ describe("existing synchronization contracts", () => {
   it("excludes Synology recycle directories by default", () => {
     expect(defaultJobForm().exclude.split("\n")).toContain("\\#recycle/");
   });
+  it("enables safe default file and folder filters", () => {
+    const exclude = defaultJobForm().exclude;
+    const enabledFileGroups = new Set(["system", "temporary", "lock"]);
+    for (const group of fileTypeFilterGroups) {
+      const selected = group.patterns.filter((pattern) =>
+        isExcludePatternEnabled(exclude, pattern),
+      );
+      if (enabledFileGroups.has(group.key)) {
+        expect(selected, group.label).toEqual([...group.patterns]);
+      } else {
+        expect(selected, group.label).toEqual([]);
+      }
+    }
+
+    for (const group of systemDirFilterGroups) {
+      expect(
+        group.patterns.filter((pattern) =>
+          isExcludePatternEnabled(exclude, pattern),
+        ),
+        group.label,
+      ).toEqual([...group.patterns]);
+    }
+  });
   it("toggles file type presets without changing unrelated exclude rules", () => {
     const filters = taskFormModule as typeof taskFormModule & {
       updateExcludePatterns?: (
@@ -110,13 +136,13 @@ describe("existing synchronization contracts", () => {
     expect(filters.parseCustomFileTypeFilters).toBeTypeOf("function");
     expect(filters.parseOtherFileTypeFilters).toBeTypeOf("function");
 
-    const added = filters.addCustomFileTypeFilter!(".DS_Store", ".ISO");
+    const added = filters.addCustomFileTypeFilter!(".DS_Store", ".PST");
     expect(filters.parseOtherFileTypeFilters!(added)).toEqual([
-      { pattern: "*.iso", enabled: true },
+      { pattern: "*.pst", enabled: true },
     ]);
-    const disabled = filters.updateExcludePatterns!(added, ["*.iso"], false);
+    const disabled = filters.updateExcludePatterns!(added, ["*.pst"], false);
     expect(filters.parseOtherFileTypeFilters!(disabled)).toEqual([
-      { pattern: "*.iso", enabled: false },
+      { pattern: "*.pst", enabled: false },
     ]);
     expect(disabled).toContain(".DS_Store");
   });
@@ -130,11 +156,11 @@ describe("existing synchronization contracts", () => {
 
     expect(
       filters.parseOtherFileTypeFilters!(
-        "keep-dir/\n*.iso\n# *.bak\n*.tmp\n.DS_Store",
+        "keep-dir/\n*.pst\n# *.vmdk\n*.tmp\n.DS_Store",
       ),
     ).toEqual([
-      { pattern: "*.iso", enabled: true },
-      { pattern: "*.bak", enabled: false },
+      { pattern: "*.pst", enabled: true },
+      { pattern: "*.vmdk", enabled: false },
     ]);
   });
   it("round trips existing job identifiers, cache settings and Cron expressions", () => {

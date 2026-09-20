@@ -358,13 +358,6 @@ function NotificationEditor({
             ))}
           </>
         )}
-        <SettingRow label="启用通知" variant="bordered">
-          <Switch
-            aria-label="启用通知"
-            checked={form.enable}
-            onChange={(v) => change("enable", v)}
-          />
-        </SettingRow>
         <SettingRow label="无变更时不发送" variant="bordered">
           <Switch
             aria-label="无变更时不发送"

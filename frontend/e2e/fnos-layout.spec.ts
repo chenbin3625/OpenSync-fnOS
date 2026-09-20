@@ -39,26 +39,29 @@ test("desktop sidebar is 220px with icon menus and bottom settings", async ({
   const sidebar = page.locator(".app-sidebar");
   await expect(sidebar).toBeVisible();
   expect((await sidebar.boundingBox())?.width).toBe(220);
-  const firstNav = sidebar.getByRole("link", { name: "任务管理" });
+  const firstNav = sidebar.getByRole("button", { name: "任务管理" });
   const firstNavBox = await firstNav.boundingBox();
   expect(firstNavBox?.width).toBe(204);
   expect(firstNavBox?.height).toBe(36);
   await expect(firstNav).toHaveCSS("font-size", "14px");
-  await expect(firstNav).not.toHaveAttribute("aria-expanded", /.+/);
-  await expect(sidebar.locator(".nav-submenu")).toHaveCount(0);
-  await expect(sidebar.locator(".semi-icon")).toHaveCount(4);
-  await expect(sidebar.locator(".semi-icon").first()).toHaveAttribute(
+  await expect(firstNav).toHaveAttribute("aria-expanded", "true");
+  await expect(sidebar.locator(".nav-submenu")).toHaveCount(1);
+  await expect(firstNav.locator(".task-menu-triangle")).toHaveAttribute(
     "aria-label",
-    "cloud_stroked",
+    "tree_triangle_down",
   );
-  await expect(sidebar.locator(".semi-icon").first()).toHaveCSS(
+  await expect(sidebar.locator(".task-sub-icon").first()).toHaveAttribute(
+    "aria-label",
+    "folder_stroked",
+  );
+  await expect(firstNav.locator(".task-menu-triangle")).toHaveCSS(
     "font-size",
     "16px",
   );
   await expect(page.getByRole("button", { name: "切换导航" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "切换主题" })).toHaveCount(0);
   const settings = page.locator(".sidebar-settings");
-  await expect(settings.getByRole("link", { name: "系统设置" })).toBeVisible();
+  await expect(settings.getByRole("link", { name: "设置" })).toBeVisible();
   const bounds = await settings.boundingBox();
   expect(bounds!.y + bounds!.height).toBeGreaterThan(
     page.viewportSize()!.height - 24,
@@ -161,9 +164,9 @@ test("task tabs and page commands share an integrated toolbar row", async ({
   page,
 }) => {
   for (const [path, tab, action] of [
-    ["tasks", "总览", "新建任务"],
-    ["tasks", "实时任务", "新建任务"],
-    ["tasks", "历史任务", "执行全部"],
+    ["tasks?tab=overview", "总览", "新建任务"],
+    ["tasks?tab=realtime", "实时任务", null],
+    ["tasks?tab=history", "历史任务", null],
   ]) {
     await page.goto(`/app/opensync/${path}`);
     const toolbar = page.locator(".page-toolbar");
@@ -183,17 +186,23 @@ test("task tabs and page commands share an integrated toolbar row", async ({
     const tabBox = await toolbar
       .getByRole("tab", { name: tab, exact: true })
       .boundingBox();
-    const actionBox = await toolbar
-      .getByRole("button", { name: action, exact: true })
-      .boundingBox();
     expect(tabBox).not.toBeNull();
-    expect(actionBox).not.toBeNull();
-    if (page.viewportSize()!.width > 640) {
+    if (action) {
+      const actionBox = await toolbar
+        .getByRole("button", { name: action, exact: true })
+        .boundingBox();
+      expect(actionBox).not.toBeNull();
+      if (page.viewportSize()!.width > 640) {
+        expect(
+          Math.abs(
+            tabBox!.y + tabBox!.height / 2 - actionBox!.y - actionBox!.height / 2,
+          ),
+        ).toBeLessThan(8);
+      }
+    } else {
       expect(
-        Math.abs(
-          tabBox!.y + tabBox!.height / 2 - actionBox!.y - actionBox!.height / 2,
-        ),
-      ).toBeLessThan(8);
+        await toolbar.locator(".page-actions").textContent(),
+      ).toBe("");
     }
   }
   // 引擎管理只有一个页面，不再有 Tab；工具栏仍须撑满高度并右对齐操作按钮。
@@ -263,7 +272,7 @@ test("primary surface, cards and controls use consistent radii and full width", 
   await expect(rows.first()).toHaveCSS("border-top-width", "0px");
   await expect(rows.first()).toHaveCSS("border-bottom-width", "0px");
 
-  const input = page.getByRole("textbox", { name: "复制并发数", exact: true });
+  const input = page.getByRole("textbox", { name: "操作并发数", exact: true });
   await input.hover();
   const wrapper = input.locator(
     "xpath=ancestor::*[contains(@class, 'semi-input-wrapper')][1]",
@@ -272,7 +281,7 @@ test("primary surface, cards and controls use consistent radii and full width", 
   await expect(wrapper).toHaveCSS("border-top-color", "rgb(0, 102, 255)");
 
   await input.fill("9");
-  const save = page.getByRole("button", { name: "保存设置", exact: true });
+  const save = page.getByRole("button", { name: "保存", exact: true });
   await expect(save).toBeEnabled();
   await expect(save).toHaveCSS("background-color", "rgb(0, 102, 255)");
   await expect(save).toHaveCSS("border-radius", "8px");
@@ -363,16 +372,17 @@ test("data fixture renders inspectable engine, task and notification rows", asyn
     ).toBeVisible();
 
     await page.goto("/app/opensync/notifications");
-    await expect(page.getByText(`通知 #${notifyId}`, { exact: true })).toBeVisible();
+    const notifySwitch = page.getByLabel(`通知 ${notifyId} 开关`, { exact: true });
+    await expect(notifySwitch).toBeVisible();
     await expect(page.locator(".notification-item .item-symbol")).toHaveCount(0);
     await expect(
-      page.locator(".notification-item .semi-switch").first(),
+      notifySwitch.locator("xpath=ancestor::*[contains(@class, 'semi-switch')][1]"),
     ).toHaveCSS("width", "40px");
     await expect(
-      page.locator(".notification-item .semi-switch").first(),
+      notifySwitch.locator("xpath=ancestor::*[contains(@class, 'semi-switch')][1]"),
     ).toHaveCSS("height", "24px");
     await expect(
-      page.locator(".notification-item .semi-switch").first(),
+      notifySwitch.locator("xpath=ancestor::*[contains(@class, 'semi-switch')][1]"),
     ).toHaveCSS("background-color", "rgb(0, 102, 255)");
     await page.screenshot({
       path: `test-results/data-${testInfo.project.name}.png`,
@@ -461,7 +471,7 @@ test("task cards follow the reference card style and fill the detail pane", asyn
     ).toBeVisible();
     // 「⋯」菜单里的操作与参考稿一致
     await menu.click();
-    for (const label of ["设置", "执行记录", "禁用", "删除"]) {
+    for (const label of ["设置", "删除"]) {
       await expect(
         page.locator(".semi-dropdown-menu").getByText(label, { exact: true }),
       ).toBeVisible();
@@ -597,9 +607,9 @@ test("settings save stays at the top right", async ({ page }) => {
   await page.goto("/app/opensync/settings");
   const save = page
     .locator(".page-toolbar")
-    .getByRole("button", { name: "保存设置", exact: true });
+    .getByRole("button", { name: "保存", exact: true });
   await expect(save).toBeVisible();
-  await expect(page.getByRole("textbox", { name: "复制并发数", exact: true })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "操作并发数", exact: true })).toBeVisible();
   const bounds = await save.boundingBox();
   expect(bounds!.y).toBeLessThan(60);
   expect(bounds!.x + bounds!.width).toBeGreaterThan(
@@ -619,10 +629,10 @@ test("toolbar keeps its divider only when tabs are present", async ({
   page,
 }) => {
   await page.goto("/app/opensync/settings");
-  await expect(page.locator(".page-toolbar")).toHaveClass(/no-tabs/);
-  await page.goto("/app/opensync/engines?view=engine");
+  await expect(page.locator(".page-toolbar .semi-tabs-bar")).toHaveCount(0);
+  await expect(page.locator(".page-toolbar")).toHaveCSS("border-bottom-width", "0px");
+  await page.goto("/app/opensync/tasks");
   const toolbar = page.locator(".page-toolbar");
   await expect(toolbar.locator(".page-tabs .semi-tabs-tab").first()).toBeVisible();
-  await expect(toolbar).not.toHaveClass(/no-tabs/);
   await expect(toolbar).toHaveCSS("border-bottom-width", "1px");
 });

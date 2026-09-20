@@ -30,15 +30,15 @@ import {
 import { useAction, useResource } from "../lib/hooks";
 import { selectJob } from "../lib/taskForm";
 import {
-  formatFileSizeRange,
-  formatJobPaths,
+  formatDuration,
   formatSchedule,
   formatSchedulePlan,
   getJobName,
   methodNames,
   parseJobPathList,
 } from "./Home/homeUtils";
-import type { AlistItem, JobItem } from "../types";
+import { formatTimestamp } from "../utils/date";
+import type { AlistItem, JobItem, TaskRecord } from "../types";
 
 const Realtime = lazy(() =>
   import("./TaskExecution").then((module) => ({ default: module.Realtime })),
@@ -264,6 +264,11 @@ function Overview({
   onEdit: () => void;
   onDelete: () => void;
 }) {
+  const latestExecution = useResource(
+    (signal) =>
+      api.history(job.id, { pageNum: 1, pageSize: 1 }, signal),
+    [job.id],
+  );
   const engine = engines.find((e) => e.id === job.alistId);
   const engineName = engine
     ? engine.remark || engine.userName
@@ -344,21 +349,45 @@ function Overview({
         </div>
         <div className="overview-sections">
           <section className="info-section">
-          <h3>规则与调度</h3>
-          <Info label="同步方式">{methodNames[job.method]}</Info>
-          <Info label="执行计划">{formatSchedulePlan(job)}</Info>
-          <Info label="文件大小">
-            {formatFileSizeRange(job.minFileSize, job.maxFileSize) || "不限制"}
-          </Info>
-          <Info label="排除规则">
-            <details className="exclude-details">
-              <summary>{job.exclude ? "查看规则" : "无排除规则"}</summary>
-              {job.exclude && <pre>{job.exclude}</pre>}
-            </details>
-          </Info>
-        </section>
+            <h3>规则与调度</h3>
+            <Info label="同步方式">{methodNames[job.method]}</Info>
+            <Info label="执行计划">{formatSchedulePlan(job)}</Info>
+            <Info label="最近一次执行">
+              <LatestExecution
+                record={latestExecution.data?.dataList?.[0]}
+                loading={latestExecution.loading}
+                error={latestExecution.error}
+              />
+            </Info>
+          </section>
         </div>
       </section>
+    </div>
+  );
+}
+
+function LatestExecution({
+  record,
+  loading,
+  error,
+}: {
+  record?: TaskRecord;
+  loading: boolean;
+  error?: string;
+}) {
+  if (loading) return "加载中";
+  if (error) return "加载失败";
+  if (!record) return "暂无执行记录";
+
+  const duration =
+    record.runTime && record.createTime
+      ? formatDuration(record.runTime - record.createTime)
+      : "";
+
+  return (
+    <div className="latest-execution">
+      <span>{formatTimestamp(record.createTime)}</span>
+      {duration && <span>{duration}</span>}
     </div>
   );
 }

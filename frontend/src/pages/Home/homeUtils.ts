@@ -108,6 +108,12 @@ lost+found/
 *.part
 *.crdownload
 *.download
+*.bak
+*.old
+*.orig
+*.swp
+*.swo
+*.swn
 
 # Office / 编辑器锁文件
 ~$*
@@ -121,14 +127,8 @@ lost+found/
 # tmp/
 # temp/
 
-# 日志 / 备份
+# 日志
 # *.log
-# *.bak
-# *.old
-# *.orig
-# *.swp
-# *.swo
-# *.swn
 # *~
 # logs/
 # log/

@@ -13,7 +13,7 @@ import Spin from "@douyinfe/semi-ui/lib/es/spin";
 import Tag from "@douyinfe/semi-ui/lib/es/tag";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
-import { IconAlertTriangle, IconRefresh, IconCrossStroked, IconMoreStroked } from "@douyinfe/semi-icons";
+import { IconAlertTriangle, IconRefresh, IconCrossStroked, IconMoreStroked, IconHelpCircleStroked } from "@douyinfe/semi-icons";
 import { getHost } from "../lib/host";
 
 export function errorToast(error: unknown) {
@@ -190,14 +190,29 @@ export function SettingRow({
   label,
   children,
   variant,
+  tip,
 }: {
   label: string;
   children: ReactNode;
   variant?: "bordered" | "compact";
+  tip?: string;
 }) {
   return (
     <div className={`setting-row${variant ? ` setting-row--${variant}` : ""}`}>
-      <span>{label}</span>
+      <span className="setting-row-label">
+        {label}
+        {tip && (
+          <Tooltip content={tip} trigger="hover">
+            <span
+              className="field-tip-icon"
+              aria-label={`${label}说明`}
+              tabIndex={0}
+            >
+              <IconHelpCircleStroked aria-hidden="true" />
+            </span>
+          </Tooltip>
+        )}
+      </span>
       {children}
     </div>
   );

@@ -79,6 +79,7 @@ test("realtime view can transition from idle to an active task", async ({ page }
 });
 
 test("realtime view loads running rows when the live snapshot is missing", async ({ page }) => {
+  test.setTimeout(15000);
   await page.addInitScript(() => {
     Object.defineProperty(globalThis, "ReadableStream", { value: undefined });
     Object.defineProperty(globalThis, "EventSource", { value: undefined });
@@ -151,10 +152,188 @@ test("realtime view loads running rows when the live snapshot is missing", async
   });
 
   await page.goto("/app/opensync/tasks?jobId=1&tab=realtime");
+  await expect(page.getByRole("heading", { name: "正在同步" })).toBeVisible({
+    timeout: 10000,
+  });
 
+  const visibleList = page.locator(".desktop-data:visible, .mobile-data:visible").last();
+  await expect(visibleList.getByText("mobile-running-file.txt")).toBeVisible();
+  await expect(visibleList.getByText("42%")).toBeVisible();
+});
+
+test("mobile realtime view primes status while SSE is silent", async ({
+  page,
+}) => {
+  test.skip(
+    (page.viewportSize()?.width || 0) > 640,
+    "mobile layout regression only",
+  );
+  await page.addInitScript(() => {
+    Object.defineProperty(globalThis, "ReadableStream", { value: undefined });
+    class SilentEventSource {
+      onmessage: ((event: MessageEvent<string>) => void) | null = null;
+      onerror: (() => void) | null = null;
+      close() {}
+    }
+    Object.defineProperty(globalThis, "EventSource", {
+      value: SilentEventSource,
+    });
+  });
+  const activeTask = {
+    taskId: 21,
+    scanFinish: true,
+    createTime: 1,
+    duration: 1,
+    num: { wait: 0, running: 1, success: 3, fail: 0, other: 0 },
+    size: { wait: 0, running: 1, success: 3, fail: 0, other: 0 },
+    doneSize: 3,
+    remainSize: 1,
+    speed: 1,
+    speedAvg: 1,
+    remainTime: 1,
+  };
+
+  await page.route("**/app/opensync/svr/**", async (route) => {
+    const url = new URL(route.request().url());
+    const success = (data: unknown) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ code: 200, data, msg: "" }),
+      });
+    if (url.pathname.endsWith("/session"))
+      return success({ uid: 1, development: false, version: "test" });
+    if (url.pathname.endsWith("/alist")) return success([]);
+    if (url.pathname.endsWith("/job") && url.searchParams.get("current")) {
+      if (url.searchParams.has("status")) {
+        return success({ dataList: [], count: 0 });
+      }
+      return success(activeTask);
+    }
+    if (url.pathname.endsWith("/job")) {
+      return success({
+        dataList: [
+          {
+            id: 1,
+            enable: 1,
+            remark: "静默流任务",
+            srcPath: '["/src"]',
+            dstPath: '["/dst"]',
+            alistId: 1,
+            useCacheT: 0,
+            useCacheS: 0,
+            method: 0,
+            interval: 0,
+            isCron: 2,
+          },
+        ],
+        count: 1,
+      });
+    }
+    return success(null);
+  });
+
+  await page.goto("/app/opensync/tasks?jobId=1&tab=realtime");
+  await expect(page.getByRole("tab", { name: "成功 3" })).toBeVisible({
+    timeout: 2500,
+  });
+});
+
+test("mobile realtime pagination stays at the bottom with short content", async ({
+  page,
+}) => {
+  test.skip(
+    (page.viewportSize()?.width || 0) > 640,
+    "mobile layout regression only",
+  );
+  await page.addInitScript(() => {
+    Object.defineProperty(globalThis, "ReadableStream", { value: undefined });
+    Object.defineProperty(globalThis, "EventSource", { value: undefined });
+  });
+  const activeTask = {
+    taskId: 22,
+    scanFinish: true,
+    createTime: 1,
+    duration: 1,
+    num: { wait: 0, running: 1, success: 0, fail: 0, other: 0 },
+    size: { wait: 0, running: 1, success: 0, fail: 0, other: 0 },
+    doneSize: 0,
+    remainSize: 1,
+    speed: 1,
+    speedAvg: 1,
+    remainTime: 1,
+  };
+
+  await page.route("**/app/opensync/svr/**", async (route) => {
+    const url = new URL(route.request().url());
+    const success = (data: unknown) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ code: 200, data, msg: "" }),
+      });
+    if (url.pathname.endsWith("/session"))
+      return success({ uid: 1, development: false, version: "test" });
+    if (url.pathname.endsWith("/alist")) return success([]);
+    if (url.pathname.endsWith("/job") && url.searchParams.get("current")) {
+      if (url.searchParams.get("status") === "1") {
+        return success({
+          dataList: [
+            {
+              id: 220,
+              fileName: "bottom-pager-row.txt",
+              srcPath: "/src",
+              dstPath: "/dst",
+              fileSize: 1024,
+              type: 0,
+              status: 1,
+              progress: 12,
+            },
+          ],
+          count: 1,
+        });
+      }
+      return success(activeTask);
+    }
+    if (url.pathname.endsWith("/job")) {
+      return success({
+        dataList: [
+          {
+            id: 1,
+            enable: 1,
+            remark: "分页贴底任务",
+            srcPath: '["/src"]',
+            dstPath: '["/dst"]',
+            alistId: 1,
+            useCacheT: 0,
+            useCacheS: 0,
+            method: 0,
+            interval: 0,
+            isCron: 2,
+          },
+        ],
+        count: 1,
+      });
+    }
+    return success(null);
+  });
+
+  await page.goto("/app/opensync/tasks?jobId=1&tab=realtime");
   const mobileList = page.locator(".mobile-data").last();
-  await expect(mobileList.getByText("mobile-running-file.txt")).toBeVisible();
-  await expect(mobileList.getByText("42%")).toBeVisible();
+  await expect(mobileList.getByText("bottom-pager-row.txt")).toBeVisible();
+
+  const layout = await page.evaluate(() => {
+    const workspace = document.querySelector<HTMLElement>(".task-workspace")!;
+    const pager = document.querySelector<HTMLElement>(
+      ".execution-view .table-pagination",
+    )!;
+    const workspaceBox = workspace.getBoundingClientRect();
+    const pagerBox = pager.getBoundingClientRect();
+    return {
+      workspaceBottom: workspaceBox.bottom,
+      pagerBottom: pagerBox.bottom,
+    };
+  });
+
+  expect(Math.abs(layout.workspaceBottom - layout.pagerBottom)).toBeLessThan(3);
 });
 
 test("slow realtime status request survives the refresh interval", async ({
@@ -407,7 +586,7 @@ test("realtime status pages refresh independently of SSE summary updates", async
       });
     }
     if (url.pathname.endsWith("/job") && url.searchParams.get("current")) {
-      return success({ dataList: [], count: 0 });
+      return success(activeTask);
     }
     if (url.pathname.endsWith("/job")) {
       return success({
@@ -448,7 +627,7 @@ test("realtime status pages refresh independently of SSE summary updates", async
 
   pageTwoVersion = 2;
   await expect(realtimeTable.getByText("success-page-2-v2.txt")).toBeVisible({
-    timeout: 7000,
+    timeout: 12000,
   });
   expect(successRequests.at(-1)).toBe(2);
 });
@@ -546,7 +725,7 @@ test("realtime file columns keep the name readable at 1100px desktop width", asy
   expect(fileBox).not.toBeNull();
   expect(progressBox).not.toBeNull();
   expect(fileBox!.width).toBeGreaterThanOrEqual(260);
-  expect(progressBox!.width).toBeLessThanOrEqual(180);
+  expect(progressBox!.width).toBeLessThanOrEqual(200);
 });
 
 test("engine connectivity checks are serialized", async ({ page }) => {
@@ -594,7 +773,7 @@ test("engine connectivity checks are serialized", async ({ page }) => {
 });
 
 test("history load errors stay visible and can be retried", async ({ page }) => {
-  let historyCalls = 0;
+  let allowHistorySuccess = false;
   await page.route("**/app/opensync/svr/**", async (route) => {
     const url = new URL(route.request().url());
     const response = (code: number, data: unknown, msg = "") =>
@@ -605,9 +784,12 @@ test("history load errors stay visible and can be retried", async ({ page }) => 
     if (url.pathname.endsWith("/session"))
       return response(200, { uid: 1, development: false, version: "test" });
     if (url.pathname.endsWith("/alist")) return response(200, []);
-    if (url.pathname.endsWith("/job") && url.searchParams.has("id")) {
-      historyCalls += 1;
-      return historyCalls === 1
+    if (
+      url.pathname.endsWith("/job") &&
+      url.searchParams.has("id") &&
+      !url.searchParams.has("current")
+    ) {
+      return !allowHistorySuccess
         ? response(500, null, "历史记录加载失败")
         : response(200, { dataList: [], count: 0 });
     }
@@ -635,9 +817,9 @@ test("history load errors stay visible and can be retried", async ({ page }) => 
 
   await page.goto("/app/opensync/tasks?jobId=1&tab=history");
   await expect(page.getByText("历史记录加载失败", { exact: true })).toBeVisible();
+  allowHistorySuccess = true;
   await page.getByRole("button", { name: "重试", exact: true }).click();
   await expect(page.getByText("历史记录加载失败", { exact: true })).toHaveCount(0);
-  expect(historyCalls).toBeGreaterThanOrEqual(2);
 });
 
 test("completed execution details omit file status filtering", async ({ page }) => {

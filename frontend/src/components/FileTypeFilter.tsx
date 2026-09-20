@@ -6,7 +6,9 @@ import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import {
   IconArchive,
   IconChevronRight,
+  IconCodeStroked,
   IconDeleteStroked,
+  IconDesktop,
   IconFile,
   IconImageStroked,
   IconMusicNoteStroked,
@@ -24,6 +26,8 @@ import {
 
 function GroupIcon({ groupKey }: { groupKey: string }) {
   switch (groupKey) {
+    case "system":
+      return <IconDesktop aria-hidden="true" />;
     case "audio":
       return <IconMusicNoteStroked aria-hidden="true" />;
     case "video":
@@ -32,6 +36,8 @@ function GroupIcon({ groupKey }: { groupKey: string }) {
       return <IconImageStroked aria-hidden="true" />;
     case "archive":
       return <IconArchive aria-hidden="true" />;
+    case "executable":
+      return <IconCodeStroked aria-hidden="true" />;
     default:
       return <IconFile aria-hidden="true" />;
   }

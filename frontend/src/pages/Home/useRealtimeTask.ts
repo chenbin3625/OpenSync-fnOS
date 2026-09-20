@@ -218,6 +218,7 @@ export function useRealtimeTask(
       (canUseFetchSSE() || typeof EventSource !== "undefined") &&
       canPollCurrentDocument()
     ) {
+      void refreshCurrentTask();
       connectSSE();
       return () => {
         closed = true;

@@ -4,6 +4,7 @@ import { Form } from "@douyinfe/semi-ui/lib/es/form";
 import Input from "@douyinfe/semi-ui/lib/es/input";
 import Select from "@douyinfe/semi-ui/lib/es/select";
 import Switch from "@douyinfe/semi-ui/lib/es/switch";
+import Checkbox from "@douyinfe/semi-ui/lib/es/checkbox";
 import Tabs from "@douyinfe/semi-ui/lib/es/tabs";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
@@ -24,9 +25,12 @@ import {
   defaultJobForm,
   jobToForm,
   parseExcludeFolders,
+  systemDirFilterGroups,
   updateExcludeFolders,
   validateJobForm,
   validateJobFormStep,
+  isExcludePatternEnabled,
+  updateExcludePatterns,
   type JobForm,
 } from "../lib/taskForm";
 import {
@@ -35,7 +39,7 @@ import {
   formatSchedulePlan,
   methodOptions,
 } from "./Home/homeUtils";
-import { fileSizeUnitOptions } from "./Home/fileSizeUnits";
+import { fileSizeUnitOptions, type FileSizeUnit } from "./Home/fileSizeUnits";
 import type { AlistItem, JobItem } from "../types";
 
 const taskEditorSteps = ["引擎与路径", "同步与调度", "文件过滤", "文件夹过滤"];
@@ -45,11 +49,14 @@ const taskEditorTabs = [
   { key: "filter", label: "文件过滤" },
   { key: "folder", label: "文件夹过滤" },
 ];
-const fileSizeLimitNote = (
-  <span className="field-label-inline-note">
-    <span>0 表示不限</span>
-  </span>
-);
+const fileSizeFilterDefaults = {
+  min: { label: "排除小于", value: 10, unit: "KB" },
+  max: { label: "排除大于", value: 10, unit: "GB" },
+} satisfies Record<"min" | "max", {
+  label: string;
+  value: number;
+  unit: FileSizeUnit;
+}>;
 const syncMethodTip = (
   <div className="sync-method-tip">
     {methodOptions.map((method) => (
@@ -86,6 +93,10 @@ export default function TaskEditor({
   const change = <K extends keyof JobForm>(key: K, value: JobForm[K]) => {
     setDirty(true);
     setForm((current) => ({ ...current, [key]: value }));
+  };
+  const patch = (values: Partial<JobForm>) => {
+    setDirty(true);
+    setForm((current) => ({ ...current, ...values }));
   };
   const nextStep = () => {
     const validation = validateJobFormStep(form, step);
@@ -200,7 +211,11 @@ export default function TaskEditor({
                       onChange={(paths) => change("srcPath", paths)}
                       multiple={false}
                     />
-                    <SettingRow label="源端缓存" variant="bordered">
+                    <SettingRow
+                      label="源端缓存"
+                      variant="bordered"
+                      tip="开启后优先使用引擎缓存目录列表，减少远程请求次数，提升同步速度"
+                    >
                       <Switch
                         checked={form.useCacheS}
                         onChange={(value) => change("useCacheS", value)}
@@ -215,7 +230,11 @@ export default function TaskEditor({
                       onChange={(paths) => change("dstPath", paths)}
                       multiple={false}
                     />
-                    <SettingRow label="目标缓存" variant="bordered">
+                    <SettingRow
+                      label="目标缓存"
+                      variant="bordered"
+                      tip="开启后优先使用引擎缓存目录列表，减少远程请求次数，提升同步速度"
+                    >
                       <Switch
                         checked={form.useCacheT}
                         onChange={(value) => change("useCacheT", value)}
@@ -301,48 +320,15 @@ export default function TaskEditor({
             )}
             {activePanel === "filter" && (
               <div className="form-section">
-                <div className="form-grid">
+                <div className="file-size-filters" aria-label="文件大小过滤">
                   {(["min", "max"] as const).map((kind) => (
-                    <Field
+                    <FileSizeFilterRow
                       key={kind}
-                      label={
-                        <span className="field-label-with-note">
-                          <span>
-                            {kind === "min" ? "最小文件大小" : "最大文件大小"}
-                          </span>
-                          {fileSizeLimitNote}
-                        </span>
-                      }
-                      ariaLabel={
-                        kind === "min" ? "最小文件大小" : "最大文件大小"
-                      }
-                    >
-                      <div className="unit-input">
-                        <Input
-                          inputMode="decimal"
-                          value={String(form[`${kind}FileSize`])}
-                          onChange={(value) => {
-                            const n = Number(value);
-                            change(
-                              `${kind}FileSize`,
-                              Number.isFinite(n) ? n : 0,
-                            );
-                          }}
-                        />
-                        <Select
-                          aria-label={
-                            kind === "min"
-                              ? "最小文件大小单位"
-                              : "最大文件大小单位"
-                          }
-                          value={form[`${kind}FileSizeUnit`]}
-                          optionList={fileSizeUnitOptions}
-                          onChange={(value) =>
-                            change(`${kind}FileSizeUnit`, String(value))
-                          }
-                        />
-                      </div>
-                    </Field>
+                      kind={kind}
+                      form={form}
+                      change={change}
+                      patch={patch}
+                    />
                   ))}
                 </div>
                 <Field label="文件类型过滤">
@@ -371,12 +357,110 @@ export default function TaskEditor({
                     }
                   />
                 </Field>
+                <Field label="系统目录过滤" hint="忽略操作系统和 NAS 的系统目录">
+                  <div className="system-dir-groups">
+                    {systemDirFilterGroups.map((group) => {
+                      const selected = group.patterns.filter((p) =>
+                        isExcludePatternEnabled(form.exclude, p),
+                      );
+                      const allSelected =
+                        selected.length === group.patterns.length;
+                      return (
+                        <div className="system-dir-group" key={group.key}>
+                          <Checkbox
+                            checked={allSelected}
+                            indeterminate={
+                              selected.length > 0 && !allSelected
+                            }
+                            onChange={(event) =>
+                              change(
+                                "exclude",
+                                updateExcludePatterns(
+                                  form.exclude,
+                                  group.patterns,
+                                  Boolean(event.target.checked),
+                                ),
+                              )
+                            }
+                          >
+                            {group.label}
+                          </Checkbox>
+                          <span className="system-dir-patterns">
+                            {group.patterns.join("  ")}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </Field>
               </div>
             )}
           </div>
         </fieldset>
       </Form>
     </Editor>
+  );
+}
+
+function FileSizeFilterRow({
+  kind,
+  form,
+  change,
+  patch,
+}: {
+  kind: "min" | "max";
+  form: JobForm;
+  change: <K extends keyof JobForm>(key: K, value: JobForm[K]) => void;
+  patch: (values: Partial<JobForm>) => void;
+}) {
+  const config = fileSizeFilterDefaults[kind];
+  const valueKey = `${kind}FileSize` as const;
+  const unitKey = `${kind}FileSizeUnit` as const;
+  const currentValue = Number(form[valueKey]);
+  const enabled = currentValue > 0;
+  const displayValue = enabled ? String(form[valueKey]) : String(config.value);
+  const displayUnit = enabled ? form[unitKey] : config.unit;
+  const controlLabel = `${config.label}文件大小`;
+
+  return (
+    <div className={`file-size-filter-row${enabled ? "" : " is-disabled"}`}>
+      <Checkbox
+        aria-label={`启用${config.label}指定大小的文件`}
+        checked={enabled}
+        onChange={(event) => {
+          const checked = Boolean(event.target.checked);
+          patch({
+            [valueKey]: checked
+              ? currentValue > 0
+                ? currentValue
+                : config.value
+              : 0,
+            [unitKey]: checked ? displayUnit : config.unit,
+          });
+        }}
+      />
+      <span className="file-size-filter-copy">{config.label}</span>
+      <Input
+        aria-label={controlLabel}
+        inputMode="decimal"
+        disabled={!enabled}
+        value={displayValue}
+        onChange={(value) => {
+          const n = Number(value);
+          change(valueKey, (Number.isFinite(n) ? n : 0) as JobForm[typeof valueKey]);
+        }}
+      />
+      <Select
+        aria-label={`${controlLabel}单位`}
+        disabled={!enabled}
+        value={displayUnit}
+        optionList={fileSizeUnitOptions}
+        onChange={(value) =>
+          change(unitKey, String(value) as JobForm[typeof unitKey])
+        }
+      />
+      <span className="file-size-filter-copy">的文件</span>
+    </div>
   );
 }
 

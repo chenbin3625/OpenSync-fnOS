@@ -166,71 +166,112 @@ export function validateJobForm(form: JobForm) {
 
 export const fileTypeFilterGroups = [
   {
+    key: "system",
+    label: "系统文件",
+    patterns: [
+      ".DS_Store", "._*", "Thumbs.db", "Desktop.ini",
+    ],
+  },
+  {
     key: "audio",
     label: "音乐",
-    patterns: ["*.mp3", "*.flac", "*.wav", "*.aac", "*.m4a", "*.ogg", "*.wma"],
+    patterns: [
+      "*.mp3", "*.flac", "*.wav", "*.aac", "*.m4a",
+      "*.ogg", "*.wma", "*.ape", "*.alac", "*.aiff",
+      "*.opus", "*.mid", "*.midi",
+    ],
   },
   {
     key: "video",
     label: "视频",
     patterns: [
-      "*.mp4",
-      "*.mkv",
-      "*.avi",
-      "*.mov",
-      "*.wmv",
-      "*.flv",
-      "*.webm",
-      "*.m4v",
+      "*.mp4", "*.mkv", "*.avi", "*.mov", "*.wmv",
+      "*.flv", "*.webm", "*.m4v", "*.rmvb", "*.rm",
+      "*.ts", "*.m2ts", "*.vob", "*.3gp", "*.mpg",
+      "*.mpeg",
     ],
   },
   {
     key: "image",
     label: "图像",
     patterns: [
-      "*.jpg",
-      "*.jpeg",
-      "*.png",
-      "*.gif",
-      "*.bmp",
-      "*.webp",
-      "*.heic",
-      "*.tif",
-      "*.tiff",
-      "*.raw",
+      "*.jpg", "*.jpeg", "*.png", "*.gif", "*.bmp",
+      "*.webp", "*.heic", "*.heif", "*.tif", "*.tiff",
+      "*.raw", "*.svg", "*.ico", "*.psd", "*.cr2",
+      "*.nef", "*.arw", "*.dng",
     ],
   },
   {
     key: "document",
     label: "文档",
     patterns: [
-      "*.doc",
-      "*.docx",
-      "*.xls",
-      "*.xlsx",
-      "*.ppt",
-      "*.pptx",
-      "*.pdf",
-      "*.txt",
-      "*.rtf",
-      "*.csv",
-      "*.md",
+      "*.doc", "*.docx", "*.xls", "*.xlsx", "*.ppt",
+      "*.pptx", "*.pdf", "*.txt", "*.rtf", "*.csv",
+      "*.md", "*.odt", "*.ods", "*.odp", "*.epub",
+      "*.pages", "*.numbers", "*.keynote", "*.json",
+      "*.xml", "*.yaml", "*.yml",
     ],
   },
   {
     key: "archive",
     label: "压缩文件",
-    patterns: ["*.zip", "*.rar", "*.7z", "*.tar", "*.gz", "*.bz2", "*.xz"],
+    patterns: [
+      "*.zip", "*.rar", "*.7z", "*.tar", "*.gz",
+      "*.bz2", "*.xz", "*.zst", "*.iso", "*.dmg",
+      "*.img", "*.cab", "*.lz", "*.lzma",
+    ],
+  },
+  {
+    key: "executable",
+    label: "可执行文件",
+    patterns: [
+      "*.exe", "*.msi", "*.dll", "*.so", "*.dylib",
+      "*.app", "*.deb", "*.rpm", "*.apk", "*.ipa",
+      "*.bat", "*.cmd", "*.sh", "*.bin",
+    ],
   },
   {
     key: "temporary",
     label: "临时文件",
-    patterns: ["*.tmp", "*.temp", "*.part", "*.crdownload", "*.download"],
+    patterns: [
+      "*.tmp", "*.temp", "*.part", "*.crdownload",
+      "*.download", "*.bak", "*.old", "*.orig",
+      "*.swp", "*.swo", "*.swn",
+    ],
   },
   {
     key: "lock",
     label: "锁文件",
     patterns: ["~$*", ".~lock.*#"],
+  },
+] as const;
+
+export const systemDirFilterGroups = [
+  {
+    key: "macos",
+    label: "macOS",
+    patterns: [
+      ".Spotlight-V100/", ".Trashes/", ".fseventsd/",
+      ".DocumentRevisions-V100/", ".TemporaryItems/",
+    ],
+  },
+  {
+    key: "windows",
+    label: "Windows",
+    patterns: ["$RECYCLE.BIN/", "System Volume Information/"],
+  },
+  {
+    key: "nas",
+    label: "NAS 回收站",
+    patterns: [
+      "\\#recycle/", "@Recycle/", ".Recycle/",
+      ".Trash-*/", ".Trash/",
+    ],
+  },
+  {
+    key: "other-dirs",
+    label: "其他系统目录",
+    patterns: ["lost+found/", "@eaDir/", ".git/"],
   },
 ] as const;
 

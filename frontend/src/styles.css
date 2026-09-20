@@ -113,9 +113,16 @@ h3 {
 .field-tip-icon {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
   color: var(--muted);
   cursor: help;
   line-height: 1;
+}
+.field-tip-icon .semi-icon {
+  font-size: 14px;
 }
 .sync-method-tip {
   display: grid;
@@ -507,6 +514,13 @@ h3 {
 .exclude-details summary {
   cursor: pointer;
 }
+.latest-execution {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  min-width: 0;
+}
 .item-list {
   width: 100%;
   margin-top: 20px;
@@ -556,16 +570,16 @@ body .semi-modal-mask {
   overflow: hidden;
 }
 .editor-modal .semi-modal-header {
-  padding: 24px 24px 20px;
+  padding: 16px 24px 12px;
   margin: 0;
 }
 .editor-modal .semi-modal-title {
   font-size: var(--font-size-modal-title);
   font-weight: 600;
-  line-height: 26px;
+  line-height: 24px;
 }
 .editor-modal .semi-modal-close {
-  top: 22px;
+  top: 14px;
   right: 20px;
 }
 .editor-modal .semi-modal-body {
@@ -706,6 +720,38 @@ body .semi-modal-mask {
 .unit-input .semi-select {
   flex: 0 0 82px;
 }
+.remote-path-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.file-size-filters {
+  display: grid;
+  gap: 10px;
+}
+.file-size-filter-row {
+  display: grid;
+  grid-template-columns: 20px auto minmax(84px, 1fr) 82px auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  color: var(--semi-color-text-0);
+}
+.file-size-filter-row.is-disabled {
+  color: var(--semi-color-text-2);
+}
+.file-size-filter-row .semi-checkbox {
+  display: inline-flex;
+}
+.file-size-filter-row .semi-input-wrapper,
+.file-size-filter-row .semi-select {
+  min-width: 0;
+  background: var(--surface);
+}
+.file-size-filter-copy {
+  white-space: nowrap;
+}
 /* 文件夹过滤树 */
 .exclude-tree {
   border: 1px solid var(--line);
@@ -763,12 +809,18 @@ body .semi-modal-mask {
   justify-content: center;
   color: var(--accent);
 }
+.file-type-icon.system {
+  color: var(--muted);
+}
 .file-type-icon.image {
   color: var(--success);
 }
 .file-type-icon.archive,
 .file-type-icon.temporary {
   color: var(--warning);
+}
+.file-type-icon.executable {
+  color: var(--danger);
 }
 .file-type-group-label {
   display: flex;
@@ -830,13 +882,37 @@ body .semi-modal-mask {
 .file-type-add .semi-button {
   min-width: 78px;
 }
+.system-dir-groups {
+  display: grid;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--surface-soft);
+}
+.system-dir-group {
+  display: grid;
+  grid-template-columns: minmax(112px, auto) minmax(0, 1fr);
+  align-items: baseline;
+  gap: 8px 12px;
+  min-height: 42px;
+  padding: 10px 12px;
+}
+.system-dir-group + .system-dir-group {
+  border-top: 1px solid var(--line);
+}
+.system-dir-patterns {
+  color: var(--muted);
+  font-size: var(--font-size-small);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  word-break: break-all;
+}
 .editor-form fieldset {
   border: 0;
   padding: 0;
   margin: 0;
   min-width: 0;
   display: grid;
-  gap: 24px;
+  gap: 0;
 }
 .editor-form .semi-tabs-tab-active {
   color: var(--accent) !important;
@@ -877,7 +953,7 @@ body .semi-modal-mask {
 }
 .task-editor-step {
   min-height: 0;
-  padding: 0;
+  padding-top: 8px;
 }
 .task-editor-step .form-section {
   padding-top: 0;
@@ -899,7 +975,11 @@ body .semi-modal-mask {
   min-height: var(--control-height);
   padding: 6px 12px;
 }
-.setting-row > span {
+.setting-row-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
   overflow-wrap: anywhere;
 }
 .numeric-setting {
@@ -1315,7 +1395,20 @@ body .semi-modal-mask {
     min-height: 0;
   }
   .task-detail-pane {
+    display: flex;
+    flex-direction: column;
     padding-top: 8px;
+  }
+  .execution-view,
+  .history-view {
+    flex: 1;
+    min-height: 0;
+  }
+  .execution-scroll,
+  .history-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
   }
   .overview-head {
     padding: 12px 16px 10px;
@@ -1358,7 +1451,7 @@ body .semi-modal-mask {
     flex-direction: column;
   }
   .editor-modal .semi-modal-header {
-    padding: 20px 16px 16px;
+    padding: 14px 16px 10px;
   }
   .editor-modal .semi-modal-body {
     flex: 1;
@@ -1377,6 +1470,16 @@ body .semi-modal-mask {
   .form-grid {
     grid-template-columns: minmax(0, 1fr);
     gap: 16px;
+  }
+  .file-size-filter-row {
+    grid-template-columns: 20px auto minmax(0, 1fr) 78px;
+  }
+  .file-size-filter-row .file-size-filter-copy:last-child {
+    grid-column: 3 / 5;
+    align-self: start;
+  }
+  .system-dir-group {
+    grid-template-columns: minmax(0, 1fr);
   }
   .cron-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));

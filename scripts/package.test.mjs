@@ -102,9 +102,12 @@ test("package declares rootless gateway and minimum API scopes", () => {
   assert.ok(existsSync(root + "fnos/manifest"), "native manifest must exist");
   const manifest = readFileSync(root + "fnos/manifest", "utf8");
   assert.match(manifest, /^platform=x86$/m);
+  assert.match(manifest, /^install_type=$/m);
   assert.match(manifest, /^micro_app=true$/m);
   assert.match(manifest, /^os_min_version=1.2.0401$/m);
   assert.doesNotMatch(manifest, /^service_port=/m);
+  assert.match(manifest, /^checkport=false$/m);
+  assert.match(manifest, /^disable_authorization_path=true$/m);
   assert.equal(
     JSON.parse(readFileSync(root + "fnos/config/privilege")).defaults["run-as"],
     "package",

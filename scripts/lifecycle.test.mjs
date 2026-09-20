@@ -9,45 +9,60 @@ import {
   existsSync,
   chmodSync,
   rmSync,
+  symlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync, spawn } from "node:child_process";
 const root = fileURLToPath(new URL("../", import.meta.url));
+
+const requireBinary = () => {
+  const binary = process.env.OPENSYNC_TEST_BINARY;
+  assert.ok(
+    binary && existsSync(binary),
+    "build a local test binary and set OPENSYNC_TEST_BINARY",
+  );
+  return binary;
+};
+
+const setupLifecycleFixture = ({ appdestSymlink = false } = {}) => {
+  const binary = requireBinary();
+  const fixture = mkdtempSync(join(tmpdir(), "opensync-lifecycle-"));
+  for (const name of ["var", "etc", "tmp", "cmd"])
+    mkdirSync(join(fixture, name), { recursive: true });
+  const realTarget = join(fixture, appdestSymlink ? "real-target" : "target");
+  mkdirSync(join(realTarget, "server"), { recursive: true });
+  copyFileSync(binary, join(realTarget, "server/opensync"));
+  if (appdestSymlink) symlinkSync(realTarget, join(fixture, "target"));
+  for (const name of ["main", "upgrade_init", "uninstall_init"]) {
+    copyFileSync(join(root, "fnos/cmd", name), join(fixture, "cmd", name));
+    chmodSync(join(fixture, "cmd", name), 0o755);
+  }
+  const env = {
+    ...process.env,
+    TRIM_APPNAME: "opensync",
+    TRIM_APPDEST: join(fixture, "target"),
+    TRIM_PKGVAR: join(fixture, "var"),
+    TRIM_PKGETC: join(fixture, "etc"),
+    TRIM_PKGTMP: join(fixture, "tmp"),
+    TRIM_TEMP_LOGFILE: join(fixture, "tmp/error"),
+    TRIM_API_TOKEN: "fixture-not-a-real-platform-token",
+  };
+  const run = (operation, overrides = {}) =>
+    spawnSync("bash", [join(fixture, "cmd/main"), operation], {
+      env: { ...env, ...overrides },
+      encoding: "utf8",
+      timeout: 50000,
+    });
+  return { fixture, env, run };
+};
+
 test(
   "native service lifecycle protects identity, unrelated processes and upgrade data",
   { timeout: 60000 },
   async () => {
-    const binary = process.env.OPENSYNC_TEST_BINARY;
-    assert.ok(
-      binary && existsSync(binary),
-      "build a local test binary and set OPENSYNC_TEST_BINARY",
-    );
-    const fixture = mkdtempSync(join(tmpdir(), "opensync-lifecycle-"));
-    for (const name of ["target/server", "var", "etc", "tmp", "cmd"])
-      mkdirSync(join(fixture, name), { recursive: true });
-    copyFileSync(binary, join(fixture, "target/server/opensync"));
-    for (const name of ["main", "upgrade_init"]) {
-      copyFileSync(join(root, "fnos/cmd", name), join(fixture, "cmd", name));
-      chmodSync(join(fixture, "cmd", name), 0o755);
-    }
-    const env = {
-      ...process.env,
-      TRIM_APPNAME: "opensync",
-      TRIM_APPDEST: join(fixture, "target"),
-      TRIM_PKGVAR: join(fixture, "var"),
-      TRIM_PKGETC: join(fixture, "etc"),
-      TRIM_PKGTMP: join(fixture, "tmp"),
-      TRIM_TEMP_LOGFILE: join(fixture, "tmp/error"),
-      TRIM_API_TOKEN: "fixture-not-a-real-platform-token",
-    };
-    const run = (operation, overrides = {}) =>
-      spawnSync("bash", [join(fixture, "cmd/main"), operation], {
-        env: { ...env, ...overrides },
-        encoding: "utf8",
-        timeout: 50000,
-      });
+    const { fixture, env, run } = setupLifecycleFixture();
     try {
       assert.equal(run("status").status, 3);
       // 应用只读统一网关注入的身份头，不再调用飞牛开放 API，因此启动不应依赖
@@ -115,3 +130,58 @@ test(
     }
   },
 );
+
+test("native service lifecycle accepts fnOS symlinked target path", {
+  timeout: 60000,
+}, () => {
+  const { fixture, run } = setupLifecycleFixture({ appdestSymlink: true });
+  try {
+    const start = run("start");
+    assert.equal(start.status, 0, start.stderr);
+    assert.equal(run("status").status, 0);
+  } finally {
+    run("stop");
+    rmSync(fixture, { recursive: true });
+  }
+});
+
+test("main compares canonical binary path for Linux proc identity checks", () => {
+  const main = readFileSync(join(root, "fnos/cmd/main"), "utf8");
+  assert.match(main, /BIN_REAL=/);
+  assert.match(main, /readlink -f "\$BIN"/);
+  assert.match(main, /\$executable" = "\$BIN_REAL"/);
+});
+
+test("uninstall_init stops a running native service before files are removed", {
+  timeout: 60000,
+}, () => {
+  const { fixture, env, run } = setupLifecycleFixture();
+  try {
+    assert.equal(run("start").status, 0);
+    const uninstall = spawnSync("bash", [join(fixture, "cmd/uninstall_init")], {
+      env,
+      encoding: "utf8",
+      timeout: 50000,
+    });
+    assert.equal(uninstall.status, 0, uninstall.stderr);
+    assert.equal(run("status").status, 3);
+  } finally {
+    run("stop");
+    rmSync(fixture, { recursive: true });
+  }
+});
+
+test("start ignores stale startup lock when the service is not running", {
+  timeout: 60000,
+}, () => {
+  const { fixture, run } = setupLifecycleFixture();
+  mkdirSync(join(fixture, "tmp/start.lock"));
+  try {
+    const start = run("start");
+    assert.equal(start.status, 0, start.stderr);
+    assert.equal(run("status").status, 0);
+  } finally {
+    run("stop");
+    rmSync(fixture, { recursive: true });
+  }
+});

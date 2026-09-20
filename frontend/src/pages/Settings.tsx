@@ -9,19 +9,52 @@ import { useAction, useResource } from "../lib/hooks";
 import type { SystemSettings } from "../types";
 
 const fields = [
-  { key: "copyConcurrency", label: "操作并发数", min: 1, max: 100, unit: "个" },
-  { key: "scanConcurrency", label: "扫描并发数", min: 1, max: 20, unit: "个" },
-  { key: "maxRetries", label: "失败重试次数", min: 0, max: 10, unit: "次" },
-  { key: "taskTimeout", label: "任务超时", min: 0, max: 8760, unit: "小时" },
-  { key: "taskSave", label: "任务记录保留", min: 0, max: 3650, unit: "天" },
+  {
+    key: "copyConcurrency",
+    label: "操作并发数",
+    min: 1,
+    max: 100,
+    unit: "个",
+    tip: "同时执行的复制、删除、移动操作数量",
+  },
+  {
+    key: "scanConcurrency",
+    label: "扫描并发数",
+    min: 1,
+    max: 20,
+    unit: "个",
+    tip: "同时扫描源端和目标端目录的请求数量",
+  },
+  {
+    key: "maxRetries",
+    label: "失败重试次数",
+    min: 0,
+    max: 10,
+    unit: "次",
+    tip: "单个文件操作失败后的最大重试次数",
+  },
+  {
+    key: "taskTimeout",
+    label: "任务超时",
+    min: 0,
+    max: 8760,
+    unit: "小时",
+    tip: "单个任务运行超过该时长后自动标记为超时",
+  },
+  {
+    key: "taskSave",
+    label: "任务记录保留",
+    min: 0,
+    max: 3650,
+    unit: "天",
+    tip: "历史任务记录保留天数，0 表示不自动清理",
+  },
 ] as const;
 type SettingsForm = Record<(typeof fields)[number]["key"], string>;
 
 const cardGroups = [
   {
     title: "任务执行",
-    note: "并发数越大占用的系统资源越多，请按硬件配置调整。",
-    noteAfter: "scanConcurrency",
     keys: [
       "copyConcurrency",
       "scanConcurrency",
@@ -31,7 +64,6 @@ const cardGroups = [
   },
   {
     title: "历史记录",
-    note: "超时或保留时间为 0 时，不设置相应限制。",
     keys: ["taskSave"] as const,
   },
 ];
@@ -41,8 +73,7 @@ const fieldOf = (key: (typeof fields)[number]["key"]) =>
 
 export default function Settings() {
   const resource = useResource((signal) => api.settings(signal));
-  const [form, setForm] = useState<SettingsForm | null>(null),
-    [error, setError] = useState("");
+  const [form, setForm] = useState<SettingsForm | null>(null);
   const action = useAction();
   useEffect(() => {
     if (resource.data)
@@ -69,24 +100,28 @@ export default function Settings() {
         value < field.min ||
         value > field.max
       ) {
-        setError(`${field.label}请输入 ${field.min}–${field.max} 的整数`);
+        Toast.error(`${field.label}请输入 ${field.min}–${field.max} 的整数`);
         return;
       }
       values[field.key] = value;
     }
     void action.run(async () => {
       try {
-        setError("");
         await api.saveSettings(values);
         Toast.success("配置已保存");
         await resource.refresh();
       } catch (err) {
-        setError(err instanceof Error ? err.message : "保存失败");
+        Toast.error(err instanceof Error ? err.message : "保存失败");
       }
     });
   };
   const input = (field: (typeof fields)[number]) => (
-    <SettingRow key={field.key} label={field.label} variant="compact">
+    <SettingRow
+      key={field.key}
+      label={field.label}
+      variant="compact"
+      tip={field.tip}
+    >
       <div className="numeric-setting">
         <Input
           aria-label={field.label}
@@ -94,7 +129,6 @@ export default function Settings() {
           value={form![field.key]}
           disabled={action.busy}
           onChange={(value) => {
-            setError("");
             setForm((f) => f && { ...f, [field.key]: value });
           }}
         />
@@ -105,9 +139,7 @@ export default function Settings() {
   // 每个分组渲染成一张大卡片，条目靠间距区分，不用图标和小卡片分组。
   const card = (
     title: string,
-    note: string,
     keys: readonly (typeof fields)[number]["key"][],
-    noteAfter?: string,
   ) => (
     <section className="settings-card card-base" key={title}>
       <div className="settings-card-head">
@@ -115,13 +147,9 @@ export default function Settings() {
       </div>
       <div className="settings-card-body">
         {keys.map((key) => (
-          <div key={key}>
-            {input(fieldOf(key))}
-            {noteAfter === key && <div className="muted settings-card-note">{note}</div>}
-          </div>
+          <div key={key}>{input(fieldOf(key))}</div>
         ))}
       </div>
-      {!noteAfter && <div className="muted settings-card-note">{note}</div>}
     </section>
   );
   return (
@@ -145,11 +173,10 @@ export default function Settings() {
         error={resource.error}
         retry={resource.refresh}
       />
-      {error && <p className="inline-error">{error}</p>}
       {form && !resource.loading && !resource.error && (
         <>
           {cardGroups.map((group) =>
-            card(group.title, group.note, group.keys, "noteAfter" in group ? group.noteAfter : undefined),
+            card(group.title, group.keys),
           )}
         </>
       )}

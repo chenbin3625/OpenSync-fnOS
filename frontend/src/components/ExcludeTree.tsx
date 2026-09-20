@@ -90,6 +90,7 @@ export function ExcludeTree({
       label: p,
       value: p,
       key: p,
+      disabled: true,
       isLeaf: false,
     }));
     setTreeData(roots);
@@ -97,7 +98,7 @@ export function ExcludeTree({
 
     // 自动加载每个根节点的子目录
     for (const sp of rootPaths) {
-      void loadChildren(sp, engineId, controllerRef.current.signal);
+      void loadChildren(sp, engineId, controllerRef.current.signal, true);
     }
 
     return () => controllerRef.current?.abort();
@@ -105,7 +106,12 @@ export function ExcludeTree({
   }, [engineId, srcPaths.join(",")]);
 
   const loadChildren = useCallback(
-    async (path: string, eid?: number, signal?: AbortSignal) => {
+    async (
+      path: string,
+      eid?: number,
+      signal?: AbortSignal,
+      expandChildren = false,
+    ) => {
       const id = eid ?? engineId;
       if (!id) return;
       try {
@@ -113,6 +119,13 @@ export function ExcludeTree({
         if (signal?.aborted || engineRef.current !== id) return;
         const children = toChildren(path, result || []);
         setTreeData((prev) => patchTree(prev, path, children));
+        if (expandChildren && children.length > 0) {
+          const childKeys = children.map((child) => String(child.key));
+          setExpandedKeys((prev) => Array.from(new Set([...prev, ...childKeys])));
+          for (const childKey of childKeys) {
+            void loadChildren(childKey, id, signal);
+          }
+        }
       } catch (err) {
         if (!signal?.aborted && engineRef.current === id) {
           Toast.error(
@@ -137,13 +150,14 @@ export function ExcludeTree({
   );
 
   // 将 excludedPaths 相对路径转换为绝对 key 用于勾选
-  const checkedKeys = excludedPaths.flatMap((rel) =>
-    srcPaths.map((sp) => {
+  const checkedKeys = excludedPaths.flatMap((rel) => {
+    const clean = rel.replace(/^\/+/, "").replace(/\/+$/, "");
+    if (!clean) return [];
+    return srcPaths.map((sp) => {
       const root = normalizeExcludeRootPath(sp);
-      const clean = rel.replace(/^\/+/, "").replace(/\/+$/, "");
       return root === "/" ? "/" + clean : root + "/" + clean;
-    }),
-  );
+    });
+  });
 
   const handleCheck = useCallback(
     (keys: unknown) => {
@@ -153,10 +167,10 @@ export function ExcludeTree({
       for (const abs of checked) {
         for (const sp of srcPaths) {
           const root = normalizeExcludeRootPath(sp);
+          if (abs === root) continue;
           if (
             (root === "/" && abs.startsWith("/")) ||
-            abs.startsWith(root + "/") ||
-            abs === root
+            abs.startsWith(root + "/")
           ) {
             relSet.add(toRelative(sp, abs));
             break;

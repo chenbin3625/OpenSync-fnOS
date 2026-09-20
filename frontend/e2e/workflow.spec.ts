@@ -62,6 +62,8 @@ test("sends a webhook template and preserves masked credentials when editing", a
   try {
     await page.goto("/app/opensync/notifications");
     await page.getByRole("button", { name: "添加通知", exact: true }).click();
+    await page.getByRole("combobox", { name: "通知渠道", exact: true }).click();
+    await page.getByRole("option").filter({ hasText: "自定义 Webhook" }).click();
     await page
       .getByRole("textbox", { name: "Webhook URL", exact: true })
       .fill(engineUrl + "/hook");
@@ -83,8 +85,8 @@ test("sends a webhook template and preserves masked credentials when editing", a
     const result = await (await request.get("/app/opensync/svr/notify")).json();
     id = result.data.at(-1).id;
     const card = page
-      .locator(".notification-item")
-      .filter({ hasText: `通知 #${id}` });
+      .getByLabel(`通知 ${id} 开关`, { exact: true })
+      .locator("xpath=ancestor::*[contains(@class, 'notification-item')][1]");
     await card
       .getByRole("button", { name: "编辑通知", exact: true })
       .click();
@@ -127,7 +129,9 @@ test("creates an engine and manual job, then edits without changing sync mode", 
     await page
       .getByRole("textbox", { name: "API Token", exact: true })
       .fill("test-fixture-token");
-    await page.getByRole("textbox", { name: "名称", exact: true }).fill(name);
+    await page
+      .getByRole("textbox", { name: "引擎名称", exact: true })
+      .fill(name);
     await page.getByRole("button", { name: "保存", exact: true }).click();
     await expect(page.getByRole("dialog")).not.toBeVisible();
     await expect(
@@ -180,13 +184,17 @@ test("creates an engine and manual job, then edits without changing sync mode", 
     await page
       .getByRole("textbox", { name: "任务名称", exact: true })
       .fill(name);
-    await page.getByRole("tab", { name: "同步与调度" }).click();
+    await page.getByRole("button", { name: "下一步", exact: true }).click();
     await page.getByRole("combobox", { name: "调度方式", exact: true }).click();
     await page.getByRole("option").filter({ hasText: "仅手动" }).click();
     await expect(
       page.getByRole("combobox", { name: "调度方式", exact: true }),
     ).toHaveText("仅手动");
-    await page.getByRole("tab", { name: "文件过滤" }).click();
+    await page.getByRole("button", { name: "下一步", exact: true }).click();
+    await expect(
+      page.getByRole("textbox", { name: "高级排除规则", exact: true }),
+    ).toHaveCount(0);
+    await page.getByRole("button", { name: "下一步", exact: true }).click();
     const posted = page.waitForRequest(
       (r) => r.url().endsWith("/svr/job") && r.method() === "POST",
     );
