@@ -19,6 +19,7 @@ export type RealtimeTaskLoadKey = {
   status: number;
   taskIdentity: string;
   page: number;
+  pageSize: number;
 };
 
 const runningHistoryStatuses = new Set([0, 1]);
@@ -188,18 +189,14 @@ export function sortTaskItemsByCreateTimeDesc(rows: TaskItem[]): TaskItem[] {
   });
 }
 
-// Realtime running rows arrive as a complete snapshot and must stay complete.
-// Other statuses are already paged and ordered by the server, so this helper
-// keeps every tab's input unchanged.
+// All tabs use server-side pagination; this function is kept for backward
+// compatibility but no longer slices rows client-side.
 export function pageTaskItems(
   rows: TaskItem[],
-  status: number,
-  page: number,
-  pageSize: number,
+  _status: number,
+  _page: number,
+  _pageSize: number,
 ): TaskItem[] {
-  void status;
-  void page;
-  void pageSize;
   return rows;
 }
 
@@ -211,7 +208,8 @@ export function shouldReplaceRealtimeRows(
     !previous ||
     previous.status !== next.status ||
     previous.taskIdentity !== next.taskIdentity ||
-    previous.page !== next.page
+    previous.page !== next.page ||
+    previous.pageSize !== next.pageSize
   );
 }
 

@@ -972,6 +972,11 @@ body .semi-modal-mask {
   font-size: var(--font-size-small);
   color: var(--text-tertiary);
 }
+.table-pagination .semi-select {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
 .mobile-record {
   padding: 10px 0;
   border-bottom: 1px solid var(--line);

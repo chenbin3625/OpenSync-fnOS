@@ -1,17 +1,18 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { jobGetTaskCurrent } from "../../api/job";
 import type { CurrentTaskView, TaskItem } from "../../types";
 import {
   getRealtimeTaskIdentity,
   mergeTaskItems,
   normalizeTaskItemPage,
-  pageTaskItems,
-  realtimeRunningSnapshotIsComplete,
   shouldReplaceRealtimeRows,
   shouldResetRealtimeSnapshot,
-  sortTaskItemsByCreateTimeDesc,
   type RealtimeTaskLoadKey,
 } from "./taskRows";
+
+// Running tab fetches from the server-paged endpoint too, but at a faster
+// cadence than the DB-backed tabs so the UI stays reasonably responsive.
+const RUNNING_POLL_INTERVAL_MS = 3000;
 
 // Non-running tabs (success/fail/other/... ) fetch from the DB-backed server
 // page; slowing them down avoids hammering the sqlite aggregation queries on
@@ -29,21 +30,23 @@ export function useRealtimeTaskItems({
   jobId,
   enabled,
   currentTask,
-  pageSize,
+  pageSize: initialPageSize,
 }: RealtimeTaskItemsParams): {
   activeTab: number;
   setActiveTab: (status: number) => void;
   tabTaskList: TaskItem[];
-  pagedTabTaskList: TaskItem[];
   tabTaskTotal: number;
   tabTaskPage: number;
   setTabTaskPage: (page: number) => void;
+  pageSize: number;
+  setPageSize: (size: number) => void;
   tabLoading: boolean;
 } {
   const [activeTab, setActiveTabValue] = useState(1);
   const [tabTaskList, setTabTaskList] = useState<TaskItem[]>([]);
   const [tabTaskTotal, setTabTaskTotal] = useState(0);
   const [tabTaskPage, setTabTaskPageValue] = useState(1);
+  const [pageSize, setPageSizeValue] = useState(initialPageSize);
   const [tabLoading, setTabLoading] = useState(false);
   const requestRef = useRef(0);
   const lastLoadedRef = useRef<RealtimeTaskLoadKey | null>(null);
@@ -59,6 +62,11 @@ export function useRealtimeTaskItems({
 
   const setTabTaskPage = useCallback((page: number) => {
     setTabTaskPageValue(page);
+  }, []);
+
+  const setPageSize = useCallback((size: number) => {
+    setPageSizeValue(size);
+    setTabTaskPageValue(1);
   }, []);
 
   useEffect(() => {
@@ -93,49 +101,22 @@ export function useRealtimeTaskItems({
       return;
     }
 
-    const loadKey = { status: activeTab, taskIdentity, page: tabTaskPage };
+    const loadKey = { status: activeTab, taskIdentity, page: tabTaskPage, pageSize };
     const replaceRows = shouldReplaceRealtimeRows(lastLoaded, loadKey);
     const resetSnapshot = shouldResetRealtimeSnapshot(lastLoaded, loadKey);
 
-    if (activeTab === 1 && realtimeRunningSnapshotIsComplete(currentTask)) {
-      // Invalidate any in-flight server fetch and reset the fetch throttle so
-      // returning to a non-running tab always fetches fresh.
-      requestRef.current += 1;
-      lastFetchKeyRef.current = null;
-      lastFetchAtRef.current = null;
-      abortRef.current?.abort();
-      lastLoadedRef.current = loadKey;
-      const doingTask = currentTask.doingTask || [];
-      const patchKeepsOrder =
-        Boolean(currentTask.doingPatch) &&
-        lastLoaded?.status === 1 &&
-        lastLoaded.taskIdentity === taskIdentity;
-      const orderedDoingTask = patchKeepsOrder
-        ? doingTask
-        : sortTaskItemsByCreateTimeDesc(doingTask);
-      setTabTaskList((previous) => {
-        if (replaceRows || patchKeepsOrder) return orderedDoingTask;
-        return mergeTaskItems(previous, orderedDoingTask);
-      });
-      setTabTaskTotal(doingTask.length);
-      setTabLoading(false);
-      return;
-    }
-
-    // Non-running tabs, and running tabs without a complete live snapshot, fetch
-    // server-side rows. Throttle to at most one request
-    // per poll interval per view: currentTask changes on every SSE push, and
-    // refetching on each push would pile up requests against a slow backend.
-    // A fresh view (new tab / task / page) always fetches immediately.
-    const fetchKey = `${loadKey.status}:${loadKey.taskIdentity}:${loadKey.page}`;
+    // All tabs (including running) fetch from the server-paged endpoint.
+    // Running tab uses a faster poll interval so the UI stays responsive.
+    const pollInterval = activeTab === 1
+      ? RUNNING_POLL_INTERVAL_MS
+      : NON_RUNNING_POLL_INTERVAL_MS;
+    const fetchKey = `${loadKey.status}:${loadKey.taskIdentity}:${loadKey.page}:${pageSize}`;
     const now = Date.now();
     const changedView = lastFetchKeyRef.current !== fetchKey;
-    // This branch only runs for non-running tabs (activeTab === 1 returned
-    // above), so the throttle always uses the slower DB-backed interval.
     if (
       !changedView &&
       lastFetchAtRef.current != null &&
-      now - lastFetchAtRef.current < NON_RUNNING_POLL_INTERVAL_MS
+      now - lastFetchAtRef.current < pollInterval
     ) {
       return;
     }
@@ -165,8 +146,8 @@ export function useRealtimeTaskItems({
           {
             id: jobId,
             status: activeTab,
-            pageSize: activeTab === 1 ? undefined : pageSize,
-            pageNum: activeTab === 1 ? undefined : tabTaskPage,
+            pageSize,
+            pageNum: tabTaskPage,
           },
           { silent: true, signal: controller.signal },
         );
@@ -203,26 +184,22 @@ export function useRealtimeTaskItems({
     [],
   );
 
-  const pagedTabTaskList = useMemo(() => {
-    return pageTaskItems(tabTaskList, activeTab, tabTaskPage, pageSize);
-  }, [activeTab, pageSize, tabTaskList, tabTaskPage]);
-
   useEffect(() => {
-    const totalRows = activeTab === 1 ? tabTaskList.length : tabTaskTotal;
-    const maxPage = Math.max(1, Math.ceil(totalRows / pageSize));
+    const maxPage = Math.max(1, Math.ceil(tabTaskTotal / pageSize));
     if (tabTaskPage > maxPage) {
       setTabTaskPageValue(maxPage);
     }
-  }, [activeTab, pageSize, tabTaskList.length, tabTaskPage, tabTaskTotal]);
+  }, [pageSize, tabTaskPage, tabTaskTotal]);
 
   return {
     activeTab,
     setActiveTab,
     tabTaskList,
-    pagedTabTaskList,
     tabTaskTotal,
     tabTaskPage,
     setTabTaskPage,
+    pageSize,
+    setPageSize,
     tabLoading,
   };
 }

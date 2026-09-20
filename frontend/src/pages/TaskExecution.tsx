@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import DatePicker from "@douyinfe/semi-ui/lib/es/datePicker";
 import Input from "@douyinfe/semi-ui/lib/es/input";
@@ -30,6 +30,12 @@ import {
 } from "../components/common";
 import { useAction, useResource } from "../lib/hooks";
 import { historyRangeParams } from "../lib/historyFilters";
+import {
+  createDemoTaskItems,
+  createDemoTaskRecords,
+  createDemoTaskView,
+  pageDemoRows,
+} from "./Home/demoTaskData";
 import { useRealtimeTask } from "./Home/useRealtimeTask";
 import { useRealtimeTaskItems } from "./Home/useRealtimeTaskItems";
 import {
@@ -76,32 +82,12 @@ export function Realtime({ jobId }: { jobId: number }) {
   const action = useAction();
 
   // 演示数据
-  const demoTask = demo && !currentTask ? {
-    taskId: 99999,
-    scanFinish: true,
-    createTime: Math.floor(Date.now() / 1000) - 320,
-    duration: 320,
-    num: { wait: 1, running: 2, success: 1, fail: 1, other: 1 },
-    size: { wait: 0, running: 0, success: 0, fail: 0, other: 0 },
-    doneSize: 1536 * 1024 * 1024,
-    remainSize: 640 * 1024 * 1024,
-    speed: 12.5 * 1024 * 1024,
-    speedAvg: 8.7 * 1024 * 1024,
-    remainTime: 52,
-    doingTask: [
-      { id: 1, fileName: "2024-summer-vacation-photos-collection-final-v2.zip", srcPath: "/photos/2024/summer", dstPath: "/backup/photos/2024/summer", fileSize: 256 * 1024 * 1024, type: 1, status: 1, progress: 67 },
-      { id: 2, fileName: "project-report-2024-Q3-department-review.pdf", srcPath: "/documents/reports", dstPath: "/backup/documents/reports", fileSize: 48 * 1024 * 1024, type: 1, status: 1, progress: 23 },
-    ],
-  } as unknown as NonNullable<typeof currentTask> : null;
-
-  const demoItems: TaskItem[] = demo && !currentTask ? [
-    { id: 1, fileName: "2024-summer-vacation-photos-collection-final-v2.zip", srcPath: "/photos/2024/summer", dstPath: "/backup/photos/2024/summer", fileSize: 256 * 1024 * 1024, type: 1, status: 1, progress: 67 },
-    { id: 2, fileName: "project-report-2024-Q3-department-review.pdf", srcPath: "/documents/reports", dstPath: "/backup/documents/reports", fileSize: 48 * 1024 * 1024, type: 1, status: 1, progress: 23 },
-    { id: 3, fileName: "家庭相册-全家福-20240815-高清原图.jpg", srcPath: "/photos/family", dstPath: "/backup/photos/family", fileSize: 18 * 1024 * 1024, type: 1, status: 0, progress: 0 },
-    { id: 4, fileName: "system-backup-incremental-20240901.tar.gz", srcPath: "/system/backups", dstPath: "/backup/system", fileSize: 512 * 1024 * 1024, type: 1, status: 7, progress: 0, errMsg: "连接超时：目标引擎无响应，请检查引擎地址和网络连接" },
-    { id: 5, fileName: "meeting-recording-2024-09-15-weekly-standup.mp4", srcPath: "/videos/meetings", dstPath: "/backup/videos/meetings", fileSize: 890 * 1024 * 1024, type: 1, status: 2, progress: 100 },
-    { id: 6, fileName: "database-dump-20240910-prod.sql.gz", srcPath: "/database/backups", dstPath: "/backup/database", fileSize: 64 * 1024 * 1024, type: 1, status: 5, progress: 35, errMsg: "写入失败：目标磁盘空间不足" },
-  ] : [];
+  const demoItems = useMemo(
+    () => (demo && !currentTask ? createDemoTaskItems() : []),
+    [currentTask, demo],
+  );
+  const demoTask =
+    demo && !currentTask ? createDemoTaskView(undefined, demoItems) : null;
 
   const activeTask = currentTask || demoTask;
   if (!activeTask) {
@@ -116,12 +102,12 @@ export function Realtime({ jobId }: { jobId: number }) {
           : item.status === activeTab,
       )
     : [];
-  const tabItems =
-    filteredDemo.length > 0 || demoItems.length > 0
-      ? filteredDemo
-      : items.tabTaskList;
-  const tabTotal =
-    demoItems.length > 0 ? filteredDemo.length : items.tabTaskTotal;
+  const isDemo = filteredDemo.length > 0 || demoItems.length > 0;
+  const pagedDemo = isDemo
+    ? pageDemoRows(filteredDemo, items.tabTaskPage, items.pageSize)
+    : [];
+  const tabItems = isDemo ? pagedDemo : items.tabTaskList;
+  const tabTotal = isDemo ? filteredDemo.length : items.tabTaskTotal;
   const total = task.doneSize + task.remainSize;
   const percent =
     total > 0 ? Math.min(100, (task.doneSize / total) * 100) : 0;
@@ -196,14 +182,13 @@ export function Realtime({ jobId }: { jobId: number }) {
         loading={items.tabLoading}
       />
       </div>
-      {activeTab !== 1 && (
-        <Pager
-          total={tabTotal}
-          page={items.tabTaskPage}
-          size={10}
-          onChange={items.setTabTaskPage}
-        />
-      )}
+      <Pager
+        total={tabTotal}
+        page={items.tabTaskPage}
+        size={items.pageSize}
+        onChange={items.setTabTaskPage}
+        onSizeChange={items.setPageSize}
+      />
     </div>
   );
 }
@@ -235,25 +220,14 @@ export function History({ jobId }: { jobId: number }) {
   const action = useAction();
 
   // 演示数据
-  const now = Math.floor(Date.now() / 1000);
-  const demoRecords: TaskRecord[] = demo ? [
-    { id: 9001, status: 2, createTime: now - 86400, runTime: now - 86400 + 245, successNum: 128, failNum: 0, allNum: 128 },
-    { id: 9002, status: 7, errMsg: "连接超时：引擎无响应", createTime: now - 172800, runTime: now - 172800 + 63, successNum: 45, failNum: 12, allNum: 57 },
-    { id: 9003, status: 2, createTime: now - 259200, runTime: now - 259200 + 1820, successNum: 1024, failNum: 0, allNum: 1024 },
-    { id: 9004, status: 7, errMsg: "目标路径不存在", createTime: now - 345600, runTime: now - 345600 + 5, successNum: 0, failNum: 3, allNum: 3 },
-    { id: 9005, status: 2, createTime: now - 432000, runTime: now - 432000 + 480, successNum: 256, failNum: 0, allNum: 256 },
-    { id: 9006, status: 8, createTime: now - 518400, runTime: now - 518400 + 120, successNum: 30, failNum: 0, allNum: 88 },
-    { id: 9007, status: 2, createTime: now - 604800, runTime: now - 604800 + 3600, successNum: 2048, failNum: 0, allNum: 2048 },
-    { id: 9008, status: 2, createTime: now - 691200, runTime: now - 691200 + 150, successNum: 64, failNum: 0, allNum: 64 },
-    { id: 9009, status: 7, errMsg: "磁盘空间不足", createTime: now - 777600, runTime: now - 777600 + 12, successNum: 8, failNum: 5, allNum: 13 },
-    { id: 9010, status: 2, createTime: now - 864000, runTime: now - 864000 + 920, successNum: 512, failNum: 0, allNum: 512 },
-    { id: 9011, status: 2, createTime: now - 950400, runTime: now - 950400 + 60, successNum: 32, failNum: 0, allNum: 32 },
-    { id: 9012, status: 7, errMsg: "认证失败：token 已过期", createTime: now - 1036800, runTime: now - 1036800 + 3, successNum: 0, failNum: 1, allNum: 1 },
-  ] : [];
+  const demoRecords = useMemo(
+    () => (demo ? createDemoTaskRecords() : []),
+    [demo],
+  );
 
   const realRows = resource.data?.dataList || [];
   const showDemo = demo && !resource.loading && !resource.data;
-  const rows = showDemo ? demoRecords : realRows;
+  const rows = showDemo ? pageDemoRows(demoRecords, page, size) : realRows;
   const totalCount = showDemo ? demoRecords.length : (resource.data?.count || 0);
   const retry = (record: TaskRecord) =>
     void action.run(async () => {
@@ -436,6 +410,7 @@ export function History({ jobId }: { jobId: number }) {
         page={page}
         size={size}
         onChange={setPage}
+        onSizeChange={(s) => { setSize(s); setPage(1); }}
       />
       {detail !== null && (
         <FileDetails taskId={detail} onClose={() => setDetail(null)} />
@@ -539,61 +514,79 @@ export function FileTable({
           <EmptyState />
         ) : (
           rows.map((record, index) => (
-            <details
-              className="mobile-record file-record"
-              key={record.id || index}
-            >
-              <summary>
-                <div className="record-title">
-                  <Tooltip content={getTaskDisplayName(record)} position="topLeft">
-                    <strong>{getTaskDisplayName(record)}</strong>
-                  </Tooltip>
-                  <Status
-                    status={record.status}
-                    label={taskItemStatusNames[record.status]}
-                    error={record.errMsg}
-                  />
-                </div>
-                <div className="record-footer">
-                  <span className="muted">
-                    {taskTypeNames[record.type || 0]} ·{" "}
-                    {record.isPath ? "目录" : formatSize(record.fileSize || 0)}
-                  </span>
-                  {record.status === 1 && (
-                    <span>{Number(record.progress) || 0}%</span>
-                  )}
-                </div>
-                {record.status === 1 && (
-                  <Progress
-                    percent={Math.max(
-                      0,
-                      Math.min(100, Number(record.progress) || 0),
-                    )}
-                    showInfo={false}
-                  />
-                )}
-              </summary>
-              <div className="file-expanded">
-                <div>
-                  <span>源目录</span>
-                  <p className="mono">{record.srcPath || "—"}</p>
-                </div>
-                <div>
-                  <span>目标目录</span>
-                  <p className="mono">{record.dstPath || "—"}</p>
-                </div>
-                {record.errMsg && (
-                  <div className="inline-error">
-                    <span>错误信息</span>
-                    <p>{record.errMsg}</p>
-                  </div>
-                )}
-              </div>
-            </details>
+            <MobileFileRecord key={record.id || index} record={record} />
           ))
         )}
       </div>
     </>
+  );
+}
+
+function MobileFileRecord({ record }: { record: TaskItem }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className={`mobile-record file-record${open ? " open" : ""}`}>
+      <div
+        className="record-summary"
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setOpen((v) => !v);
+          }
+        }}
+      >
+        <div className="record-title">
+          <Tooltip content={getTaskDisplayName(record)} position="topLeft">
+            <strong>{getTaskDisplayName(record)}</strong>
+          </Tooltip>
+          <Status
+            status={record.status}
+            label={taskItemStatusNames[record.status]}
+            error={record.errMsg}
+          />
+        </div>
+        <div className="record-footer">
+          <span className="muted">
+            {taskTypeNames[record.type || 0]} ·{" "}
+            {record.isPath ? "目录" : formatSize(record.fileSize || 0)}
+          </span>
+          {record.status === 1 && (
+            <span>{Number(record.progress) || 0}%</span>
+          )}
+        </div>
+        {record.status === 1 && (
+          <Progress
+            percent={Math.max(
+              0,
+              Math.min(100, Number(record.progress) || 0),
+            )}
+            showInfo={false}
+          />
+        )}
+      </div>
+      {open && (
+        <div className="file-expanded">
+          <div>
+            <span>源目录</span>
+            <p className="mono">{record.srcPath || "—"}</p>
+          </div>
+          <div>
+            <span>目标目录</span>
+            <p className="mono">{record.dstPath || "—"}</p>
+          </div>
+          {record.errMsg && (
+            <div className="inline-error">
+              <span>错误信息</span>
+              <p>{record.errMsg}</p>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -747,6 +740,7 @@ function FileDetails({
         page={page}
         size={size}
         onChange={setPage}
+        onSizeChange={(s) => { setSize(s); setPage(1); }}
       />
     </SideSheet>
   );
@@ -757,23 +751,39 @@ function Pager({
   page,
   size,
   onChange,
+  onSizeChange,
 }: {
   total: number;
   page: number;
   size: number;
   onChange: (page: number) => void;
+  onSizeChange?: (size: number) => void;
 }) {
   return (
     <div className="table-pagination">
       <span className="muted">共 {total} 条</span>
-      <Pagination
-        total={total}
-        currentPage={page}
-        pageSize={size}
-        size="small"
-        hideOnSinglePage={false}
-        onPageChange={onChange}
-      />
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <Pagination
+          total={total}
+          currentPage={page}
+          pageSize={size}
+          size="small"
+          hideOnSinglePage={false}
+          onPageChange={onChange}
+        />
+        {onSizeChange && (
+          <Select
+            value={size}
+            onChange={(v) => onSizeChange(v as number)}
+            size="small"
+            style={{ width: 108 }}
+            optionList={[10, 20, 50, 100].map((n) => ({
+              value: n,
+              label: `${n} 条/页`,
+            }))}
+          />
+        )}
+      </div>
     </div>
   );
 }
