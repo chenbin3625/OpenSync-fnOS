@@ -1,17 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { jobGetTaskCurrent } from "../../api/job";
-import type { CurrentTaskView, TaskItem } from "../../types";
-import {
-  getRealtimeTaskIdentity,
-  mergeTaskItems,
-  normalizeTaskItemPage,
-  shouldReplaceRealtimeRows,
-  shouldResetRealtimeSnapshot,
-  type RealtimeTaskLoadKey,
-} from "./taskRows";
+import type { CurrentTaskView, TaskItem, TaskNumKey } from "../../types";
+import { getRealtimeTaskIdentity, normalizeTaskItemPage } from "./taskRows";
 
-// Item pages need their own refresh clock. SSE only reports summary changes,
-// so using summary object updates as the clock can leave the selected page stale.
+// Item pages refresh independently from the SSE summary. A refresh never
+// replaces an identical request that is still in flight.
 const ITEMS_POLL_INTERVAL_MS = 3000;
 
 type RealtimeTaskItemsParams = {
@@ -20,6 +13,129 @@ type RealtimeTaskItemsParams = {
   currentTask: CurrentTaskView | null;
   pageSize: number;
 };
+
+type RealtimeItemsState = {
+  taskIdentity: string;
+  activeTab: number;
+  page: number;
+  pageSize: number;
+  rows: TaskItem[];
+  total: number;
+  loading: boolean;
+  error?: string;
+};
+
+type RealtimeItemsAction =
+  | { type: "task"; taskIdentity: string; total: number }
+  | { type: "tab"; status: number; total: number }
+  | { type: "page"; page: number }
+  | { type: "pageSize"; pageSize: number }
+  | { type: "start"; key: string }
+  | { type: "success"; key: string; rows: TaskItem[]; total: number }
+  | { type: "failure"; key: string; error: string }
+  | { type: "retry" };
+
+function stateKey(state: RealtimeItemsState): string {
+  return `${state.taskIdentity}:${state.activeTab}:${state.page}:${state.pageSize}`;
+}
+
+function realtimeItemsReducer(
+  state: RealtimeItemsState,
+  action: RealtimeItemsAction,
+): RealtimeItemsState {
+  switch (action.type) {
+    case "task":
+      if (action.taskIdentity === state.taskIdentity) return state;
+      return {
+        ...state,
+        taskIdentity: action.taskIdentity,
+        page: 1,
+        rows: [],
+        total: action.total,
+        loading: Boolean(action.taskIdentity),
+        error: undefined,
+      };
+    case "tab":
+      if (action.status === state.activeTab) return state;
+      return {
+        ...state,
+        activeTab: action.status,
+        page: 1,
+        rows: [],
+        total: action.total,
+        loading: Boolean(state.taskIdentity),
+        error: undefined,
+      };
+    case "page": {
+      const page = Math.max(1, Math.trunc(action.page));
+      if (page === state.page) return state;
+      return {
+        ...state,
+        page,
+        rows: [],
+        loading: Boolean(state.taskIdentity),
+        error: undefined,
+      };
+    }
+    case "pageSize": {
+      const pageSize = Math.max(1, Math.trunc(action.pageSize));
+      if (pageSize === state.pageSize && state.page === 1) return state;
+      return {
+        ...state,
+        page: 1,
+        pageSize,
+        rows: [],
+        loading: Boolean(state.taskIdentity),
+        error: undefined,
+      };
+    }
+    case "start":
+      if (action.key !== stateKey(state)) return state;
+      return { ...state, loading: state.rows.length === 0, error: undefined };
+    case "success": {
+      if (action.key !== stateKey(state)) return state;
+      const maxPage = Math.max(1, Math.ceil(action.total / state.pageSize));
+      if (state.page > maxPage) {
+        return {
+          ...state,
+          page: maxPage,
+          rows: [],
+          total: action.total,
+          loading: true,
+          error: undefined,
+        };
+      }
+      return {
+        ...state,
+        rows: action.rows,
+        total: action.total,
+        loading: false,
+        error: undefined,
+      };
+    }
+    case "failure":
+      if (action.key !== stateKey(state)) return state;
+      return { ...state, loading: false, error: action.error };
+    case "retry":
+      return { ...state, loading: state.rows.length === 0, error: undefined };
+  }
+}
+
+function statusTotal(task: CurrentTaskView | null, status: number): number {
+  const keys: Partial<Record<number, TaskNumKey>> = {
+    0: "wait",
+    1: "running",
+    2: "success",
+    7: "fail",
+    [-1]: "other",
+  };
+  const key = keys[status];
+  return key ? Number(task?.num?.[key] || 0) : 0;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "实时任务加载失败";
+}
 
 export function useRealtimeTaskItems({
   jobId,
@@ -36,39 +152,36 @@ export function useRealtimeTaskItems({
   pageSize: number;
   setPageSize: (size: number) => void;
   tabLoading: boolean;
+  tabError?: string;
+  retryTabTasks: () => void;
 } {
-  const [activeTab, setActiveTabValue] = useState(1);
-  const [tabTaskList, setTabTaskList] = useState<TaskItem[]>([]);
-  const [tabTaskTotal, setTabTaskTotal] = useState(0);
-  const [tabTaskPage, setTabTaskPageValue] = useState(1);
-  const [pageSize, setPageSizeValue] = useState(initialPageSize);
-  const [tabLoading, setTabLoading] = useState(false);
-  const [refreshTick, setRefreshTick] = useState(0);
-  const requestRef = useRef(0);
-  const lastLoadedRef = useRef<RealtimeTaskLoadKey | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
-  const tabFetchingRef = useRef(false);
-  const lastFetchKeyRef = useRef<string | null>(null);
-  const lastFetchAtRef = useRef<number | null>(null);
-  const lastRefreshTickRef = useRef(0);
-
-  const setActiveTab = useCallback((status: number) => {
-    setActiveTabValue(status);
-    setTabTaskPageValue(1);
-  }, []);
-
-  const setTabTaskPage = useCallback((page: number) => {
-    setTabTaskPageValue(page);
-  }, []);
-
-  const setPageSize = useCallback((size: number) => {
-    setPageSizeValue(size);
-    setTabTaskPageValue(1);
-  }, []);
-
   const taskIdentity = currentTask
     ? getRealtimeTaskIdentity(currentTask)
     : "";
+  const [state, dispatch] = useReducer(realtimeItemsReducer, {
+    taskIdentity: "",
+    activeTab: 1,
+    page: 1,
+    pageSize: initialPageSize,
+    rows: [],
+    total: 0,
+    loading: false,
+  });
+  const [refreshTick, setRefreshTick] = useState(0);
+  const requestRef = useRef(0);
+  const inFlightRef = useRef<{
+    key: string;
+    controller: AbortController;
+    requestID: number;
+  } | null>(null);
+
+  useEffect(() => {
+    dispatch({
+      type: "task",
+      taskIdentity,
+      total: statusTotal(currentTask, state.activeTab),
+    });
+  }, [currentTask, state.activeTab, taskIdentity]);
 
   useEffect(() => {
     if (!enabled || !jobId || !taskIdentity) return undefined;
@@ -78,146 +191,103 @@ export function useRealtimeTaskItems({
       }
     }, ITEMS_POLL_INTERVAL_MS);
     return () => clearInterval(interval);
-  }, [activeTab, enabled, jobId, taskIdentity]);
+  }, [enabled, jobId, taskIdentity]);
 
   useEffect(() => {
-    if (!enabled || !jobId || !currentTask) {
-      requestRef.current += 1;
-      lastLoadedRef.current = null;
-      lastFetchKeyRef.current = null;
-      lastFetchAtRef.current = null;
-      lastRefreshTickRef.current = refreshTick;
-      abortRef.current?.abort();
-      setTabTaskList([]);
-      setTabTaskTotal(0);
-      setTabLoading(false);
-      return;
-    }
-
-    const lastLoaded = lastLoadedRef.current;
-    const mustResetPage =
-      !lastLoaded ||
-      lastLoaded.status !== activeTab ||
-      lastLoaded.taskIdentity !== taskIdentity;
-
-    if (mustResetPage && tabTaskPage !== 1) {
-      requestRef.current += 1;
-      lastFetchKeyRef.current = null;
-      lastFetchAtRef.current = null;
-      abortRef.current?.abort();
-      setTabTaskList([]);
-      setTabTaskTotal(0);
-      setTabLoading(true);
-      setTabTaskPageValue(1);
-      return;
-    }
-
-    const loadKey = { status: activeTab, taskIdentity, page: tabTaskPage, pageSize };
-    const replaceRows = shouldReplaceRealtimeRows(lastLoaded, loadKey);
-    const resetSnapshot = shouldResetRealtimeSnapshot(lastLoaded, loadKey);
-
-    const fetchKey = `${loadKey.status}:${loadKey.taskIdentity}:${loadKey.page}:${pageSize}`;
-    const now = Date.now();
-    const changedView = lastFetchKeyRef.current !== fetchKey;
-    const scheduledRefresh = lastRefreshTickRef.current !== refreshTick;
     if (
-      !changedView &&
-      !scheduledRefresh &&
-      lastFetchAtRef.current != null &&
-      now - lastFetchAtRef.current < ITEMS_POLL_INTERVAL_MS
+      !enabled ||
+      !jobId ||
+      !taskIdentity ||
+      state.taskIdentity !== taskIdentity
     ) {
+      inFlightRef.current?.controller.abort();
+      inFlightRef.current = null;
       return;
     }
-    // A changed tab/page/task must win immediately. Abort the stale browser
-    // request; requestRef and the finally guard below prevent its completion
-    // from clearing loading state owned by the newer request.
-    if (tabFetchingRef.current) abortRef.current?.abort();
-    lastFetchKeyRef.current = fetchKey;
-    lastFetchAtRef.current = now;
-    lastRefreshTickRef.current = refreshTick;
 
-    const requestID = ++requestRef.current;
-    lastLoadedRef.current = loadKey;
-
-    if (replaceRows) {
-      if (resetSnapshot) setTabTaskList([]);
-      if (resetSnapshot) setTabTaskTotal(0);
-      setTabLoading(true);
-    }
+    const key = stateKey(state);
+    const inFlight = inFlightRef.current;
+    if (inFlight?.key === key) return;
+    inFlight?.controller.abort();
 
     const controller = new AbortController();
-    abortRef.current = controller;
+    const requestID = ++requestRef.current;
+    inFlightRef.current = { key, controller, requestID };
+    dispatch({ type: "start", key });
 
     async function loadTabTasks() {
-      tabFetchingRef.current = true;
       try {
         const res = await jobGetTaskCurrent(
           {
             id: jobId,
-            status: activeTab,
-            pageSize,
-            pageNum: tabTaskPage,
+            status: state.activeTab,
+            pageSize: state.pageSize,
+            pageNum: state.page,
           },
           { silent: true, signal: controller.signal },
         );
-        if (controller.signal.aborted || requestID !== requestRef.current)
-          return;
-        const { rows, total } = normalizeTaskItemPage(res.data);
-        setTabTaskList((previous) =>
-          replaceRows ? rows : mergeTaskItems(previous, rows),
-        );
-        setTabTaskTotal(total);
-      } catch {
         if (controller.signal.aborted) return;
-        if (requestID === requestRef.current && replaceRows) {
-          if (resetSnapshot) setTabTaskList([]);
-          if (resetSnapshot) setTabTaskTotal(0);
+        const { rows, total } = normalizeTaskItemPage(res.data);
+        dispatch({ type: "success", key, rows, total });
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          dispatch({ type: "failure", key, error: errorMessage(error) });
         }
       } finally {
-        if (requestID === requestRef.current) {
-          tabFetchingRef.current = false;
-          setTabLoading(false);
+        if (inFlightRef.current?.requestID === requestID) {
+          inFlightRef.current = null;
         }
       }
     }
 
-    loadTabTasks();
+    void loadTabTasks();
   }, [
-    activeTab,
-    currentTask,
     enabled,
     jobId,
-    pageSize,
     refreshTick,
-    tabTaskPage,
+    state.activeTab,
+    state.page,
+    state.pageSize,
+    state.taskIdentity,
     taskIdentity,
   ]);
 
-  // Abort any in-flight tab fetch when the component unmounts (job switch /
-  // tab teardown remounts TaskList via `key`).
   useEffect(
     () => () => {
-      abortRef.current?.abort();
+      inFlightRef.current?.controller.abort();
+      inFlightRef.current = null;
     },
     [],
   );
 
-  useEffect(() => {
-    const maxPage = Math.max(1, Math.ceil(tabTaskTotal / pageSize));
-    if (tabTaskPage > maxPage) {
-      setTabTaskPageValue(maxPage);
-    }
-  }, [pageSize, tabTaskPage, tabTaskTotal]);
+  const setActiveTab = useCallback(
+    (status: number) => {
+      dispatch({ type: "tab", status, total: statusTotal(currentTask, status) });
+    },
+    [currentTask],
+  );
+  const setTabTaskPage = useCallback((page: number) => {
+    dispatch({ type: "page", page });
+  }, []);
+  const setPageSize = useCallback((pageSize: number) => {
+    dispatch({ type: "pageSize", pageSize });
+  }, []);
+  const retryTabTasks = useCallback(() => {
+    dispatch({ type: "retry" });
+    setRefreshTick((value) => value + 1);
+  }, []);
 
   return {
-    activeTab,
+    activeTab: state.activeTab,
     setActiveTab,
-    tabTaskList,
-    tabTaskTotal,
-    tabTaskPage,
+    tabTaskList: state.rows,
+    tabTaskTotal: state.total,
+    tabTaskPage: state.page,
     setTabTaskPage,
-    pageSize,
+    pageSize: state.pageSize,
     setPageSize,
-    tabLoading,
+    tabLoading: state.loading,
+    tabError: state.error,
+    retryTabTasks,
   };
 }

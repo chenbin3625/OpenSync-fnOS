@@ -180,18 +180,18 @@ test("creates an engine and manual job, then edits without changing sync mode", 
     await page
       .getByRole("textbox", { name: "任务名称", exact: true })
       .fill(name);
-    await page.getByRole("button", { name: "下一步", exact: true }).click();
+    await page.getByRole("tab", { name: "同步与调度" }).click();
     await page.getByRole("combobox", { name: "调度方式", exact: true }).click();
     await page.getByRole("option").filter({ hasText: "仅手动" }).click();
     await expect(
       page.getByRole("combobox", { name: "调度方式", exact: true }),
     ).toHaveText("仅手动");
-    await page.getByRole("button", { name: "下一步", exact: true }).click();
+    await page.getByRole("tab", { name: "文件过滤" }).click();
     const posted = page.waitForRequest(
       (r) => r.url().endsWith("/svr/job") && r.method() === "POST",
     );
     await page
-      .getByRole("button", { name: "保存任务配置", exact: true })
+      .getByRole("button", { name: "保存", exact: true })
       .click();
     expect((await posted).postDataJSON()).toMatchObject({
       isCron: 2,
@@ -221,17 +221,19 @@ test("creates an engine and manual job, then edits without changing sync mode", 
       .getByText("设置", { exact: true });
     await expect(editButton).toBeVisible();
     await editButton.click({ force: forceMobileClick });
+    await expect(
+      page.getByRole("tab", { name: "文件夹过滤", exact: true }),
+    ).toBeVisible();
+    await page.getByRole("tab", { name: "文件过滤", exact: true }).click();
+    await expect(
+      page.getByRole("textbox", { name: "高级排除规则", exact: true }),
+    ).toHaveCount(0);
+    await page.getByRole("tab", { name: "引擎与路径", exact: true }).click();
     await page
       .getByRole("textbox", { name: "任务名称", exact: true })
       .fill(name + "-修改");
-    await page
-      .getByRole("button", { name: "下一步", exact: true })
-      .click({ force: forceMobileClick });
-    await page
-      .getByRole("button", { name: "下一步", exact: true })
-      .click({ force: forceMobileClick });
     const saveButton = page.getByRole("button", {
-      name: "保存任务配置",
+      name: "保存",
       exact: true,
     });
     await expect(saveButton).toBeVisible();

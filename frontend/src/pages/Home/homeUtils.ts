@@ -93,7 +93,7 @@ System Volume Information/
 # Linux / NAS
 lost+found/
 @eaDir/
-#recycle/
+\\#recycle/
 @Recycle/
 .Recycle/
 .Trash-*/

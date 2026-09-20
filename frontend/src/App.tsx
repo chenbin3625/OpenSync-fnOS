@@ -75,7 +75,6 @@ function Shell({ children }: { children: ReactNode }) {
   const taskHref = (jobId: number) => {
     const next = new URLSearchParams(pathname.startsWith("/tasks") ? search : "");
     next.set("jobId", String(jobId));
-    next.delete("tab");
     return `/tasks?${next.toString()}`;
   };
   useEffect(() => {
@@ -107,7 +106,7 @@ function Shell({ children }: { children: ReactNode }) {
     window.addEventListener("opensync:jobs-changed", refresh);
     return () => window.removeEventListener("opensync:jobs-changed", refresh);
   }, [taskMenu.refresh]);
-  const tasksSelected = pathname.startsWith("/tasks") && !(taskMenuOpen && currentTaskId);
+  const tasksSelected = pathname.startsWith("/tasks") && !hasTaskItems;
   return (
     <div className="app-shell">
       <aside className="app-sidebar" aria-label="主菜单">
@@ -122,7 +121,7 @@ function Shell({ children }: { children: ReactNode }) {
                 setTaskMenuTouched(true);
                 if (!pathname.startsWith("/tasks")) {
                   setTaskMenuOpen(true);
-                  navigate("/tasks");
+                  navigate(taskHref(taskItems[0].id));
                   return;
                 }
                 setTaskMenuOpen((open) => !open);

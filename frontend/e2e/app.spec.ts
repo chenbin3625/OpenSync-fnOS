@@ -10,7 +10,7 @@ test("opens usable task workspace without a second login", async ({ page }) => {
   await expect(page.locator(".task-workspace")).toBeVisible();
 });
 
-test("opens task editor as a step-by-step wizard", async ({ page }) => {
+test("opens task editor with tab navigation", async ({ page }) => {
   await page.goto("/app/opensync/tasks");
   await page.getByRole("button", { name: "新建任务", exact: true }).click();
   const dialog = page.getByRole("dialog");
@@ -18,26 +18,25 @@ test("opens task editor as a step-by-step wizard", async ({ page }) => {
   await expect(
     page.getByRole("heading", { name: "新建任务", exact: true }),
   ).toBeVisible();
-  await expect(page.getByLabel("当前步骤")).toHaveText(/步骤\s*1\s*\/\s*3/);
+  await expect(page.getByRole("tab", { name: "引擎与路径" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "同步与调度" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "文件过滤" })).toBeVisible();
   const dialogBox = await page.locator(".editor-modal .semi-modal").boundingBox();
   const viewport = page.viewportSize();
   if ((viewport?.width || 0) >= 1000) {
     expect(dialogBox?.width).toBeLessThanOrEqual(520);
   }
   await expect(
-    page.getByRole("heading", { name: "引擎与路径", exact: true }),
-  ).toBeVisible();
-  await expect(
     page.getByRole("combobox", { name: "同步方式", exact: true }),
   ).toHaveCount(0);
   await expect(
-    page.getByRole("button", { name: "下一步", exact: true }),
+    page.getByRole("button", { name: "保存", exact: true }),
   ).toBeVisible();
   await expect(
     dialog.locator(".setting-row").filter({ hasText: "目标缓存" }),
   ).toHaveCSS("border-radius", "8px");
   await expect(
-    page.getByRole("button", { name: "下一步", exact: true }),
+    page.getByRole("button", { name: "保存", exact: true }),
   ).toHaveCSS("height", "36px");
   await page.getByRole("button", { name: "取消", exact: true }).click();
   await expect(page.getByRole("dialog")).not.toBeVisible();

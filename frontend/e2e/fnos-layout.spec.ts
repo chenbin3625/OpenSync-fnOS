@@ -212,6 +212,30 @@ test("task tabs and page commands share an integrated toolbar row", async ({
   ).toBeLessThan(8);
 });
 
+test("task management top tabs keep a visible selected state", async ({ page }) => {
+  await page.goto("/app/opensync/tasks?tab=history");
+  const toolbar = page.locator(".page-toolbar");
+  const activeTab = toolbar.getByRole("tab", {
+    name: "历史任务",
+    exact: true,
+  });
+
+  await expect(activeTab).toHaveClass(/semi-tabs-tab-active/);
+  await expect(activeTab).toHaveCSS("color", "rgb(0, 102, 255)");
+  await expect(activeTab).toHaveCSS("border-bottom-width", "2px");
+  await expect(activeTab).toHaveCSS("border-bottom-color", "rgb(0, 102, 255)");
+
+  if (page.viewportSize()!.width > 640) {
+    const toolbarBox = await toolbar.boundingBox();
+    const activeTabBox = await activeTab.boundingBox();
+    expect(toolbarBox).not.toBeNull();
+    expect(activeTabBox).not.toBeNull();
+    expect(activeTabBox!.y + activeTabBox!.height).toBeLessThanOrEqual(
+      toolbarBox!.y + toolbarBox!.height,
+    );
+  }
+});
+
 test("primary surface, cards and controls use consistent radii and full width", async ({
   page,
 }) => {
@@ -518,14 +542,21 @@ test("editor is 454px on desktop and remains within the viewport", async ({
     "rgba(255, 255, 255, 0.65)",
   );
   const bounds = await dialog.boundingBox();
+  const viewport = page.viewportSize()!;
   expect(bounds!.width).toBe(
-    page.viewportSize()!.width <= 640 ? page.viewportSize()!.width : 454,
+    viewport.width <= 640 ? viewport.width : 454,
   );
   expect(bounds!.x).toBeGreaterThanOrEqual(0);
   expect(bounds!.y).toBeGreaterThanOrEqual(0);
   expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(
-    page.viewportSize()!.height + 1,
+    viewport.height + 1,
   );
+  expect(
+    Math.abs(bounds!.x + bounds!.width / 2 - viewport.width / 2),
+  ).toBeLessThanOrEqual(1);
+  expect(
+    Math.abs(bounds!.y + bounds!.height / 2 - viewport.height / 2),
+  ).toBeLessThanOrEqual(1);
   await expect(
     dialog.getByRole("button", { name: "保存", exact: true }),
   ).toBeVisible();
@@ -534,12 +565,12 @@ test("editor is 454px on desktop and remains within the viewport", async ({
   });
 });
 
-test("dirty-confirm dialog title is aligned to the top left", async ({
-  page,
-}) => {
+test("dirty-confirm dialog is centered", async ({ page }) => {
   await page.goto("/app/opensync/engines");
   await page.getByRole("button", { name: "添加引擎", exact: true }).click();
-  await page.getByRole("textbox", { name: "名称", exact: true }).fill("dirty");
+  await page
+    .getByRole("textbox", { name: "引擎名称", exact: true })
+    .fill("dirty");
   await page.getByRole("button", { name: "取消", exact: true }).click();
   const dialog = page
     .getByRole("dialog")
@@ -547,10 +578,19 @@ test("dirty-confirm dialog title is aligned to the top left", async ({
   await expect(dialog).toBeVisible();
   const title = dialog.getByText("放弃未保存的修改？", { exact: true });
   await expect(title).toBeVisible();
-  const dialogBox = await dialog.boundingBox();
-  const titleBox = await title.boundingBox();
-  expect(titleBox!.x - dialogBox!.x).toBeLessThan(34);
-  expect(titleBox!.y - dialogBox!.y).toBeLessThan(34);
+  const viewport = page.viewportSize()!;
+  await expect
+    .poll(async () => {
+      const dialogBox = await dialog.boundingBox();
+      return Math.abs(dialogBox!.x + dialogBox!.width / 2 - viewport.width / 2);
+    })
+    .toBeLessThanOrEqual(1);
+  await expect
+    .poll(async () => {
+      const dialogBox = await dialog.boundingBox();
+      return Math.abs(dialogBox!.y + dialogBox!.height / 2 - viewport.height / 2);
+    })
+    .toBeLessThanOrEqual(1);
 });
 
 test("settings save stays at the top right", async ({ page }) => {

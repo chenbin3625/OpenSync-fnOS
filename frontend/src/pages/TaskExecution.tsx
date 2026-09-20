@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import DatePicker from "@douyinfe/semi-ui/lib/es/datePicker";
 import Input from "@douyinfe/semi-ui/lib/es/input";
-import Modal from "@douyinfe/semi-ui/lib/es/modal";
 import Pagination from "@douyinfe/semi-ui/lib/es/pagination";
 import Progress from "@douyinfe/semi-ui/lib/es/progress";
 import Select from "@douyinfe/semi-ui/lib/es/select";
@@ -26,6 +25,7 @@ import {
   LoadState,
   Status,
   confirmDelete,
+  confirmStopTask,
   errorToast,
 } from "../components/common";
 import { useAction, useResource } from "../lib/hooks";
@@ -43,7 +43,6 @@ import {
   formatSize,
   getTaskDisplayName,
   taskItemStatusNames,
-  taskItemStatusOptions,
   taskRecordStatusNames,
   taskTypeNames,
 } from "./Home/homeUtils";
@@ -113,27 +112,12 @@ export function Realtime({ jobId }: { jobId: number }) {
   const percent =
     total > 0 ? Math.min(100, (task.doneSize / total) * 100) : 0;
   const stop = () =>
-    Modal.confirm({
-      width: 454,
-      className: "fnos-confirm",
-      title: "停止当前任务？",
-      content: "已完成的文件不会撤销。",
-      okText: "停止任务",
-      cancelText: "取消",
-      okButtonProps: { type: "danger", "aria-label": "停止任务" },
-      cancelButtonProps: { "aria-label": "取消" },
-      onOk: () =>
-        action.run(async () => {
-          try {
-            await api.taskAction(task.taskId, "stop");
-            Toast.success("已提交停止");
-            await refreshCurrentTask();
-          } catch (error) {
-            errorToast(error);
-            throw error;
-          }
-        }),
-    });
+    confirmStopTask(() =>
+      action.run(async () => {
+        await api.taskAction(task.taskId, "stop");
+        await refreshCurrentTask();
+      }),
+    );
   return (
     <div className="execution-view flex-column">
       <div className="execution-top">
@@ -172,16 +156,24 @@ export function Realtime({ jobId }: { jobId: number }) {
           <Tabs.TabPane
             key={tab.key}
             itemKey={String(tab.key)}
-            tab={`${tab.label} ${tab.key === activeTab ? tabTotal : task.num?.[tab.count] || 0}`}
+            tab={`${tab.label} ${task.num?.[tab.count] || 0}`}
           />
         ))}
       </Tabs>
       </div>
       <div className="execution-scroll">
-      <FileTable
-        rows={tabItems}
-        loading={items.tabLoading}
-      />
+      {items.tabError && tabItems.length === 0 ? (
+        <LoadState
+          loading={false}
+          error={items.tabError}
+          retry={items.retryTabTasks}
+        />
+      ) : (
+        <FileTable
+          rows={tabItems}
+          loading={items.tabLoading}
+        />
+      )}
       </div>
       <Pager
         total={tabTotal}
@@ -597,8 +589,7 @@ function FileDetails({
 }) {
   const [page, setPage] = useState(1),
     [size, setSize] = useState(10);
-  const [status, setStatus] = useState<number | undefined>(),
-    [type, setType] = useState<number | undefined>(),
+  const [type, setType] = useState<number | undefined>(),
     [object, setObject] = useState<number | undefined>(),
     [hasError, setHasError] = useState<number | undefined>();
   const [input, setInput] = useState(""),
@@ -610,7 +601,6 @@ function FileDetails({
         {
           pageNum: page,
           pageSize: size,
-          status,
           type,
           isPath: object,
           hasError,
@@ -618,7 +608,7 @@ function FileDetails({
         },
         signal,
       ),
-    [taskId, page, size, status, type, object, hasError, keyword],
+    [taskId, page, size, type, object, hasError, keyword],
     true,
   );
   useEffect(() => {
@@ -652,22 +642,6 @@ function FileDetails({
             setPage(1);
           }}
           showClear
-        />
-        <Select
-          aria-label="文件状态"
-          placeholder="全部状态"
-          value={status === undefined ? "all" : String(status)}
-          optionList={[
-            { label: "全部状态", value: "all" },
-            ...taskItemStatusOptions.map((o) => ({
-              ...o,
-              value: String(o.value),
-            })),
-          ]}
-          onChange={(value) => {
-            setStatus(value === "all" ? undefined : Number(value));
-            setPage(1);
-          }}
         />
         {[
           {
@@ -716,7 +690,6 @@ function FileDetails({
         <Button
           theme="borderless"
           onClick={() => {
-            setStatus(undefined);
             setType(undefined);
             setObject(undefined);
             setHasError(undefined);

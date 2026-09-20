@@ -62,6 +62,19 @@ test("realtime view can transition from idle to an active task", async ({ page }
 
   await page.goto("/app/opensync/tasks?jobId=1&tab=realtime");
   await expect(page.getByRole("heading", { name: "正在同步" })).toBeVisible();
+  const stopButton = page.getByRole("button", { name: "停止任务", exact: true });
+  await expect(stopButton).toHaveCSS("height", "28px");
+  await stopButton.click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toBeVisible();
+  const dialogBox = await dialog.boundingBox();
+  const viewport = page.viewportSize()!;
+  expect(
+    Math.abs(dialogBox!.x + dialogBox!.width / 2 - viewport.width / 2),
+  ).toBeLessThanOrEqual(1);
+  expect(
+    Math.abs(dialogBox!.y + dialogBox!.height / 2 - viewport.height / 2),
+  ).toBeLessThanOrEqual(1);
   expect(errors).toEqual([]);
 });
 
@@ -142,6 +155,181 @@ test("realtime view loads running rows when the live snapshot is missing", async
   const mobileList = page.locator(".mobile-data").last();
   await expect(mobileList.getByText("mobile-running-file.txt")).toBeVisible();
   await expect(mobileList.getByText("42%")).toBeVisible();
+});
+
+test("slow realtime status request survives the refresh interval", async ({
+  page,
+}) => {
+  test.setTimeout(12000);
+  await page.addInitScript(() => {
+    Object.defineProperty(globalThis, "ReadableStream", { value: undefined });
+    Object.defineProperty(globalThis, "EventSource", { value: undefined });
+  });
+  const activeTask = {
+    taskId: 17,
+    scanFinish: true,
+    createTime: 1,
+    duration: 1,
+    num: { wait: 0, running: 0, success: 21, fail: 0, other: 0 },
+    size: { wait: 0, running: 0, success: 21, fail: 0, other: 0 },
+    doneSize: 21,
+    remainSize: 0,
+    speed: 0,
+    speedAvg: 0,
+    remainTime: 0,
+  };
+  let successRequests = 0;
+  let cancelledRequests = 0;
+  page.on("requestfailed", (request) => {
+    const url = new URL(request.url());
+    if (url.searchParams.get("status") === "2") cancelledRequests += 1;
+  });
+
+  await page.route("**/app/opensync/svr/**", async (route) => {
+    const url = new URL(route.request().url());
+    const success = (data: unknown) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ code: 200, data, msg: "" }),
+      });
+    if (url.pathname.endsWith("/session"))
+      return success({ uid: 1, development: false, version: "test" });
+    if (url.pathname.endsWith("/alist")) return success([]);
+    if (
+      url.pathname.endsWith("/job") &&
+      url.searchParams.get("current") &&
+      url.searchParams.get("status") === "2"
+    ) {
+      successRequests += 1;
+      await new Promise((resolve) => setTimeout(resolve, 3500));
+      return success({
+        dataList: [
+          { id: 171, fileName: "slow-success.txt", status: 2, type: 0 },
+        ],
+        count: 21,
+      });
+    }
+    if (url.pathname.endsWith("/job") && url.searchParams.get("current")) {
+      if (url.searchParams.has("status"))
+        return success({ dataList: [], count: 0 });
+      return success(activeTask);
+    }
+    if (url.pathname.endsWith("/job")) {
+      return success({
+        dataList: [
+          {
+            id: 1,
+            enable: 1,
+            remark: "慢查询任务",
+            srcPath: '["/src"]',
+            dstPath: '["/dst"]',
+            alistId: 1,
+            method: 0,
+            interval: 0,
+            isCron: 2,
+          },
+        ],
+        count: 1,
+      });
+    }
+    return success(null);
+  });
+
+  await page.goto("/app/opensync/tasks?jobId=1&tab=realtime");
+  await page.getByRole("tab", { name: /成功/ }).click();
+  await expect(page.getByText("slow-success.txt").first()).toBeVisible({
+    timeout: 8000,
+  });
+  expect(successRequests).toBe(1);
+  expect(cancelledRequests).toBe(0);
+});
+
+test("realtime status load failure can be retried", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(globalThis, "ReadableStream", { value: undefined });
+    Object.defineProperty(globalThis, "EventSource", { value: undefined });
+  });
+  const activeTask = {
+    taskId: 19,
+    scanFinish: true,
+    createTime: 1,
+    duration: 1,
+    num: { wait: 0, running: 0, success: 1, fail: 0, other: 0 },
+    size: { wait: 0, running: 0, success: 1, fail: 0, other: 0 },
+    doneSize: 1,
+    remainSize: 0,
+    speed: 0,
+    speedAvg: 0,
+    remainTime: 0,
+  };
+  let successRequests = 0;
+
+  await page.route("**/app/opensync/svr/**", async (route) => {
+    const url = new URL(route.request().url());
+    const success = (data: unknown) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ code: 200, data, msg: "" }),
+      });
+    if (url.pathname.endsWith("/session"))
+      return success({ uid: 1, development: false, version: "test" });
+    if (url.pathname.endsWith("/alist")) return success([]);
+    if (
+      url.pathname.endsWith("/job") &&
+      url.searchParams.get("current") &&
+      url.searchParams.get("status") === "2"
+    ) {
+      successRequests += 1;
+      if (successRequests === 1) {
+        return route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({
+            code: 503,
+            data: null,
+            msg: "实时明细暂时不可用",
+          }),
+        });
+      }
+      return success({
+        dataList: [
+          { id: 191, fileName: "retry-success.txt", status: 2, type: 0 },
+        ],
+        count: 1,
+      });
+    }
+    if (url.pathname.endsWith("/job") && url.searchParams.get("current")) {
+      if (url.searchParams.has("status"))
+        return success({ dataList: [], count: 0 });
+      return success(activeTask);
+    }
+    if (url.pathname.endsWith("/job")) {
+      return success({
+        dataList: [
+          {
+            id: 1,
+            enable: 1,
+            remark: "失败重试任务",
+            srcPath: '["/src"]',
+            dstPath: '["/dst"]',
+            alistId: 1,
+            method: 0,
+            interval: 0,
+            isCron: 2,
+          },
+        ],
+        count: 1,
+      });
+    }
+    return success(null);
+  });
+
+  await page.goto("/app/opensync/tasks?jobId=1&tab=realtime");
+  await page.getByRole("tab", { name: /成功/ }).click();
+  await expect(page.getByText("实时明细暂时不可用")).toBeVisible();
+  await page.getByRole("button", { name: "重试", exact: true }).click();
+  await expect(page.getByText("retry-success.txt").first()).toBeVisible();
+  expect(successRequests).toBe(2);
 });
 
 test("realtime status pages refresh independently of SSE summary updates", async ({
@@ -450,6 +638,96 @@ test("history load errors stay visible and can be retried", async ({ page }) => 
   await page.getByRole("button", { name: "重试", exact: true }).click();
   await expect(page.getByText("历史记录加载失败", { exact: true })).toHaveCount(0);
   expect(historyCalls).toBeGreaterThanOrEqual(2);
+});
+
+test("completed execution details omit file status filtering", async ({ page }) => {
+  const detailRequests: string[] = [];
+  await page.route("**/app/opensync/svr/**", async (route) => {
+    const url = new URL(route.request().url());
+    const success = (data: unknown) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ code: 200, data, msg: "" }),
+      });
+    if (url.pathname.endsWith("/session"))
+      return success({ uid: 1, development: false, version: "test" });
+    if (url.pathname.endsWith("/alist")) return success([]);
+    if (url.pathname.endsWith("/job") && url.searchParams.get("current")) {
+      return success(null);
+    }
+    if (url.pathname.endsWith("/job") && url.searchParams.has("taskId")) {
+      detailRequests.push(url.search);
+      return success({
+        dataList: [
+          {
+            id: 31,
+            fileName: "detail-done.txt",
+            srcPath: "/src/detail-done.txt",
+            dstPath: "/dst/detail-done.txt",
+            fileSize: 1024,
+            type: 0,
+            status: 2,
+          },
+        ],
+        count: 1,
+      });
+    }
+    if (url.pathname.endsWith("/job") && url.searchParams.has("id")) {
+      return success({
+        dataList: [
+          {
+            id: 101,
+            status: 2,
+            createTime: 1,
+            runTime: 5,
+            successNum: 1,
+            failNum: 0,
+            allNum: 1,
+          },
+        ],
+        count: 1,
+      });
+    }
+    if (url.pathname.endsWith("/job")) {
+      return success({
+        dataList: [
+          {
+            id: 1,
+            enable: 1,
+            remark: "已结束任务",
+            srcPath: '["/src"]',
+            dstPath: '["/dst"]',
+            alistId: 1,
+            useCacheT: 0,
+            useCacheS: 0,
+            method: 0,
+            interval: 0,
+            isCron: 2,
+          },
+        ],
+        count: 1,
+      });
+    }
+    return success(null);
+  });
+
+  await page.goto("/app/opensync/tasks?jobId=1&tab=history");
+  await page
+    .getByRole("button", { name: "查看执行明细", exact: true })
+    .click();
+  const details = page.getByRole("dialog");
+  await expect(details.getByText("执行明细", { exact: true })).toBeVisible();
+  const visibleDetails = details.locator(
+    ".desktop-data:visible, .mobile-data:visible",
+  );
+  await expect(
+    visibleDetails.getByText("detail-done.txt", { exact: true }).first(),
+  ).toBeVisible();
+  await expect(details.getByText("全部状态", { exact: true })).toHaveCount(0);
+  await expect(details.getByText("全部操作类型", { exact: true })).toBeVisible();
+  await expect(details.getByText("全部对象类型", { exact: true })).toBeVisible();
+  await expect(details.getByText("全部错误信息", { exact: true })).toBeVisible();
+  expect(detailRequests.some((query) => query.includes("status="))).toBe(false);
 });
 
 test("remote path load errors remain actionable", async ({ page }) => {

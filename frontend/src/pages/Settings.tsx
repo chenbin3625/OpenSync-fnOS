@@ -136,7 +136,7 @@ export default function Settings() {
             disabled={!dirty || resource.loading || Boolean(resource.error)}
             onClick={save}
           >
-            保存设置
+            保存
           </Button>
         }
       />

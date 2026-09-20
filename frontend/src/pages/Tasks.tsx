@@ -8,6 +8,7 @@ import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
 import {
   IconChevronRightStroked,
   IconCloudStroked,
+  IconPause,
   IconPlay,
   IconPlusStroked,
   IconServerStroked,
@@ -22,6 +23,7 @@ import {
   Info,
   LoadState,
   confirmDelete,
+  confirmStopTask,
   errorToast,
   type MenuAction,
 } from "../components/common";
@@ -168,12 +170,23 @@ export default function Tasks() {
                     job={selected}
                     engines={engines.data || []}
                     busy={actions.busy}
+                    running={!!currentTask.data}
                     onRun={() =>
                       action(
                         () => api.jobAction({ id: String(selected.id) }),
                         "已提交执行",
                       )
                     }
+                    onStop={() => {
+                      if (!currentTask.data) return;
+                      const { taskId } = currentTask.data;
+                      confirmStopTask(() =>
+                        actions.run(async () => {
+                          await api.taskAction(taskId, "stop");
+                          await refreshJobs();
+                        }),
+                      );
+                    }}
                     onToggle={() =>
                       action(
                         () =>
@@ -234,7 +247,9 @@ function Overview({
   job,
   engines,
   busy,
+  running,
   onRun,
+  onStop,
   onToggle,
   onEdit,
   onDelete,
@@ -242,7 +257,9 @@ function Overview({
   job: JobItem;
   engines: AlistItem[];
   busy: boolean;
+  running: boolean;
   onRun: () => void;
+  onStop: () => void;
   onToggle: () => void;
   onEdit: () => void;
   onDelete: () => void;
@@ -280,14 +297,21 @@ function Overview({
                 onChange={() => onToggle()}
               />
             )}
-            <Tooltip content="手动执行" position="top">
+            <Tooltip content={running ? "停止任务" : "启动任务"} position="top">
               <Button
-                icon={<IconPlay aria-hidden="true" />}
-                type="tertiary"
+                aria-label={running ? "停止任务" : "启动任务"}
+                icon={
+                  running ? (
+                    <IconPause aria-hidden="true" />
+                  ) : (
+                    <IconPlay aria-hidden="true" />
+                  )
+                }
+                type={running ? "danger" : "tertiary"}
                 theme="borderless"
                 size="small"
                 disabled={busy}
-                onClick={onRun}
+                onClick={running ? onStop : onRun}
               />
             </Tooltip>
             <ActionMenu actions={menu} disabled={busy} />

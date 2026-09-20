@@ -4,7 +4,7 @@ import { Form } from "@douyinfe/semi-ui/lib/es/form";
 import Input from "@douyinfe/semi-ui/lib/es/input";
 import Select from "@douyinfe/semi-ui/lib/es/select";
 import Switch from "@douyinfe/semi-ui/lib/es/switch";
-import TextArea from "@douyinfe/semi-ui/lib/es/input/textarea";
+import Tabs from "@douyinfe/semi-ui/lib/es/tabs";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
 import { IconHelpCircleStroked } from "@douyinfe/semi-icons";
@@ -16,6 +16,7 @@ import {
   errorToast,
 } from "../components/common";
 import { ExcludeTree } from "../components/ExcludeTree";
+import { FileTypeFilter } from "../components/FileTypeFilter";
 import { RemotePaths } from "../components/RemotePaths";
 import { useAction } from "../lib/hooks";
 import {
@@ -37,7 +38,18 @@ import {
 import { fileSizeUnitOptions } from "./Home/fileSizeUnits";
 import type { AlistItem, JobItem } from "../types";
 
-const taskEditorSteps = ["引擎与路径", "同步与调度", "文件过滤"];
+const taskEditorSteps = ["引擎与路径", "同步与调度", "文件过滤", "文件夹过滤"];
+const taskEditorTabs = [
+  { key: "engine", label: "引擎与路径" },
+  { key: "sync", label: "同步与调度" },
+  { key: "filter", label: "文件过滤" },
+  { key: "folder", label: "文件夹过滤" },
+];
+const fileSizeLimitNote = (
+  <span className="field-label-inline-note">
+    <span>0 表示不限</span>
+  </span>
+);
 const syncMethodTip = (
   <div className="sync-method-tip">
     {methodOptions.map((method) => (
@@ -63,10 +75,14 @@ export default function TaskEditor({
     job ? jobToForm(job) : defaultJobForm(engines[0]?.id),
   );
   const [dirty, setDirty] = useState(false);
+  const isNew = !job;
   const [step, setStep] = useState(0);
+  const [activeTab, setActiveTab] = useState("engine");
   const action = useAction();
-  const activeStep = taskEditorSteps[step];
   const lastStep = step === taskEditorSteps.length - 1;
+  const activePanel = isNew
+    ? ["engine", "sync", "filter", "folder"][step]
+    : activeTab;
   const change = <K extends keyof JobForm>(key: K, value: JobForm[K]) => {
     setDirty(true);
     setForm((current) => ({ ...current, [key]: value }));
@@ -77,9 +93,9 @@ export default function TaskEditor({
       Toast.warning(validation);
       return;
     }
-    setStep((current) => Math.min(current + 1, taskEditorSteps.length - 1));
+    setStep((s) => Math.min(s + 1, taskEditorSteps.length - 1));
   };
-  const previousStep = () => setStep((current) => Math.max(current - 1, 0));
+  const previousStep = () => setStep((s) => Math.max(s - 1, 0));
   const save = () => {
     const validation = validateJobForm(form);
     if (validation) {
@@ -106,8 +122,8 @@ export default function TaskEditor({
       onSave={save}
       dirty={dirty}
       footer={({ close }) => (
-        <div className="editor-actions task-editor-actions">
-          {step > 0 && (
+        <div className={`editor-actions${isNew ? " task-editor-actions" : ""}`}>
+          {isNew && step > 0 && (
             <Button onClick={previousStep} disabled={action.busy}>
               上一步
             </Button>
@@ -119,23 +135,35 @@ export default function TaskEditor({
             type="primary"
             theme="solid"
             loading={action.busy}
-            onClick={lastStep ? save : nextStep}
+            onClick={isNew && !lastStep ? nextStep : save}
           >
-            {lastStep ? "保存任务配置" : "下一步"}
+            {isNew && !lastStep ? "下一步" : "保存"}
           </Button>
         </div>
       )}
     >
-      <Form onSubmit={lastStep ? save : nextStep} className="editor-form">
+      <Form onSubmit={isNew && !lastStep ? nextStep : save} className="editor-form">
         <fieldset disabled={action.busy}>
-          <div className="task-editor-stepbar">
-            <h3>{activeStep}</h3>
-            <div className="task-editor-count" aria-label="当前步骤">
-              步骤 <strong>{step + 1}</strong> / {taskEditorSteps.length}
+          {isNew ? (
+            <div className="task-editor-stepbar">
+              <h3>{taskEditorSteps[step]}</h3>
+              <div className="task-editor-count" aria-label="当前步骤">
+                步骤 <strong>{step + 1}</strong> / {taskEditorSteps.length}
+              </div>
             </div>
-          </div>
+          ) : (
+            <Tabs
+              type="line"
+              activeKey={activeTab}
+              onChange={(key) => setActiveTab(key)}
+            >
+              {taskEditorTabs.map((tab) => (
+                <Tabs.TabPane tab={tab.label} itemKey={tab.key} key={tab.key} />
+              ))}
+            </Tabs>
+          )}
           <div className="task-editor-step">
-            {step === 0 && (
+            {activePanel === "engine" && (
               <div className="form-section">
                 <Field label="任务名称" required>
                   <Input
@@ -197,7 +225,7 @@ export default function TaskEditor({
                 </div>
               </div>
             )}
-            {step === 1 && (
+            {activePanel === "sync" && (
               <div className="form-section">
                 <div className="form-grid">
                   <Field
@@ -271,14 +299,23 @@ export default function TaskEditor({
                 </div>
               </div>
             )}
-            {step === 2 && (
+            {activePanel === "filter" && (
               <div className="form-section">
                 <div className="form-grid">
                   {(["min", "max"] as const).map((kind) => (
                     <Field
                       key={kind}
-                      label={kind === "min" ? "最小文件大小" : "最大文件大小"}
-                      hint="0 表示不限"
+                      label={
+                        <span className="field-label-with-note">
+                          <span>
+                            {kind === "min" ? "最小文件大小" : "最大文件大小"}
+                          </span>
+                          {fileSizeLimitNote}
+                        </span>
+                      }
+                      ariaLabel={
+                        kind === "min" ? "最小文件大小" : "最大文件大小"
+                      }
                     >
                       <div className="unit-input">
                         <Input
@@ -308,6 +345,16 @@ export default function TaskEditor({
                     </Field>
                   ))}
                 </div>
+                <Field label="文件类型过滤">
+                  <FileTypeFilter
+                    value={form.exclude}
+                    onChange={(value) => change("exclude", value)}
+                  />
+                </Field>
+              </div>
+            )}
+            {activePanel === "folder" && (
+              <div className="form-section">
                 <Field
                   label="文件夹过滤"
                   hint="仅针对源目录，勾选要忽略的子文件夹"
@@ -322,14 +369,6 @@ export default function TaskEditor({
                         updateExcludeFolders(form.exclude, folders),
                       )
                     }
-                  />
-                </Field>
-                <Field label="排除规则（.gitignore 格式）">
-                  <TextArea
-                    value={form.exclude}
-                    onChange={(value) => change("exclude", value)}
-                    rows={5}
-                    className="mono"
                   />
                 </Field>
               </div>

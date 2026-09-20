@@ -253,20 +253,43 @@ export function confirmDelete(
   action: () => Promise<unknown>,
   content = "删除后无法恢复，是否继续？",
 ) {
-  Modal.warning({
+  Modal.error({
     width: 454,
     className: "fnos-confirm",
+    centered: true,
     closable: false,
     title,
     content,
     okText: "删除",
     cancelText: "取消",
-    okButtonProps: { type: "danger", "aria-label": "删除" },
+    okButtonProps: { type: "danger", theme: "solid", "aria-label": "删除" },
     cancelButtonProps: { "aria-label": "取消" },
     onOk: async () => {
       try {
         await action();
         Toast.success("已删除");
+      } catch (error) {
+        errorToast(error);
+        throw error;
+      }
+    },
+  });
+}
+export function confirmStopTask(action: () => Promise<unknown>) {
+  Modal.confirm({
+    width: 454,
+    className: "fnos-confirm",
+    centered: true,
+    title: "停止当前任务？",
+    content: "已完成的文件不会撤销。",
+    okText: "停止",
+    cancelText: "取消",
+    okButtonProps: { type: "danger", "aria-label": "停止任务" },
+    cancelButtonProps: { "aria-label": "取消" },
+    onOk: async () => {
+      try {
+        await action();
+        Toast.success("已提交停止");
       } catch (error) {
         errorToast(error);
         throw error;
@@ -322,11 +345,12 @@ export function Editor({
       Modal.confirm({
         width: 454,
         className: "fnos-confirm",
+        centered: true,
         title: "放弃未保存的修改？",
-        okText: "放弃修改",
-        cancelText: "继续编辑",
-        okButtonProps: { type: "danger", "aria-label": "放弃修改" },
-        cancelButtonProps: { "aria-label": "继续编辑" },
+        okText: "放弃",
+        cancelText: "取消",
+        okButtonProps: { type: "danger", "aria-label": "放弃" },
+        cancelButtonProps: { "aria-label": "取消" },
         onOk: onClose,
       });
     else onClose();

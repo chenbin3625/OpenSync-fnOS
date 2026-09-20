@@ -13,6 +13,7 @@ import {
   initialExcludeExpandedKeys,
   normalizeExcludeRootPath,
 } from "../src/lib/excludeTree";
+import * as taskFormModule from "../src/lib/taskForm";
 
 describe("existing synchronization contracts", () => {
   it("keeps multi-source, multi-target and the two supported synchronization modes", () => {
@@ -57,6 +58,84 @@ describe("existing synchronization contracts", () => {
     });
     expect(payload.enable).toBe(1);
     expect(payload.minFileSize).toBe(2 * 1024 ** 3);
+  });
+  it("excludes Synology recycle directories by default", () => {
+    expect(defaultJobForm().exclude.split("\n")).toContain("\\#recycle/");
+  });
+  it("toggles file type presets without changing unrelated exclude rules", () => {
+    const filters = taskFormModule as typeof taskFormModule & {
+      updateExcludePatterns?: (
+        exclude: string,
+        patterns: string[],
+        enabled: boolean,
+      ) => string;
+    };
+    expect(filters.updateExcludePatterns).toBeTypeOf("function");
+
+    const original = "keep-this/\n*.tmp\n# *.log\nphotos/raw/";
+    const disabled = filters.updateExcludePatterns!(
+      original,
+      ["*.tmp", "*.temp"],
+      false,
+    );
+    expect(disabled).toContain("# *.tmp");
+    expect(disabled).toContain("keep-this/");
+    expect(disabled).toContain("photos/raw/");
+
+    const enabled = filters.updateExcludePatterns!(
+      disabled,
+      ["*.tmp", "*.temp"],
+      true,
+    );
+    expect(enabled.split("\n")).toEqual(
+      expect.arrayContaining(["*.tmp", "*.temp"]),
+    );
+  });
+  it("adds normalized custom file extensions and keeps their enabled state", () => {
+    const filters = taskFormModule as typeof taskFormModule & {
+      addCustomFileTypeFilter?: (exclude: string, input: string) => string;
+      parseCustomFileTypeFilters?: (
+        exclude: string,
+      ) => { pattern: string; enabled: boolean }[];
+      parseOtherFileTypeFilters?: (
+        exclude: string,
+      ) => { pattern: string; enabled: boolean }[];
+      updateExcludePatterns?: (
+        exclude: string,
+        patterns: string[],
+        enabled: boolean,
+      ) => string;
+    };
+    expect(filters.addCustomFileTypeFilter).toBeTypeOf("function");
+    expect(filters.parseCustomFileTypeFilters).toBeTypeOf("function");
+    expect(filters.parseOtherFileTypeFilters).toBeTypeOf("function");
+
+    const added = filters.addCustomFileTypeFilter!(".DS_Store", ".ISO");
+    expect(filters.parseOtherFileTypeFilters!(added)).toEqual([
+      { pattern: "*.iso", enabled: true },
+    ]);
+    const disabled = filters.updateExcludePatterns!(added, ["*.iso"], false);
+    expect(filters.parseOtherFileTypeFilters!(disabled)).toEqual([
+      { pattern: "*.iso", enabled: false },
+    ]);
+    expect(disabled).toContain(".DS_Store");
+  });
+  it("treats legacy manual file patterns as other file type filters", () => {
+    const filters = taskFormModule as typeof taskFormModule & {
+      parseOtherFileTypeFilters?: (
+        exclude: string,
+      ) => { pattern: string; enabled: boolean }[];
+    };
+    expect(filters.parseOtherFileTypeFilters).toBeTypeOf("function");
+
+    expect(
+      filters.parseOtherFileTypeFilters!(
+        "keep-dir/\n*.iso\n# *.bak\n*.tmp\n.DS_Store",
+      ),
+    ).toEqual([
+      { pattern: "*.iso", enabled: true },
+      { pattern: "*.bak", enabled: false },
+    ]);
   });
   it("round trips existing job identifiers, cache settings and Cron expressions", () => {
     const job = {

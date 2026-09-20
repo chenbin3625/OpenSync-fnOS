@@ -1,7 +1,8 @@
 :root {
   font-family:
-    -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
-    "Microsoft YaHei", sans-serif;
+    "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial,
+    sans-serif;
   color: #24262b;
   background: #f3f3f3;
   font-synthesis: none;
@@ -97,6 +98,17 @@ h3 {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+.field-label-with-note {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.field-label-inline-note {
+  color: var(--muted);
+  font-size: var(--font-size-small);
+  font-weight: 400;
 }
 .field-tip-icon {
   display: inline-flex;
@@ -235,7 +247,7 @@ h3 {
   gap: 16px;
   margin: -20px -20px 20px;
   padding: 0 20px;
-  min-height: 56px;
+  height: 53px;
   border-radius: var(--radius) var(--radius) 0 0;
   overflow: hidden;
   position: sticky;
@@ -251,6 +263,8 @@ h3 {
 }
 .page-title {
   white-space: nowrap;
+  font-size: 22px;
+  line-height: 22px;
 }
 .page-actions,
 .row-actions {
@@ -263,6 +277,9 @@ h3 {
   justify-content: flex-end;
   margin-left: auto;
   flex-shrink: 0;
+}
+.page-actions .semi-button {
+  height: 28px;
 }
 .semi-button {
   border-radius: var(--radius);
@@ -563,17 +580,15 @@ body .semi-modal-mask {
   margin: 0;
 }
 .fnos-confirm .semi-modal-footer .semi-button {
-  height: 40px;
-  min-width: 100px;
+  height: 36px;
+  min-width: 88px;
 }
-.fnos-confirm .semi-modal-footer .semi-button-danger,
-.fnos-confirm .semi-modal-footer .semi-button-warning {
+.fnos-confirm .semi-modal-footer .semi-button-danger {
   background-color: var(--danger);
   border-color: var(--danger);
   color: #fff;
 }
-.fnos-confirm .semi-modal-footer .semi-button-danger:hover,
-.fnos-confirm .semi-modal-footer .semi-button-warning:hover {
+.fnos-confirm .semi-modal-footer .semi-button-danger:hover {
   background-color: var(--danger-hover);
   border-color: var(--danger-hover);
 }
@@ -611,7 +626,7 @@ body .semi-modal-mask {
   justify-content: flex-end;
 }
 .editor-actions .semi-button {
-  height: var(--control-height);
+  height: 36px;
   min-width: 88px;
 }
 .editor-actions .semi-button:not(.semi-button-primary):not(.semi-button-danger),
@@ -707,6 +722,114 @@ body .semi-modal-mask {
   padding: 24px 0;
   text-align: center;
 }
+.file-type-filter {
+  display: grid;
+  gap: 12px;
+}
+.file-type-groups {
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--surface);
+}
+.file-type-group + .file-type-group,
+.custom-file-types {
+  border-top: 1px solid var(--line);
+}
+.file-type-group-row {
+  display: grid;
+  grid-template-columns: 28px 20px 24px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 0 10px 0 6px;
+}
+.file-type-expand.semi-button {
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+  color: var(--muted);
+}
+.file-type-expand .semi-icon {
+  transition: transform 0.15s ease;
+}
+.file-type-expand.expanded .semi-icon {
+  transform: rotate(90deg);
+}
+.file-type-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+}
+.file-type-icon.image {
+  color: var(--success);
+}
+.file-type-icon.archive,
+.file-type-icon.temporary {
+  color: var(--warning);
+}
+.file-type-group-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--semi-color-text-0);
+  text-align: left;
+}
+.file-type-count {
+  color: var(--muted);
+  font-size: var(--font-size-small);
+  font-variant-numeric: tabular-nums;
+}
+.file-type-patterns {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px 12px;
+  padding: 4px 16px 12px 70px;
+  background: var(--surface-soft);
+}
+.file-type-patterns .semi-checkbox {
+  display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
+}
+.file-type-patterns .semi-checkbox-inner-addon {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.custom-file-types {
+  padding: 4px 10px;
+  background: var(--surface-soft);
+}
+.custom-file-type-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 36px;
+}
+.custom-file-type-row .semi-button {
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+}
+.file-type-add {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+.file-type-add .semi-button {
+  min-width: 78px;
+}
 .editor-form fieldset {
   border: 0;
   padding: 0;
@@ -714,6 +837,12 @@ body .semi-modal-mask {
   min-width: 0;
   display: grid;
   gap: 24px;
+}
+.editor-form .semi-tabs-tab-active {
+  color: var(--accent) !important;
+}
+.editor-form .semi-tabs-ink-bar {
+  background-color: var(--accent) !important;
 }
 .editor-form .form-section:first-child {
   padding-top: 0;
@@ -740,6 +869,12 @@ body .semi-modal-mask {
 .task-editor-count strong {
   color: var(--accent);
 }
+.task-editor-actions {
+  align-items: center;
+}
+.task-editor-actions > .semi-button:first-child {
+  margin-right: auto;
+}
 .task-editor-step {
   min-height: 0;
   padding: 0;
@@ -747,12 +882,6 @@ body .semi-modal-mask {
 .task-editor-step .form-section {
   padding-top: 0;
   border-top: 0;
-}
-.task-editor-actions {
-  align-items: center;
-}
-.task-editor-actions > .semi-button:first-child {
-  margin-right: auto;
 }
 .setting-row {
   display: flex;
@@ -795,6 +924,10 @@ body .semi-modal-mask {
 }
 .execution-header h2 {
   font-size: var(--font-size-section-title);
+}
+.execution-header .semi-button {
+  height: 28px;
+  min-height: 28px;
 }
 .execution-metrics {
   display: flex;
@@ -1109,6 +1242,10 @@ body .semi-modal-mask {
   .page-actions {
     margin-left: auto;
   }
+  .file-type-patterns {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding-left: 54px;
+  }
   .mobile-navigation {
     position: fixed;
     bottom: 0;
@@ -1320,7 +1457,7 @@ body .semi-modal-mask {
 }
 .page-tabs .semi-tabs,
 .page-tabs .semi-tabs-bar {
-  height: 56px;
+  height: 53px;
 }
 .page-tabs .semi-tabs-bar,
 .page-tabs .semi-tabs-bar-line {
@@ -1333,7 +1470,7 @@ body .semi-modal-mask {
 .page-tabs .semi-tabs-tab {
   display: inline-flex;
   align-items: center;
-  height: 56px;
+  height: 53px;
   margin: 0 28px 0 0;
   padding: 0;
   font-size: var(--font-size-body);
@@ -1365,6 +1502,9 @@ body .semi-modal-mask {
 }
 .execution-tabs .semi-tabs-bar-line {
   background-color: transparent !important;
+}
+.page-tabs .semi-tabs-tab-active {
+  color: var(--accent) !important;
 }
 .page-tabs .semi-tabs-bar-line .semi-tabs-tab-active,
 .execution-tabs .semi-tabs-bar-line .semi-tabs-tab-active {
