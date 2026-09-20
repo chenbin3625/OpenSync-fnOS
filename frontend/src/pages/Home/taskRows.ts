@@ -2,10 +2,7 @@ import type {
   CurrentTaskData,
   PageData,
   TaskItem,
-  TaskRecord,
 } from "../../types";
-
-export type TaskListView = "realtime" | "history";
 
 type CurrentTaskIdentity =
   | {
@@ -15,150 +12,8 @@ type CurrentTaskIdentity =
   | null
   | undefined;
 
-export type RealtimeTaskLoadKey = {
-  status: number;
-  taskIdentity: string;
-  page: number;
-  pageSize: number;
-};
-
-const runningHistoryStatuses = new Set([0, 1]);
-const runningTaskItemStatus = 1;
-
-export const IDLE_POLL_INTERVAL_MS = 15000;
-
-export function historyHasActiveTask(rows: Array<{ status: number }>): boolean {
-  return rows.some((row) => runningHistoryStatuses.has(row.status));
-}
-export function detailHasRunningItem(rows: Array<{ status: number }>): boolean {
-  return rows.some((row) => row.status === runningTaskItemStatus);
-}
-
-export function pollIntervalForActiveWork(
-  hasActive: boolean,
-  activeMs: number,
-  idleMs = IDLE_POLL_INTERVAL_MS,
-): number {
-  return hasActive ? activeMs : idleMs;
-}
-
-function mergeByKey<T>(
-  previous: T[],
-  next: T[],
-  getKey: (item: T, index: number) => string,
-  isSame: (a: T, b: T) => boolean,
-): T[] {
-  if (previous.length === 0) return next;
-
-  const previousByKey = new Map(
-    previous.map((item, index) => [getKey(item, index), item]),
-  );
-  let changed = previous.length !== next.length;
-  const merged = next.map((item, index) => {
-    const existing = previousByKey.get(getKey(item, index));
-    const row = existing && isSame(existing, item) ? existing : item;
-    if (row !== previous[index]) changed = true;
-    return row;
-  });
-  return changed ? merged : previous;
-}
-
-function sameTaskRecord(a: TaskRecord, b: TaskRecord): boolean {
-  return (
-    a.id === b.id &&
-    a.status === b.status &&
-    a.errMsg === b.errMsg &&
-    a.runTime === b.runTime &&
-    a.successNum === b.successNum &&
-    a.failNum === b.failNum &&
-    a.allNum === b.allNum &&
-    a.createTime === b.createTime
-  );
-}
-
-export function mergeTaskRecords(
-  previous: TaskRecord[],
-  next: TaskRecord[],
-): TaskRecord[] {
-  return mergeByKey(previous, next, (task) => String(task.id), sameTaskRecord);
-}
-
-export function getTaskItemKey(task: TaskItem, fallback = 0): string {
-  return String(
-    task.id ??
-      task.alistTaskId ??
-      `${task.fileName || ""}|${task.srcPath || ""}|${task.dstPath || ""}|${fallback}`,
-  );
-}
-
 export function getRealtimeTaskIdentity(task: CurrentTaskIdentity): string {
   return `${Number(task?.taskId || 0)}:${Number(task?.createTime || 0)}`;
-}
-
-function sameTaskItem(a: TaskItem, b: TaskItem): boolean {
-  return (
-    a.id === b.id &&
-    a.taskId === b.taskId &&
-    a.srcPath === b.srcPath &&
-    a.dstPath === b.dstPath &&
-    a.isPath === b.isPath &&
-    a.fileName === b.fileName &&
-    a.fileSize === b.fileSize &&
-    a.type === b.type &&
-    a.alistTaskId === b.alistTaskId &&
-    a.status === b.status &&
-    a.progress === b.progress &&
-    a.errMsg === b.errMsg &&
-    a.createTime === b.createTime
-  );
-}
-
-export function mergeTaskItems(
-  previous: TaskItem[],
-  next: TaskItem[],
-): TaskItem[] {
-  return mergeByKey(previous, next, getTaskItemKey, sameTaskItem);
-}
-
-export function applyDoingPatch(
-  previous: TaskItem[],
-  patch: TaskItem[],
-): TaskItem[] {
-  if (previous.length === 0 || patch.length === 0) return previous;
-
-  const patchByKey = new Map(
-    patch.map((item, index) => [getTaskItemKey(item, index), item]),
-  );
-  let changed = false;
-  const next = previous.map((item, index) => {
-    const delta = patchByKey.get(getTaskItemKey(item, index));
-    if (!delta) return item;
-    const merged = { ...item, ...delta };
-    if (sameTaskItem(item, merged)) return item;
-    changed = true;
-    return merged;
-  });
-  return changed ? next : previous;
-}
-
-export function mergeCurrentTaskData(
-  data: CurrentTaskData,
-  previous: CurrentTaskData | null,
-): CurrentTaskData {
-  if (
-    data.doingPatch &&
-    previous &&
-    getRealtimeTaskIdentity(data) === getRealtimeTaskIdentity(previous)
-  ) {
-    return {
-      ...data,
-      doingTask: applyDoingPatch(previous.doingTask || [], data.doingPatch),
-    };
-  }
-  return {
-    ...data,
-    doingTask: data.doingTask || previous?.doingTask || [],
-  };
 }
 
 export function normalizeTaskItemPage(
@@ -180,17 +35,6 @@ export function realtimeRunningSnapshotIsComplete(
   return runningCount <= 0 || snapshotCount >= runningCount;
 }
 
-export function sortTaskItemsByCreateTimeDesc(rows: TaskItem[]): TaskItem[] {
-  return [...rows].sort((a, b) => {
-    const left = Number(a.createTime || 0);
-    const right = Number(b.createTime || 0);
-    if (left === right) return Number(b.id || 0) - Number(a.id || 0);
-    return right - left;
-  });
-}
-
-// All tabs use server-side pagination; this function is kept for backward
-// compatibility but no longer slices rows client-side.
 export function pageTaskItems(
   rows: TaskItem[],
   _status: number,
@@ -204,55 +48,6 @@ export function taskProgressPercent(progress: unknown): number {
   const value = Number(progress);
   if (!Number.isFinite(value)) return 0;
   return Math.max(0, Math.min(100, Math.round(value)));
-}
-
-export function shouldReplaceRealtimeRows(
-  previous: RealtimeTaskLoadKey | null,
-  next: RealtimeTaskLoadKey,
-): boolean {
-  return (
-    !previous ||
-    previous.status !== next.status ||
-    previous.taskIdentity !== next.taskIdentity ||
-    previous.page !== next.page ||
-    previous.pageSize !== next.pageSize
-  );
-}
-
-export function shouldResetRealtimeSnapshot(
-  previous: RealtimeTaskLoadKey | null,
-  next: RealtimeTaskLoadKey,
-): boolean {
-  return (
-    !previous ||
-    previous.status !== next.status ||
-    previous.taskIdentity !== next.taskIdentity
-  );
-}
-
-export function filterCurrentTaskFromHistory(
-  history: TaskRecord[],
-  currentTask: CurrentTaskIdentity,
-): TaskRecord[] {
-  const currentCreateTime = Number(currentTask?.createTime || 0);
-  if (!Number.isFinite(currentCreateTime) || currentCreateTime <= 0)
-    return history;
-
-  return history.filter((task) => {
-    const taskCreateTime = Number(task.createTime || task.runTime || 0);
-    return !(
-      taskCreateTime === currentCreateTime &&
-      runningHistoryStatuses.has(task.status)
-    );
-  });
-}
-
-export function filterRunningTaskRows(history: TaskRecord[]): TaskRecord[] {
-  return history.filter((task) => !runningHistoryStatuses.has(task.status));
-}
-
-export function shouldPollRealtime(view: TaskListView): boolean {
-  return view === "realtime";
 }
 
 type ProgressSnapshot = {
