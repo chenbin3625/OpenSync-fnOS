@@ -1,9 +1,55 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
 let engine: Server;
 let engineUrl: string;
+
+async function routeMobileTaskFixture(page: Page) {
+  await page.route("**/app/opensync/svr/**", async (route) => {
+    const url = new URL(route.request().url());
+    const success = (data: unknown) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ code: 200, data, msg: "" }),
+      });
+    if (url.pathname.endsWith("/session"))
+      return success({ uid: 1, development: false, version: "test" });
+    if (url.pathname.endsWith("/alist")) return success([]);
+    if (url.pathname.endsWith("/job") && url.searchParams.has("current"))
+      return success(null);
+    if (url.pathname.endsWith("/job")) {
+      return success({
+        dataList: [
+          {
+            id: 1,
+            enable: 1,
+            remark: "相册备份",
+            srcPath: '["/photos"]',
+            dstPath: '["/backup"]',
+            alistId: 1,
+            method: 0,
+            interval: 0,
+            isCron: 2,
+          },
+          {
+            id: 2,
+            enable: 1,
+            remark: "工作资料同步",
+            srcPath: '["/work"]',
+            dstPath: '["/backup"]',
+            alistId: 1,
+            method: 0,
+            interval: 0,
+            isCron: 2,
+          },
+        ],
+        count: 2,
+      });
+    }
+    return success(null);
+  });
+}
 
 test.beforeAll(async () => {
   engine = createServer(async (request, response) => {
@@ -240,6 +286,7 @@ test("mobile task tabs fit inside the page toolbar", async ({ page }) => {
     "desktop uses the fixed-height toolbar",
   );
 
+  await routeMobileTaskFixture(page);
   await page.goto("/app/opensync/tasks?tab=overview");
   const toolbar = page.locator(".page-toolbar");
   const tabs = toolbar.getByRole("tab");
@@ -270,50 +317,7 @@ test("mobile task switcher stays below the toolbar", async ({ page }) => {
     "mobile layout regression only",
   );
 
-  await page.route("**/app/opensync/svr/**", async (route) => {
-    const url = new URL(route.request().url());
-    const success = (data: unknown) =>
-      route.fulfill({
-        contentType: "application/json",
-        body: JSON.stringify({ code: 200, data, msg: "" }),
-      });
-    if (url.pathname.endsWith("/session"))
-      return success({ uid: 1, development: false, version: "test" });
-    if (url.pathname.endsWith("/alist")) return success([]);
-    if (url.pathname.endsWith("/job") && url.searchParams.has("current"))
-      return success(null);
-    if (url.pathname.endsWith("/job")) {
-      return success({
-        dataList: [
-          {
-            id: 1,
-            enable: 1,
-            remark: "相册备份",
-            srcPath: '["/photos"]',
-            dstPath: '["/backup"]',
-            alistId: 1,
-            method: 0,
-            interval: 0,
-            isCron: 2,
-          },
-          {
-            id: 2,
-            enable: 1,
-            remark: "工作资料同步",
-            srcPath: '["/work"]',
-            dstPath: '["/backup"]',
-            alistId: 1,
-            method: 0,
-            interval: 0,
-            isCron: 2,
-          },
-        ],
-        count: 2,
-      });
-    }
-    return success(null);
-  });
-
+  await routeMobileTaskFixture(page);
   await page.goto("/app/opensync/tasks?jobId=1&tab=overview");
   const toolbar = page.locator(".page-toolbar");
   const switcher = page.getByRole("tablist", { name: "任务列表" });
@@ -323,9 +327,9 @@ test("mobile task switcher stays below the toolbar", async ({ page }) => {
   const switcherBox = await switcher.boundingBox();
   expect(toolbarBox).not.toBeNull();
   expect(switcherBox).not.toBeNull();
-  expect(switcherBox!.y).toBeGreaterThanOrEqual(
-    toolbarBox!.y + toolbarBox!.height,
-  );
+  expect(
+    switcherBox!.y - (toolbarBox!.y + toolbarBox!.height),
+  ).toBeGreaterThanOrEqual(16);
 });
 
 test("task management top tabs keep a visible selected state", async ({ page }) => {
