@@ -71,7 +71,7 @@ export function FileTypeFilter({
   const addCustom = () => {
     const next = addCustomFileTypeFilter(value, customInput);
     if (next === value) {
-      Toast.warning("请输入新的有效文件扩展名");
+      Toast.warning("请输入新的有效文件名或通配规则");
       return;
     }
     onChange(next);
@@ -136,7 +136,7 @@ export function FileTypeFilter({
                 <div
                   className="file-type-patterns"
                   role="group"
-                  aria-label={`${group.label}扩展名`}
+                  aria-label={`${group.label}文件规则`}
                 >
                   {group.patterns.map((pattern) => (
                     <Checkbox
@@ -206,7 +206,7 @@ export function FileTypeFilter({
               </button>
             </div>
             {otherExpanded && (
-              <div className="custom-file-types" aria-label="其他扩展名">
+              <div className="custom-file-types" aria-label="其他文件规则">
                 {otherFilters.map((item) => (
                   <div className="custom-file-type-row" key={item.pattern}>
                     <Checkbox
@@ -243,8 +243,8 @@ export function FileTypeFilter({
       <div className="file-type-add">
         <Input
           value={customInput}
-          aria-label="自定义文件扩展名"
-          placeholder="文件扩展名，如 iso、tar.gz"
+          aria-label="自定义文件规则"
+          placeholder="文件名或通配规则，如 ipc-socket、a.bcd、*.doc"
           onChange={setCustomInput}
           onEnterPress={addCustom}
         />
@@ -252,7 +252,7 @@ export function FileTypeFilter({
           type="primary"
           theme="solid"
           icon={<IconPlusStroked aria-hidden="true" />}
-          aria-label="新增文件类型"
+          aria-label="新增文件规则"
           onClick={addCustom}
           disabled={!customInput.trim()}
         >

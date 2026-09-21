@@ -324,7 +324,7 @@ export default function TaskEditor({
                     />
                   ))}
                 </div>
-                <Field label="文件类型过滤">
+                <Field label="文件过滤">
                   <FileTypeFilter
                     value={form.exclude}
                     onChange={(value) => change("exclude", value)}

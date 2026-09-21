@@ -117,7 +117,7 @@ describe("existing synchronization contracts", () => {
       expect.arrayContaining(["*.tmp", "*.temp"]),
     );
   });
-  it("adds normalized custom file extensions and keeps their enabled state", () => {
+  it("adds custom file names and wildcard extension patterns separately", () => {
     const filters = taskFormModule as typeof taskFormModule & {
       addCustomFileTypeFilter?: (exclude: string, input: string) => string;
       parseCustomFileTypeFilters?: (
@@ -136,17 +136,23 @@ describe("existing synchronization contracts", () => {
     expect(filters.parseCustomFileTypeFilters).toBeTypeOf("function");
     expect(filters.parseOtherFileTypeFilters).toBeTypeOf("function");
 
-    const added = filters.addCustomFileTypeFilter!(".DS_Store", ".PST");
+    let added = filters.addCustomFileTypeFilter!(".DS_Store", "a.bcd");
+    added = filters.addCustomFileTypeFilter!(added, "ipc-socket");
+    added = filters.addCustomFileTypeFilter!(added, "*.DOC");
     expect(filters.parseOtherFileTypeFilters!(added)).toEqual([
-      { pattern: "*.pst", enabled: true },
+      { pattern: "a.bcd", enabled: true },
+      { pattern: "ipc-socket", enabled: true },
     ]);
-    const disabled = filters.updateExcludePatterns!(added, ["*.pst"], false);
+    expect(isExcludePatternEnabled(added, "*.doc")).toBe(true);
+    const disabled = filters.updateExcludePatterns!(added, ["a.bcd"], false);
     expect(filters.parseOtherFileTypeFilters!(disabled)).toEqual([
-      { pattern: "*.pst", enabled: false },
+      { pattern: "a.bcd", enabled: false },
+      { pattern: "ipc-socket", enabled: true },
     ]);
+    expect(isExcludePatternEnabled(disabled, "*.doc")).toBe(true);
     expect(disabled).toContain(".DS_Store");
   });
-  it("treats legacy manual file patterns as other file type filters", () => {
+  it("treats legacy manual file patterns and file names as other file filters", () => {
     const filters = taskFormModule as typeof taskFormModule & {
       parseOtherFileTypeFilters?: (
         exclude: string,
@@ -156,9 +162,10 @@ describe("existing synchronization contracts", () => {
 
     expect(
       filters.parseOtherFileTypeFilters!(
-        "keep-dir/\n*.pst\n# *.vmdk\n*.tmp\n.DS_Store",
+        "keep-dir/\nreport.final\n*.pst\n# *.vmdk\n*.tmp\n.DS_Store",
       ),
     ).toEqual([
+      { pattern: "report.final", enabled: true },
       { pattern: "*.pst", enabled: true },
       { pattern: "*.vmdk", enabled: false },
     ]);

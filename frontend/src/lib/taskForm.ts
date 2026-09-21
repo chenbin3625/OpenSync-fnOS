@@ -162,7 +162,7 @@ export function validateJobForm(form: JobForm) {
   return "";
 }
 
-// ---- 文件类型过滤 ----
+// ---- 文件过滤 ----
 
 export const fileTypeFilterGroups = [
   {
@@ -275,8 +275,10 @@ export const systemDirFilterGroups = [
   },
 ] as const;
 
-const CUSTOM_FILE_TYPE_START = "# --- 自定义文件类型过滤 ---";
-const CUSTOM_FILE_TYPE_END = "# --- 自定义文件类型过滤结束 ---";
+const CUSTOM_FILE_TYPE_START = "# --- 自定义文件过滤 ---";
+const CUSTOM_FILE_TYPE_END = "# --- 自定义文件过滤结束 ---";
+const LEGACY_CUSTOM_FILE_TYPE_START = "# --- 自定义文件类型过滤 ---";
+const LEGACY_CUSTOM_FILE_TYPE_END = "# --- 自定义文件类型过滤结束 ---";
 
 function fileTypePresetPatterns() {
   return new Set<string>(
@@ -313,25 +315,43 @@ export function updateExcludePatterns(
   return lines.join("\n");
 }
 
-function normalizeCustomExtension(input: string) {
-  const extension = input
-    .trim()
-    .toLowerCase()
-    .replace(/^\*\./, "")
-    .replace(/^\./, "");
-  return /^[a-z0-9][a-z0-9.+_-]*$/.test(extension)
-    ? `*.${extension}`
-    : "";
+function normalizeCustomFilePattern(input: string) {
+  const pattern = input.trim();
+  if (
+    !pattern ||
+    pattern.startsWith("#") ||
+    pattern.includes("/") ||
+    pattern.includes("\\")
+  ) {
+    return "";
+  }
+
+  if (/^\*\.[a-z0-9][a-z0-9.+_-]*$/i.test(pattern)) {
+    return pattern.toLowerCase();
+  }
+
+  return pattern.endsWith("/") ? "" : pattern;
+}
+
+function findCustomFileFilterBlock(lines: string[]) {
+  for (const [startMarker, endMarker] of [
+    [CUSTOM_FILE_TYPE_START, CUSTOM_FILE_TYPE_END],
+    [LEGACY_CUSTOM_FILE_TYPE_START, LEGACY_CUSTOM_FILE_TYPE_END],
+  ]) {
+    const start = lines.findIndex((line) => line.trim() === startMarker);
+    const end = lines.findIndex(
+      (line, index) => index > start && line.trim() === endMarker,
+    );
+    if (start !== -1 && end !== -1) return { start, end };
+  }
+  return null;
 }
 
 export function parseCustomFileTypeFilters(exclude: string) {
   const lines = exclude.split("\n");
-  const start = lines.findIndex((line) => line.trim() === CUSTOM_FILE_TYPE_START);
-  const end = lines.findIndex(
-    (line, index) => index > start && line.trim() === CUSTOM_FILE_TYPE_END,
-  );
-  if (start === -1 || end === -1) return [];
-  return lines.slice(start + 1, end).flatMap((line) => {
+  const block = findCustomFileFilterBlock(lines);
+  if (!block) return [];
+  return lines.slice(block.start + 1, block.end).flatMap((line) => {
     const value = line.trim();
     if (!value) return [];
     const enabled = !value.startsWith("# ");
@@ -345,17 +365,20 @@ function parseFileTypePatternLine(line: string) {
   if (!value) return null;
   const enabled = !value.startsWith("# ");
   const pattern = enabled ? value : value.slice(2).trim();
-  if (!/^\*\.[a-z0-9][a-z0-9.+_-]*$/i.test(pattern)) return null;
-  return { pattern: pattern.toLowerCase(), enabled };
+  if (/^\*\.[a-z0-9][a-z0-9.+_-]*$/i.test(pattern)) {
+    return { pattern: pattern.toLowerCase(), enabled };
+  }
+  if (enabled) {
+    const normalized = normalizeCustomFilePattern(pattern);
+    return normalized ? { pattern: normalized, enabled } : null;
+  }
+  return null;
 }
 
 export function parseOtherFileTypeFilters(exclude: string) {
   const presetPatterns = fileTypePresetPatterns();
   const lines = exclude.split("\n");
-  const start = lines.findIndex((line) => line.trim() === CUSTOM_FILE_TYPE_START);
-  const end = lines.findIndex(
-    (line, index) => index > start && line.trim() === CUSTOM_FILE_TYPE_END,
-  );
+  const block = findCustomFileFilterBlock(lines);
   const filters = new Map<string, { pattern: string; enabled: boolean }>();
   const add = (item: { pattern: string; enabled: boolean } | null) => {
     if (!item || presetPatterns.has(item.pattern) || filters.has(item.pattern)) {
@@ -365,17 +388,22 @@ export function parseOtherFileTypeFilters(exclude: string) {
   };
 
   parseCustomFileTypeFilters(exclude).forEach((item) =>
-    add({ pattern: item.pattern.toLowerCase(), enabled: item.enabled }),
+    add({
+      pattern: item.pattern.startsWith("*.")
+        ? item.pattern.toLowerCase()
+        : item.pattern,
+      enabled: item.enabled,
+    }),
   );
   lines.forEach((line, index) => {
-    if (start !== -1 && end !== -1 && index >= start && index <= end) return;
+    if (block && index >= block.start && index <= block.end) return;
     add(parseFileTypePatternLine(line));
   });
   return [...filters.values()];
 }
 
 export function addCustomFileTypeFilter(exclude: string, input: string) {
-  const pattern = normalizeCustomExtension(input);
+  const pattern = normalizeCustomFilePattern(input);
   if (!pattern) return exclude;
 
   const presetPatterns = fileTypePresetPatterns();
@@ -389,32 +417,31 @@ export function addCustomFileTypeFilter(exclude: string, input: string) {
   if (existing) return updateExcludePatterns(exclude, [pattern], true);
 
   const lines = exclude.split("\n");
-  const end = lines.findIndex((line) => line.trim() === CUSTOM_FILE_TYPE_END);
-  if (end !== -1) {
-    lines.splice(end, 0, pattern);
+  const block = findCustomFileFilterBlock(lines);
+  if (block) {
+    lines.splice(block.end, 0, pattern);
     return lines.join("\n");
   }
 
-  const block = [CUSTOM_FILE_TYPE_START, pattern, CUSTOM_FILE_TYPE_END].join("\n");
+  const newBlock = [CUSTOM_FILE_TYPE_START, pattern, CUSTOM_FILE_TYPE_END].join(
+    "\n",
+  );
   const current = exclude.trimEnd();
-  return current ? `${current}\n\n${block}` : block;
+  return current ? `${current}\n\n${newBlock}` : newBlock;
 }
 
 export function removeCustomFileTypeFilter(exclude: string, pattern: string) {
   let lines = exclude
     .split("\n")
     .filter((line) => ![pattern, `# ${pattern}`].includes(line.trim()));
-  const start = lines.findIndex((line) => line.trim() === CUSTOM_FILE_TYPE_START);
-  const end = lines.findIndex(
-    (line, index) => index > start && line.trim() === CUSTOM_FILE_TYPE_END,
-  );
-  if (start === -1 || end === -1) return lines.join("\n");
+  const block = findCustomFileFilterBlock(lines);
+  if (!block) return lines.join("\n");
 
-  const nextBlock = lines.slice(start + 1, end);
+  const nextBlock = lines.slice(block.start + 1, block.end);
   if (nextBlock.some((line) => line.trim())) return lines.join("\n");
 
-  const before = lines.slice(0, start).join("\n").trimEnd();
-  const after = lines.slice(end + 1).join("\n").trimStart();
+  const before = lines.slice(0, block.start).join("\n").trimEnd();
+  const after = lines.slice(block.end + 1).join("\n").trimStart();
   return [before, after].filter(Boolean).join("\n\n");
 }
 

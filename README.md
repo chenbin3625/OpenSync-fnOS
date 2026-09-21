@@ -4,7 +4,7 @@
 
 依赖 [OpenList](https://github.com/OpenListTeam/OpenList)（兼容 AList）作为存储引擎 — 在 OpenList 中添加本地存储和各类云盘（阿里云盘、百度网盘、OneDrive、S3、WebDAV 等）后，即可通过 OpenSync 在不同存储之间自动定期备份与同步文件。
 
-当前版本：**v0.0.19**
+当前版本：**v0.0.20**
 
 ## 功能
 
