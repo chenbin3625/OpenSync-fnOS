@@ -13,3 +13,6 @@ test-results/
 
 # 一键预览脚本（scripts/dev.mjs）的运行日志
 .dev-logs/
+
+# 本地排查用的一次性脚本（frontend/.tmp-*.mjs）
+frontend/.tmp-*

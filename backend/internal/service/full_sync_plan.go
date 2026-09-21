@@ -2,12 +2,13 @@ package service
 
 import (
 	"fmt"
+	"log"
+	"opensync/internal/msg"
 	"path"
 	"sort"
 	"strings"
 	"sync"
-
-	ignore "github.com/sabhiram/go-gitignore"
+	"time"
 )
 
 type fullSyncSnapshot struct {
@@ -55,6 +56,13 @@ type fullSyncPlan struct {
 	src *fullSyncSnapshot
 	dst *fullSyncSnapshot
 
+	// branchGate bounds the concurrent recursion in compareDir. Without it a
+	// deep destination tree forks one goroutine per child directory at every
+	// level, so a wide tree can spawn thousands at once. It is the task's
+	// existing scan-branch semaphore, so plan building and tree scanning share
+	// one budget; a nil gate (tests) runs the recursion sequentially.
+	branchGate chan struct{}
+
 	mu           sync.Mutex
 	newDirs      map[string]fullSyncDir
 	newFiles     map[string]*fullSyncFile
@@ -64,7 +72,7 @@ type fullSyncPlan struct {
 	blockers     map[string]fullSyncDelete
 }
 
-func (jt *JobTask) syncFull(work scanWork, spec *ignore.GitIgnore) {
+func (jt *JobTask) syncFull(work scanWork, spec *excludeMatcher) {
 	// Full sync needs both complete trees before it mutates the destination;
 	// otherwise an old path may be deleted before it can satisfy a moved file.
 	var srcSnapshot, dstSnapshot *fullSyncSnapshot
@@ -99,12 +107,12 @@ func (jt *JobTask) syncFull(work scanWork, spec *ignore.GitIgnore) {
 		}
 	}
 
-	plan := newFullSyncPlan(srcSnapshot, dstSnapshot)
+	plan := newFullSyncPlan(srcSnapshot, dstSnapshot, jt.scanBranchSem)
 	plan.build(jt.Job)
 	jt.executeFullSyncPlan(plan)
 }
 
-func (jt *JobTask) scanFullSyncTree(root string, firstDst bool, spec *ignore.GitIgnore, isSrc bool) (*fullSyncSnapshot, error) {
+func (jt *JobTask) scanFullSyncTree(root string, firstDst bool, spec *excludeMatcher, isSrc bool) (*fullSyncSnapshot, error) {
 	root = normalizeDirPath(root)
 	snapshot := &fullSyncSnapshot{
 		root: root,
@@ -175,10 +183,11 @@ func (jt *JobTask) scanFullSyncTree(root string, firstDst bool, spec *ignore.Git
 	return snapshot, firstErr
 }
 
-func newFullSyncPlan(src, dst *fullSyncSnapshot) *fullSyncPlan {
+func newFullSyncPlan(src, dst *fullSyncSnapshot, branchGate chan struct{}) *fullSyncPlan {
 	return &fullSyncPlan{
 		src:          src,
 		dst:          dst,
+		branchGate:   branchGate,
 		newDirs:      make(map[string]fullSyncDir),
 		newFiles:     make(map[string]*fullSyncFile),
 		extraFiles:   make(map[string]*fullSyncExtraFile),
@@ -262,21 +271,47 @@ func (plan *fullSyncPlan) compareDir(job map[string]interface{}, srcRelDir, dstR
 		plan.addExtraFile(dstDir, name, metadata, deleteRoot)
 	}
 
-	// Recurse into child directories concurrently.
-	if len(children) > 1 {
-		var wg sync.WaitGroup
-		for _, child := range children {
-			child := child
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				plan.compareDir(job, child.srcRel, child.dstRel)
-			}()
-		}
-		wg.Wait()
-	} else if len(children) == 1 {
+	// Recurse into child directories, forking only while the shared branch
+	// budget allows it. A child that cannot get a slot is compared inline, so
+	// the walk always makes progress and can never deadlock waiting on itself.
+	if len(children) == 1 {
 		plan.compareDir(job, children[0].srcRel, children[0].dstRel)
+		return
 	}
+	var wg sync.WaitGroup
+	for _, child := range children {
+		child := child
+		if !plan.acquireBranchSlot() {
+			plan.compareDir(job, child.srcRel, child.dstRel)
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer plan.releaseBranchSlot()
+			plan.compareDir(job, child.srcRel, child.dstRel)
+		}()
+	}
+	wg.Wait()
+}
+
+// acquireBranchSlot takes a slot from the shared branch budget without
+// blocking. Plan building is pure in-memory comparison, so waiting for a slot
+// would only add latency: falling back to an inline call is strictly better.
+func (plan *fullSyncPlan) acquireBranchSlot() bool {
+	if plan.branchGate == nil {
+		return false
+	}
+	select {
+	case plan.branchGate <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (plan *fullSyncPlan) releaseBranchSlot() {
+	<-plan.branchGate
 }
 
 func (plan *fullSyncPlan) collectSourceOnly(job map[string]interface{}, srcRelDir, dstRelDir string) {
@@ -443,6 +478,7 @@ func (jt *JobTask) executeFullSyncPlan(plan *fullSyncPlan) {
 		jt.queueCopyFile(file.srcDir, file.dstDir, file.name, file.metadata.Size, taskItemTypeCopy)
 	}
 
+	deleteKeys := make([]string, 0, len(plan.extraDeletes))
 	for _, key := range sortedDeleteKeys(plan.extraDeletes, true) {
 		if _, protected := protectedDeletes[key]; protected {
 			continue
@@ -450,9 +486,62 @@ func (jt *JobTask) executeFullSyncPlan(plan *fullSyncPlan) {
 		if _, consumed := consumedFileDeletes[key]; consumed {
 			continue
 		}
+		deleteKeys = append(deleteKeys, key)
+	}
+
+	// Safety valve. Deletions are derived purely from "destination entries the
+	// source did not match", so any listing anomaly on the source side is
+	// amplified into a mass delete. Individual anomalies are rejected upstream,
+	// but the amplifier itself is what turns one of them into data loss, so an
+	// implausible deletion ratio stops the delete phase instead of executing it.
+	if reason, unsafe := plan.unsafeDeleteVolume(len(deleteKeys)); unsafe {
+		log.Printf("Task %d skipped the full-sync delete phase: %s", jt.TaskID, reason)
+		errMsg := msg.MirrorDeleteGuard(reason)
+		jt.CopyHook("", plan.dst.root, "", nil, "", taskStatusFailed, &errMsg, taskItemPath, taskItemTypeDelete, time.Now().Unix())
+		return
+	}
+
+	for _, key := range deleteKeys {
 		item := plan.extraDeletes[key]
 		jt.queueDelFile(item.dir, item.name, item.metadata.Size, strings.HasSuffix(item.name, "/"))
 	}
+}
+
+// mirrorDeleteRatioThreshold / mirrorDeleteFloor gate the delete phase. Both
+// must be exceeded: a ratio alone would block routine cleanup of a small
+// directory, and an absolute count alone would block a legitimate large purge.
+const (
+	mirrorDeleteRatioThreshold = 0.5
+	mirrorDeleteFloor          = 100
+)
+
+// unsafeDeleteVolume reports whether the planned deletions are too large a share
+// of the destination to be plausible.
+func (plan *fullSyncPlan) unsafeDeleteVolume(deleteCount int) (string, bool) {
+	if deleteCount < mirrorDeleteFloor {
+		return "", false
+	}
+	total := plan.dst.entryCount()
+	if total == 0 {
+		return "", false
+	}
+	ratio := float64(deleteCount) / float64(total)
+	if ratio <= mirrorDeleteRatioThreshold {
+		return "", false
+	}
+	return fmt.Sprintf("planned deletions %d of %d destination entries (%.0f%%) exceed the %.0f%% safety threshold",
+		deleteCount, total, ratio*100, mirrorDeleteRatioThreshold*100), true
+}
+
+// entryCount totals the entries recorded across the scanned tree.
+func (snapshot *fullSyncSnapshot) entryCount() int {
+	snapshot.mu.Lock()
+	defer snapshot.mu.Unlock()
+	total := 0
+	for _, items := range snapshot.dirs {
+		total += len(items)
+	}
+	return total
 }
 
 func (plan *fullSyncPlan) relocations() []fullSyncRelocation {

@@ -569,7 +569,10 @@ function FileDetails({
         signal,
       ),
     [taskId, page, size, type, object, hasError, keyword],
-    true,
+    // No polling: History lists only terminal tasks (statusIn 2..8), so a
+    // finished record's item list can never change. Re-fetching it every 3s was
+    // pure load on the NAS and the AList box behind it.
+    false,
   );
   useEffect(() => {
     if (resource.error) Toast.error(resource.error);

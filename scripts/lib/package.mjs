@@ -97,7 +97,7 @@ export const buildPackage = (arch, { nodeDir } = {}) => {
     [
       "build",
       "-trimpath",
-      "-ldflags=-s -w",
+      `-ldflags=-s -w -X main.appVersion=${readVersion()}`,
       "-o",
       join(pack, "app", "server", "opensync"),
       "./cmd/server",

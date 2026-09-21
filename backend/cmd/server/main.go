@@ -29,6 +29,11 @@ import (
 //go:embed all:web
 var webFiles embed.FS
 
+// appVersion is injected at build time via
+// -ldflags "-X main.appVersion=<version>" (see scripts/lib/package.mjs, which
+// takes it from fnos/manifest). Local `go build` leaves the fallback.
+var appVersion = "dev"
+
 const prefix = "/app/opensync"
 const maxRequestBodyBytes = 1 << 20
 const shutdownTimeout = 30 * time.Second
@@ -43,6 +48,14 @@ func newRouter(development bool, allowedOrigins []string) *gin.Engine {
 				msg := "操作失败，请检查引擎连接或查看服务日志"
 				if public, ok := value.(model.PublicError); ok {
 					msg = string(public)
+				}
+				if c.Writer.Written() {
+					// Headers and body are already on the wire (e.g. an SSE
+					// stream mid-flight). Appending a JSON error object would
+					// corrupt the event stream the client is parsing, so just
+					// abort and let the connection close.
+					c.Abort()
+					return
 				}
 				c.AbortWithStatusJSON(500, gin.H{"code": 500, "msg": msg})
 			}
@@ -59,7 +72,7 @@ func newRouter(development bool, allowedOrigins []string) *gin.Engine {
 	})
 	api := r.Group(prefix+"/svr", platform.GatewayRequired(development, allowedOrigins))
 	api.GET("/session", func(c *gin.Context) {
-		c.JSON(200, model.Success(gin.H{"uid": c.GetInt64("uid"), "development": development, "version": "0.0.1"}))
+		c.JSON(200, model.Success(gin.H{"uid": c.GetInt64("uid"), "development": development, "version": appVersion}))
 	})
 	api.GET("/system/config", handler.GetSystemConfig)
 	api.PUT("/system/config", handler.UpdateSystemConfig)
@@ -155,7 +168,18 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	server := &http.Server{Handler: newRouter(*development, config.GetConfig().Server.AllowedOrigins), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 32 << 10}
+	// baseCtx is cancelled at shutdown so long-lived handlers (the SSE progress
+	// stream) return instead of keeping http.Server.Shutdown blocked for its
+	// full timeout: an SSE handler only exits when its request context ends.
+	baseCtx, cancelRequests := context.WithCancel(context.Background())
+	defer cancelRequests()
+	server := &http.Server{
+		Handler:           newRouter(*development, config.GetConfig().Server.AllowedOrigins),
+		BaseContext:       func(net.Listener) context.Context { return baseCtx },
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    32 << 10,
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	done := make(chan error, 1)
@@ -170,6 +194,8 @@ func main() {
 	shutdown, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	service.ShutdownJobs(shutdown)
+	// Ends the SSE handlers before Shutdown waits on them.
+	cancelRequests()
 	if server.Shutdown(shutdown) != nil {
 		server.Close()
 	}

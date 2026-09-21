@@ -59,13 +59,19 @@ export function useResource<T>(
   return { data, loading, error, refresh };
 }
 
+/** Returned when a run was dropped because another action was still in flight. */
+export const actionSkipped = Symbol("actionSkipped");
+
 export function useAction() {
   const inFlight = useRef(false);
   const [busy, setBusy] = useState(false);
   return {
     busy,
+    // Returns actionSkipped when the call was dropped, so callers can avoid
+    // reporting success for work that never ran: double-clicking delete used to
+    // skip the second request and still toast "已删除".
     run: async (action: () => Promise<unknown>) => {
-      if (inFlight.current) return;
+      if (inFlight.current) return actionSkipped;
       inFlight.current = true;
       setBusy(true);
       try {

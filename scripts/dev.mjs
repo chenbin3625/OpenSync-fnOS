@@ -188,6 +188,12 @@ const frontend = start("frontend", "npm", ["run", "dev"], {
   color: "35",
 });
 
+// 启动失败时的收尾入口。此前这两处调用的 die() 从未被定义，抛出的
+// ReferenceError 会让顶层 await 直接拒绝，shutdown() 永不执行 —— 已拉起的
+// Vite（detached 进程组）继续占着端口，且看不到日志路径提示。
+// shutdown 自带 closing 幂等保护，重复调用安全。
+const die = (message) => shutdown(1, message);
+
 // ── 5. 信号处理（收尾机制已在第 4 节定义） ───────────────────────────────
 process.on("SIGINT", () => shutdown(0, "\n收到 Ctrl-C。"));
 process.on("SIGTERM", () => shutdown(0, "\n收到终止信号。"));
@@ -196,10 +202,15 @@ process.on("SIGTERM", () => shutdown(0, "\n收到终止信号。"));
 const waitFor = async (label, url, child, timeoutMs) => {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (child.exitCode !== null || child.signalCode !== null)
-      die(
+    if (child.exitCode !== null || child.signalCode !== null) {
+      // await + return: die() resolves only after shutdown has stopped the
+      // siblings and called process.exit, so the poll loop must not continue
+      // in the meantime.
+      await die(
         `${label}进程已退出（退出码 ${child.exitCode}），未就绪。日志：${logs.get(label)}`,
       );
+      return;
+    }
     try {
       const response = await fetch(url, { signal: AbortSignal.timeout(2000) });
       if (response.ok) return;
@@ -208,7 +219,7 @@ const waitFor = async (label, url, child, timeoutMs) => {
     }
     await sleep(400);
   }
-  die(`${label}在 ${timeoutMs / 1000}s 内未就绪：${url}`);
+  await die(`${label}在 ${timeoutMs / 1000}s 内未就绪：${url}`);
 };
 
 // go run 首次需要编译，给足时间。

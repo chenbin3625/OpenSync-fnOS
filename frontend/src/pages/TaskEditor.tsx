@@ -324,7 +324,10 @@ export default function TaskEditor({
                     />
                   ))}
                 </div>
-                <Field label="文件过滤">
+                <Field
+                  label="文件过滤"
+                  hint="仅支持文件名和文件后缀；文件目录请在“文件夹过滤”中配置"
+                >
                   <FileTypeFilter
                     value={form.exclude}
                     onChange={(value) => change("exclude", value)}
@@ -410,10 +413,35 @@ function FileSizeFilterRow({
   const valueKey = `${kind}FileSize` as const;
   const unitKey = `${kind}FileSizeUnit` as const;
   const currentValue = Number(form[valueKey]);
-  const enabled = currentValue > 0;
-  const displayValue = enabled ? String(form[valueKey]) : String(config.value);
-  const displayUnit = enabled ? form[unitKey] : config.unit;
+  // draft holds exactly what the user typed while the field has focus. Without
+  // it, round-tripping every keystroke through Number() ate the decimal point
+  // ("1." -> 1), so typing 1.2 silently stored 12 — and a leading "0" parsed to
+  // 0, which flipped `enabled` off and disabled the input mid-entry, making
+  // "0.5" impossible to type.
+  const [draft, setDraft] = useState<string | null>(null);
+  const editing = draft !== null;
+  const enabled = editing || currentValue > 0;
+  const displayValue = editing
+    ? draft
+    : currentValue > 0
+      ? String(form[valueKey])
+      : String(config.value);
+  const displayUnit = currentValue > 0 ? form[unitKey] : config.unit;
   const controlLabel = `${config.label}文件大小`;
+
+  const commitDraft = (raw: string) => {
+    setDraft(null);
+    const trimmed = raw.trim();
+    const parsed = Number(trimmed);
+    // An empty or unparseable field means "no limit" (0); a valid number is
+    // stored with its decimals intact.
+    change(
+      valueKey,
+      (trimmed === "" || !Number.isFinite(parsed) || parsed < 0
+        ? 0
+        : parsed) as JobForm[typeof valueKey],
+    );
+  };
 
   return (
     <div className={`file-size-filter-row${enabled ? "" : " is-disabled"}`}>
@@ -422,6 +450,7 @@ function FileSizeFilterRow({
         checked={enabled}
         onChange={(event) => {
           const checked = Boolean(event.target.checked);
+          setDraft(null);
           patch({
             [valueKey]: checked
               ? currentValue > 0
@@ -438,10 +467,10 @@ function FileSizeFilterRow({
         inputMode="decimal"
         disabled={!enabled}
         value={displayValue}
-        onChange={(value) => {
-          const n = Number(value);
-          change(valueKey, (Number.isFinite(n) ? n : 0) as JobForm[typeof valueKey]);
-        }}
+        onChange={(value) => setDraft(value)}
+        onBlur={(event) =>
+          commitDraft((event.target as HTMLInputElement).value ?? "")
+        }
       />
       <Select
         aria-label={`${controlLabel}单位`}

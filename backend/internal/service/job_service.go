@@ -170,6 +170,9 @@ func ValidateJobInput(job map[string]interface{}) {
 	if syncPathsOverlap(parsePathList(job["srcPath"]), parsePathList(job["dstPath"])) {
 		panicPublic(msg.SyncPathOverlap)
 	}
+	if srcSelectionsNested(parsePathList(job["srcPath"])) {
+		panicPublic(msg.SrcPathNested)
+	}
 
 	if enable, ok := job["enable"]; ok {
 		enableInt := util.ToInt(enable)

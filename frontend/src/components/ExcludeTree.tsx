@@ -8,7 +8,7 @@ import {
 import { useAsyncTree } from "../lib/useAsyncTree";
 
 /**
- * 将绝对路径转为相对于某个 srcPath 的 gitignore 格式路径。
+ * 将绝对路径转为相对于某个 srcPath 的目录过滤路径。
  * 例如 srcPath="/data", abs="/data/photos/raw" → "photos/raw/"
  */
 function toRelative(srcPath: string, abs: string): string {

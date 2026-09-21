@@ -114,8 +114,18 @@ for (const { arch, file } of artifacts)
   );
 console.log(`  校验和  ${relative(root, checksumFile)}`);
 
-// 本机平台不匹配 ARM，无法执行产物，故只做存在性提醒。
-if (!existsSync(artifacts[0].file)) throw new Error("产物缺失");
+// 本机平台不匹配 ARM，无法执行产物，故只做存在性与体积检查。
+// 之前只检查 artifacts[0]，且紧跟在 renameSync 之后，断言实际上不可能失败。
+const MIN_ARTIFACT_BYTES = 1 << 20;
+for (const { arch, file } of artifacts) {
+  if (!existsSync(file)) throw new Error(`${arch} 产物缺失：${file}`);
+  const size = fileSize(file);
+  if (size < MIN_ARTIFACT_BYTES)
+    throw new Error(
+      `${arch} 产物只有 ${formatBytes(size)}，明显小于预期，疑似构建未完成：${file}`,
+    );
+}
+if (!existsSync(checksumFile)) throw new Error("校验和文件缺失");
 
 console.log(`
 ────────────────────────────────────────────────────────

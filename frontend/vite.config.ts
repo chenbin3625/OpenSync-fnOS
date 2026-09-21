@@ -1,6 +1,6 @@
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
-import { writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 
 export default defineConfig({
   base: "/app/opensync/",
@@ -13,6 +13,18 @@ export default defineConfig({
           new URL("../backend/cmd/server/web/.gitkeep", import.meta.url),
           "",
         );
+        // public/ is copied wholesale, so the MSW service worker would ship
+        // inside the go:embed payload. Only dev serves it, and a mock
+        // interceptor has no business being installable in a release build.
+        if (process.env.VITE_DATA_MODE !== "mock") {
+          rmSync(
+            new URL(
+              "../backend/cmd/server/web/mockServiceWorker.js",
+              import.meta.url,
+            ),
+            { force: true },
+          );
+        }
       },
     },
   ],

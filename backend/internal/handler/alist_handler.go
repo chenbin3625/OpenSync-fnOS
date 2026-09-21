@@ -13,7 +13,7 @@ func GetAlist(c *gin.Context) {
 	alistIDStr := c.Query("alistId")
 	path := c.Query("path")
 	if alistIDStr != "" && path != "" {
-		alistID, err := parseRequiredID(alistIDStr, "alistId")
+		alistID, err := parseRequiredID(alistIDStr)
 		if err != nil {
 			respondError(c, err.Error())
 			return
@@ -54,7 +54,7 @@ func TestAlist(c *gin.Context) {
 		respondError(c, msg.LostPart)
 		return
 	}
-	id, err := parseRequiredID(idStr, "id")
+	id, err := parseRequiredID(idStr)
 	if err != nil {
 		respondError(c, err.Error())
 		return
@@ -74,7 +74,7 @@ func DeleteAlist(c *gin.Context) {
 		respondError(c, msg.LostPart)
 		return
 	}
-	id, err := parseRequiredID(idStr, "id")
+	id, err := parseRequiredID(idStr)
 	if err != nil {
 		respondError(c, err.Error())
 		return

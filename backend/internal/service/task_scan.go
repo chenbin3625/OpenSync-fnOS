@@ -11,8 +11,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	ignore "github.com/sabhiram/go-gitignore"
 )
 
 type scanWorkMode int
@@ -111,12 +109,11 @@ func (jt *JobTask) sync() {
 	srcPaths := parsePathList(jt.Job["srcPath"])
 	jobExclude := jt.Job["exclude"]
 
-	var spec *ignore.GitIgnore
+	var spec *excludeMatcher
 	if jobExclude != nil {
 		excludeStr := fmt.Sprintf("%v", jobExclude)
 		if excludeStr != "" {
-			patterns := parseExcludePatterns(excludeStr)
-			spec = ignore.CompileIgnoreLines(patterns...)
+			spec = newExcludeMatcher(excludeStr)
 		}
 	}
 
@@ -395,7 +392,7 @@ func (jt *JobTask) queueDelFile(path, fileName string, size interface{}, isPath 
 	}
 }
 
-func (jt *JobTask) listDir(path string, firstDst bool, spec *ignore.GitIgnore, rootPath string, isSrc bool) (FileListResult, error) {
+func (jt *JobTask) listDir(path string, firstDst bool, spec *excludeMatcher, rootPath string, isSrc bool) (FileListResult, error) {
 	var useCache int
 	if isSrc && !firstDst {
 		useCache = 1
@@ -451,7 +448,7 @@ func (jt *JobTask) listDir(path string, firstDst bool, spec *ignore.GitIgnore, r
 		filtered := make(FileListResult, len(result))
 		for key, val := range result {
 			checkPath := excludeMatchPath(rootPath, path, key)
-			if !spec.MatchesPath(checkPath) {
+			if !spec.matches(checkPath) {
 				filtered[key] = val
 			}
 		}
@@ -492,7 +489,7 @@ func pathIfTrue(cond bool, path string) string {
 	return ""
 }
 
-func (jt *JobTask) listSrcAndDst(srcPath, dstPath string, spec *ignore.GitIgnore, srcRootPath, dstRootPath string, firstDst bool) (FileListResult, FileListResult, error) {
+func (jt *JobTask) listSrcAndDst(srcPath, dstPath string, spec *excludeMatcher, srcRootPath, dstRootPath string, firstDst bool) (FileListResult, FileListResult, error) {
 	var srcFiles, dstFiles FileListResult
 	var srcErr, dstErr error
 
@@ -549,7 +546,7 @@ func (jt *JobTask) ensureDstDirAfterListError(dstPath string, listErr error) boo
 	return true
 }
 
-func (jt *JobTask) runScanWork(work scanWork, spec *ignore.GitIgnore) {
+func (jt *JobTask) runScanWork(work scanWork, spec *excludeMatcher) {
 	if work.Mode == scanWorkMissingDst {
 		jt.syncWithoutHave(work, spec)
 		return
@@ -557,7 +554,7 @@ func (jt *JobTask) runScanWork(work scanWork, spec *ignore.GitIgnore) {
 	jt.syncWithHave(work, spec)
 }
 
-func (jt *JobTask) runChildScanWorks(children []scanWork, spec *ignore.GitIgnore) {
+func (jt *JobTask) runChildScanWorks(children []scanWork, spec *excludeMatcher) {
 	if len(children) == 0 {
 		return
 	}
@@ -580,7 +577,7 @@ func (jt *JobTask) runChildScanWorks(children []scanWork, spec *ignore.GitIgnore
 	wg.Wait()
 }
 
-func (jt *JobTask) syncWithHave(work scanWork, spec *ignore.GitIgnore) {
+func (jt *JobTask) syncWithHave(work scanWork, spec *excludeMatcher) {
 	jt.beginScanWork(work)
 	if jt.isBreak() {
 		jt.finishScanWork()
@@ -645,7 +642,7 @@ func (jt *JobTask) syncWithHave(work scanWork, spec *ignore.GitIgnore) {
 	jt.runChildScanWorks(children, spec)
 }
 
-func (jt *JobTask) syncWithoutHave(work scanWork, spec *ignore.GitIgnore) {
+func (jt *JobTask) syncWithoutHave(work scanWork, spec *excludeMatcher) {
 	jt.beginScanWork(work)
 	if jt.isBreak() {
 		jt.finishScanWork()
@@ -716,6 +713,16 @@ func fileChanged(srcVal, dstVal interface{}) bool {
 	if isMD5Digest(src.MD5) && isMD5Digest(dst.MD5) {
 		return src.MD5 != dst.MD5
 	}
+	// No usable digest on at least one side. Without a further signal a
+	// same-size in-place edit is invisible, and many drivers never return a
+	// hash, so the file would never be re-synced. Fall back to the modification
+	// time: only when both sides report one is it meaningful, and only a source
+	// strictly newer than the destination counts as changed. A destination that
+	// is newer (or equal) is left alone, so a copy whose mtime the driver set to
+	// the transfer time does not re-copy on every run.
+	if src.Modified > 0 && dst.Modified > 0 {
+		return src.Modified > dst.Modified
+	}
 	return false
 }
 
@@ -751,7 +758,11 @@ func toFileMetadata(val interface{}) FileMetadata {
 		metadata.MD5 = normalizeMD5(metadata.MD5)
 		return metadata
 	case map[string]interface{}:
-		return FileMetadata{Size: util.ToInt64(v["size"]), MD5: normalizeMD5(util.StringValue(v["md5"]))}
+		return FileMetadata{
+			Size:     util.ToInt64(v["size"]),
+			MD5:      normalizeMD5(util.StringValue(v["md5"])),
+			Modified: util.ToInt64(v["modified"]),
+		}
 	default:
 		return FileMetadata{Size: util.ToInt64(val)}
 	}

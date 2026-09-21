@@ -310,8 +310,11 @@ func TestClient(ctx context.Context, alistID int64) {
 	if err != nil {
 		panicPublicIf(err, msg.AlistNotFound)
 	}
-	url, _ := alist["url"].(string)
-	token, _ := alist["token"].(string)
+	// util.StringValue, not a bare type assertion: a DB row can carry a
+	// non-string (or NULL) here, and an assertion would silently degrade the
+	// token to "" and test the engine unauthenticated.
+	url := util.StringValue(alist["url"])
+	token := util.StringValue(alist["token"])
 	if url == "" {
 		panicPublic(msg.AlistURLInvalid)
 	}

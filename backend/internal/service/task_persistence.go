@@ -1,11 +1,15 @@
 package service
 
 import (
+	"fmt"
 	"log"
 	"time"
 )
 
 func (jt *JobTask) persistRemainingTaskItems() error {
+	// Cancel first: a timer that fires during/after the final flush would write
+	// again behind the task's back.
+	jt.cancelPersistFlush()
 	if err := jt.flushPersistBuffer(); err != nil {
 		return err
 	}
@@ -55,9 +59,21 @@ func (jt *JobTask) schedulePersistFlush() {
 		return
 	}
 	jt.persistFlushScheduled = true
-	time.AfterFunc(persistFlushInterval, func() {
+	jt.persistFlushTimer = time.AfterFunc(persistFlushInterval, func() {
+		// This runs on the timer's own goroutine, which no Gin middleware
+		// covers: an unrecovered panic here takes the whole NAS app down. The
+		// progress hub's debounced timer recovers for the same reason.
+		defer func() {
+			if r := recover(); r != nil {
+				err := fmt.Errorf("persist flush panic: %v", r)
+				log.Printf("Task %d %v", jt.TaskID, err)
+				jt.recordTaskPersistenceError(err)
+				jt.requestBreak()
+			}
+		}()
 		jt.persistFlushMu.Lock()
 		jt.persistFlushScheduled = false
+		jt.persistFlushTimer = nil
 		jt.persistFlushMu.Unlock()
 		if err := jt.flushPersistBuffer(); err != nil {
 			jt.recordTaskPersistenceError(err)
@@ -66,7 +82,29 @@ func (jt *JobTask) schedulePersistFlush() {
 	})
 }
 
+// cancelPersistFlush stops a pending debounced flush. Without it the timer
+// outlives the task and fires a write after the run is finished — reaching
+// GetDB even after CloseDB has torn the handle down at shutdown. The final
+// flush is performed synchronously by persistRemainingTaskItems, so nothing
+// buffered is lost by cancelling here.
+func (jt *JobTask) cancelPersistFlush() {
+	jt.persistFlushMu.Lock()
+	timer := jt.persistFlushTimer
+	jt.persistFlushTimer = nil
+	jt.persistFlushScheduled = false
+	jt.persistFlushMu.Unlock()
+	if timer != nil {
+		timer.Stop()
+	}
+}
+
 func (jt *JobTask) flushPersistBuffer() error {
+	// Serialize the write itself. Without this the final flush can observe an
+	// empty buffer while a timer flush is still writing, report success, and
+	// only then have that write fail and push the items back — losing them
+	// after the task was already marked successful.
+	jt.persistFlushInFlight.Lock()
+	defer jt.persistFlushInFlight.Unlock()
 	jt.persistBufMu.Lock()
 	if len(jt.persistBuffer) == 0 {
 		jt.persistBufMu.Unlock()

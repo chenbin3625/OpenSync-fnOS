@@ -12,6 +12,7 @@ import Modal from "@douyinfe/semi-ui/lib/es/modal";
 import Spin from "@douyinfe/semi-ui/lib/es/spin";
 import Tag from "@douyinfe/semi-ui/lib/es/tag";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
+import { actionSkipped } from "../lib/hooks";
 import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
 import { IconAlertTriangle, IconRefresh, IconCrossStroked, IconMoreStroked, IconHelpCircleStroked } from "@douyinfe/semi-icons";
 import { getHost } from "../lib/host";
@@ -315,7 +316,9 @@ export function confirmDelete(
     variant: "error",
     onOk: async () => {
       try {
-        await action();
+        // A run dropped by useAction (double-click while the first request is
+        // still open) did nothing, so claiming "已删除" would be a lie.
+        if ((await action()) === actionSkipped) return;
         Toast.success("已删除");
       } catch (error) {
         errorToast(error);
@@ -332,7 +335,7 @@ export function confirmStopTask(action: () => Promise<unknown>) {
     okLabel: "停止任务",
     onOk: async () => {
       try {
-        await action();
+        if ((await action()) === actionSkipped) return;
         Toast.success("已提交停止");
       } catch (error) {
         errorToast(error);

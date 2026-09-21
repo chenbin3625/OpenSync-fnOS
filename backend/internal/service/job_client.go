@@ -438,12 +438,15 @@ func (jc *JobClient) StopJob(remove bool) {
 		if err := mapper.UpdateJobEnable(jobID, 0); err != nil {
 			panic(err.Error())
 		}
-		if err := mapper.UpdateJobTaskStatusByStatusAndJobID(jobID); err != nil {
-			panic(err.Error())
-		}
 		jc.setEnable(0)
+		// Break the task before rewriting history. The reverse order marked the
+		// row aborted while the task was still running, so the task's own final
+		// write could land afterwards and resurrect it as running.
 		if task := jc.currentTask(); task != nil {
 			task.requestBreak()
+		}
+		if err := mapper.UpdateJobTaskStatusByStatusAndJobID(jobID); err != nil {
+			panic(err.Error())
 		}
 		if scheduler != nil {
 			scheduler.Pause()

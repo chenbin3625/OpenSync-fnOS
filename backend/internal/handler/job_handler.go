@@ -17,7 +17,7 @@ func GetJob(c *gin.Context) {
 	}
 
 	if idStr != "" {
-		id, err := parseRequiredID(idStr, "id")
+		id, err := parseRequiredID(idStr)
 		if err != nil {
 			respondError(c, msg.LostPart)
 			return
@@ -122,7 +122,7 @@ func UpdateJob(c *gin.Context) {
 	}
 
 	if req.TaskID != nil {
-		taskID, err := parseRequiredID(*req.TaskID, "taskId")
+		taskID, err := parseRequiredID(*req.TaskID)
 		if err != nil {
 			respondError(c, err.Error())
 			return
@@ -143,7 +143,7 @@ func UpdateJob(c *gin.Context) {
 	if req.Pause == nil {
 		// Manual execution
 		if req.ID != nil {
-			id, err := parseRequiredID(*req.ID, "id")
+			id, err := parseRequiredID(*req.ID)
 			if err != nil {
 				respondError(c, err.Error())
 				return
@@ -158,7 +158,7 @@ func UpdateJob(c *gin.Context) {
 			respondError(c, msg.LostPart)
 			return
 		}
-		id, err := parseRequiredID(*req.ID, "id")
+		id, err := parseRequiredID(*req.ID)
 		if err != nil {
 			respondError(c, err.Error())
 			return
@@ -174,7 +174,7 @@ func UpdateJob(c *gin.Context) {
 			respondError(c, msg.LostPart)
 			return
 		}
-		id, err := parseRequiredID(*req.ID, "id")
+		id, err := parseRequiredID(*req.ID)
 		if err != nil {
 			respondError(c, err.Error())
 			return
@@ -190,14 +190,14 @@ func DeleteJob(c *gin.Context) {
 	taskIDStr := c.Query("taskId")
 
 	if idStr != "" {
-		id, err := parseRequiredID(idStr, "id")
+		id, err := parseRequiredID(idStr)
 		if err != nil {
 			respondError(c, err.Error())
 			return
 		}
 		service.RemoveJobClient(id)
 	} else if taskIDStr != "" {
-		taskID, err := parseRequiredID(taskIDStr, "taskId")
+		taskID, err := parseRequiredID(taskIDStr)
 		if err != nil {
 			respondError(c, err.Error())
 			return

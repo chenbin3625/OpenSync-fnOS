@@ -79,7 +79,7 @@ func TestFullSyncPlanExecutesDestinationMoveBeforeDeletingOldTree(t *testing.T) 
 	restorePersist := stubPersistJobTaskItems(t, &persisted, nil)
 	defer restorePersist()
 
-	jt := scanTestTask(server.URL, server.Client(), map[string]interface{}{
+	jt := scanTestTask(t, server.URL, server.Client(), map[string]interface{}{
 		"method":        1,
 		"srcPath":       "/src/",
 		"dstPath":       "/dst/",
@@ -164,7 +164,7 @@ func TestFullSyncPlanPreservesOldTreeWhenDestinationMoveFails(t *testing.T) {
 	restorePersist := stubPersistJobTaskItems(t, &persisted, nil)
 	defer restorePersist()
 
-	jt := scanTestTask(server.URL, server.Client(), map[string]interface{}{
+	jt := scanTestTask(t, server.URL, server.Client(), map[string]interface{}{
 		"method":        1,
 		"scanIntervalT": 0,
 	})
@@ -229,7 +229,7 @@ func movedFileFullSyncPlan(metadata FileMetadata) *fullSyncPlan {
 			"old/archive/": {"movie.mkv": metadata},
 		},
 	}
-	plan := newFullSyncPlan(src, dst)
+	plan := newFullSyncPlan(src, dst, nil)
 	plan.build(map[string]interface{}{"method": 1})
 	return plan
 }
@@ -246,7 +246,7 @@ func TestFullSyncPlanKeepsSizeFilteredDestinationFile(t *testing.T) {
 		root: "/dst/",
 		dirs: map[string]FileListResult{"": {"small.txt": small}},
 	}
-	plan := newFullSyncPlan(src, dst)
+	plan := newFullSyncPlan(src, dst, nil)
 	plan.build(map[string]interface{}{
 		"method":      1,
 		"minFileSize": int64(1024 * 1024),
@@ -274,7 +274,7 @@ func TestFullSyncPlanStillDeletesUnmatchedDestinationFileWithSizeFilter(t *testi
 		root: "/dst/",
 		dirs: map[string]FileListResult{"": {"orphan.txt": {Size: 500 * 1024}}},
 	}
-	plan := newFullSyncPlan(src, dst)
+	plan := newFullSyncPlan(src, dst, nil)
 	plan.build(map[string]interface{}{
 		"method":      1,
 		"minFileSize": int64(1024 * 1024),

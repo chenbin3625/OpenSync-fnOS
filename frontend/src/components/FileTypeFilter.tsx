@@ -57,7 +57,7 @@ export function FileTypeFilter({
   "aria-labelledby"?: string;
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const [otherExpanded, setOtherExpanded] = useState(true);
+  const [otherExpanded, setOtherExpanded] = useState(false);
   const [customInput, setCustomInput] = useState("");
   const otherFilters = parseOtherFileTypeFilters(value);
 
@@ -71,7 +71,7 @@ export function FileTypeFilter({
   const addCustom = () => {
     const next = addCustomFileTypeFilter(value, customInput);
     if (next === value) {
-      Toast.warning("请输入新的有效文件名或通配规则");
+      Toast.warning("请输入有效的文件名或文件后缀");
       return;
     }
     onChange(next);
@@ -244,7 +244,7 @@ export function FileTypeFilter({
         <Input
           value={customInput}
           aria-label="自定义文件规则"
-          placeholder="文件名或通配规则，如 ipc-socket、a.bcd、*.doc"
+          placeholder="文件名或文件后缀，如 ipc-socket、a.bcd、*.doc"
           onChange={setCustomInput}
           onEnterPress={addCustom}
         />

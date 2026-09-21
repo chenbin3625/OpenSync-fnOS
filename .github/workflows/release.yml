@@ -38,9 +38,18 @@ jobs:
         run: npm test
         working-directory: frontend
 
-      - name: Go tests
-        run: go test ./...
+      - name: Go vet
+        run: go vet ./...
         working-directory: backend
+
+      # -race is the gate that catches the concurrency regressions this codebase
+      # is most exposed to (shared task state, debounced timers, the DB handle).
+      - name: Go tests (race detector)
+        run: go test -race ./...
+        working-directory: backend
+
+      - name: Packaging script tests
+        run: npm run test:scripts
 
   build:
     name: Build and upload

@@ -4,14 +4,20 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"opensync/internal/msg"
 	"opensync/pkg/util"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
 )
 
+// List queries order by createTime DESC, id DESC. createTime is second-grained
+// and AddJobTaskItemMany stamps a whole batch with the same value, so ties are
+// the norm rather than an edge case; without the unique id tiebreaker LIMIT/
+// OFFSET paging can repeat or skip rows between pages.
 const (
 	jobTaskItemListColumns     = "id, taskId, srcPath, dstPath, isPath, fileName, fileSize, type, alistTaskId, status, progress, errMsg, createTime"
 	jobTaskItemRuntimeColumns  = "id, taskId, srcPath, dstPath, isPath, fileName, fileSize, type, alistTaskId, status, errMsg, createTime"
@@ -20,12 +26,12 @@ const (
 
 // GetJobList gets paginated job list
 func GetJobList(params map[string]interface{}) (map[string]interface{}, error) {
-	return FetchAllToPage("SELECT * FROM job ORDER BY createTime DESC", params)
+	return FetchAllToPage("SELECT * FROM job ORDER BY createTime DESC, id DESC", params)
 }
 
 // GetJobListAll gets all jobs
 func GetJobListAll() ([]map[string]interface{}, error) {
-	return FetchAllToTable("SELECT * FROM job ORDER BY createTime DESC")
+	return FetchAllToTable("SELECT * FROM job ORDER BY createTime DESC, id DESC")
 }
 
 // GetEnableJobList gets all enabled jobs
@@ -153,7 +159,7 @@ func GetJobTaskList(params map[string]interface{}) (map[string]interface{}, erro
 		}
 	}
 
-	baseSQL := fmt.Sprintf("SELECT * FROM job_task %s ORDER BY createTime DESC", where.clause)
+	baseSQL := fmt.Sprintf("SELECT * FROM job_task %s ORDER BY createTime DESC, id DESC", where.clause)
 	return FetchAllToPage(baseSQL, params, where.args...)
 }
 
@@ -178,12 +184,12 @@ func parseStatusList(value interface{}) []int {
 	case []int:
 		return v
 	case []string:
+		// Each entry may itself be comma-separated: Gin delivers
+		// "?statusIn=2,7" as []string{"2,7"}, and ToInt("2,7") is 0 — which
+		// silently degraded the filter to "status IN (0)", i.e. waiting-only.
 		statuses := make([]int, 0, len(v))
 		for _, item := range v {
-			if strings.TrimSpace(item) == "" {
-				continue
-			}
-			statuses = append(statuses, util.ToInt(item))
+			statuses = append(statuses, parseStatusCSV(item)...)
 		}
 		return statuses
 	case []interface{}:
@@ -193,18 +199,30 @@ func parseStatusList(value interface{}) []int {
 		}
 		return statuses
 	case string:
-		parts := strings.Split(v, ",")
-		statuses := make([]int, 0, len(parts))
-		for _, item := range parts {
-			if strings.TrimSpace(item) == "" {
-				continue
-			}
-			statuses = append(statuses, util.ToInt(item))
-		}
-		return statuses
+		return parseStatusCSV(v)
 	default:
 		return []int{util.ToInt(v)}
 	}
+}
+
+// parseStatusCSV splits a comma-separated status list, skipping blanks and
+// values that are not plain integers. A malformed entry is dropped rather than
+// silently read as status 0 (waiting).
+func parseStatusCSV(value string) []int {
+	parts := strings.Split(value, ",")
+	statuses := make([]int, 0, len(parts))
+	for _, item := range parts {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		n, err := strconv.Atoi(item)
+		if err != nil {
+			continue
+		}
+		statuses = append(statuses, n)
+	}
+	return statuses
 }
 
 // GetJobTaskByID gets task by ID
@@ -255,15 +273,43 @@ func DeleteJobTaskByRunTime(runTime int64) error {
 			return err
 		}
 		if len(taskIDs) == 0 {
-			_, _ = GetDB().Exec("PRAGMA wal_checkpoint(PASSIVE)")
+			// incremental_vacuum only does anything when the database was
+			// created with auto_vacuum=INCREMENTAL, which this schema never
+			// set — so deleting years of history returned no pages to the
+			// filesystem. TRUNCATE actually shrinks the WAL, and the freed
+			// pages are reclaimed by an explicit VACUUM below.
+			_, _ = GetDB().Exec("PRAGMA wal_checkpoint(TRUNCATE)")
 			_, _ = GetDB().Exec("PRAGMA optimize")
-			_, _ = GetDB().Exec("PRAGMA incremental_vacuum")
+			if err := vacuumIfFreePagesExceed(freePageVacuumThreshold); err != nil {
+				log.Printf("Failed to reclaim free database pages: %v", err)
+			}
 			return nil
 		}
 		if err := deleteJobTasksByIDs(taskIDs); err != nil {
 			return err
 		}
 	}
+}
+
+// freePageVacuumThreshold is the number of free pages that justifies a VACUUM.
+// VACUUM rewrites the whole database and needs room for a copy, so it is only
+// worth doing once a meaningful amount of space is actually reclaimable.
+const freePageVacuumThreshold = 4096
+
+// vacuumIfFreePagesExceed reclaims disk space only when enough pages are free.
+// VACUUM cannot run inside a transaction and is skipped (not an error) when the
+// database is busy.
+func vacuumIfFreePagesExceed(threshold int64) error {
+	var freePages int64
+	if err := GetDB().QueryRow("PRAGMA freelist_count").Scan(&freePages); err != nil {
+		return err
+	}
+	if freePages < threshold {
+		return nil
+	}
+	log.Printf("Reclaiming %d free database pages", freePages)
+	_, err := GetDB().Exec("VACUUM")
+	return err
 }
 
 func expiredJobTaskIDs(cutoff int64, limit int) ([]int64, error) {
@@ -412,7 +458,7 @@ func GetJobTaskItemList(params map[string]interface{}) (map[string]interface{}, 
 		}
 	}
 
-	baseSQL := fmt.Sprintf("SELECT %s FROM job_task_item %s ORDER BY createTime DESC", jobTaskItemListColumns, where.clause)
+	baseSQL := fmt.Sprintf("SELECT %s FROM job_task_item %s ORDER BY createTime DESC, id DESC", jobTaskItemListColumns, where.clause)
 	return FetchAllToPage(baseSQL, params, where.args...)
 }
 

@@ -63,7 +63,7 @@ func UpdateNotify(c *gin.Context) {
 
 	if notifyIDStr, ok := req["notifyId"]; ok {
 		// Update status
-		notifyID, err := parseRequiredID(util.StringValue(notifyIDStr), "notifyId")
+		notifyID, err := parseRequiredID(util.StringValue(notifyIDStr))
 		if err != nil {
 			respondError(c, err.Error())
 			return
@@ -101,7 +101,7 @@ func DeleteNotify(c *gin.Context) {
 		respondError(c, msg.LostPart)
 		return
 	}
-	notifyID, err := parseRequiredID(notifyIDStr, "notifyId")
+	notifyID, err := parseRequiredID(notifyIDStr)
 	if err != nil {
 		respondError(c, err.Error())
 		return

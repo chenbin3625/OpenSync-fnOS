@@ -60,6 +60,27 @@ func syncPathsOverlap(srcPaths, dstPaths []string) bool {
 	return false
 }
 
+// srcSelectionsNested reports whether one selected source path contains
+// another. Such a pair is rejected because both selections resolve into
+// overlapping destination subtrees: the parent's scan walks into the same
+// directory the child is mapped onto, so two top-level scan works mutate one
+// destination tree concurrently. In mirror mode each of them independently
+// computes "extra files to delete" for that directory, which can delete files
+// the sibling work is still copying.
+func srcSelectionsNested(srcPaths []string) bool {
+	for i, parent := range srcPaths {
+		for j, candidate := range srcPaths {
+			if i == j {
+				continue
+			}
+			if syncPathContains(parent, candidate) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func syncPathContains(parent, candidate string) bool {
 	parent = path.Clean(strings.TrimSpace(parent))
 	candidate = path.Clean(strings.TrimSpace(candidate))

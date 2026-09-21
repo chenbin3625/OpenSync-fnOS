@@ -23,36 +23,53 @@ var (
 	dbMu sync.RWMutex
 )
 
+// currentOnce reads the once guard under dbMu. CloseDB replaces it, so reading
+// the package variable unsynchronized would race with shutdown.
+func currentOnce() *sync.Once {
+	dbMu.RLock()
+	defer dbMu.RUnlock()
+	return once
+}
+
 const maxPageSize = 500
 const defaultUnpagedLimit = 500
 const sqliteMaxOpenConns = 12
 
 // InitDB initializes the database connection
 func InitDB() *sql.DB {
-	once.Do(func() {
+	currentOnce().Do(func() {
 		cfg := config.GetConfig()
-		var err error
 		ensureSQLiteFileMode(cfg.DB.DBName)
-		db, err = sql.Open("sqlite", sqliteDSN(cfg.DB.DBName))
+		// The handle is configured through a local variable and only published
+		// to the package-level db under dbMu. Assigning db first would race with
+		// the lock-protected readers in GetDB (and with CloseDB during shutdown),
+		// because sync.Once only orders the initialization against other
+		// once.Do callers, not against readers that never enter it.
+		handle, err := sql.Open("sqlite", sqliteDSN(cfg.DB.DBName))
 		if err != nil {
 			log.Fatalf("Failed to open database: %v", err)
 		}
-		db.SetMaxOpenConns(sqliteMaxOpenConns)
-		db.SetMaxIdleConns(sqliteMaxOpenConns)
+		handle.SetMaxOpenConns(sqliteMaxOpenConns)
+		handle.SetMaxIdleConns(sqliteMaxOpenConns)
 		// Keep explicit PRAGMAs as a startup sanity pass; sqliteDSN applies
 		// them to each new pooled connection.
-		if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		if _, err := handle.Exec("PRAGMA journal_mode=WAL"); err != nil {
 			log.Printf("Failed to set sqlite journal_mode: %v", err)
 		}
-		if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		if _, err := handle.Exec("PRAGMA busy_timeout=5000"); err != nil {
 			log.Printf("Failed to set sqlite busy_timeout: %v", err)
 		}
 		for _, pragma := range []string{"PRAGMA foreign_keys=ON", "PRAGMA temp_store=MEMORY", "PRAGMA cache_size=-16384", "PRAGMA mmap_size=67108864"} {
-			if _, err := db.Exec(pragma); err != nil {
+			if _, err := handle.Exec(pragma); err != nil {
 				log.Printf("Failed to set sqlite %s: %v", pragma, err)
 			}
 		}
+		dbMu.Lock()
+		db = handle
+		dbMu.Unlock()
 	})
+	dbMu.RLock()
+	defer dbMu.RUnlock()
 	return db
 }
 
@@ -99,9 +116,16 @@ func sqliteDSN(dbName string) string {
 	if dbName == ":memory:" {
 		return dbName
 	}
+	// Every PRAGMA here applies to each pooled connection. Executing them via
+	// db.Exec instead would configure whichever single connection served that
+	// call, leaving the other 11 in the pool on defaults.
 	pragmas := url.Values{}
 	pragmas.Add("_pragma", "busy_timeout(5000)")
 	pragmas.Add("_pragma", "journal_mode(WAL)")
+	pragmas.Add("_pragma", "foreign_keys(ON)")
+	pragmas.Add("_pragma", "temp_store(MEMORY)")
+	pragmas.Add("_pragma", "cache_size(-16384)")
+	pragmas.Add("_pragma", "mmap_size(67108864)")
 	query := pragmas.Encode()
 	if strings.HasPrefix(dbName, "file:") {
 		sep := "?"
@@ -219,30 +243,25 @@ func ExecuteMany(query string, argsList [][]interface{}) error {
 	if len(argsList) == 0 {
 		return nil
 	}
-	tx, err := GetDB().Begin()
-	if err != nil {
-		return err
-	}
-	stmt, err := tx.Prepare(query)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	defer stmt.Close()
-
-	for _, args := range argsList {
-		_, err := stmt.Exec(args...)
+	// withTx rolls back via defer: the previous explicit Rollback() calls were
+	// skipped by a panic inside the loop, which left the transaction (and the
+	// SQLite write lock) open until the process exited — every later write then
+	// failed on busy_timeout.
+	return withTx(func(tx *sql.Tx) error {
+		stmt, err := tx.Prepare(query)
 		if err != nil {
-			tx.Rollback()
-			log.Printf("Database batch execute failed (size %d): %v", len(argsList), err)
 			return err
 		}
-	}
-	if err := tx.Commit(); err != nil {
-		log.Printf("Database batch commit failed (size %d): %v", len(argsList), err)
-		return err
-	}
-	return nil
+		defer stmt.Close()
+
+		for _, args := range argsList {
+			if _, err := stmt.Exec(args...); err != nil {
+				log.Printf("Database batch execute failed (size %d): %v", len(argsList), err)
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // FetchAllToPage executes a paginated query with a window count when SQLite
@@ -397,11 +416,55 @@ func isSafeSQLIdentifier(name string) bool {
 	return true
 }
 
+// stripOrderBy removes a trailing top-level ORDER BY so the statement can be
+// wrapped in SELECT COUNT(*) FROM (...). Only depth-zero clauses outside string
+// literals are considered: a plain LastIndex search would cut at an ORDER BY
+// belonging to a subquery (or sitting inside a quoted value) and produce
+// unbalanced SQL.
 func stripOrderBy(sql string) string {
-	upperSQL := strings.ToUpper(sql)
-	idx := strings.LastIndex(upperSQL, " ORDER BY ")
+	const clause = " ORDER BY "
+	depth := 0
+	idx := -1
+	var quote byte
+	for i := 0; i < len(sql); i++ {
+		c := sql[i]
+		if quote != 0 {
+			// Doubled quotes are an escaped quote inside the literal, not its end.
+			if c == quote {
+				if i+1 < len(sql) && sql[i+1] == quote {
+					i++
+					continue
+				}
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '\'', '"', '`':
+			quote = c
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		default:
+			if depth == 0 && c == ' ' && strings.EqualFold(sqlSlice(sql, i, len(clause)), clause) {
+				idx = i
+			}
+		}
+	}
 	if idx == -1 {
 		return sql
 	}
 	return sql[:idx]
+}
+
+// sqlSlice returns the length-byte window of sql starting at i, or "" when the
+// statement is too short for one.
+func sqlSlice(sql string, i, length int) string {
+	if i+length > len(sql) {
+		return ""
+	}
+	return sql[i : i+length]
 }

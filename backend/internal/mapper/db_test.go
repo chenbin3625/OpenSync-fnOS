@@ -11,20 +11,28 @@ import (
 
 func resetGlobalDBForTest(t *testing.T, cfg *config.Config) {
 	t.Helper()
+	// The globals are swapped under dbMu: other tests in this package start
+	// goroutines that call GetDB.
+	dbMu.Lock()
 	oldDB := db
 	oldOnce := once
+	dbMu.Unlock()
 	oldConfig := config.GetConfig()
 	t.Cleanup(func() {
+		dbMu.Lock()
 		if db != nil && db != oldDB {
 			_ = db.Close()
 		}
 		db = oldDB
 		once = oldOnce
+		dbMu.Unlock()
 		config.SetConfigForTest(oldConfig)
 	})
 
+	dbMu.Lock()
 	db = nil
 	once = &sync.Once{}
+	dbMu.Unlock()
 	config.SetConfigForTest(cfg)
 }
 

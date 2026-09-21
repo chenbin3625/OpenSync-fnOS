@@ -13,6 +13,7 @@ import (
 	"opensync/internal/model"
 	"opensync/internal/msg"
 	"opensync/pkg/util"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -117,18 +118,36 @@ func redactNotifyParams(method int, paramsStr string) string {
 	if err != nil {
 		return paramsStr
 	}
+	// Redaction is decided by key, never by the value's Go type. headers is
+	// stored as a JSON object, so the old `s, _ := v.(string); if s == ""
+	// { continue }` guard skipped it entirely and returned Authorization in
+	// cleartext — the case "headers" branch below was unreachable.
 	for _, key := range notifySecretKeys[method] {
 		v, ok := params[key]
 		if !ok || v == nil {
 			continue
 		}
-		s, _ := v.(string)
+		if key == "headers" {
+			// Any non-empty headers value is replaced with the standard marker
+			// so resolveNotifyParams restores the stored object on edit. An
+			// already-empty value carries no secret and is left alone.
+			if isEmptyNotifyValue(v) {
+				continue
+			}
+			params[key] = notifyRedactionMarker
+			continue
+		}
+		s, isStr := v.(string)
+		if !isStr {
+			// A sensitive key holding a non-string (malformed or hand-written
+			// config) still must not be echoed back verbatim.
+			params[key] = notifyRedactionMarker
+			continue
+		}
 		if s == "" {
 			continue
 		}
 		switch key {
-		case "headers":
-			params[key] = ""
 		case "body":
 			// Unlike sendKey-style masks, no suffix is kept: a body template
 			// may embed a token at any position.
@@ -144,6 +163,21 @@ func redactNotifyParams(method int, paramsStr string) string {
 		return paramsStr
 	}
 	return string(out)
+}
+
+// isEmptyNotifyValue reports whether a params value carries nothing worth
+// redacting: an absent/empty string, or an empty headers object.
+func isEmptyNotifyValue(v interface{}) bool {
+	switch value := v.(type) {
+	case nil:
+		return true
+	case string:
+		return strings.TrimSpace(value) == ""
+	case map[string]interface{}:
+		return len(value) == 0
+	default:
+		return false
+	}
 }
 
 // isMaskedSecretValue reports whether value looks like a redacted secret, so
@@ -177,6 +211,13 @@ func resolveNotifyParams(notify map[string]interface{}) (map[string]interface{},
 		return incoming, nil
 	}
 	existingParams, _ := parseNotifyParams(fmt.Sprintf("%v", existing["params"]))
+	// Stored secrets are only merged back when the delivery target is unchanged.
+	// Otherwise a caller could submit {"id":<existing>,"params":{"url":"https://
+	// attacker/hook"}} and have the saved Authorization header merged in, so a
+	// test send (or a PUT) ships the credential to an address of their choosing.
+	if notifyTargetChanged(incoming, existingParams) {
+		return incoming, nil
+	}
 	for _, key := range notifySecretKeys[method] {
 		v, ok := incoming[key]
 		if !ok || v == nil {
@@ -204,6 +245,21 @@ func resolveNotifyParams(notify map[string]interface{}) (map[string]interface{},
 		}
 	}
 	return incoming, nil
+}
+
+// notifyTargetChanged reports whether the incoming params point at a different
+// delivery target than the stored ones. A masked or absent URL is not a change:
+// that is the UI round-tripping the redacted value it was given.
+func notifyTargetChanged(incoming, existing map[string]interface{}) bool {
+	incomingURL := paramString(incoming, "url", "webhook")
+	if incomingURL == "" || isMaskedSecretValue(incomingURL) {
+		return false
+	}
+	existingURL := paramString(existing, "url", "webhook")
+	if existingURL == "" {
+		return false
+	}
+	return incomingURL != existingURL
 }
 
 func validateNotifyParams(method int, params map[string]interface{}) error {
@@ -336,6 +392,14 @@ func TestNotify(notify map[string]interface{}) {
 		if r := recover(); r != nil {
 			if publicErr, ok := r.(model.PublicError); ok {
 				panic(publicErr)
+			}
+			// A runtime error here is a bug in our own code, not a bad webhook
+			// config. Reporting it as "check your configuration" sent users
+			// hunting through settings for something they cannot fix, so it is
+			// re-panicked and surfaces as a generic 500 instead.
+			if runtimeErr, ok := r.(runtime.Error); ok {
+				log.Printf("notify test failed with a runtime error: %v", runtimeErr)
+				panic(r)
 			}
 			log.Printf("notify test failed: %v", r)
 			panicPublic(msg.NotifySendFail)
@@ -547,12 +611,17 @@ func notifyProviderError(body []byte, fields ...string) error {
 	if err := json.Unmarshal(body, &m); err != nil {
 		return nil
 	}
+	// Every named field is checked, not just the first one present: Lark is
+	// passed ("code", "StatusCode") and can answer code=0 alongside a non-zero
+	// StatusCode. Returning on the first field found would report that failure
+	// as a success.
 	for _, field := range fields {
-		if v, ok := m[field]; ok {
-			if code := util.ToInt(v); code != 0 {
-				return fmt.Errorf("notify %s=%d: %s", field, code, strings.TrimSpace(string(body)))
-			}
-			return nil
+		v, ok := m[field]
+		if !ok {
+			continue
+		}
+		if code := util.ToInt(v); code != 0 {
+			return fmt.Errorf("notify %s=%d: %s", field, code, strings.TrimSpace(string(body)))
 		}
 	}
 	return nil

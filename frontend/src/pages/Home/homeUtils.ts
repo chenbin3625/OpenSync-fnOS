@@ -87,74 +87,31 @@ Desktop.ini
 $RECYCLE.BIN/
 System Volume Information/
 
-# Linux / NAS
+# NAS / Linux
 lost+found/
 @eaDir/
-\\#recycle/
+#recycle/
 @Recycle/
 .Recycle/
-.Trash-*/
+.recycle/
 .Trash/
+.Trash-1000/
 
-# 版本控制
-.git/
-
-# 下载未完成 / 临时文件
+# 临时文件
 *.tmp
 *.temp
 *.part
 *.crdownload
 *.download
-*.bak
-*.old
-*.orig
+*.partial
 *.swp
 *.swo
 *.swn
 
-# Office / 编辑器锁文件
+# 锁文件
 ~$*
 .~lock.*#
-
-# --- 以下按需启用，取消注释即可 ---
-
-# 缓存目录
-# .cache/
-# cache/
-# tmp/
-# temp/
-
-# 日志
-# *.log
-# *~
-# logs/
-# log/
-
-# 开发依赖
-# node_modules/
-# .npm/
-# .yarn/
-# .pnpm-store/
-# __pycache__/
-# *.pyc
-# *.pyo
-# .venv/
-# venv/
-# env/
-
-# 编辑器 / IDE 配置
-# .idea/
-# .vscode/
-# *.iml
-
-# 构建产物
-# build/
-# dist/
-# target/
-# coverage/
-# .next/
-# .nuxt/
-# .turbo/`;
+.#*`;
 
 // ---- Utility Functions ----
 

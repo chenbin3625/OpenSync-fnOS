@@ -235,14 +235,14 @@ export const fileTypeFilterGroups = [
     label: "临时文件",
     patterns: [
       "*.tmp", "*.temp", "*.part", "*.crdownload",
-      "*.download", "*.bak", "*.old", "*.orig",
+      "*.download", "*.partial",
       "*.swp", "*.swo", "*.swn",
     ],
   },
   {
     key: "lock",
     label: "锁文件",
-    patterns: ["~$*", ".~lock.*#"],
+    patterns: ["~$*", ".~lock.*#", ".#*"],
   },
 ] as const;
 
@@ -264,14 +264,14 @@ export const systemDirFilterGroups = [
     key: "nas",
     label: "NAS 回收站",
     patterns: [
-      "\\#recycle/", "@Recycle/", ".Recycle/",
-      ".Trash-*/", ".Trash/",
+      "#recycle/", "@Recycle/", ".Recycle/",
+      ".recycle/", ".Trash/", ".Trash-1000/",
     ],
   },
   {
     key: "other-dirs",
     label: "其他系统目录",
-    patterns: ["lost+found/", "@eaDir/", ".git/"],
+    patterns: ["lost+found/", "@eaDir/"],
   },
 ] as const;
 
@@ -282,12 +282,18 @@ const LEGACY_CUSTOM_FILE_TYPE_END = "# --- 自定义文件类型过滤结束 ---
 
 function fileTypePresetPatterns() {
   return new Set<string>(
-    fileTypeFilterGroups.flatMap((group) => [...group.patterns]),
+    fileTypeFilterGroups.flatMap((group) =>
+      [...group.patterns].map((pattern) => filterRuleKey(pattern)),
+    ),
   );
 }
 
 export function isExcludePatternEnabled(exclude: string, pattern: string) {
-  return exclude.split("\n").some((line) => line.trim() === pattern);
+  const target = filterRuleKey(pattern);
+  return exclude.split("\n").some((line) => {
+    const value = line.trim();
+    return !value.startsWith("# ") && filterRuleKey(value) === target;
+  });
 }
 
 export function updateExcludePatterns(
@@ -297,17 +303,20 @@ export function updateExcludePatterns(
 ) {
   let lines = exclude.split("\n");
   for (const pattern of patterns) {
+    const target = filterRuleKey(pattern);
     let found = false;
     const nextLines: string[] = [];
     for (const line of lines) {
       const value = line.trim();
-      if (value !== pattern && value !== `# ${pattern}`) {
+      const isDisabled = value.startsWith("# ");
+      const serialized = isDisabled ? value.slice(2).trim() : value;
+      if (!serialized || filterRuleKey(serialized) !== target) {
         nextLines.push(line);
         continue;
       }
       if (found) continue;
       found = true;
-      nextLines.push(enabled ? pattern : `# ${pattern}`);
+      nextLines.push(enabled ? serialized : `# ${serialized}`);
     }
     if (!found && enabled) nextLines.push(pattern);
     lines = nextLines;
@@ -320,17 +329,28 @@ function normalizeCustomFilePattern(input: string) {
   if (
     !pattern ||
     pattern.startsWith("#") ||
+    pattern.startsWith("!") ||
     pattern.includes("/") ||
-    pattern.includes("\\")
+    pattern.includes("\\") ||
+    /[\u0000-\u001f\u007f?[\]{}]/.test(pattern) ||
+    pattern === "*" ||
+    pattern.includes("**")
   ) {
     return "";
   }
 
   if (/^\*\.[a-z0-9][a-z0-9.+_-]*$/i.test(pattern)) {
-    return pattern.toLowerCase();
+    return pattern;
   }
 
-  return pattern.endsWith("/") ? "" : pattern;
+  return pattern.startsWith("*.") ? "" : pattern.endsWith("/") ? "" : pattern;
+}
+
+function filterRuleKey(pattern: string) {
+  const value = pattern.trim().replace(/^\\(?=#recycle\/$)/, "");
+  return /^\*\.[a-z0-9][a-z0-9.+_-]*$/i.test(value)
+    ? value.toLowerCase()
+    : value;
 }
 
 function findCustomFileFilterBlock(lines: string[]) {
@@ -355,8 +375,9 @@ export function parseCustomFileTypeFilters(exclude: string) {
     const value = line.trim();
     if (!value) return [];
     const enabled = !value.startsWith("# ");
-    const pattern = enabled ? value : value.slice(2).trim();
-    return pattern ? [{ pattern, enabled }] : [];
+    const rawPattern = enabled ? value : value.slice(2).trim();
+    const pattern = normalizeCustomFilePattern(rawPattern);
+    return pattern ? [{ pattern: filterRuleKey(pattern), enabled }] : [];
   });
 }
 
@@ -364,15 +385,14 @@ function parseFileTypePatternLine(line: string) {
   const value = line.trim();
   if (!value) return null;
   const enabled = !value.startsWith("# ");
-  const pattern = enabled ? value : value.slice(2).trim();
-  if (/^\*\.[a-z0-9][a-z0-9.+_-]*$/i.test(pattern)) {
-    return { pattern: pattern.toLowerCase(), enabled };
+  const rawPattern = enabled ? value : value.slice(2).trim();
+  if (!enabled && !/^\*\.[a-z0-9][a-z0-9.+_-]*$/i.test(rawPattern)) {
+    return null;
   }
-  if (enabled) {
-    const normalized = normalizeCustomFilePattern(pattern);
-    return normalized ? { pattern: normalized, enabled } : null;
-  }
-  return null;
+  const normalized = normalizeCustomFilePattern(rawPattern);
+  return normalized
+    ? { pattern: filterRuleKey(normalized), enabled }
+    : null;
 }
 
 export function parseOtherFileTypeFilters(exclude: string) {
@@ -381,20 +401,18 @@ export function parseOtherFileTypeFilters(exclude: string) {
   const block = findCustomFileFilterBlock(lines);
   const filters = new Map<string, { pattern: string; enabled: boolean }>();
   const add = (item: { pattern: string; enabled: boolean } | null) => {
-    if (!item || presetPatterns.has(item.pattern) || filters.has(item.pattern)) {
+    if (
+      !item ||
+      presetPatterns.has(filterRuleKey(item.pattern)) ||
+      filters.has(filterRuleKey(item.pattern))
+    ) {
       return;
     }
-    filters.set(item.pattern, item);
+    const pattern = filterRuleKey(item.pattern);
+    filters.set(pattern, { ...item, pattern });
   };
 
-  parseCustomFileTypeFilters(exclude).forEach((item) =>
-    add({
-      pattern: item.pattern.startsWith("*.")
-        ? item.pattern.toLowerCase()
-        : item.pattern,
-      enabled: item.enabled,
-    }),
-  );
+  parseCustomFileTypeFilters(exclude).forEach(add);
   lines.forEach((line, index) => {
     if (block && index >= block.start && index <= block.end) return;
     add(parseFileTypePatternLine(line));
@@ -407,12 +425,12 @@ export function addCustomFileTypeFilter(exclude: string, input: string) {
   if (!pattern) return exclude;
 
   const presetPatterns = fileTypePresetPatterns();
-  if (presetPatterns.has(pattern)) {
+  if (presetPatterns.has(filterRuleKey(pattern))) {
     return updateExcludePatterns(exclude, [pattern], true);
   }
 
   const existing = parseOtherFileTypeFilters(exclude).find(
-    (item) => item.pattern === pattern,
+    (item) => filterRuleKey(item.pattern) === filterRuleKey(pattern),
   );
   if (existing) return updateExcludePatterns(exclude, [pattern], true);
 
@@ -431,9 +449,16 @@ export function addCustomFileTypeFilter(exclude: string, input: string) {
 }
 
 export function removeCustomFileTypeFilter(exclude: string, pattern: string) {
+  const target = filterRuleKey(pattern);
   let lines = exclude
     .split("\n")
-    .filter((line) => ![pattern, `# ${pattern}`].includes(line.trim()));
+    .filter((line) => {
+      const value = line.trim();
+      const serialized = value.startsWith("# ")
+        ? value.slice(2).trim()
+        : value;
+      return !serialized || filterRuleKey(serialized) !== target;
+    });
   const block = findCustomFileFilterBlock(lines);
   if (!block) return lines.join("\n");
 

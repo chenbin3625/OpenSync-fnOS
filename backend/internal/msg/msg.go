@@ -26,6 +26,7 @@ const (
 	JobRunningCannotDelete  = "当前同步任务正在执行中，不能删除"
 	JobDeleteWaitTimeout    = "任务仍在停止中，请稍后重试删除"
 	SyncPathOverlap         = "来源目录和目标目录不能相同或互相嵌套"
+	SrcPathNested           = "来源目录之间不能互相嵌套，请去掉被上级目录覆盖的子目录"
 	IntervalLost            = "创建间隔型作业时，间隔必填"
 	CronLost                = "创建cron型任务时，至少有一项不为空"
 	CannotResumeLostJob     = "作业不存在无法恢复，请删除后重新创建"
@@ -47,6 +48,11 @@ const (
 	SettingsScanConcurrency = "扫描并发数"
 	SettingsMaxRetries      = "最大重试次数"
 )
+
+// MirrorDeleteGuard explains a skipped full-sync delete phase.
+func MirrorDeleteGuard(reason string) string {
+	return fmt.Sprintf("为防止误删，已跳过本次全量同步的删除阶段：%s。请确认来源目录可正常列举后重试", reason)
+}
 
 func ScanError(srcOrDst, reason string) string {
 	return fmt.Sprintf("%s目录扫描失败，原因为: %s", srcOrDst, reason)

@@ -58,7 +58,7 @@ func TestFullSyncDeletesConflictingDestinationDirectoryBeforeQueueingFile(t *tes
 	// Mirror (method=1) jobs run through syncFull, so drive the job entry point
 	// rather than the incremental scanner: the dir-vs-file conflict is resolved
 	// by the full-sync plan's blockers, which run before anything is queued.
-	jt := scanTestTask(server.URL, server.Client(), map[string]interface{}{
+	jt := scanTestTask(t, server.URL, server.Client(), map[string]interface{}{
 		"method":        1,
 		"srcPath":       "/src/",
 		"dstPath":       "/dst/",
@@ -155,7 +155,7 @@ func TestFullSyncSkipsEquivalentEscapedDestinationFileNameWithSameSize(t *testin
 	}))
 	defer server.Close()
 
-	jt := scanTestTask(server.URL, server.Client(), map[string]interface{}{"method": 1})
+	jt := scanTestTask(t, server.URL, server.Client(), map[string]interface{}{"method": 1})
 	jt.syncWithHave(scanWork{
 		SrcPath:     "/src/",
 		DstPath:     "/dst/",
@@ -216,7 +216,7 @@ func TestFullSyncRecopiesEquivalentEscapedDestinationFileNameWhenSizeDiffers(t *
 	}))
 	defer server.Close()
 
-	jt := scanTestTask(server.URL, server.Client(), map[string]interface{}{"method": 1})
+	jt := scanTestTask(t, server.URL, server.Client(), map[string]interface{}{"method": 1})
 	jt.syncWithHave(scanWork{
 		SrcPath:     "/src/",
 		DstPath:     "/dst/",
@@ -270,7 +270,7 @@ func TestFullSyncDoesNotFuzzyMatchWhenSourceHasCanonicalNameCollision(t *testing
 	}))
 	defer server.Close()
 
-	jt := scanTestTask(server.URL, server.Client(), map[string]interface{}{"method": 1})
+	jt := scanTestTask(t, server.URL, server.Client(), map[string]interface{}{"method": 1})
 	jt.syncWithHave(scanWork{
 		SrcPath:     "/src/",
 		DstPath:     "/dst/",
@@ -292,7 +292,8 @@ func TestFullSyncDoesNotFuzzyMatchWhenSourceHasCanonicalNameCollision(t *testing
 	}
 }
 
-func scanTestTask(serverURL string, client *http.Client, job map[string]interface{}) *JobTask {
+func scanTestTask(t *testing.T, serverURL string, client *http.Client, job map[string]interface{}) *JobTask {
+	t.Helper()
 	jt := &JobTask{
 		TaskID:  42,
 		Job:     job,
@@ -303,6 +304,10 @@ func scanTestTask(serverURL string, client *http.Client, job map[string]interfac
 		},
 	}
 	jt.initRuntime()
+	// These tests drive jt.sync() directly, so taskSubmit — which cancels the
+	// debounced flush in production — never runs. Cancel it here or the pending
+	// timer fires after the test restored persistJobTaskItems.
+	t.Cleanup(jt.cancelPersistFlush)
 	return jt
 }
 
@@ -353,7 +358,7 @@ func TestSyncCreatesMissingDestinationRoot(t *testing.T) {
 	}))
 	defer server.Close()
 
-	jt := scanTestTask(server.URL, server.Client(), map[string]interface{}{
+	jt := scanTestTask(t, server.URL, server.Client(), map[string]interface{}{
 		"method":        0,
 		"srcPath":       "/src/",
 		"dstPath":       "/dst/",

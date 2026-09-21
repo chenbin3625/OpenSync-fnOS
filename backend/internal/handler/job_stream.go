@@ -14,7 +14,7 @@ import (
 
 // StreamJobCurrent handles GET /svr/job/stream as Server-Sent Events.
 func StreamJobCurrent(c *gin.Context) {
-	jobID, err := parseRequiredID(c.Query("id"), "id")
+	jobID, err := parseRequiredID(c.Query("id"))
 	if err != nil {
 		c.JSON(http.StatusOK, model.Error(msg.LostPart))
 		return

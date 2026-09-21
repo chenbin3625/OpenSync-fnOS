@@ -218,9 +218,13 @@ export default function Tasks() {
                   <History key={selected.id} jobId={selected.id} />
                 )}
               </div>
-            ) : (
+            ) : jobs.loading || jobs.error ? null : (
+              // Only a genuinely empty result gets the empty state. While
+              // loading, `selected` is falsy too, so this branch used to render
+              // "空空如也" underneath the spinner; on error it repeated the
+              // message LoadState already shows.
               <div className="task-empty-detail">
-                {jobs.error ? "任务加载失败" : <EmptyState />}
+                <EmptyState />
               </div>
             )}
           </section>

@@ -11,7 +11,10 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func parseRequiredID(value, field string) (int64, error) {
+// parseRequiredID parses a positive int64 id. The caller's field name is
+// deliberately not folded into the error: this message is returned verbatim to
+// the browser, so it stays the generic user-facing text.
+func parseRequiredID(value string) (int64, error) {
 	if value == "" {
 		return 0, errors.New(msg.LostPart)
 	}

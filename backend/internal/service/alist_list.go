@@ -51,6 +51,14 @@ func (c *AlistClient) FileListApiContext(ctx context.Context, path string, useCa
 	if err != nil {
 		return nil, err
 	}
+	// An empty first page while the server reports entries is the same
+	// inconsistency the emptyPage check below rejects for later pages: the
+	// listing cannot be trusted. Accepting it as "directory is empty" is the
+	// most dangerous possible reading — in mirror mode every destination entry
+	// then looks extra and gets queued for deletion.
+	if n == 0 && total > 0 {
+		return nil, fmt.Errorf("AList directory listing is incomplete: page 1 of %d entries returned no content", total)
+	}
 	if n == 0 || total <= n {
 		return result, nil
 	}

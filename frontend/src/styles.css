@@ -1705,3 +1705,31 @@ body .semi-modal-mask {
 .remote-paths-retry {
   margin-top: 8px;
 }
+
+.app-error-boundary {
+  max-width: 560px;
+  margin: 15vh auto 0;
+  padding: 0 16px;
+  text-align: center;
+}
+.app-error-boundary pre {
+  margin: 12px 0 20px;
+  padding: 12px;
+  overflow-x: auto;
+  text-align: left;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-radius: 6px;
+  background: var(--semi-color-fill-0);
+  color: var(--semi-color-text-1);
+  font-size: 12px;
+}
+.app-error-boundary button {
+  padding: 8px 20px;
+  border: none;
+  border-radius: 6px;
+  background: var(--semi-color-primary);
+  color: #fff;
+  cursor: pointer;
+  font-size: 14px;
+}

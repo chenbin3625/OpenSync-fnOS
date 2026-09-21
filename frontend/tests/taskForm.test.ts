@@ -63,10 +63,11 @@ describe("existing synchronization contracts", () => {
     expect(payload.minFileSize).toBe(2 * 1024 ** 3);
   });
   it("excludes Synology recycle directories by default", () => {
-    expect(defaultJobForm().exclude.split("\n")).toContain("\\#recycle/");
+    expect(defaultJobForm().exclude.split("\n")).toContain("#recycle/");
   });
   it("enables safe default file and folder filters", () => {
     const exclude = defaultJobForm().exclude;
+    expect(parseExcludeFolders(exclude)).toEqual([]);
     const enabledFileGroups = new Set(["system", "temporary", "lock"]);
     for (const group of fileTypeFilterGroups) {
       const selected = group.patterns.filter((pattern) =>
@@ -117,6 +118,22 @@ describe("existing synchronization contracts", () => {
       expect.arrayContaining(["*.tmp", "*.temp"]),
     );
   });
+  it("can disable and re-enable a directory rule whose name starts with #", () => {
+    const disabled = taskFormModule.updateExcludePatterns(
+      "#recycle/",
+      ["#recycle/"],
+      false,
+    );
+    expect(disabled).toBe("# #recycle/");
+    expect(isExcludePatternEnabled(disabled, "#recycle/")).toBe(false);
+    expect(
+      taskFormModule.updateExcludePatterns(
+        disabled,
+        ["#recycle/"],
+        true,
+      ),
+    ).toBe("#recycle/");
+  });
   it("adds custom file names and wildcard extension patterns separately", () => {
     const filters = taskFormModule as typeof taskFormModule & {
       addCustomFileTypeFilter?: (exclude: string, input: string) => string;
@@ -152,6 +169,47 @@ describe("existing synchronization contracts", () => {
     expect(isExcludePatternEnabled(disabled, "*.doc")).toBe(true);
     expect(disabled).toContain(".DS_Store");
   });
+  it("accepts only supported file name and extension rules", () => {
+    const filters = taskFormModule as typeof taskFormModule & {
+      addCustomFileTypeFilter?: (exclude: string, input: string) => string;
+      parseOtherFileTypeFilters?: (
+        exclude: string,
+      ) => { pattern: string; enabled: boolean }[];
+    };
+    expect(filters.addCustomFileTypeFilter).toBeTypeOf("function");
+
+    expect(filters.addCustomFileTypeFilter!("", "!important.txt")).toBe("");
+    expect(filters.addCustomFileTypeFilter!("", "report[1].txt")).toBe("");
+    expect(filters.addCustomFileTypeFilter!("", "folder/report.txt")).toBe("");
+    expect(filters.addCustomFileTypeFilter!("", "report+1.txt")).not.toBe("");
+
+    const added = filters.addCustomFileTypeFilter!("", "*.PST");
+    expect(filters.parseOtherFileTypeFilters!(added)).toEqual([
+      { pattern: "*.pst", enabled: true },
+    ]);
+  });
+  it("preserves the original extension spelling when toggling or removing it", () => {
+    const filters = taskFormModule as typeof taskFormModule & {
+      addCustomFileTypeFilter?: (exclude: string, input: string) => string;
+      removeCustomFileTypeFilter?: (exclude: string, pattern: string) => string;
+      updateExcludePatterns?: (
+        exclude: string,
+        patterns: string[],
+        enabled: boolean,
+      ) => string;
+    };
+    const added = filters.addCustomFileTypeFilter!("", "*.PST");
+    const disabled = filters.updateExcludePatterns!(
+      added,
+      ["*.pst"],
+      false,
+    );
+
+    expect(disabled).toBe("# --- 自定义文件过滤 ---\n# *.PST\n# --- 自定义文件过滤结束 ---");
+    expect(
+      filters.removeCustomFileTypeFilter!(disabled, "*.pst"),
+    ).toBe("");
+  });
   it("treats legacy manual file patterns and file names as other file filters", () => {
     const filters = taskFormModule as typeof taskFormModule & {
       parseOtherFileTypeFilters?: (
@@ -169,6 +227,12 @@ describe("existing synchronization contracts", () => {
       { pattern: "*.pst", enabled: true },
       { pattern: "*.vmdk", enabled: false },
     ]);
+  });
+  it("keeps the default filters focused on temporary files and system metadata", () => {
+    const exclude = defaultJobForm().exclude;
+    expect(exclude).toContain("*.partial");
+    expect(exclude).not.toContain("*.bak");
+    expect(exclude).not.toContain(".git/");
   });
   it("round trips existing job identifiers, cache settings and Cron expressions", () => {
     const job = {
@@ -229,7 +293,7 @@ describe("existing synchronization contracts", () => {
   });
 
   it("updates generated folder exclude rules without changing manual rules", () => {
-    const manualRules = "*.tmp\n!important.tmp";
+    const manualRules = "*.tmp\nimportant.tmp";
     const withFolders = updateExcludeFolders(manualRules, [
       "photos/raw/",
       "cache/",
@@ -241,7 +305,7 @@ describe("existing synchronization contracts", () => {
       "cache/",
     ]);
     expect(updateExcludeFolders(withFolders, ["logs/"])).toBe(
-      "*.tmp\n!important.tmp\n\n# --- 文件夹过滤（自动生成，请勿手动编辑）---\nlogs/\n# --- 文件夹过滤结束 ---",
+      "*.tmp\nimportant.tmp\n\n# --- 文件夹过滤（自动生成，请勿手动编辑）---\nlogs/\n# --- 文件夹过滤结束 ---",
     );
     expect(updateExcludeFolders(withFolders, [])).toBe(manualRules);
   });

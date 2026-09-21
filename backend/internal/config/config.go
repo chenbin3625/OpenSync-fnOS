@@ -351,6 +351,18 @@ func writeConfigFile(sCfg ServerConfig) error {
 
 	var out []string
 	inOpensync := false
+	// sawOpensync records that the file already has an [opensync] section, so
+	// leftover managed keys are flushed into it (at the next section header, or
+	// at EOF) instead of being appended under a second [opensync] header.
+	sawOpensync := false
+	flushPending := func() {
+		for _, key := range configManagedKeys {
+			if v, ok := pending[key]; ok {
+				out = append(out, key+"="+v)
+				delete(pending, key)
+			}
+		}
+	}
 	if existing, err := os.ReadFile(filepath.Join(ConfigDir(), "config.ini")); err == nil {
 		for _, line := range strings.Split(string(existing), "\n") {
 			trimmed := strings.TrimSpace(line)
@@ -358,14 +370,10 @@ func writeConfigFile(sCfg ServerConfig) error {
 				// Append managed keys that were missing before leaving the
 				// [opensync] section.
 				if inOpensync && len(pending) > 0 {
-					for _, key := range configManagedKeys {
-						if v, ok := pending[key]; ok {
-							out = append(out, key+"="+v)
-							delete(pending, key)
-						}
-					}
+					flushPending()
 				}
 				inOpensync = trimmed == "[opensync]"
+				sawOpensync = sawOpensync || inOpensync
 				out = append(out, line)
 				continue
 			}
@@ -381,6 +389,23 @@ func writeConfigFile(sCfg ServerConfig) error {
 			}
 			out = append(out, line)
 		}
+	}
+	// The section ran to EOF: its remaining keys belong inside it, not under a
+	// duplicate header.
+	if inOpensync && len(pending) > 0 {
+		trailing := []string{}
+		for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
+			trailing = append(trailing, out[len(out)-1])
+			out = out[:len(out)-1]
+		}
+		flushPending()
+		out = append(out, trailing...)
+	}
+	if len(pending) > 0 && sawOpensync {
+		// An [opensync] section exists but another section follows it, so the
+		// keys were already flushed there; anything left is a bug rather than a
+		// reason to emit a second header.
+		flushPending()
 	}
 	if len(pending) > 0 {
 		if len(out) > 0 && strings.TrimSpace(out[len(out)-1]) != "" {

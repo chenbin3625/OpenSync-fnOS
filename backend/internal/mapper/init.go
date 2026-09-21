@@ -156,12 +156,12 @@ func schemaVersion(db *sql.DB) int64 {
 
 func ensureIndexes(db *sql.DB) {
 	indexes := []string{
-		"CREATE INDEX IF NOT EXISTS idx_job_task_job_time ON job_task(jobId, createTime DESC)",
+		"CREATE INDEX IF NOT EXISTS idx_job_task_job_time ON job_task(jobId, createTime DESC, id DESC)",
 		"CREATE INDEX IF NOT EXISTS idx_job_task_status_job ON job_task(status, jobId)",
 		"CREATE INDEX IF NOT EXISTS idx_job_task_effective_time ON job_task(COALESCE(NULLIF(runTime, 0), createTime), id)",
-		"CREATE INDEX IF NOT EXISTS idx_job_task_item_task_time ON job_task_item(taskId, createTime DESC)",
+		"CREATE INDEX IF NOT EXISTS idx_job_task_item_task_time ON job_task_item(taskId, createTime DESC, id DESC)",
 		"CREATE INDEX IF NOT EXISTS idx_job_task_item_task_status ON job_task_item(taskId, status)",
-		"CREATE INDEX IF NOT EXISTS idx_job_task_item_task_status_time ON job_task_item(taskId, status, createTime DESC)",
+		"CREATE INDEX IF NOT EXISTS idx_job_task_item_task_status_time ON job_task_item(taskId, status, createTime DESC, id DESC)",
 		// The time suffix lets type/object-filtered detail pages stream rows in
 		// create order without scanning every item for the task and sorting the
 		// matches. The composite type index supersedes the old type-only index.

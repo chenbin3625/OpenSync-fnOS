@@ -50,16 +50,26 @@ type JobTask struct {
 	// CurrentMu guards the transfer meter below (speed bookkeeping).
 	CurrentMu sync.RWMutex
 
-	RetrySourceTaskID         int64
-	RetryStatuses             []taskStatus
-	FatalMu                   sync.Mutex
-	FatalErr                  *string
-	PersistMu                 sync.Mutex
-	PersistErr                error
-	persistBufMu              sync.Mutex
-	persistBuffer             []JobTaskItem
-	persistFlushMu            sync.Mutex
-	persistFlushScheduled     bool
+	RetrySourceTaskID     int64
+	RetryStatuses         []taskStatus
+	FatalMu               sync.Mutex
+	FatalErr              *string
+	PersistMu             sync.Mutex
+	PersistErr            error
+	persistBufMu          sync.Mutex
+	persistBuffer         []JobTaskItem
+	persistFlushMu        sync.Mutex
+	persistFlushScheduled bool
+	// persistFlushTimer is the pending debounced flush. It is retained so the
+	// task can cancel it on completion: an AfterFunc that outlives the task
+	// would still write task items (and reach GetDB) after the run finished,
+	// and after CloseDB during shutdown.
+	persistFlushTimer *time.Timer
+	// persistFlushInFlight is held for the duration of a flush's DB write. The
+	// final flush takes it too, so a timer flush that already started (and can
+	// therefore no longer be cancelled) is awaited instead of being raced: its
+	// failure must be visible before the task reports success.
+	persistFlushInFlight      sync.Mutex
 	copyMonitor               *copyTaskMonitor
 	copyMonitorClientOverride copyItemClient
 }

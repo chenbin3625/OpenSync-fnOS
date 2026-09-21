@@ -5,7 +5,18 @@ import (
 	"io"
 )
 
+// A non-positive limit means "no limit" in both helpers below. They used to
+// disagree — capReader treated 0 as unlimited while readAllWithLimit treated it
+// as "every byte is too many" — so a limit that ever reached zero would either
+// silently disable the cap or reject every response.
 func readAllWithLimit(reader io.Reader, limit int64) ([]byte, error) {
+	if limit <= 0 {
+		data, err := io.ReadAll(reader)
+		if err != nil {
+			return nil, err
+		}
+		return data, nil
+	}
 	// Read at most limit+1 bytes so callers can detect oversized responses while
 	// keeping memory use bounded by the configured response cap.
 	data, err := io.ReadAll(io.LimitReader(reader, limit+1))
