@@ -16,8 +16,12 @@ import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
 import { IconAlertTriangle, IconRefresh, IconCrossStroked, IconMoreStroked, IconHelpCircleStroked } from "@douyinfe/semi-icons";
 import { getHost } from "../lib/host";
 
-export function errorToast(error: unknown) {
-  Toast.error(error instanceof Error ? error.message : "操作失败");
+export function getErrorMessage(error: unknown, fallback = "操作失败"): string {
+  return error instanceof Error ? error.message : fallback;
+}
+
+export function errorToast(error: unknown, fallback = "操作失败") {
+  Toast.error(getErrorMessage(error, fallback));
 }
 export function Header({
   title,
@@ -117,11 +121,13 @@ export function LoadState({
   error,
   retry,
   empty,
+  children,
 }: {
   loading: boolean;
   error?: string;
   retry: () => unknown;
   empty?: boolean;
+  children?: ReactNode;
 }) {
   if (error)
     return (
@@ -142,7 +148,7 @@ export function LoadState({
       </div>
     );
   if (empty) return <EmptyState />;
-  return null;
+  return <>{children}</>;
 }
 export function Field({
   label,
@@ -263,22 +269,50 @@ export function Status({
     </span>
   );
 }
+function confirmAction({
+  title,
+  content,
+  okText,
+  okLabel,
+  onOk,
+  variant = "confirm",
+}: {
+  title: string;
+  content?: string;
+  okText: string;
+  okLabel?: string;
+  onOk: () => void | Promise<unknown>;
+  variant?: "error" | "confirm";
+}) {
+  const method = variant === "error" ? Modal.error : Modal.confirm;
+  method({
+    width: 454,
+    className: "fnos-confirm",
+    centered: true,
+    closable: variant !== "error" ? undefined : false,
+    title,
+    content,
+    okText,
+    cancelText: "取消",
+    okButtonProps: {
+      type: "danger",
+      ...(variant === "error" ? { theme: "solid" as const } : {}),
+      "aria-label": okLabel || okText,
+    },
+    cancelButtonProps: { "aria-label": "取消" },
+    onOk,
+  });
+}
 export function confirmDelete(
   title: string,
   action: () => Promise<unknown>,
   content = "删除后无法恢复，是否继续？",
 ) {
-  Modal.error({
-    width: 454,
-    className: "fnos-confirm",
-    centered: true,
-    closable: false,
+  confirmAction({
     title,
     content,
     okText: "删除",
-    cancelText: "取消",
-    okButtonProps: { type: "danger", theme: "solid", "aria-label": "删除" },
-    cancelButtonProps: { "aria-label": "取消" },
+    variant: "error",
     onOk: async () => {
       try {
         await action();
@@ -291,16 +325,11 @@ export function confirmDelete(
   });
 }
 export function confirmStopTask(action: () => Promise<unknown>) {
-  Modal.confirm({
-    width: 454,
-    className: "fnos-confirm",
-    centered: true,
+  confirmAction({
     title: "停止当前任务？",
     content: "已完成的文件不会撤销。",
     okText: "停止",
-    cancelText: "取消",
-    okButtonProps: { type: "danger", "aria-label": "停止任务" },
-    cancelButtonProps: { "aria-label": "取消" },
+    okLabel: "停止任务",
     onOk: async () => {
       try {
         await action();
@@ -357,15 +386,9 @@ export function Editor({
   const close = () => {
     if (busy) return;
     if (dirty)
-      Modal.confirm({
-        width: 454,
-        className: "fnos-confirm",
-        centered: true,
+      confirmAction({
         title: "放弃未保存的修改？",
         okText: "放弃",
-        cancelText: "取消",
-        okButtonProps: { type: "danger", "aria-label": "放弃" },
-        cancelButtonProps: { "aria-label": "取消" },
         onOk: onClose,
       });
     else onClose();

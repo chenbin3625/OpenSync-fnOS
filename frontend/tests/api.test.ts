@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, serializeParams, apiBase } from "../src/api/client";
+import { api, serializeParams, apiBase, request } from "../src/api/client";
+import { jobGetTaskCurrent } from "../src/api/job";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -56,5 +57,29 @@ describe("gateway-aware API requests", () => {
       `${apiBase}/alist/test?id=7`,
       expect.objectContaining({ method: "POST" }),
     );
+  });
+  it("disables HTTP caching for realtime task requests", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ code: 200, data: null, msg: "" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await jobGetTaskCurrent({ id: 1, current: 1, status: 2 });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining(`${apiBase}/job?`),
+      expect.objectContaining({ cache: "no-store" }),
+    );
+  });
+  it("does not replace backend failures with development fallback data", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({ code: 500, data: null, msg: "真实后端错误" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(request("/job")).rejects.toThrow("真实后端错误");
   });
 });

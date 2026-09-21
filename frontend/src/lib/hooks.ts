@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { getErrorMessage } from "../components/common";
 
 export function useResource<T>(
   fetcher: (signal: AbortSignal) => Promise<T>,
@@ -30,7 +31,7 @@ export function useResource<T>(
       }
     } catch (err) {
       if (!controller.signal.aborted && id === requestRef.current)
-        setError(err instanceof Error ? err.message : "加载失败");
+        setError(getErrorMessage(err, "加载失败"));
     } finally {
       if (id === requestRef.current) {
         abortRef.current = null;
@@ -75,4 +76,20 @@ export function useAction() {
       }
     },
   };
+}
+
+export function useEditorForm<T extends object>(
+  initial: T | (() => T),
+) {
+  const [form, setForm] = useState<T>(initial);
+  const [dirty, setDirty] = useState(false);
+  const change = <K extends keyof T>(key: K, value: T[K]) => {
+    setDirty(true);
+    setForm((f) => ({ ...f, [key]: value }));
+  };
+  const patch = (values: Partial<T>) => {
+    setDirty(true);
+    setForm((f) => ({ ...f, ...values }));
+  };
+  return { form, dirty, change, patch, setForm, setDirty };
 }

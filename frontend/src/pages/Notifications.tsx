@@ -22,7 +22,7 @@ import {
   confirmDelete,
   errorToast,
 } from "../components/common";
-import { useAction, useResource } from "../lib/hooks";
+import { useAction, useEditorForm, useResource } from "../lib/hooks";
 
 import {
   buildNotifyParams,
@@ -89,11 +89,9 @@ export default function Notifications() {
         error={resource.error}
         retry={resource.refresh}
         empty={!resource.data?.length}
-      />
-      <div className="item-list">
-        {!resource.loading &&
-          !resource.error &&
-          resource.data?.map((item) => (
+      >
+        <div className="item-list">
+          {resource.data?.map((item) => (
             <div className="notification-item card-base" key={item.id}>
               <div className="item-content">
                 <h2>
@@ -144,7 +142,8 @@ export default function Notifications() {
               </div>
             </div>
           ))}
-      </div>
+        </div>
+      </LoadState>
       {editing !== undefined && (
         <NotificationEditor
           item={editing}
@@ -167,15 +166,10 @@ function NotificationEditor({
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const [form, setForm] = useState<NotifyForm>(() =>
+  const { form, dirty, change, setForm, setDirty } = useEditorForm<NotifyForm>(() =>
     item ? notifyToForm(item) : defaultNotifyForm(),
   );
-  const [dirty, setDirty] = useState(false);
   const action = useAction();
-  const change = <K extends keyof NotifyForm>(key: K, value: NotifyForm[K]) => {
-    setDirty(true);
-    setForm((f) => ({ ...f, [key]: value }));
-  };
   const submit = (test: boolean) => {
     const validation = validateNotifyForm(form);
     if (validation) {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import DatePicker from "@douyinfe/semi-ui/lib/es/datePicker";
 import Input from "@douyinfe/semi-ui/lib/es/input";
@@ -17,7 +17,6 @@ import {
   IconRefresh,
   IconSearchStroked,
 } from "@douyinfe/semi-icons";
-import dayjs from "dayjs";
 import { api } from "../api/client";
 import {
   IconButton,
@@ -30,12 +29,6 @@ import {
 } from "../components/common";
 import { useAction, useResource } from "../lib/hooks";
 import { historyRangeParams } from "../lib/historyFilters";
-import {
-  createDemoTaskItems,
-  createDemoTaskRecords,
-  createDemoTaskView,
-  pageDemoRows,
-} from "./Home/demoTaskData";
 import { useRealtimeTask } from "./Home/useRealtimeTask";
 import { useRealtimeTaskItems } from "./Home/useRealtimeTaskItems";
 import {
@@ -47,10 +40,8 @@ import {
   taskTypeNames,
 } from "./Home/homeUtils";
 import { taskProgressPercent } from "./Home/taskRows";
+import { formatTimestamp } from "../utils/date";
 import type { TaskItem, TaskRecord } from "../types";
-
-const time = (value?: number) =>
-  value ? dayjs.unix(value).format("YYYY-MM-DD HH:mm:ss") : "—";
 
 const statusTabs = [
   { key: 0, label: "等待", count: "wait" },
@@ -68,7 +59,6 @@ const fileTableWidths = {
 } as const;
 
 export function Realtime({ jobId }: { jobId: number }) {
-  const demo = import.meta.env.DEV;
   const { currentTask, refreshCurrentTask } = useRealtimeTask(
     String(jobId),
     true,
@@ -80,34 +70,13 @@ export function Realtime({ jobId }: { jobId: number }) {
     pageSize: 10,
   });
   const action = useAction();
-
-  // 演示数据
-  const demoItems = useMemo(
-    () => (demo && !currentTask ? createDemoTaskItems() : []),
-    [currentTask, demo],
-  );
-  const demoTask =
-    demo && !currentTask ? createDemoTaskView(undefined, demoItems) : null;
-
-  const activeTask = currentTask || demoTask;
-  if (!activeTask) {
+  if (!currentTask) {
     return <EmptyState />;
   }
-  const task = activeTask;
+  const task = currentTask;
   const activeTab = items.activeTab;
-  const filteredDemo = demoItems.length > 0
-    ? demoItems.filter((item) =>
-        activeTab === -1
-          ? ![0, 1, 2, 7].includes(item.status)
-          : item.status === activeTab,
-      )
-    : [];
-  const isDemo = filteredDemo.length > 0 || demoItems.length > 0;
-  const pagedDemo = isDemo
-    ? pageDemoRows(filteredDemo, items.tabTaskPage, items.pageSize)
-    : [];
-  const tabItems = isDemo ? pagedDemo : items.tabTaskList;
-  const tabTotal = isDemo ? filteredDemo.length : items.tabTaskTotal;
+  const tabItems = items.tabTaskList;
+  const tabTotal = items.tabTaskTotal;
   const total = task.doneSize + task.remainSize;
   const percent =
     total > 0 ? Math.min(100, (task.doneSize / total) * 100) : 0;
@@ -187,7 +156,6 @@ export function Realtime({ jobId }: { jobId: number }) {
 }
 
 export function History({ jobId }: { jobId: number }) {
-  const demo = import.meta.env.DEV;
   const [page, setPage] = useState(1),
     [size, setSize] = useState(10);
   const [status, setStatus] = useState<number | undefined>(),
@@ -211,17 +179,9 @@ export function History({ jobId }: { jobId: number }) {
     [jobId, page, size, status, keyword, range],
   );
   const action = useAction();
-
-  // 演示数据
-  const demoRecords = useMemo(
-    () => (demo ? createDemoTaskRecords() : []),
-    [demo],
-  );
-
   const realRows = resource.data?.dataList || [];
-  const showDemo = demo && !resource.loading && !resource.data;
-  const rows = showDemo ? pageDemoRows(demoRecords, page, size) : realRows;
-  const totalCount = showDemo ? demoRecords.length : (resource.data?.count || 0);
+  const rows = realRows;
+  const totalCount = resource.data?.count || 0;
   const retry = (record: TaskRecord) =>
     void action.run(async () => {
       try {
@@ -337,7 +297,7 @@ export function History({ jobId }: { jobId: number }) {
             {
               title: "开始时间",
               dataIndex: "createTime",
-              render: (value) => time(value),
+              render: (value) => formatTimestamp(value, true),
             },
             {
               title: "状态",
@@ -376,7 +336,7 @@ export function History({ jobId }: { jobId: number }) {
           rows.map((record) => (
             <div className="mobile-record" key={record.id}>
               <div className="record-title">
-                <strong>{time(record.createTime)}</strong>
+                <strong>{formatTimestamp(record.createTime, true)}</strong>
                 <Status
                   status={record.status}
                   label={taskRecordStatusNames[record.status]}
@@ -733,7 +693,7 @@ function Pager({
   return (
     <div className="table-pagination">
       <span className="muted">共 {total} 条</span>
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <div className="pager-controls">
         <Pagination
           total={total}
           currentPage={page}
@@ -747,7 +707,7 @@ function Pager({
             value={size}
             onChange={(v) => onSizeChange(v as number)}
             size="small"
-            style={{ width: 108 }}
+            className="pager-size-select"
             optionList={[10, 20, 50, 100].map((n) => ({
               value: n,
               label: `${n} 条/页`,

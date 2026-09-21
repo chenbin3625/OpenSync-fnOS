@@ -1,5 +1,23 @@
 import { expect, test } from "@playwright/test";
 
+function realtimePage(
+  url: URL,
+  task: { taskId: number; createTime: number },
+  dataList: Record<string, unknown>[],
+  count = dataList.length,
+) {
+  return {
+    taskId: task.taskId,
+    createTime: task.createTime,
+    status: Number(url.searchParams.get("status")),
+    pageNum: Number(url.searchParams.get("pageNum") || 1),
+    pageSize: Number(url.searchParams.get("pageSize") || 10),
+    stale: false,
+    dataList,
+    count,
+  };
+}
+
 test("realtime view loads the initial active task snapshot", async ({ page }) => {
   test.setTimeout(15000);
   const errors: Error[] = [];
@@ -108,8 +126,8 @@ test("realtime view loads running rows when the live snapshot is missing", async
     if (url.pathname.endsWith("/alist")) return success([]);
     if (url.pathname.endsWith("/job") && url.searchParams.get("current")) {
       if (url.searchParams.get("status") === "1") {
-        return success({
-          dataList: [
+        return success(
+          realtimePage(url, activeTask, [
             {
               id: 10,
               fileName: "mobile-running-file.txt",
@@ -120,9 +138,8 @@ test("realtime view loads running rows when the live snapshot is missing", async
               status: 1,
               progress: 42,
             },
-          ],
-          count: 1,
-        });
+          ]),
+        );
       }
       return success(activeTask);
     }
@@ -192,7 +209,7 @@ test("mobile realtime view loads the initial status snapshot", async ({
     if (url.pathname.endsWith("/alist")) return success([]);
     if (url.pathname.endsWith("/job") && url.searchParams.get("current")) {
       if (url.searchParams.has("status")) {
-        return success({ dataList: [], count: 0 });
+        return success(realtimePage(url, activeTask, []));
       }
       return success(activeTask);
     }
@@ -262,8 +279,8 @@ test("mobile realtime pagination stays at the bottom with short content", async 
     if (url.pathname.endsWith("/alist")) return success([]);
     if (url.pathname.endsWith("/job") && url.searchParams.get("current")) {
       if (url.searchParams.get("status") === "1") {
-        return success({
-          dataList: [
+        return success(
+          realtimePage(url, activeTask, [
             {
               id: 220,
               fileName: "bottom-pager-row.txt",
@@ -274,9 +291,8 @@ test("mobile realtime pagination stays at the bottom with short content", async 
               status: 1,
               progress: 12,
             },
-          ],
-          count: 1,
-        });
+          ]),
+        );
       }
       return success(activeTask);
     }
@@ -368,16 +384,20 @@ test("slow realtime status request completes without cancellation", async ({
     ) {
       successRequests += 1;
       await new Promise((resolve) => setTimeout(resolve, 3500));
-      return success({
-        dataList: [
+      return success(
+        realtimePage(
+          url,
+          activeTask,
+          [
           { id: 171, fileName: "slow-success.txt", status: 2, type: 0 },
-        ],
-        count: 21,
-      });
+          ],
+          21,
+        ),
+      );
     }
     if (url.pathname.endsWith("/job") && url.searchParams.get("current")) {
       if (url.searchParams.has("status"))
-        return success({ dataList: [], count: 0 });
+        return success(realtimePage(url, activeTask, []));
       return success(activeTask);
     }
     if (url.pathname.endsWith("/job")) {
@@ -460,16 +480,15 @@ test("realtime status load failure can be retried", async ({ page }) => {
           }),
         });
       }
-      return success({
-        dataList: [
+      return success(
+        realtimePage(url, activeTask, [
           { id: 191, fileName: "retry-success.txt", status: 2, type: 0 },
-        ],
-        count: 1,
-      });
+        ]),
+      );
     }
     if (url.pathname.endsWith("/job") && url.searchParams.get("current")) {
       if (url.searchParams.has("status"))
-        return success({ dataList: [], count: 0 });
+        return success(realtimePage(url, activeTask, []));
       return success(activeTask);
     }
     if (url.pathname.endsWith("/job")) {
@@ -540,8 +559,8 @@ test("realtime detail refreshes without changing the current view", async ({
     if (url.pathname.endsWith("/job") && url.searchParams.get("current")) {
       if (url.searchParams.has("status")) {
         detailRequests += 1;
-        return success({
-          dataList: [
+        return success(
+          realtimePage(url, activeTask, [
             {
               id: 230 + detailRequests,
               fileName: `detail-version-${detailRequests}.txt`,
@@ -552,9 +571,8 @@ test("realtime detail refreshes without changing the current view", async ({
               status: 1,
               progress: detailRequests,
             },
-          ],
-          count: 1,
-        });
+          ]),
+        );
       }
       return success(activeTask);
     }
@@ -631,8 +649,11 @@ test("realtime detail refresh keeps the selected page", async ({ page }) => {
         if (pageTwoVisible) pageRequestsAfterPageTwo.push(pageNum);
         const version =
           pageNum === "2" ? String(++pageTwoRequests) : "1";
-        return success({
-          dataList: [
+        return success(
+          realtimePage(
+            url,
+            activeTask,
+            [
             {
               id: 250 + Number(pageNum),
               fileName: `running-page-${pageNum}-v${version}.txt`,
@@ -643,9 +664,10 @@ test("realtime detail refresh keeps the selected page", async ({ page }) => {
               status: 1,
               progress: 50,
             },
-          ],
-          count: 12,
-        });
+            ],
+            12,
+          ),
+        );
       }
       return success(activeTask);
     }
@@ -740,8 +762,11 @@ test("realtime snapshot refresh keeps the selected status view", async ({
       if (url.searchParams.has("status")) {
         const status = url.searchParams.get("status") || "";
         if (successTabSelected) statusesAfterSuccessTab.push(status);
-        return success({
-          dataList: [
+        return success(
+          realtimePage(
+            url,
+            snapshot(allowSnapshotUpdate ? 2 : 1),
+            [
             {
               id: 240 + Number(status || 0),
               fileName:
@@ -755,9 +780,10 @@ test("realtime snapshot refresh keeps the selected status view", async ({
               status: Number(status),
               progress: 100,
             },
-          ],
-          count: status === "2" ? 2 : 1,
-        });
+            ],
+            status === "2" ? 2 : 1,
+          ),
+        );
       }
       return success(snapshot(allowSnapshotUpdate ? 2 : 1));
     }
@@ -974,8 +1000,8 @@ test("realtime file columns keep the name readable at 1100px desktop width", asy
     if (url.pathname.endsWith("/alist")) return success([]);
     if (url.pathname.endsWith("/job") && url.searchParams.get("current")) {
       if (url.searchParams.get("status") === "7") {
-        return success({
-          dataList: [
+        return success(
+          realtimePage(url, activeTask, [
             {
               id: 11,
               fileName: "annual-audit-source-archive-with-readable-name.tar.gz",
@@ -988,9 +1014,8 @@ test("realtime file columns keep the name readable at 1100px desktop width", asy
               errMsg:
                 "目标端返回了一个非常长的错误说明，包含路径、重试建议、服务端响应和多段上下文信息，需要在进度列内被截断而不是把文件名列挤没。",
             },
-          ],
-          count: 1,
-        });
+          ]),
+        );
       }
       return success(activeTask);
     }
@@ -1282,24 +1307,23 @@ test("switching realtime tab clears the previous tab rows immediately", async ({
       const status = url.searchParams.get("status");
       // 运行中：立即返回
       if (status === "1") {
-        return success({
-          dataList: [
+        return success(
+          realtimePage(url, activeTask, [
             { id: 271, fileName: "running-file.txt", status: 1, type: 0 },
-          ],
-          count: 1,
-        });
+          ]),
+        );
       }
       // 成功：故意延迟，留出观察脏数据的窗口
       if (status === "2") {
         await new Promise((resolve) => setTimeout(resolve, 4000));
-        return success({
-          dataList: [
+        return success(
+          realtimePage(url, activeTask, [
             { id: 272, fileName: "success-file.txt", status: 2, type: 0 },
-          ],
-          count: 1,
-        });
+          ]),
+        );
       }
-      if (status !== null) return success({ dataList: [], count: 0 });
+      if (status !== null)
+        return success(realtimePage(url, activeTask, []));
       return success(activeTask);
     }
     if (url.pathname.endsWith("/job")) {

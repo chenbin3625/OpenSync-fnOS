@@ -33,9 +33,15 @@ function sameNumber(
     return true;
   }
   if (actual === undefined || actual === null || actual === "") {
-    return true;
+    return false;
   }
   return Number(actual) === Number(expected);
+}
+
+function taskItemMatchesStatus(item: TaskItem, status: number): boolean {
+  return status === -1
+    ? ![0, 1, 2, 7].includes(item.status)
+    : item.status === status;
 }
 
 export function realtimeTaskPageMatches(
@@ -58,31 +64,31 @@ export function normalizeTaskItemPage(
   expected?: RealtimeTaskPageIdentity,
 ): { rows: TaskItem[]; total: number } {
   if (!data) return { rows: [], total: 0 };
-  if (Array.isArray(data)) return { rows: data, total: data.length };
+  if (Array.isArray(data)) {
+    return expected ? { rows: [], total: 0 } : { rows: data, total: data.length };
+  }
   if ("dataList" in data && Array.isArray(data.dataList)) {
     if (!realtimeTaskPageMatches(data as RealtimeTaskItemPage, expected)) {
       return { rows: [], total: 0 };
     }
-    return { rows: data.dataList, total: Number(data.count || 0) };
+    const expectedStatus = expected?.status;
+    if (
+      expectedStatus === undefined ||
+      expectedStatus === null ||
+      expectedStatus === ""
+    ) {
+      return { rows: data.dataList, total: Number(data.count || 0) };
+    }
+    const rows = data.dataList.filter((item) =>
+      taskItemMatchesStatus(item, Number(expectedStatus)),
+    );
+    const rejectedCount = data.dataList.length - rows.length;
+    return {
+      rows,
+      total: Math.max(rows.length, Number(data.count || 0) - rejectedCount),
+    };
   }
   return { rows: [], total: 0 };
-}
-
-export function realtimeRunningSnapshotIsComplete(
-  task: Pick<CurrentTaskData, "doingTask" | "num">,
-): boolean {
-  const runningCount = Number(task.num?.running || 0);
-  const snapshotCount = task.doingTask?.length || 0;
-  return runningCount <= 0 || snapshotCount >= runningCount;
-}
-
-export function pageTaskItems(
-  rows: TaskItem[],
-  _status: number,
-  _page: number,
-  _pageSize: number,
-): TaskItem[] {
-  return rows;
 }
 
 export function taskProgressPercent(progress: unknown): number {

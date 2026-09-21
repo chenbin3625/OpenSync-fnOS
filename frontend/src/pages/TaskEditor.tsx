@@ -19,7 +19,7 @@ import {
 import { ExcludeTree } from "../components/ExcludeTree";
 import { FileTypeFilter } from "../components/FileTypeFilter";
 import { RemotePaths } from "../components/RemotePaths";
-import { useAction } from "../lib/hooks";
+import { useAction, useEditorForm } from "../lib/hooks";
 import {
   buildJobPayload,
   defaultJobForm,
@@ -42,13 +42,15 @@ import {
 import { fileSizeUnitOptions, type FileSizeUnit } from "./Home/fileSizeUnits";
 import type { AlistItem, JobItem } from "../types";
 
-const taskEditorSteps = ["引擎与路径", "同步与调度", "文件过滤", "文件夹过滤"];
+type CronFieldName = "second" | "minute" | "hour" | "day" | "month" | "day_of_week";
+
 const taskEditorTabs = [
   { key: "engine", label: "引擎与路径" },
   { key: "sync", label: "同步与调度" },
   { key: "filter", label: "文件过滤" },
   { key: "folder", label: "文件夹过滤" },
 ];
+const taskEditorSteps = taskEditorTabs.map((tab) => tab.label);
 const fileSizeFilterDefaults = {
   min: { label: "排除小于", value: 10, unit: "KB" },
   max: { label: "排除大于", value: 10, unit: "GB" },
@@ -78,26 +80,17 @@ export default function TaskEditor({
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const [form, setForm] = useState<JobForm>(() =>
+  const { form, dirty, change, patch, setForm, setDirty } = useEditorForm<JobForm>(() =>
     job ? jobToForm(job) : defaultJobForm(engines[0]?.id),
   );
-  const [dirty, setDirty] = useState(false);
   const isNew = !job;
   const [step, setStep] = useState(0);
   const [activeTab, setActiveTab] = useState("engine");
   const action = useAction();
   const lastStep = step === taskEditorSteps.length - 1;
   const activePanel = isNew
-    ? ["engine", "sync", "filter", "folder"][step]
+    ? taskEditorTabs[step].key
     : activeTab;
-  const change = <K extends keyof JobForm>(key: K, value: JobForm[K]) => {
-    setDirty(true);
-    setForm((current) => ({ ...current, [key]: value }));
-  };
-  const patch = (values: Partial<JobForm>) => {
-    setDirty(true);
-    setForm((current) => ({ ...current, ...values }));
-  };
   const nextStep = () => {
     const validation = validateJobFormStep(form, step);
     if (validation) {
@@ -301,10 +294,10 @@ export default function TaskEditor({
                     {cronFields.map((field) => (
                       <Field key={field.name} label={field.label}>
                         <Input
-                          value={form[field.name as keyof typeof rangesKeys]}
+                          value={form[field.name as CronFieldName]}
                           onChange={(value) =>
                             change(
-                              field.name as keyof typeof rangesKeys,
+                              field.name as CronFieldName,
                               value,
                             )
                           }
@@ -463,12 +456,3 @@ function FileSizeFilterRow({
     </div>
   );
 }
-
-const rangesKeys = {
-  second: true,
-  minute: true,
-  hour: true,
-  day: true,
-  month: true,
-  day_of_week: true,
-};

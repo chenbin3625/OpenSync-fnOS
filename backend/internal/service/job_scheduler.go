@@ -18,6 +18,16 @@ import (
 const defaultSchedulerTimeZone = "Asia/Shanghai"
 const schedulerStopTimeout = 5 * time.Second
 
+// stopCronWithTimeout stops a cron scheduler and waits up to schedulerStopTimeout.
+func stopCronWithTimeout(c *cron.Cron, label string) {
+	ctx := c.Stop()
+	select {
+	case <-ctx.Done():
+	case <-time.After(schedulerStopTimeout):
+		log.Printf("%s stop timed out after %s", label, schedulerStopTimeout)
+	}
+}
+
 // Scheduler wraps robfig/cron for job scheduling
 type Scheduler struct {
 	cron    *cron.Cron
@@ -156,12 +166,7 @@ func (s *Scheduler) Stop() {
 	if c == nil {
 		return
 	}
-	ctx := c.Stop()
-	select {
-	case <-ctx.Done():
-	case <-time.After(schedulerStopTimeout):
-		log.Printf("scheduler stop timed out after %s", schedulerStopTimeout)
-	}
+	stopCronWithTimeout(c, "scheduler")
 }
 
 // buildCronSpec builds a cron expression from job data

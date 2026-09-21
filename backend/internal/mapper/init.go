@@ -440,11 +440,16 @@ func txTableExists(tx *sql.Tx, tableName string) bool {
 	return err == nil && name == tableName
 }
 
-func txTableHasColumn(tx *sql.Tx, tableName, columnName string) bool {
+// querier is satisfied by both *sql.Tx and *sql.DB.
+type querier interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+}
+
+func hasColumn(q querier, tableName, columnName string) bool {
 	if !isSafeSQLIdentifier(tableName) {
 		return false
 	}
-	rows, err := tx.Query("PRAGMA table_info(" + tableName + ")")
+	rows, err := q.Query("PRAGMA table_info(" + tableName + ")")
 	if err != nil {
 		return false
 	}
@@ -466,28 +471,10 @@ func txTableHasColumn(tx *sql.Tx, tableName, columnName string) bool {
 	return false
 }
 
-func tableHasColumnDB(db *sql.DB, tableName, columnName string) bool {
-	if !isSafeSQLIdentifier(tableName) {
-		return false
-	}
-	rows, err := db.Query("PRAGMA table_info(" + tableName + ")")
-	if err != nil {
-		return false
-	}
-	defer rows.Close()
+func txTableHasColumn(tx *sql.Tx, tableName, columnName string) bool {
+	return hasColumn(tx, tableName, columnName)
+}
 
-	for rows.Next() {
-		var cid int
-		var name, typ string
-		var notNull int
-		var defaultValue interface{}
-		var pk int
-		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
-			return false
-		}
-		if name == columnName {
-			return true
-		}
-	}
-	return false
+func tableHasColumnDB(db *sql.DB, tableName, columnName string) bool {
+	return hasColumn(db, tableName, columnName)
 }

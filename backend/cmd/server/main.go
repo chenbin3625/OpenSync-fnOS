@@ -30,6 +30,8 @@ import (
 var webFiles embed.FS
 
 const prefix = "/app/opensync"
+const maxRequestBodyBytes = 1 << 20
+const shutdownTimeout = 30 * time.Second
 
 func newRouter(development bool, allowedOrigins []string) *gin.Engine {
 	r := gin.New()
@@ -48,11 +50,11 @@ func newRouter(development bool, allowedOrigins []string) *gin.Engine {
 		c.Header("X-Content-Type-Options", "nosniff")
 		c.Header("Referrer-Policy", "same-origin")
 		c.Header("Content-Security-Policy", "frame-ancestors 'self'; object-src 'none'; base-uri 'self'")
-		if c.Request.ContentLength > 1<<20 {
+		if c.Request.ContentLength > maxRequestBodyBytes {
 			c.AbortWithStatusJSON(413, gin.H{"code": 413, "msg": "请求内容过大"})
 			return
 		}
-		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxRequestBodyBytes)
 		c.Next()
 	})
 	api := r.Group(prefix+"/svr", platform.GatewayRequired(development, allowedOrigins))
@@ -165,7 +167,7 @@ func main() {
 		}
 	case <-ctx.Done():
 	}
-	shutdown, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	shutdown, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	service.ShutdownJobs(shutdown)
 	if server.Shutdown(shutdown) != nil {

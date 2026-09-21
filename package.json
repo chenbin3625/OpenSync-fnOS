@@ -1,11 +1,12 @@
 {
   "name": "opensync-fnos",
-  "version": "0.0.17",
+  "version": "0.0.18",
   "private": true,
   "type": "module",
   "description": "OpenSync 飞牛 Native 应用的本地预览与打包入口",
   "scripts": {
     "dev": "node scripts/dev.mjs",
+    "dev:mock": "npm --prefix frontend run dev:mock",
     "package:amd64": "node scripts/build.mjs amd64",
     "package:arm64": "node scripts/build.mjs arm64",
     "release": "node scripts/release.mjs",

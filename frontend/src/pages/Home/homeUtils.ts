@@ -1,6 +1,6 @@
-import type { AlistItem, JobItem, TaskItem, TreeNode } from "../../types";
+import type { JobItem, TaskItem, TreeNode } from "../../types";
 
-export type ScheduleValues = {
+type ScheduleValues = {
   isCron?: number;
   interval?: number;
   second?: string | null;
@@ -36,9 +36,6 @@ export const taskItemStatusNames: Record<number, string> = {
   10: "等待重试中",
   11: "等待重试前",
 };
-export const taskItemStatusOptions = Object.entries(taskItemStatusNames).map(
-  ([value, label]) => ({ value: Number(value), label }),
-);
 export const taskTypeNames: Record<number, string> = {
   0: "复制",
   1: "删除",
@@ -161,12 +158,12 @@ lost+found/
 
 // ---- Utility Functions ----
 
-export const cronValue = (value?: string | null, fallback = "*") => {
+const cronValue = (value?: string | null, fallback = "*") => {
   const normalized = String(value ?? "").trim();
   return normalized || fallback;
 };
 
-export const formatTime = (
+const formatTime = (
   hour?: string | null,
   minute?: string | null,
   second?: string | null,
@@ -199,7 +196,7 @@ export const formatCronDayOfWeek = (value?: string | null) => {
     .join("、");
 };
 
-export const describeCronPlan = (values: ScheduleValues) => {
+const describeCronPlan = (values: ScheduleValues) => {
   const second = cronValue(values.second, "0");
   const minute = cronValue(values.minute);
   const hour = cronValue(values.hour);
@@ -260,23 +257,6 @@ export const parseJobPathList = (value: unknown): string[] => {
     /* plain single path */
   }
   return [raw];
-};
-
-export const normalizeFormPaths = (
-  value: string | string[] | undefined,
-): string[] => {
-  const paths = Array.isArray(value) ? value : [value];
-  return paths.map((item) => String(item ?? "").trim()).filter(Boolean);
-};
-
-export const formatAlistLabel = (
-  alist: AlistItem,
-  options?: { includeUrl?: boolean },
-) => {
-  const base = options?.includeUrl
-    ? `${alist.userName} - ${alist.url}`
-    : alist.userName;
-  return alist.remark ? `${base} (${alist.remark})` : base;
 };
 
 export const normalizeTreePath = (value: unknown): string => {
@@ -364,13 +344,6 @@ export const mergeTreeData = (
   return merged;
 };
 
-export const formatJobPaths = (value: unknown, separator = "、") => {
-  const paths = parseJobPathList(value);
-  return paths.length > 0 ? paths.join(separator) : "";
-};
-
-export const countJobPaths = (value: unknown) => parseJobPathList(value).length;
-
 export const formatSize = (bytes: number) => {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -381,25 +354,6 @@ export const formatSize = (bytes: number) => {
     unitIndex++;
   }
   return `${size.toFixed(unitIndex === 0 ? 0 : 2)} ${units[unitIndex]}`;
-};
-
-export const displayText = (
-  value: string | number | null | undefined,
-): string => {
-  if (value === null || value === undefined || value === "") return "--";
-  return String(value);
-};
-
-export const formatFileSizeRange = (
-  minSize?: number | null,
-  maxSize?: number | null,
-) => {
-  const min = Number(minSize || 0);
-  const max = Number(maxSize || 0);
-  if (min <= 0 && max <= 0) return "";
-  if (min > 0 && max > 0) return `${formatSize(min)} ~ ${formatSize(max)}`;
-  if (min > 0) return `不小于 ${formatSize(min)}`;
-  return `不大于 ${formatSize(max)}`;
 };
 
 export const getJobName = (job: JobItem) => job.remark || `同步任务 #${job.id}`;

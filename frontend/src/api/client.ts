@@ -29,14 +29,17 @@ export async function request<T>(
     data?: unknown;
     params?: Record<string, unknown>;
     signal?: AbortSignal;
+    cache?: RequestCache;
   } = {},
 ): Promise<T> {
   const timeout = AbortSignal.timeout(90000);
-  const response = await fetch(
+  let response: Response;
+  response = await fetch(
     `${apiBase}${path}${options.params ? "?" + serializeParams(options.params) : ""}`,
     {
       method: options.method || "GET",
       credentials: "same-origin",
+      cache: options.cache,
       signal: options.signal
         ? AbortSignal.any([options.signal, timeout])
         : timeout,
@@ -93,11 +96,6 @@ export const api = {
     request("/alist", { method: "DELETE", params: { id } }),
   testEngine: (id: number) =>
     request("/alist/test", { method: "POST", params: { id } }),
-  jobs: (page: number, signal?: AbortSignal, pageSize = 12) =>
-    request<PageData<JobItem>>("/job", {
-      params: { pageNum: page, pageSize },
-      signal,
-    }),
   jobMenu: (signal?: AbortSignal) => requestAllJobs(signal),
   saveJob: (data: unknown, signal?: AbortSignal) =>
     request("/job", { method: "POST", data, signal }),
@@ -107,16 +105,6 @@ export const api = {
   current: (id: number, signal?: AbortSignal) =>
     request<CurrentTaskData | null>("/job", {
       params: { id, current: 1 },
-      signal,
-    }),
-  currentItems: (
-    id: number,
-    status: number,
-    page: number,
-    signal?: AbortSignal,
-  ) =>
-    request<PageData<TaskItem> | TaskItem[]>("/job", {
-      params: { id, current: 1, status, pageNum: page, pageSize: 20 },
       signal,
     }),
   history: (

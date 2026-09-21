@@ -109,11 +109,12 @@ test("task editor keeps size filters disabled until selected", async ({
   await expect(rootNode).toHaveAttribute("aria-disabled", "true");
   await expect(
     rootNode.getByRole("checkbox", { name: "Toggle the checked state of checkbox" }),
-  ).toBeDisabled();
+  ).toHaveCount(0);
   const albumsNode = dialog.locator(
     '.exclude-tree [role="treeitem"][data-key="/Photos/Albums"]',
   );
-  await expect(albumsNode).toHaveAttribute("aria-expanded", "true");
+  await expect(albumsNode).toHaveAttribute("aria-expanded", "false");
+  await albumsNode.getByRole("button").click();
   await expect(
     dialog.locator('.exclude-tree [role="treeitem"][data-key="/Photos/Albums/2024"]'),
   ).toBeVisible();

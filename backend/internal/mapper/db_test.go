@@ -35,6 +35,7 @@ func TestParsePageParamsRejectsInvalidValues(t *testing.T) {
 		{"pageSize": "20", "pageNum": "0"},
 		{"pageSize": "abc", "pageNum": "1"},
 		{"pageSize": "20", "pageNum": "abc"},
+		{"pageSize": 1.5, "pageNum": 1},
 	}
 
 	for _, params := range cases {

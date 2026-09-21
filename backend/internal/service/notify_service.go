@@ -245,15 +245,7 @@ func validateWebhookMethod(method string) error {
 }
 
 func validateNotifyWebhookURL(rawURL string) error {
-	u, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		return errors.New(msg.NotifyURLInvalid)
-	}
-	scheme := strings.ToLower(u.Scheme)
-	if scheme != "http" && scheme != "https" {
-		return errors.New(msg.NotifyURLInvalid)
-	}
-	return nil
+	return util.ValidateHTTPURL(rawURL, msg.NotifyURLInvalid)
 }
 
 func validateNotifyHTTPSURL(rawURL string) error {

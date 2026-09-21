@@ -35,6 +35,19 @@ test("desktop sidebar is 220px with icon menus and bottom settings", async ({
     (page.viewportSize()?.width || 0) <= 640,
     "mobile uses bottom navigation",
   );
+  await page.route("**/app/opensync/svr/job**", async (route) => {
+    const url = new URL(route.request().url());
+    const data = url.searchParams.has("current")
+      ? null
+      : {
+          dataList: [{ id: 1, remark: "布局测试任务", enable: 1 }],
+          count: 1,
+        };
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ code: 200, data, msg: "" }),
+    });
+  });
   await page.goto("/app/opensync/tasks");
   const sidebar = page.locator(".app-sidebar");
   await expect(sidebar).toBeVisible();
@@ -219,6 +232,100 @@ test("task tabs and page commands share an integrated toolbar row", async ({
       actionBox!.y + actionBox!.height / 2 - toolbarBox!.y - toolbarBox!.height / 2,
     ),
   ).toBeLessThan(8);
+});
+
+test("mobile task tabs fit inside the page toolbar", async ({ page }) => {
+  test.skip(
+    (page.viewportSize()?.width || 0) > 640,
+    "desktop uses the fixed-height toolbar",
+  );
+
+  await page.goto("/app/opensync/tasks?tab=overview");
+  const toolbar = page.locator(".page-toolbar");
+  const tabs = toolbar.getByRole("tab");
+  const action = toolbar.getByRole("button", {
+    name: "新建任务",
+    exact: true,
+  });
+
+  const toolbarBox = await toolbar.boundingBox();
+  expect(toolbarBox).not.toBeNull();
+  for (const item of [tabs.first(), tabs.last(), action]) {
+    const itemBox = await item.boundingBox();
+    expect(itemBox).not.toBeNull();
+    expect(itemBox!.y).toBeGreaterThanOrEqual(toolbarBox!.y);
+    expect(itemBox!.y + itemBox!.height).toBeLessThanOrEqual(
+      toolbarBox!.y + toolbarBox!.height,
+    );
+  }
+
+  expect(await toolbar.evaluate((element) => element.scrollHeight)).toBe(
+    await toolbar.evaluate((element) => element.clientHeight),
+  );
+});
+
+test("mobile task switcher stays below the toolbar", async ({ page }) => {
+  test.skip(
+    (page.viewportSize()?.width || 0) > 640,
+    "mobile layout regression only",
+  );
+
+  await page.route("**/app/opensync/svr/**", async (route) => {
+    const url = new URL(route.request().url());
+    const success = (data: unknown) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ code: 200, data, msg: "" }),
+      });
+    if (url.pathname.endsWith("/session"))
+      return success({ uid: 1, development: false, version: "test" });
+    if (url.pathname.endsWith("/alist")) return success([]);
+    if (url.pathname.endsWith("/job") && url.searchParams.has("current"))
+      return success(null);
+    if (url.pathname.endsWith("/job")) {
+      return success({
+        dataList: [
+          {
+            id: 1,
+            enable: 1,
+            remark: "相册备份",
+            srcPath: '["/photos"]',
+            dstPath: '["/backup"]',
+            alistId: 1,
+            method: 0,
+            interval: 0,
+            isCron: 2,
+          },
+          {
+            id: 2,
+            enable: 1,
+            remark: "工作资料同步",
+            srcPath: '["/work"]',
+            dstPath: '["/backup"]',
+            alistId: 1,
+            method: 0,
+            interval: 0,
+            isCron: 2,
+          },
+        ],
+        count: 2,
+      });
+    }
+    return success(null);
+  });
+
+  await page.goto("/app/opensync/tasks?jobId=1&tab=overview");
+  const toolbar = page.locator(".page-toolbar");
+  const switcher = page.getByRole("tablist", { name: "任务列表" });
+  await expect(switcher.getByRole("tab")).toHaveCount(2);
+
+  const toolbarBox = await toolbar.boundingBox();
+  const switcherBox = await switcher.boundingBox();
+  expect(toolbarBox).not.toBeNull();
+  expect(switcherBox).not.toBeNull();
+  expect(switcherBox!.y).toBeGreaterThanOrEqual(
+    toolbarBox!.y + toolbarBox!.height,
+  );
 });
 
 test("task management top tabs keep a visible selected state", async ({ page }) => {
@@ -499,20 +606,28 @@ test("empty pages render the reference folder asset", async ({ page }) => {
     if (url.pathname.endsWith("/notify")) return success([]);
     return success(null);
   });
-  const layouts: Array<{ path: string; top: number; height: number; imageY: number }> = [];
+  const layouts: Array<{
+    path: string;
+    height: number;
+    topOffset: number;
+    imageOffset: number;
+  }> = [];
   for (const path of ["tasks", "engines", "notifications"]) {
     await page.goto(`/app/opensync/${path}`);
+    const toolbarBox = await page.locator(".page-toolbar").boundingBox();
     const empty = page.getByRole("status", { name: "空空如也", exact: true });
     await expect(empty).toBeVisible();
     const emptyBox = await empty.boundingBox();
     const imageBox = await empty.locator("img").boundingBox();
+    expect(toolbarBox).not.toBeNull();
     expect(emptyBox).not.toBeNull();
     expect(imageBox).not.toBeNull();
+    const toolbarBottom = toolbarBox!.y + toolbarBox!.height;
     layouts.push({
       path,
-      top: emptyBox!.y,
       height: emptyBox!.height,
-      imageY: imageBox!.y + imageBox!.height / 2,
+      topOffset: emptyBox!.y - toolbarBottom,
+      imageOffset: imageBox!.y + imageBox!.height / 2 - toolbarBottom,
     });
     expect(
       await empty
@@ -526,12 +641,15 @@ test("empty pages render the reference folder asset", async ({ page }) => {
   for (const layout of others) {
     expect.soft(layout.height, `${layout.path} empty height`).toBe(reference.height);
     expect
-      .soft(Math.abs(layout.top - reference.top), `${layout.path} empty top`)
+      .soft(
+        Math.abs(layout.topOffset - reference.topOffset),
+        `${layout.path} empty top offset`,
+      )
       .toBeLessThanOrEqual(1);
     expect
       .soft(
-        Math.abs(layout.imageY - reference.imageY),
-        `${layout.path} empty image center`,
+        Math.abs(layout.imageOffset - reference.imageOffset),
+        `${layout.path} empty image offset`,
       )
       .toBeLessThanOrEqual(1);
   }

@@ -22,6 +22,11 @@
   --semi-color-primary-hover: #0059df;
   --semi-color-primary-active: #004dc2;
   --semi-color-primary-light-default: #edf3ff;
+  --semi-color-bg-0: var(--surface);
+  --semi-color-bg-1: var(--surface-soft);
+  --semi-color-border: var(--border-control);
+  --semi-color-focus-border: var(--accent);
+  --semi-color-text-2: var(--muted);
   --semi-border-radius-small: var(--radius);
   --semi-border-radius-medium: var(--radius);
   --radius: 8px;
@@ -30,7 +35,7 @@
   --font-size-small: 12px;
   --font-size-nav: 14px;
   --font-size-section-title: 16px;
-  --font-size-page-title: 20px;
+  --font-size-page-title: 16px;
   --font-size-metric: 17px;
   --font-size-modal-title: 18px;
   --success: #30a46c;
@@ -90,24 +95,29 @@ h3 {
   outline-offset: 2px;
 }
 .muted,
-.field-hint {
+.field-hint,
+.field-label-inline-note,
+.flow-sub,
+.item-meta,
+.execution-metrics,
+.scan-status,
+.file-expanded span,
+.system-dir-patterns {
   color: var(--muted);
   font-size: var(--font-size-small);
 }
-.field-label-with-tip {
+.field-label-with-tip,
+.field-label-with-note {
   display: inline-flex;
   align-items: center;
   gap: 6px;
 }
 .field-label-with-note {
-  display: inline-flex;
   align-items: baseline;
   gap: 8px;
   min-width: 0;
 }
 .field-label-inline-note {
-  color: var(--muted);
-  font-size: var(--font-size-small);
   font-weight: 400;
 }
 .field-tip-icon {
@@ -270,7 +280,7 @@ h3 {
 }
 .page-title {
   white-space: nowrap;
-  font-size: 22px;
+  font-size: var(--font-size-page-title);
   line-height: 22px;
 }
 .page-actions,
@@ -473,8 +483,6 @@ h3 {
   color: var(--accent);
 }
 .flow-sub {
-  color: var(--muted);
-  font-size: var(--font-size-small);
   overflow-wrap: anywhere;
 }
 .flow-next .flow-name {
@@ -548,8 +556,6 @@ h3 {
   flex-wrap: wrap;
 }
 .item-meta {
-  color: var(--muted);
-  font-size: var(--font-size-small);
   overflow-wrap: anywhere;
 }
 .item-list .row-actions {
@@ -658,7 +664,6 @@ body .semi-modal-mask {
   border: 1px solid var(--border-control);
   min-height: var(--control-height);
   border-radius: var(--radius);
-  font-size: var(--font-size-body);
 }
 .editor-modal .semi-input-wrapper-focus,
 .editor-modal .semi-select-focus,
@@ -767,6 +772,11 @@ body .semi-modal-mask {
 .exclude-tree-empty {
   padding: 24px 0;
   text-align: center;
+}
+
+/* 根节点隐藏复选框 */
+.exclude-tree .semi-tree-option-level-1 > .semi-tree-option-label .semi-checkbox {
+  display: none;
 }
 .file-type-filter {
   display: grid;
@@ -901,8 +911,6 @@ body .semi-modal-mask {
   border-top: 1px solid var(--line);
 }
 .system-dir-patterns {
-  color: var(--muted);
-  font-size: var(--font-size-small);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   word-break: break-all;
 }
@@ -913,12 +921,6 @@ body .semi-modal-mask {
   min-width: 0;
   display: grid;
   gap: 0;
-}
-.editor-form .semi-tabs-tab-active {
-  color: var(--accent) !important;
-}
-.editor-form .semi-tabs-ink-bar {
-  background-color: var(--accent) !important;
 }
 .editor-form .form-section:first-child {
   padding-top: 0;
@@ -1014,8 +1016,6 @@ body .semi-modal-mask {
   flex-wrap: wrap;
   align-items: center;
   gap: 4px 0;
-  color: var(--muted);
-  font-size: var(--font-size-small);
   margin: 2px 0 4px;
 }
 .metric-sep {
@@ -1026,8 +1026,6 @@ body .semi-modal-mask {
   margin: 0 8px;
 }
 .scan-status {
-  color: var(--muted);
-  font-size: var(--font-size-small);
   margin-bottom: 4px;
 }
 .filter-bar {
@@ -1040,7 +1038,8 @@ body .semi-modal-mask {
 }
 .filter-bar .semi-input-wrapper,
 .filter-bar .semi-select,
-.filter-bar .semi-datepicker .semi-input-wrapper {
+.filter-bar .semi-datepicker .semi-input-wrapper,
+.filter-bar .semi-datepicker-range-input {
   border-radius: var(--radius);
 }
 .filter-bar > .semi-input-wrapper {
@@ -1054,6 +1053,13 @@ body .semi-modal-mask {
 .filter-bar .semi-datepicker {
   flex: 0 1 auto;
   min-width: 0;
+}
+
+/* 移除日期范围选择器开始/结束日期的药丸圆角 */
+.semi-datepicker-day-selected-start .semi-datepicker-day-main,
+.semi-datepicker-day-selected-end .semi-datepicker-day-main,
+.semi-datepicker-day-selected-start.semi-datepicker-day-selected-end .semi-datepicker-day-main {
+  border-radius: 0;
 }
 .desktop-data {
   min-width: 0;
@@ -1123,17 +1129,16 @@ body .semi-modal-mask {
   overflow: visible;
 }
 /* 所有下拉选项列表展示全部内容，不滚动 */
-.semi-select-option-list {
+.detail-drawer .semi-select-option-list,
+.editor-modal .semi-select-option-list {
   max-height: none !important;
   overflow: visible !important;
 }
 .semi-table-thead > tr > th {
-  background: var(--surface-soft);
   font-weight: 500;
   padding: 8px 12px;
 }
 .semi-table-tbody > tr > td {
-  border-bottom-color: var(--line);
   padding: 8px 12px;
 }
 .task-tag {
@@ -1242,21 +1247,18 @@ body .semi-modal-mask {
   display: grid;
   gap: 16px;
 }
-.file-expanded span {
-  color: var(--muted);
-  font-size: var(--font-size-small);
-}
 .file-expanded p {
   margin-top: 6px;
 }
-.inline-error {
-  color: var(--danger);
-  font-size: var(--font-size-small);
-  overflow-wrap: anywhere;
-}
+.inline-error,
 .inline-error-text {
   color: var(--danger);
   font-size: var(--font-size-small);
+}
+.inline-error {
+  overflow-wrap: anywhere;
+}
+.inline-error-text {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1308,12 +1310,18 @@ body .semi-modal-mask {
   }
   .page-toolbar {
     flex-wrap: wrap;
+    height: auto;
+    min-height: 53px;
     margin: -20px -16px 20px;
-    padding: 12px 16px;
+    padding: 0 16px;
     gap: 8px;
   }
-  .page-tabs .semi-tabs-tab {
-    height: 40px;
+  .page-toolbar .page-tabs .semi-tabs,
+  .page-toolbar .page-tabs .semi-tabs-bar,
+  .page-toolbar .page-tabs .semi-tabs-tab {
+    height: 53px;
+  }
+  .page-toolbar .page-tabs .semi-tabs-tab {
     margin-right: 20px;
   }
   .page-tabs {
@@ -1351,15 +1359,9 @@ body .semi-modal-mask {
   .mobile-navigation a.active {
     color: var(--accent);
   }
-  .semi-button {
-    min-height: 36px;
-  }
-  .row-actions .semi-button {
-    width: 36px;
-    height: 36px;
-  }
   .task-page {
     min-height: 0;
+    padding-bottom: 0;
   }
   .mobile-job-bar {
     display: flex;
@@ -1606,8 +1608,12 @@ body .semi-modal-mask {
 .execution-tabs .semi-tabs-bar-line {
   background-color: transparent !important;
 }
-.page-tabs .semi-tabs-tab-active {
+.page-tabs .semi-tabs-tab-active,
+.editor-form .semi-tabs-tab-active {
   color: var(--accent) !important;
+}
+.editor-form .semi-tabs-ink-bar {
+  background: var(--accent) !important;
 }
 .page-tabs .semi-tabs-bar-line .semi-tabs-tab-active,
 .execution-tabs .semi-tabs-bar-line .semi-tabs-tab-active {
@@ -1687,4 +1693,15 @@ body .semi-modal-mask {
 }
 .settings-card-note {
   padding: 0 24px 12px;
+}
+.pager-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pager-size-select {
+  width: 108px;
+}
+.remote-paths-retry {
+  margin-top: 8px;
 }

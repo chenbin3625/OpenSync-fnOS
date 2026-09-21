@@ -64,13 +64,6 @@ type JobTask struct {
 	copyMonitorClientOverride copyItemClient
 }
 
-// NewJobTask creates and starts a new task
-func NewJobTask(taskID int64, jc *JobClient) *JobTask {
-	jt := newJobTask(taskID, jc)
-	jt.Start()
-	return jt
-}
-
 func newJobTask(taskID int64, jc *JobClient) *JobTask {
 	job := jc.jobSnapshot()
 	limits := runtimeTaskLimits()
@@ -228,8 +221,10 @@ func (jt *JobTask) context() context.Context {
 	return jt.ctx
 }
 
+const cleanupTimeout = 30 * time.Second
+
 func (jt *JobTask) cleanupContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), 30*time.Second)
+	return context.WithTimeout(context.Background(), cleanupTimeout)
 }
 
 func (jt *JobTask) isBreak() bool {

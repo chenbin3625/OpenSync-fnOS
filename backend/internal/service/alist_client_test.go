@@ -111,7 +111,7 @@ func TestGetClientByIDCoalescesConcurrentLoads(t *testing.T) {
 		i := i
 		go func() {
 			defer wg.Done()
-			clients[i] = GetClientByID(7)
+			clients[i] = GetClientByIDContext(context.Background(), 7)
 		}()
 	}
 	wg.Wait()
@@ -353,7 +353,7 @@ func TestStoreAlistClientClosesReplacedClient(t *testing.T) {
 	if !oldTransport.closed.Load() {
 		t.Fatalf("storeAlistClient() did not close the replaced client")
 	}
-	if got := GetClientByID(42); got != newClient {
+	if got := GetClientByIDContext(context.Background(), 42); got != newClient {
 		t.Fatalf("cached client = %#v, want new client", got)
 	}
 }
@@ -407,7 +407,7 @@ func TestUpdateClientKeepsCachedClientWhenDatabaseUpdateFails(t *testing.T) {
 		if recovered := recover(); recovered == nil {
 			t.Fatalf("UpdateClient() did not panic on database constraint failure")
 		}
-		if got := GetClientByID(1); got != oldClient {
+		if got := GetClientByIDContext(context.Background(), 1); got != oldClient {
 			t.Fatalf("cached client changed after failed update")
 		}
 		if !newTransport.closed.Load() {

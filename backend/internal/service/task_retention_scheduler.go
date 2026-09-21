@@ -53,10 +53,5 @@ func stopTaskRetentionScheduler() {
 	if c == nil {
 		return
 	}
-	ctx := c.Stop()
-	select {
-	case <-ctx.Done():
-	case <-time.After(schedulerStopTimeout):
-		log.Printf("task retention scheduler stop timed out after %s", schedulerStopTimeout)
-	}
+	stopCronWithTimeout(c, "task retention scheduler")
 }

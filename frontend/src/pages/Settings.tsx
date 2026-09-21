@@ -4,7 +4,7 @@ import Input from "@douyinfe/semi-ui/lib/es/input";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import { IconSaveStroked } from "@douyinfe/semi-icons";
 import { api } from "../api/client";
-import { Header, LoadState, SettingRow } from "../components/common";
+import { errorToast, Header, LoadState, SettingRow } from "../components/common";
 import { useAction, useResource } from "../lib/hooks";
 import type { SystemSettings } from "../types";
 
@@ -111,7 +111,7 @@ export default function Settings() {
         Toast.success("配置已保存");
         await resource.refresh();
       } catch (err) {
-        Toast.error(err instanceof Error ? err.message : "保存失败");
+        errorToast(err, "保存失败");
       }
     });
   };
@@ -172,14 +172,11 @@ export default function Settings() {
         loading={resource.loading}
         error={resource.error}
         retry={resource.refresh}
-      />
-      {form && !resource.loading && !resource.error && (
-        <>
-          {cardGroups.map((group) =>
-            card(group.title, group.keys),
-          )}
-        </>
-      )}
+      >
+        {form && cardGroups.map((group) =>
+          card(group.title, group.keys),
+        )}
+      </LoadState>
     </div>
   );
 }

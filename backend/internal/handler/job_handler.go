@@ -11,6 +11,10 @@ import (
 func GetJob(c *gin.Context) {
 	idStr := c.Query("id")
 	taskIDStr := c.Query("taskId")
+	current := c.Query("current")
+	if current != "" {
+		c.Header("Cache-Control", "no-store")
+	}
 
 	if idStr != "" {
 		id, err := parseRequiredID(idStr, "id")
@@ -19,7 +23,6 @@ func GetJob(c *gin.Context) {
 			return
 		}
 		// Check for current (real-time progress)
-		current := c.Query("current")
 		if current != "" {
 			req := map[string]interface{}{
 				"status":             c.Query("status"),

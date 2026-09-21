@@ -14,7 +14,7 @@ function isCurrentTaskData(
   return !!data && !Array.isArray(data) && "taskId" in data && "num" in data;
 }
 
-export function toCurrentTaskView(data: CurrentTaskData): CurrentTaskView {
+function toCurrentTaskView(data: CurrentTaskData): CurrentTaskView {
   return {
     ...data,
     doingTask: data.doingTask || [],

@@ -1,11 +1,14 @@
 import { request } from "./client";
-import type { RequestOptions } from "./request";
 import type {
   CurrentTaskData,
   PageData,
   RealtimeTaskItemPage,
   TaskItem,
 } from "../types";
+
+type RequestOptions = {
+  signal?: AbortSignal;
+};
 
 export async function jobGetTaskCurrent(
   params: Record<string, unknown>,
@@ -15,5 +18,9 @@ export async function jobGetTaskCurrent(
 > {
   return request<
     CurrentTaskData | RealtimeTaskItemPage | PageData<TaskItem> | TaskItem[] | null
-  >("/job", { params: { ...params, current: 1 }, signal: options?.signal });
+  >("/job", {
+    params: { ...params, current: 1 },
+    signal: options?.signal,
+    cache: "no-store",
+  });
 }

@@ -11,7 +11,6 @@ import (
 	"opensync/pkg/util"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -372,26 +371,10 @@ func parsePageParams(params map[string]interface{}) (pageSize, pageNum int, pagi
 }
 
 func positiveInt(v interface{}) (int, error) {
-	var n int64
-	switch val := v.(type) {
-	case int:
-		n = int64(val)
-	case int64:
-		n = val
-	case float64:
-		if math.Trunc(val) != val {
-			return 0, errors.New(msg.LostPart)
-		}
-		n = int64(val)
-	case string:
-		parsed, err := strconv.ParseInt(strings.TrimSpace(val), 10, 64)
-		if err != nil {
-			return 0, err
-		}
-		n = parsed
-	default:
+	if value, ok := v.(float64); ok && math.Trunc(value) != value {
 		return 0, errors.New(msg.LostPart)
 	}
+	n := util.ToInt64(v)
 	if n <= 0 || n > int64(math.MaxInt) {
 		return 0, errors.New(msg.LostPart)
 	}

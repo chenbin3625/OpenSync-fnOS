@@ -1,8 +1,10 @@
 package util
 
 import (
+	"errors"
 	"fmt"
 	"math"
+	"net/url"
 	"strconv"
 	"strings"
 )
@@ -116,6 +118,20 @@ func StringValue(v interface{}) string {
 		return s
 	}
 	return fmt.Sprintf("%v", v)
+}
+
+// ValidateHTTPURL checks that rawURL is a valid http or https URL.
+// Returns an error with errMsg if invalid.
+func ValidateHTTPURL(rawURL, errMsg string) error {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return errors.New(errMsg)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return errors.New(errMsg)
+	}
+	return nil
 }
 
 // ToBool converts various types to bool

@@ -2,10 +2,8 @@ package service
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
-	"net/url"
 	"opensync/internal/mapper"
 	"opensync/internal/msg"
 	"opensync/pkg/util"
@@ -40,11 +38,6 @@ func GetClientList() []map[string]interface{} {
 		delete(client, "token")
 	}
 	return clientList
-}
-
-// GetClientByID gets or creates an AList client by ID
-func GetClientByID(alistID int64) *AlistClient {
-	return GetClientByIDContext(context.Background(), alistID)
 }
 
 func GetClientByIDContext(ctx context.Context, alistID int64) *AlistClient {
@@ -190,15 +183,7 @@ func normalizeAlistInput(alist map[string]interface{}) string {
 }
 
 func validateAlistURL(rawURL string) error {
-	u, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		return errors.New(msg.AlistURLInvalid)
-	}
-	scheme := strings.ToLower(u.Scheme)
-	if scheme == "http" || scheme == "https" {
-		return nil
-	}
-	return errors.New(msg.AlistURLInvalid)
+	return util.ValidateHTTPURL(rawURL, msg.AlistURLInvalid)
 }
 
 func normalizeAlistToken(alist map[string]interface{}, required bool) (string, bool) {

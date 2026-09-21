@@ -215,10 +215,6 @@ func clampServerConfig(sCfg *ServerConfig) {
 	sCfg.MaxRetries = clampInt(sCfg.MaxRetries, MinMaxRetries, MaxRetryAttempts, DefaultMaxRetries)
 }
 
-func (s ServerConfig) TLSEnabled() bool {
-	return strings.TrimSpace(s.TLSCertFile) != "" && strings.TrimSpace(s.TLSKeyFile) != ""
-}
-
 func clampInt(value, min, max, fallback int) int {
 	if value < min || value > max {
 		return fallback

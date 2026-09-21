@@ -10,12 +10,12 @@ export interface PageData<T> {
 }
 
 export interface RealtimeTaskItemPage extends PageData<TaskItem> {
-  taskId?: number;
-  createTime?: number;
-  status?: number;
-  pageNum?: number;
-  pageSize?: number;
-  stale?: boolean;
+  taskId: number;
+  createTime: number;
+  status: number;
+  pageNum: number;
+  pageSize: number;
+  stale: boolean;
 }
 
 export interface SystemSettings {
@@ -32,11 +32,6 @@ export interface AlistItem {
   url: string;
   userName: string;
   createTime?: number;
-}
-
-export interface PathItem {
-  path?: string;
-  name?: string;
 }
 
 export interface JobItem {
@@ -63,32 +58,6 @@ export interface JobItem {
   minFileSize?: number;
   maxFileSize?: number;
   createTime?: number;
-}
-
-export interface JobFormValues {
-  alistId: number;
-  srcPath: string | string[];
-  dstPath: string | string[];
-  remark?: string | null;
-  method: number;
-  isCron: number;
-  interval?: number;
-  enable: boolean;
-  useCacheS?: boolean;
-  useCacheT?: boolean;
-  scanIntervalS?: number;
-  scanIntervalT?: number;
-  second?: string;
-  minute?: string;
-  hour?: string;
-  day?: string;
-  month?: string;
-  day_of_week?: string;
-  exclude?: string | null;
-  minFileSize?: number;
-  minFileSizeUnit?: string;
-  maxFileSize?: number;
-  maxFileSizeUnit?: string;
 }
 
 export interface TreeNode {
@@ -166,30 +135,4 @@ export interface NotifyItem {
   method: number;
   params: string;
   createTime?: number;
-}
-
-export interface NotifyFormValues {
-  method: number;
-  enable: boolean;
-  url?: string;
-  webhook?: string;
-  httpMethod?: string;
-  methodName?: string;
-  contentType?: string;
-  needContent?: boolean;
-  titleName?: string;
-  contentName?: string;
-  body?: string;
-  headers?: string;
-  notSendNull?: boolean;
-  sendKey?: string;
-  version?: string;
-  corpid?: string;
-  corpId?: string;
-  corpsecret?: string;
-  corpSecret?: string;
-  agentid?: string;
-  agentId?: string;
-  touser?: string;
-  toUser?: string;
 }

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Switch from "@douyinfe/semi-ui/lib/es/switch";
@@ -70,7 +70,7 @@ export default function Tasks() {
       selected ? api.current(selected.id, signal) : Promise.resolve(null),
     [selected?.id],
   );
-  const hasCurrentTask = import.meta.env.DEV || !!currentTask.data;
+  const hasCurrentTask = !!currentTask.data;
   const update = (values: Record<string, string | number | null>) => {
     const next = new URLSearchParams(params);
     for (const [key, value] of Object.entries(values))

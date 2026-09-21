@@ -95,3 +95,18 @@ func TestUpdateNotifyRejectsUnknownPayloadShape(t *testing.T) {
 		t.Fatalf("response = %s, want error envelope", w.Body.String())
 	}
 }
+
+func TestGetJobCurrentDisablesResponseCaching(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET("/svr/job", GetJob)
+
+	req := httptest.NewRequest(http.MethodGet, "/svr/job?id=invalid&current=1", nil)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
+}

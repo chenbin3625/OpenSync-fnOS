@@ -18,7 +18,7 @@ import {
   confirmDelete,
   errorToast,
 } from "../components/common";
-import { useAction, useResource } from "../lib/hooks";
+import { useAction, useEditorForm, useResource } from "../lib/hooks";
 
 import type { AlistItem } from "../types";
 
@@ -53,11 +53,9 @@ export default function Engines() {
         error={engines.error}
         retry={engines.refresh}
         empty={!engines.data?.length}
-      />
-      <div className="item-list">
-        {!engines.loading &&
-          !engines.error &&
-          engines.data?.map((engine) => (
+      >
+        <div className="item-list">
+          {engines.data?.map((engine) => (
             <div className="engine-item card-base" key={engine.id}>
               <div className="item-content">
                 <h2>{engine.remark || engine.userName || `引擎 #${engine.id}`}</h2>
@@ -96,7 +94,8 @@ export default function Engines() {
               </div>
             </div>
           ))}
-      </div>
+        </div>
+      </LoadState>
       {editing !== undefined && (
         <EngineEditor
           engine={editing}
@@ -119,17 +118,12 @@ function EngineEditor({
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const [form, setForm] = useState({
+  const { form, dirty, change, setDirty } = useEditorForm({
     url: engine?.url || "",
     remark: engine?.remark || "",
     token: "",
   });
-  const [dirty, setDirty] = useState(false);
   const action = useAction();
-  const change = (key: keyof typeof form, value: string) => {
-    setDirty(true);
-    setForm((f) => ({ ...f, [key]: value }));
-  };
   const save = () => {
     if (!form.remark.trim()) {
       Toast.warning("请输入引擎名称");

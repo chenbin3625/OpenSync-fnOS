@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
-import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import TreeSelect from "@douyinfe/semi-ui/lib/es/treeSelect";
 import { IconRefresh } from "@douyinfe/semi-icons";
 import type { TreeNodeData } from "@douyinfe/semi-ui/lib/es/tree/interface";
-import { api } from "../api/client";
 import { buildPathTreeData } from "../pages/Home/homeUtils";
+import { useAsyncTree } from "../lib/useAsyncTree";
 
 function seed(paths: string[]): TreeNodeData[] {
   const convert = (
@@ -19,22 +18,6 @@ function seed(paths: string[]): TreeNodeData[] {
       ...(n.children?.length ? { children: convert(n.children) } : {}),
     }));
   return convert(buildPathTreeData(paths));
-}
-function update(
-  nodes: TreeNodeData[],
-  key: string,
-  children: TreeNodeData[],
-): TreeNodeData[] {
-  return nodes.map((n) =>
-    n.key === key
-      ? { ...n, children, isLeaf: children.length === 0 }
-      : {
-          ...n,
-          ...(n.children
-            ? { children: update(n.children, key, children) }
-            : {}),
-        },
-  );
 }
 
 export function RemotePaths({
@@ -50,44 +33,29 @@ export function RemotePaths({
   onChange: (paths: string[]) => void;
   multiple?: boolean;
 }) {
-  const [nodes, setNodes] = useState<TreeNodeData[]>(() => seed(value));
-  const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
   const [loadFailed, setLoadFailed] = useState(false);
-  const controller = useRef<AbortController | null>(null);
-  const engineRef = useRef(engineId);
-  const nodesRef = useRef(nodes);
-  engineRef.current = engineId;
-  nodesRef.current = nodes;
 
-  const load = useCallback(
-    async (node?: TreeNodeData) => {
-      if (!engineId) return;
-      const signal = controller.current?.signal;
-      const path = String(node?.value || "/");
-      try {
-        const result = await api.paths(engineId, path, signal);
-        if (signal?.aborted || engineRef.current !== engineId) return;
-        setLoadFailed(false);
-        const children = (result || []).map((n) => {
-          const name = n.name || n.path || "";
-          const full = path === "/" ? "/" + name : path + "/" + name;
-          return { label: name, value: full, key: full, isLeaf: false };
-        });
-        setNodes((prev) => update(prev, path, children));
-        // 根目录加载完成后，只展开根节点（显示一级目录）
-        if (path === "/") {
-          setExpandedKeys(["/"]);
-        }
-      } catch (err) {
-        if (!signal?.aborted && engineRef.current === engineId) {
-          const message = err instanceof Error ? err.message : "目录加载失败";
-          setLoadFailed(true);
-          Toast.error({ content: message, duration: 5 });
-        }
-      }
+  const onLoaded = useCallback(
+    ({ path }: { path: string; children: TreeNodeData[] }) => {
+      setLoadFailed(false);
+      // 根目录加载完成后，只展开根节点（显示一级目录）
+      if (path === "/") return ["/"];
     },
-    [engineId],
+    [],
   );
+
+  const onError = useCallback(() => setLoadFailed(true), []);
+
+  const {
+    treeData,
+    expandedKeys,
+    setExpandedKeys,
+    loadData,
+    resetTree,
+  } = useAsyncTree({ engineId, onLoaded, onError, errorFallback: "目录加载失败" });
+
+  const nodesRef = useRef(treeData);
+  nodesRef.current = treeData;
 
   // 在树中查找节点
   const findNode = useCallback(
@@ -131,18 +99,15 @@ export function RemotePaths({
   );
 
   useEffect(() => {
-    controller.current = new AbortController();
-    setNodes(seed(value));
-    setExpandedKeys([]);
-    if (engineId) void load();
-    return () => controller.current?.abort();
-  }, [engineId, load]);
+    resetTree(seed(value), []);
+    if (engineId) void loadData();
+  }, [engineId, resetTree, loadData]);
 
   return (
     <div id={id} className="remote-paths">
       <TreeSelect
         aria-label="选择引擎目录"
-        treeData={nodes}
+        treeData={treeData}
         value={multiple ? value : value[0]}
         multiple={multiple}
         treeNodeLabelProp="value"
@@ -151,7 +116,7 @@ export function RemotePaths({
         filterTreeNode
         searchPlaceholder="搜索已加载目录"
         placeholder="选择目录"
-        loadData={load}
+        loadData={loadData}
         expandedKeys={expandedKeys}
         onExpand={(keys) => setExpandedKeys(keys as string[])}
         onChange={handleChange}
@@ -161,10 +126,10 @@ export function RemotePaths({
       />
       {loadFailed && (
         <Button
+          className="remote-paths-retry"
           size="small"
           icon={<IconRefresh aria-hidden="true" />}
-          onClick={() => void load()}
-          style={{ marginTop: 8 }}
+          onClick={() => void loadData()}
         >
           重试
         </Button>

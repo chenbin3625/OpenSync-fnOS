@@ -7,7 +7,6 @@ type taskItemType int
 type taskItemObject int
 
 const (
-	taskStatusOther        taskStatus = -1
 	taskStatusWaiting      taskStatus = 0
 	taskStatusRunning      taskStatus = 1
 	taskStatusSuccess      taskStatus = 2
@@ -18,7 +17,6 @@ const (
 	taskStatusFailed       taskStatus = 7
 	taskStatusNoSync       taskStatus = 8  // job_task only
 	taskStatusRetrying     taskStatus = 10 // job_task_item only
-	taskStatusRetryDelay   taskStatus = 11 // job_task_item only
 
 	taskItemTypeCopy   taskItemType = 0
 	taskItemTypeDelete taskItemType = 1
@@ -53,7 +51,6 @@ var retryableTaskStatuses = []taskStatus{
 	taskStatusStopped,
 	taskStatusFailed,
 	taskStatusRetrying,
-	taskStatusRetryDelay,
 }
 
 func retryableStatusValues() []int {
