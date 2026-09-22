@@ -11,10 +11,11 @@ func TestP13FinalFlushWaitsForInFlightTimerFlush(t *testing.T) {
 	var mu sync.Mutex
 	entered := make(chan struct{})
 	release := make(chan struct{})
+
+	d := *jobDeps
 	calls := 0
 
-	old := persistJobTaskItems
-	persistJobTaskItems = func(items []map[string]interface{}) error {
+	d.PersistJobTaskItems = func(items []map[string]interface{}) error {
 		mu.Lock()
 		calls++
 		n := calls
@@ -26,7 +27,8 @@ func TestP13FinalFlushWaitsForInFlightTimerFlush(t *testing.T) {
 		}
 		return nil
 	}
-	defer func() { persistJobTaskItems = old }()
+	restore := SetJobDepsForTest(&d)
+	defer restore()
 
 	jt := &JobTask{TaskID: 7, Job: map[string]interface{}{}}
 	jt.initRuntime()

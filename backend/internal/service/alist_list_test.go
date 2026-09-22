@@ -50,9 +50,10 @@ func TestCapReaderRejectsOversizedStream(t *testing.T) {
 }
 
 func TestFileListApiContextPostsTypedBodyAndOverlapsRemainingPages(t *testing.T) {
-	origPageSize := fileListPageSize
-	fileListPageSize = 2
-	defer func() { fileListPageSize = origPageSize }()
+	d := *alistDeps
+	d.FileListPageSize = 2
+	restore := SetAlistDepsForTest(&d)
+	defer restore()
 
 	var mu sync.Mutex
 	inflight := 0

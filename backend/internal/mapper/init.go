@@ -109,10 +109,18 @@ func InitSQL() {
 			)`,
 		)
 
+		tx, err := db.Begin()
+		if err != nil {
+			log.Fatalf("Failed to begin transaction for database initialization: %v", err)
+		}
 		for _, stmt := range stmts {
-			if _, err := db.Exec(stmt); err != nil {
+			if _, err := tx.Exec(stmt); err != nil {
+				_ = tx.Rollback()
 				log.Fatalf("Failed to initialize database: %v\nSQL: %s", err, stmt)
 			}
+		}
+		if err := tx.Commit(); err != nil {
+			log.Fatalf("Failed to commit database initialization: %v", err)
 		}
 		ensureIndexes(db)
 		if err := migrateStoredCredentials(db); err != nil {

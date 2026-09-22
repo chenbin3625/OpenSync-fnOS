@@ -46,7 +46,7 @@ func GetJobByID(jobID int64) (map[string]interface{}, error) {
 		return nil, err
 	}
 	if len(rst) == 0 {
-		return nil, errors.New(msg.JobNotFound)
+		return nil, errors.New(msg.T(msg.JobNotFound))
 	}
 	return rst[0], nil
 }
@@ -63,7 +63,7 @@ func GetJobByTaskID(taskID int64) (map[string]interface{}, error) {
 		return nil, err
 	}
 	if len(rst) == 0 {
-		return nil, errors.New(msg.JobNotFound)
+		return nil, errors.New(msg.T(msg.JobNotFound))
 	}
 	return rst[0], nil
 }
@@ -232,7 +232,7 @@ func GetJobTaskByID(taskID int64) (map[string]interface{}, error) {
 		return nil, err
 	}
 	if len(rst) == 0 {
-		return nil, errors.New(msg.TaskNotFound)
+		return nil, errors.New(msg.T(msg.TaskNotFound))
 	}
 	return rst[0], nil
 }

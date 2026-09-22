@@ -27,14 +27,6 @@ const (
 	alistValidationTimeout      = 30 * time.Second
 )
 
-// fileListPageSize is the AList /api/fs/list page size. Mutable in tests so
-// parallel remaining-page fetches can be proven without 500-entry fixtures.
-var fileListPageSize = 500
-
-// maxResponseBytes is the current response-size cap. Kept as a mutable package
-// variable so tests can lower it; production uses loadMaxListResponseBytes().
-var maxResponseBytes = loadMaxListResponseBytes()
-
 func loadMaxListResponseBytes() int64 {
 	if raw := strings.TrimSpace(os.Getenv("OPENSYNC_MAX_LIST_BYTES")); raw != "" {
 		if n, err := strconv.ParseInt(raw, 10, 64); err == nil && n >= (1<<20) {
@@ -79,7 +71,7 @@ func NewAlistClientContext(ctx context.Context, alistURL string, token string, a
 	}
 	parsedURL, err := url.Parse(normalizedURL)
 	if err != nil {
-		return nil, errors.New(msg.AlistURLInvalid)
+		return nil, errors.New(msg.T(msg.AlistURLInvalid))
 	}
 	c := &AlistClient{
 		URL:     normalizedURL,
@@ -111,7 +103,7 @@ func (c *AlistClient) Close() {
 }
 
 func (c *AlistClient) doRequestContext(ctx context.Context, method, apiPath string, data interface{}, params map[string]string) (json.RawMessage, error) {
-	return c.doRequestContextLimit(ctx, method, apiPath, data, params, maxResponseBytes)
+	return c.doRequestContextLimit(ctx, method, apiPath, data, params, alistDeps.MaxResponseBytes)
 }
 
 func (c *AlistClient) startRequest(ctx context.Context, method, apiPath string, data interface{}, params map[string]string) (*http.Response, error) {
@@ -130,12 +122,12 @@ func (c *AlistClient) startRequest(ctx context.Context, method, apiPath string, 
 
 	reqURL, err := c.requestURL(apiPath, params)
 	if err != nil {
-		return nil, errors.New(msg.AddressIncorrect)
+		return nil, errors.New(msg.T(msg.AddressIncorrect))
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, reqURL, body)
 	if err != nil {
-		return nil, errors.New(msg.AddressIncorrect)
+		return nil, errors.New(msg.T(msg.AddressIncorrect))
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -150,7 +142,7 @@ func (c *AlistClient) startRequest(ctx context.Context, method, apiPath string, 
 			return nil, ctxErr
 		}
 		if strings.Contains(err.Error(), "connection refused") || strings.Contains(err.Error(), "no such host") {
-			return nil, errors.New(msg.AlistConnectFail)
+			return nil, errors.New(msg.T(msg.AlistConnectFail))
 		}
 		return nil, err
 	}
@@ -170,7 +162,7 @@ func (e *alistStatusError) Error() string {
 	if e.alistCode != 0 {
 		return msg.AlistFailCodeReason(e.alistCode, e.message)
 	}
-	return fmt.Sprintf("%s (HTTP %d)", msg.CodeNot200, e.httpStatus)
+	return fmt.Sprintf("%s (HTTP %d)", msg.T(msg.CodeNot200), e.httpStatus)
 }
 
 // isAlistObjectNotFound reports whether err means "the requested path does not
@@ -220,7 +212,7 @@ func (c *AlistClient) checkAlistCode(code int, message string) error {
 		if c.AlistID > 0 {
 			removeCachedAlistClient(c.AlistID)
 		}
-		return errors.New(msg.AlistUnAuth)
+		return errors.New(msg.T(msg.AlistUnAuth))
 	}
 	if code != 200 {
 		return &alistStatusError{alistCode: code, message: message}
@@ -231,11 +223,11 @@ func (c *AlistClient) checkAlistCode(code int, message string) error {
 func normalizeAlistBaseURL(rawURL string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-		return "", errors.New(msg.AlistURLInvalid)
+		return "", errors.New(msg.T(msg.AlistURLInvalid))
 	}
 	scheme := strings.ToLower(u.Scheme)
 	if scheme != "http" && scheme != "https" {
-		return "", errors.New(msg.AlistURLInvalid)
+		return "", errors.New(msg.T(msg.AlistURLInvalid))
 	}
 	u.Scheme = scheme
 	u.Path = strings.TrimRight(u.Path, "/")
@@ -248,13 +240,13 @@ func (c *AlistClient) requestURL(apiPath string, params map[string]string) (stri
 	if base.Scheme == "" || base.Host == "" {
 		parsed, err := url.Parse(c.URL)
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-			return "", errors.New(msg.AddressIncorrect)
+			return "", errors.New(msg.T(msg.AddressIncorrect))
 		}
 		base = *parsed
 	}
 	endpoint, err := url.Parse(apiPath)
 	if err != nil || endpoint.IsAbs() || endpoint.Host != "" {
-		return "", errors.New(msg.AddressIncorrect)
+		return "", errors.New(msg.T(msg.AddressIncorrect))
 	}
 	base.Path = strings.TrimRight(base.Path, "/") + "/" + strings.TrimLeft(endpoint.Path, "/")
 	base.RawPath = ""

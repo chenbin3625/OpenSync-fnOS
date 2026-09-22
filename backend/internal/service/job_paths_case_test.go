@@ -37,16 +37,14 @@ func TestSrcSelectionsNestedIgnoresCase(t *testing.T) {
 }
 
 func TestValidateJobInputRejectsCaseOnlyPathOverlap(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("ValidateJobInput() accepted source and destination differing only in case")
-		}
-	}()
-	ValidateJobInput(map[string]interface{}{
+	err := ValidateJobInput(map[string]interface{}{
 		"srcPath": `["/Photos"]`,
 		"dstPath": `["/photos"]`,
 		"alistId": 1,
 		"method":  0,
 		"isCron":  2,
 	})
+	if err == nil {
+		t.Fatal("ValidateJobInput() accepted source and destination differing only in case")
+	}
 }

@@ -80,28 +80,26 @@ func TestGetClientByIDCoalescesConcurrentLoads(t *testing.T) {
 	oldList := alistClientList
 	alistClientList = make(map[int64]*AlistClient)
 	alistClientListMu.Unlock()
-	oldGet := getAlistByID
-	oldNew := newAlistClientContext
-	defer func() {
-		alistClientListMu.Lock()
-		alistClientList = oldList
-		alistClientListMu.Unlock()
-		getAlistByID = oldGet
-		newAlistClientContext = oldNew
-	}()
-
-	var loads atomic.Int64
-	getAlistByID = func(alistID int64) (map[string]interface{}, error) {
+	d := *alistDeps
+	d.GetAlistByID = func(alistID int64) (map[string]interface{}, error) {
 		return map[string]interface{}{
 			"url":   "https://example.test",
 			"token": "token",
 		}, nil
 	}
-	newAlistClientContext = func(ctx context.Context, alistURL string, token string, alistID int64) (*AlistClient, error) {
+	var loads atomic.Int64
+	d.NewAlistClientCtx = func(ctx context.Context, alistURL string, token string, alistID int64) (*AlistClient, error) {
 		loads.Add(1)
 		time.Sleep(20 * time.Millisecond)
 		return &AlistClient{URL: alistURL, Token: token, AlistID: alistID}, nil
 	}
+	restore := SetAlistDepsForTest(&d)
+	defer func() {
+		alistClientListMu.Lock()
+		alistClientList = oldList
+		alistClientListMu.Unlock()
+		restore()
+	}()
 
 	const workers = 16
 	var wg sync.WaitGroup
@@ -111,7 +109,7 @@ func TestGetClientByIDCoalescesConcurrentLoads(t *testing.T) {
 		i := i
 		go func() {
 			defer wg.Done()
-			clients[i] = GetClientByIDContext(context.Background(), 7)
+			clients[i], _ = GetClientByIDContext(context.Background(), 7)
 		}()
 	}
 	wg.Wait()
@@ -130,14 +128,8 @@ func TestGetClientByIDCoalescesConcurrentLoads(t *testing.T) {
 }
 
 func TestClientUsesFreshConnectionAndClosesIt(t *testing.T) {
-	oldGet := getAlistByID
-	oldNew := newAlistClientContext
-	defer func() {
-		getAlistByID = oldGet
-		newAlistClientContext = oldNew
-	}()
-
-	getAlistByID = func(alistID int64) (map[string]interface{}, error) {
+	d := *alistDeps
+	d.GetAlistByID = func(alistID int64) (map[string]interface{}, error) {
 		return map[string]interface{}{
 			"url":   "https://example.test",
 			"token": "stored-token",
@@ -145,13 +137,15 @@ func TestClientUsesFreshConnectionAndClosesIt(t *testing.T) {
 	}
 	transport := &closeTrackingTransport{}
 	var gotID int64
-	newAlistClientContext = func(ctx context.Context, alistURL string, token string, alistID int64) (*AlistClient, error) {
+	d.NewAlistClientCtx = func(ctx context.Context, alistURL string, token string, alistID int64) (*AlistClient, error) {
 		gotID = alistID
 		if alistURL != "https://example.test" || token != "stored-token" {
 			t.Fatalf("connection args = %q/%q, want stored engine credentials", alistURL, token)
 		}
 		return &AlistClient{client: &http.Client{Transport: transport}}, nil
 	}
+	restore := SetAlistDepsForTest(&d)
+	defer restore()
 
 	TestClient(context.Background(), 42)
 
@@ -170,37 +164,33 @@ func TestGetClientByIDContextPassesCancellationToInitialLoad(t *testing.T) {
 	alistClientList = make(map[int64]*AlistClient)
 	alistClientLoads = make(map[int64]*alistClientLoad)
 	alistClientListMu.Unlock()
-	oldGet := getAlistByID
-	oldNew := newAlistClientContext
-	defer func() {
-		alistClientListMu.Lock()
-		alistClientList = oldList
-		alistClientLoads = oldLoads
-		alistClientListMu.Unlock()
-		getAlistByID = oldGet
-		newAlistClientContext = oldNew
-	}()
-
-	getAlistByID = func(alistID int64) (map[string]interface{}, error) {
+	d := *alistDeps
+	d.GetAlistByID = func(alistID int64) (map[string]interface{}, error) {
 		return map[string]interface{}{
 			"url":   "https://example.test",
 			"token": "token",
 		}, nil
 	}
-	newAlistClientContext = func(ctx context.Context, alistURL string, token string, alistID int64) (*AlistClient, error) {
+	d.NewAlistClientCtx = func(ctx context.Context, alistURL string, token string, alistID int64) (*AlistClient, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
+	restore := SetAlistDepsForTest(&d)
+	defer func() {
+		alistClientListMu.Lock()
+		alistClientList = oldList
+		alistClientLoads = oldLoads
+		alistClientListMu.Unlock()
+		restore()
+	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	defer func() {
-		if recovered := recover(); recovered == nil {
-			t.Fatalf("GetClientByIDContext() panic = nil, want cancellation error panic")
-		}
-	}()
-	GetClientByIDContext(ctx, 7)
+	_, err := GetClientByIDContext(ctx, 7)
+	if err == nil {
+		t.Fatalf("GetClientByIDContext() error = nil, want cancellation error")
+	}
 }
 
 func TestGetContextDoesNotSendContentTypeWithoutBody(t *testing.T) {
@@ -353,7 +343,7 @@ func TestStoreAlistClientClosesReplacedClient(t *testing.T) {
 	if !oldTransport.closed.Load() {
 		t.Fatalf("storeAlistClient() did not close the replaced client")
 	}
-	if got := GetClientByIDContext(context.Background(), 42); got != newClient {
+	if got, _ := GetClientByIDContext(context.Background(), 42); got != newClient {
 		t.Fatalf("cached client = %#v, want new client", got)
 	}
 }
@@ -382,15 +372,14 @@ func TestUpdateClientKeepsCachedClientWhenDatabaseUpdateFails(t *testing.T) {
 	restoreDB := mapper.SetDBForTest(testDB)
 	defer restoreDB()
 
-	oldNew := newAlistClient
+	d := *alistDeps
 	newTransport := &closeTrackingTransport{}
 	newClient := &AlistClient{AlistID: 1, URL: "https://dupe.test", client: &http.Client{Transport: newTransport}}
-	newAlistClient = func(alistURL string, token string, alistID int64) (*AlistClient, error) {
+	d.NewAlistClient = func(alistURL string, token string, alistID int64) (*AlistClient, error) {
 		return newClient, nil
 	}
-	defer func() {
-		newAlistClient = oldNew
-	}()
+	restoreDeps := SetAlistDepsForTest(&d)
+	defer restoreDeps()
 
 	oldClient := &AlistClient{AlistID: 1, URL: "https://old.test"}
 	alistClientListMu.Lock()
@@ -403,24 +392,21 @@ func TestUpdateClientKeepsCachedClientWhenDatabaseUpdateFails(t *testing.T) {
 		alistClientListMu.Unlock()
 	}()
 
-	defer func() {
-		if recovered := recover(); recovered == nil {
-			t.Fatalf("UpdateClient() did not panic on database constraint failure")
-		}
-		if got := GetClientByIDContext(context.Background(), 1); got != oldClient {
-			t.Fatalf("cached client changed after failed update")
-		}
-		if !newTransport.closed.Load() {
-			t.Fatalf("new client was not closed after failed update")
-		}
-	}()
-
-	UpdateClient(map[string]interface{}{
+	err = UpdateClient(map[string]interface{}{
 		"id":     int64(1),
 		"url":    "https://dupe.test",
 		"token":  "new-token",
 		"remark": "new",
 	})
+	if err == nil {
+		t.Fatalf("UpdateClient() error = nil, want database constraint failure")
+	}
+	if got, _ := GetClientByIDContext(context.Background(), 1); got != oldClient {
+		t.Fatalf("cached client changed after failed update")
+	}
+	if !newTransport.closed.Load() {
+		t.Fatalf("new client was not closed after failed update")
+	}
 }
 
 func TestValidateAlistURLAcceptsHTTPAndHTTPS(t *testing.T) {
@@ -443,7 +429,10 @@ func TestValidateAlistURLAcceptsHTTPAndHTTPS(t *testing.T) {
 
 func TestNormalizeAlistTokenTrimsAndRejectsMissingRequiredToken(t *testing.T) {
 	alist := map[string]interface{}{"token": "  token-value \n"}
-	token, ok := normalizeAlistToken(alist, true)
+	token, ok, err := normalizeAlistToken(alist, true)
+	if err != nil {
+		t.Fatalf("normalizeAlistToken() error: %v", err)
+	}
 	if !ok {
 		t.Fatalf("normalizeAlistToken() ok = false, want true")
 	}
@@ -454,10 +443,8 @@ func TestNormalizeAlistTokenTrimsAndRejectsMissingRequiredToken(t *testing.T) {
 		t.Fatalf("stored token = %q, want trimmed token", alist["token"])
 	}
 
-	defer func() {
-		if recovered := recover(); recovered == nil {
-			t.Fatalf("normalizeAlistToken() panic = nil, want missing required token panic")
-		}
-	}()
-	normalizeAlistToken(map[string]interface{}{}, true)
+	_, _, err = normalizeAlistToken(map[string]interface{}{}, true)
+	if err == nil {
+		t.Fatalf("normalizeAlistToken() error = nil, want missing required token error")
+	}
 }

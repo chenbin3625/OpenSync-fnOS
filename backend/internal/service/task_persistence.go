@@ -114,7 +114,7 @@ func (jt *JobTask) flushPersistBuffer() error {
 	jt.persistBuffer = jt.persistBuffer[:0]
 	jt.persistBufMu.Unlock()
 
-	if err := persistJobTaskItems(jobTaskItemsToMaps(items)); err != nil {
+	if err := jobDeps.PersistJobTaskItems(jobTaskItemsToMaps(items)); err != nil {
 		jt.persistBufMu.Lock()
 		jt.persistBuffer = append(items, jt.persistBuffer...)
 		jt.persistBufMu.Unlock()

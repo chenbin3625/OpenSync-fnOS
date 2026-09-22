@@ -24,13 +24,14 @@ func TestEditEnabledJobClientUpdatesNextRunWithoutBreakingCurrentTask(t *testing
 	resetJobClientsForTest()
 
 	// AddJobClient validates that the engine exists before inserting the job.
-	oldGetAlist := getAlistByID
-	getAlistByID = func(alistID int64) (map[string]interface{}, error) {
+	d := *alistDeps
+	d.GetAlistByID = func(alistID int64) (map[string]interface{}, error) {
 		return map[string]interface{}{"id": alistID, "url": "https://alist.test", "token": "t"}, nil
 	}
-	defer func() { getAlistByID = oldGetAlist }()
+	restoreAlistDeps := SetAlistDepsForTest(&d)
+	defer restoreAlistDeps()
 
-	AddJobClient(map[string]interface{}{
+	if err := AddJobClient(map[string]interface{}{
 		"enable":        1,
 		"remark":        "old",
 		"srcPath":       []string{"/old-src"},
@@ -45,7 +46,9 @@ func TestEditEnabledJobClientUpdatesNextRunWithoutBreakingCurrentTask(t *testing
 		"isCron":        0,
 		"minFileSize":   0,
 		"maxFileSize":   0,
-	}, false)
+	}, false); err != nil {
+		t.Fatalf("AddJobClient: %v", err)
+	}
 	client := onlyJobClientForTest(t)
 	defer resetJobClientsForTest()
 
@@ -60,7 +63,7 @@ func TestEditEnabledJobClientUpdatesNextRunWithoutBreakingCurrentTask(t *testing
 		client.clearCurrentTask(runningTask)
 	}()
 
-	EditJobClient(map[string]interface{}{
+	if err := EditJobClient(map[string]interface{}{
 		"id":            client.JobID,
 		"enable":        1,
 		"remark":        "edited",
@@ -76,7 +79,9 @@ func TestEditEnabledJobClientUpdatesNextRunWithoutBreakingCurrentTask(t *testing
 		"isCron":        0,
 		"minFileSize":   0,
 		"maxFileSize":   0,
-	})
+	}); err != nil {
+		t.Fatalf("EditJobClient: %v", err)
+	}
 
 	if runningTask.isBreak() {
 		t.Fatalf("EditJobClient() requested break on the currently running task")

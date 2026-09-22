@@ -18,10 +18,13 @@ import (
 var (
 	jobClientList    = make(map[int64]*JobClient)
 	jobClientListMu  sync.RWMutex
-	getEnableJobList = mapper.GetEnableJobList
 )
 
-var taskNumUpdateSlots = make(chan struct{}, 1)
+var (
+	taskNumUpdateMu      sync.Mutex
+	taskNumUpdateLatest  []map[string]interface{}
+	taskNumUpdateActive  bool
+)
 
 // InitJobs loads and starts all enabled jobs on startup
 func InitJobs() {
@@ -37,14 +40,9 @@ func InitJobs() {
 	}
 	for _, item := range jobList {
 		logger.Printf("Adding jobId %v", item["id"])
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					logger.Printf("Error adding job: %v", r)
-				}
-			}()
-			AddJobClient(item, true)
-		}()
+		if err := AddJobClient(item, true); err != nil {
+			logger.Printf("Error adding job: %v", err)
+		}
 	}
 }
 
@@ -57,7 +55,7 @@ func ShutdownJobs(ctx context.Context) {
 	jobClientListMu.RUnlock()
 
 	for _, client := range clients {
-		client.StopJob(true)
+		client.StopJob(true) //nolint:errcheck // remove=true never fails
 	}
 
 	var wg sync.WaitGroup
@@ -103,38 +101,37 @@ func taskRetentionCutoff(now time.Time, taskSaveDays int) (int64, bool) {
 }
 
 // GetJobClientByID gets or creates a job client
-func GetJobClientByID(jobID int64) *JobClient {
+func GetJobClientByID(jobID int64) (*JobClient, error) {
 	jobClientListMu.RLock()
 	client, ok := jobClientList[jobID]
 	jobClientListMu.RUnlock()
 	if ok {
-		return client
+		return client, nil
 	}
 
 	jobClientListMu.Lock()
 	defer jobClientListMu.Unlock()
 
 	if client, ok := jobClientList[jobID]; ok {
-		return client
+		return client, nil
 	}
 
 	job, err := mapper.GetJobByID(jobID)
 	if err != nil {
-		// Surface "job not found" as a meaningful public message instead of the
-		// generic "internal server error" that a plain panic produces. Real DB
-		// errors keep the raw panic (masked as 500).
-		if err.Error() == msg.JobNotFound {
-			panicPublic(msg.JobNotFound)
+		if err := publicErrorIf(err, msg.T(msg.JobNotFound)); err != nil {
+			return nil, err
 		}
-		panic(err.Error())
 	}
-	client = NewJobClient(job, false)
+	client, err = NewJobClient(job, false)
+	if err != nil {
+		return nil, err
+	}
 	jobClientList[jobID] = client
-	return client
+	return client, nil
 }
 
 // CleanJobInput sanitizes job input data
-func CleanJobInput(job map[string]interface{}) {
+func CleanJobInput(job map[string]interface{}) error {
 	if util.ToInt(job["isCron"]) == 2 && util.ToInt(job["enable"]) != 1 {
 		job["enable"] = 1
 	}
@@ -153,7 +150,7 @@ func CleanJobInput(job map[string]interface{}) {
 		// Rejected before normalization, because normalizeExclude is exactly the
 		// step that would drop these lines without a trace.
 		if invalid := invalidExcludeRules(excludeStr); len(invalid) > 0 {
-			panicPublic(msg.ExcludeRulesUnsupported(invalid))
+			return publicError(msg.ExcludeRulesUnsupported(invalid))
 		}
 		job["exclude"] = normalizeExclude(excludeStr)
 	}
@@ -163,57 +160,62 @@ func CleanJobInput(job map[string]interface{}) {
 	if job["dstPath"] != nil {
 		job["dstPath"] = normalizePathListForStorage(job["dstPath"])
 	}
-	normalizeJobFileSizeRange(job)
+	if err := normalizeJobFileSizeRange(job); err != nil {
+		return err
+	}
+	return nil
 }
 
-func ValidateJobInput(job map[string]interface{}) {
+func ValidateJobInput(job map[string]interface{}) error {
 	if len(parsePathList(job["srcPath"])) == 0 ||
 		len(parsePathList(job["dstPath"])) == 0 ||
 		util.ToInt64(job["alistId"]) <= 0 {
-		panicPublic(msg.LostPart)
+		return publicError(msg.T(msg.LostPart))
 	}
 	if syncPathsOverlap(parsePathList(job["srcPath"]), parsePathList(job["dstPath"])) {
-		panicPublic(msg.SyncPathOverlap)
+		return publicError(msg.T(msg.SyncPathOverlap))
 	}
 	if srcSelectionsNested(parsePathList(job["srcPath"])) {
-		panicPublic(msg.SrcPathNested)
+		return publicError(msg.T(msg.SrcPathNested))
 	}
 
 	if enable, ok := job["enable"]; ok {
 		enableInt := util.ToInt(enable)
 		if enableInt != 0 && enableInt != 1 {
-			panicPublic(msg.LostPart)
+			return publicError(msg.T(msg.LostPart))
 		}
 	}
 
 	method := util.ToInt(job["method"])
 	if method < 0 || method > 2 {
-		panicPublic(msg.LostPart)
+		return publicError(msg.T(msg.LostPart))
 	}
 
 	isCron := util.ToInt(job["isCron"])
 	if isCron < 0 || isCron > 2 {
-		panicPublic(msg.LostPart)
+		return publicError(msg.T(msg.LostPart))
 	}
 	if isCron == 0 && util.ToInt(job["interval"]) <= 0 {
-		panicPublic(msg.IntervalLost)
+		return publicError(msg.T(msg.IntervalLost))
 	}
+	return nil
 }
 
-func normalizeJobFileSizeRange(job map[string]interface{}) {
+func normalizeJobFileSizeRange(job map[string]interface{}) error {
 	minSize, err := nonNegativeFileSize(job["minFileSize"])
 	if err != nil {
-		panicPublic(msg.MinFileSizeInvalid)
+		return publicError(msg.T(msg.MinFileSizeInvalid))
 	}
 	maxSize, err := nonNegativeFileSize(job["maxFileSize"])
 	if err != nil {
-		panicPublic(msg.MaxFileSizeInvalid)
+		return publicError(msg.T(msg.MaxFileSizeInvalid))
 	}
 	if maxSize > 0 && minSize > maxSize {
-		panicPublic(msg.MinFileSizeGtMax)
+		return publicError(msg.T(msg.MinFileSizeGtMax))
 	}
 	job["minFileSize"] = minSize
 	job["maxFileSize"] = maxSize
+	return nil
 }
 
 func nonNegativeFileSize(value interface{}) (int64, error) {
@@ -256,9 +258,13 @@ func nonNegativeFileSize(value interface{}) (int64, error) {
 }
 
 // AddJobClient creates a new job client
-func AddJobClient(job map[string]interface{}, isInit bool) {
-	CleanJobInput(job)
-	ValidateJobInput(job)
+func AddJobClient(job map[string]interface{}, isInit bool) error {
+	if err := CleanJobInput(job); err != nil {
+		return err
+	}
+	if err := ValidateJobInput(job); err != nil {
+		return err
+	}
 	if !isInit {
 		// Interactive add: validate that the engine exists and hold the
 		// reference lock until the job row is inserted, so a concurrent
@@ -266,192 +272,223 @@ func AddJobClient(job map[string]interface{}, isInit bool) {
 		// pointing at nothing.
 		alistRefMu.Lock()
 		defer alistRefMu.Unlock()
-		if _, err := getAlistByID(util.ToInt64(job["alistId"])); err != nil {
-			panicPublicIf(err, msg.AlistNotFound)
+		if _, err := alistDeps.GetAlistByID(util.ToInt64(job["alistId"])); err != nil {
+			if err := publicErrorIf(err, msg.T(msg.AlistNotFound)); err != nil {
+				return err
+			}
 		}
 	}
-	client := NewJobClient(job, isInit)
+	client, err := NewJobClient(job, isInit)
+	if err != nil {
+		return err
+	}
 	jobClientListMu.Lock()
 	jobClientList[client.JobID] = client
 	jobClientListMu.Unlock()
+	return nil
 }
 
 // EditJobClient updates an existing job client
-func EditJobClient(job map[string]interface{}) {
+func EditJobClient(job map[string]interface{}) error {
 	jobID := util.ToInt64(job["id"])
-	CleanJobInput(job)
-	ValidateJobInput(job)
-	client := GetJobClientByID(jobID)
-	oldJob := client.jobSnapshot()
-	nextScheduler := NewScheduler()
-	dbUpdated := false
-	defer func() {
-		if r := recover(); r != nil {
-			nextScheduler.Stop()
-			if dbUpdated && oldJob != nil {
-				if err := mapper.UpdateJob(oldJob); err != nil {
-					log.Printf("failed to roll back job %d after edit panic: %v", jobID, err)
-				}
-			}
-			panic(r)
-		}
-	}()
+	if err := CleanJobInput(job); err != nil {
+		return err
+	}
+	if err := ValidateJobInput(job); err != nil {
+		return err
+	}
+	client, err := GetJobClientByID(jobID)
+	if err != nil {
+		return err
+	}
+	nextScheduler := newSchedulerStopped()
 	if err := nextScheduler.AddJob(util.ToInt(job["isCron"]), job, func() {
 		client.DoScheduled()
 	}); err != nil {
 		nextScheduler.Stop()
-		panic(err.Error())
+		return fmt.Errorf("schedule job: %w", err)
 	}
 	if err := mapper.UpdateJob(job); err != nil {
 		nextScheduler.Stop()
-		panic(err.Error())
+		return fmt.Errorf("update job: %w", err)
 	}
-	dbUpdated = true
+	nextScheduler.Start()
 	oldScheduler := client.replaceJobConfig(job, nextScheduler)
 	if oldScheduler != nil {
 		oldScheduler.Stop()
 	}
+	return nil
 }
 
 // DoAllJobManual executes all enabled jobs manually
-func DoAllJobManual() {
-	jobList, err := getEnableJobList()
+func DoAllJobManual() error {
+	jobList, err := jobDeps.GetEnableJobList()
 	if err != nil {
-		panic(err.Error())
+		return fmt.Errorf("get enabled jobs: %w", err)
 	}
 	if len(jobList) == 0 {
-		panicPublic(msg.NoJobForRun)
+		return publicError(msg.T(msg.NoJobForRun))
 	}
 	for _, jobItem := range jobList {
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("DoAllJobManual: job %v skipped: %v", jobItem["id"], r)
-				}
-			}()
-			client := GetJobClientByID(util.ToInt64(jobItem["id"]))
-			if client.enabled() {
-				client.DoManual()
+		client, err := GetJobClientByID(util.ToInt64(jobItem["id"]))
+		if err != nil {
+			log.Printf("DoAllJobManual: job %v skipped: %v", jobItem["id"], err)
+			continue
+		}
+		if client.enabled() {
+			if err := client.DoManual(); err != nil {
+				log.Printf("DoAllJobManual: job %v skipped: %v", jobItem["id"], err)
 			}
-		}()
+		}
 	}
+	return nil
 }
 
 // DoJobManual executes a specific job manually
-func DoJobManual(jobID int64) {
-	client := GetJobClientByID(jobID)
-	if !client.enabled() {
-		panicPublic(msg.DisabledJobCannotRun)
+func DoJobManual(jobID int64) error {
+	client, err := GetJobClientByID(jobID)
+	if err != nil {
+		return err
 	}
-	client.DoManual()
+	if !client.enabled() {
+		return publicError(msg.T(msg.DisabledJobCannotRun))
+	}
+	return client.DoManual()
 }
 
 // RemoveJobClient deletes a job
-func RemoveJobClient(jobID int64) {
-	client := GetJobClientByID(jobID)
-	if client.isBusy() {
-		panicPublic(msg.JobRunningCannotDelete)
+func RemoveJobClient(jobID int64) error {
+	client, err := GetJobClientByID(jobID)
+	if err != nil {
+		return err
 	}
 	client.StopJob(true)
 	if !client.waitUntilIdle(2 * time.Minute) {
-		panicPublic(msg.JobDeleteWaitTimeout)
+		return publicError(msg.T(msg.JobDeleteWaitTimeout))
 	}
 	if err := mapper.DeleteJob(jobID); err != nil {
-		panic(err.Error())
+		return fmt.Errorf("delete job: %w", err)
 	}
 	jobClientListMu.Lock()
 	delete(jobClientList, jobID)
 	jobClientListMu.Unlock()
+	return nil
 }
 
 // ContinueJob enables a job
-func ContinueJob(jobID int64) {
-	client := GetJobClientByID(jobID)
-	client.ResumeJob()
+func ContinueJob(jobID int64) error {
+	client, err := GetJobClientByID(jobID)
+	if err != nil {
+		return err
+	}
+	return client.ResumeJob()
 }
 
 // PauseJob disables a job
-func PauseJob(jobID int64) {
-	client := GetJobClientByID(jobID)
-	if util.ToInt(client.jobSnapshot()["isCron"]) == 2 {
-		panicPublic(msg.CannotDisableManualJob)
+func PauseJob(jobID int64) error {
+	client, err := GetJobClientByID(jobID)
+	if err != nil {
+		return err
 	}
-	client.StopJob(false)
+	if util.ToInt(client.jobSnapshot()["isCron"]) == 2 {
+		return publicError(msg.T(msg.CannotDisableManualJob))
+	}
+	return client.StopJob(false)
 }
 
 // AbortJob aborts a running job
-func AbortJob(jobID int64) {
-	client := GetJobClientByID(jobID)
+func AbortJob(jobID int64) error {
+	client, err := GetJobClientByID(jobID)
+	if err != nil {
+		return err
+	}
 	client.AbortJob()
+	return nil
 }
 
 // StopTask stops a currently running task without changing the job schedule.
-func StopTask(taskID int64) {
+func StopTask(taskID int64) error {
 	job, err := mapper.GetJobByTaskID(taskID)
 	if err != nil {
-		panicPublicIf(err, msg.JobNotFound)
+		if err := publicErrorIf(err, msg.T(msg.JobNotFound)); err != nil {
+			return err
+		}
 	}
-	client := GetJobClientByID(util.ToInt64(job["id"]))
+	client, err := GetJobClientByID(util.ToInt64(job["id"]))
+	if err != nil {
+		return err
+	}
 	task := client.currentTask()
 	if task == nil || task.TaskID != taskID {
-		panicPublic(msg.TaskNotRunningStop)
+		return publicError(msg.T(msg.TaskNotRunningStop))
 	}
 	task.requestBreak()
+	return nil
 }
 
 // RetryFailedTask replays the non-success items of a historical task.
-func RetryFailedTask(taskID int64) {
+func RetryFailedTask(taskID int64) error {
 	job, err := mapper.GetJobByTaskID(taskID)
 	if err != nil {
-		panicPublicIf(err, msg.JobNotFound)
+		if err := publicErrorIf(err, msg.T(msg.JobNotFound)); err != nil {
+			return err
+		}
 	}
-	client := GetJobClientByID(util.ToInt64(job["id"]))
+	client, err := GetJobClientByID(util.ToInt64(job["id"]))
+	if err != nil {
+		return err
+	}
 	if !client.enabled() {
-		panicPublic(msg.DisabledJobCannotRun)
+		return publicError(msg.T(msg.DisabledJobCannotRun))
 	}
 	if client.isBusy() {
-		panicPublic(msg.JobRunning)
+		return publicError(msg.T(msg.JobRunning))
 	}
-	count, err := countJobTaskItemsByStatuses(taskID, retryableStatusValues())
+	count, err := jobDeps.CountJobTaskItemsByStatuses(taskID, retryableStatusValues())
 	if err != nil {
-		panic(err.Error())
+		return fmt.Errorf("count retryable items: %w", err)
 	}
 	if count == 0 {
-		panicPublic(msg.NoFailedTaskItems)
+		return publicError(msg.T(msg.NoFailedTaskItems))
 	}
-	client.DoRetryFailedTaskItems(taskID)
+	return client.DoRetryFailedTaskItems(taskID)
 }
 
 // GetJobList returns paginated job list
-func GetJobList(params map[string]interface{}) map[string]interface{} {
+func GetJobList(params map[string]interface{}) (map[string]interface{}, error) {
 	result, err := mapper.GetJobList(params)
 	// An over-limit unpaginated request is the caller's to fix, so it reaches the
 	// client as an actionable message instead of a generic 500.
-	panicPublicIf(err, msg.ListTooLarge)
-	return result
+	if err := publicErrorIf(err, msg.T(msg.ListTooLarge)); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // GetJobCurrent returns real-time task progress
-func GetJobCurrent(jobID int64, params map[string]interface{}) interface{} {
-	client := GetJobClientByID(jobID)
+func GetJobCurrent(jobID int64, params map[string]interface{}) (interface{}, error) {
+	client, err := GetJobClientByID(jobID)
+	if err != nil {
+		return nil, err
+	}
 	taskClient := client.currentTask()
 	if taskClient != nil {
 		status, hasStatus := params["status"]
 		if !hasStatus || fmt.Sprintf("%v", status) == "" {
-			return taskClient.getCurrentPayload()
+			return taskClient.getCurrentPayload(), nil
 		}
 		statusInt := util.ToInt(status)
 		pageSize := util.ToInt(params["pageSize"])
 		pageNum := util.ToInt(params["pageNum"])
 		if currentRequestStale(taskClient, params) {
-			return taskClient.emptyCurrentTaskPage(statusInt, pageSize, pageNum, true)
+			return taskClient.emptyCurrentTaskPage(statusInt, pageSize, pageNum, true), nil
 		}
 		if pageSize > 0 && pageNum > 0 {
-			return taskClient.GetCurrentByStatusPage(statusInt, pageSize, pageNum)
+			return taskClient.GetCurrentByStatusPage(statusInt, pageSize, pageNum), nil
 		}
-		return taskClient.GetCurrentByStatus(statusInt)
+		return taskClient.GetCurrentByStatus(statusInt), nil
 	}
-	return nil
+	return nil, nil
 }
 
 func currentRequestStale(taskClient *JobTask, params map[string]interface{}) bool {
@@ -464,13 +501,15 @@ func currentRequestStale(taskClient *JobTask, params map[string]interface{}) boo
 }
 
 // GetTaskList returns paginated task list with task num info
-func GetTaskList(req map[string]interface{}) map[string]interface{} {
+func GetTaskList(req map[string]interface{}) (map[string]interface{}, error) {
 	jobTaskList, err := mapper.GetJobTaskList(req)
-	panicPublicIf(err, msg.ListTooLarge)
+	if err := publicErrorIf(err, msg.T(msg.ListTooLarge)); err != nil {
+		return nil, err
+	}
 
 	dataList, ok := jobTaskList["dataList"].([]map[string]interface{})
 	if !ok {
-		return jobTaskList
+		return jobTaskList, nil
 	}
 
 	var needUpdateList []map[string]interface{}
@@ -523,7 +562,7 @@ func GetTaskList(req map[string]interface{}) map[string]interface{} {
 		scheduleTaskNumUpdate(needUpdateList)
 	}
 
-	return jobTaskList
+	return jobTaskList, nil
 }
 
 func parseTaskNumJSON(value interface{}) map[string]interface{} {
@@ -555,36 +594,58 @@ func parseTaskNumJSON(value interface{}) map[string]interface{} {
 
 func scheduleTaskNumUpdate(taskNums []map[string]interface{}) {
 	taskNums = cloneTaskRows(taskNums)
-	select {
-	case taskNumUpdateSlots <- struct{}{}:
-		go func() {
-			defer func() {
-				<-taskNumUpdateSlots
-			}()
-			if err := mapper.UpdateJobTaskNumMany(taskNums); err != nil {
+	taskNumUpdateMu.Lock()
+	taskNumUpdateLatest = taskNums
+	if taskNumUpdateActive {
+		taskNumUpdateMu.Unlock()
+		return
+	}
+	taskNumUpdateActive = true
+	taskNumUpdateMu.Unlock()
+
+	go func() {
+		for {
+			taskNumUpdateMu.Lock()
+			pending := taskNumUpdateLatest
+			taskNumUpdateLatest = nil
+			taskNumUpdateMu.Unlock()
+
+			if pending == nil {
+				taskNumUpdateMu.Lock()
+				if taskNumUpdateLatest == nil {
+					taskNumUpdateActive = false
+					taskNumUpdateMu.Unlock()
+					return
+				}
+				taskNumUpdateMu.Unlock()
+				continue
+			}
+			if err := mapper.UpdateJobTaskNumMany(pending); err != nil {
 				log.Printf("Failed to update task counts: %v", err)
 			}
-		}()
-	default:
-		log.Printf("Skipping task count backfill because a previous update is still running")
-	}
+		}
+	}()
 }
 
-func GetTaskItemList(req map[string]interface{}) map[string]interface{} {
+func GetTaskItemList(req map[string]interface{}) (map[string]interface{}, error) {
 	result, err := mapper.GetJobTaskItemList(req)
-	panicPublicIf(err, msg.ListTooLarge)
-	return result
+	if err := publicErrorIf(err, msg.T(msg.ListTooLarge)); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // RemoveTask deletes a task
-func RemoveTask(taskID int64) {
+func RemoveTask(taskID int64) error {
 	task, err := mapper.GetJobTaskByID(taskID)
 	if err != nil {
-		panicPublicIf(err, msg.TaskNotFound)
+		if err := publicErrorIf(err, msg.T(msg.TaskNotFound)); err != nil {
+			return err
+		}
 	}
 	status := taskStatusFromValue(task["status"])
 	if status == taskStatusWaiting || status == taskStatusRunning {
-		panicPublic(msg.JobRunningCannotDelete)
+		return publicError(msg.T(msg.JobRunningCannotDelete))
 	}
 
 	jobID := util.ToInt64(task["jobId"])
@@ -593,11 +654,12 @@ func RemoveTask(taskID int64) {
 	jobClientListMu.RUnlock()
 	if client != nil {
 		if current := client.currentTask(); current != nil && current.TaskID == taskID {
-			panicPublic(msg.JobRunningCannotDelete)
+			return publicError(msg.T(msg.JobRunningCannotDelete))
 		}
 	}
 
 	if err := mapper.DeleteJobTaskByTaskID(taskID); err != nil {
-		panic(err.Error())
+		return fmt.Errorf("delete task: %w", err)
 	}
+	return nil
 }

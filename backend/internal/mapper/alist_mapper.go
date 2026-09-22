@@ -25,7 +25,7 @@ func GetAlistByID(alistID int64) (map[string]interface{}, error) {
 		return nil, err
 	}
 	if len(rst) == 0 {
-		return nil, errors.New(msg.AlistNotFound)
+		return nil, errors.New(msg.T(msg.AlistNotFound))
 	}
 	if err := decryptCredentialColumn(rst, "token"); err != nil {
 		return nil, err

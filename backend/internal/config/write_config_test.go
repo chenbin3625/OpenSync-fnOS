@@ -69,7 +69,10 @@ func TestWriteConfigFileKeepsOneOpensyncSection(t *testing.T) {
 			}
 
 			// Every managed key must round-trip through the parser.
-			parsed := readINI(path)
+			parsed, err := readINI(path)
+			if err != nil {
+				t.Fatalf("readINI(%q) failed: %v", path, err)
+			}
 			section, ok := parsed["opensync"]
 			if !ok {
 				t.Fatalf("parsed file has no opensync section:\n%s", content)

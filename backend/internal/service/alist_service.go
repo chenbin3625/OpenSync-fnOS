@@ -15,10 +15,6 @@ var (
 	alistClientList   = make(map[int64]*AlistClient)
 	alistClientListMu sync.RWMutex
 	alistClientLoads  = make(map[int64]*alistClientLoad)
-
-	getAlistByID          = mapper.GetAlistByID
-	newAlistClient        = NewAlistClient
-	newAlistClientContext = NewAlistClientContext
 )
 
 type alistClientLoad struct {
@@ -29,18 +25,18 @@ type alistClientLoad struct {
 }
 
 // GetClientList returns all alist entries without token
-func GetClientList() []map[string]interface{} {
+func GetClientList() ([]map[string]interface{}, error) {
 	clientList, err := mapper.GetAlistList()
 	if err != nil {
-		panic(err.Error())
+		return nil, fmt.Errorf("get alist list: %w", err)
 	}
 	for _, client := range clientList {
 		delete(client, "token")
 	}
-	return clientList
+	return clientList, nil
 }
 
-func GetClientByIDContext(ctx context.Context, alistID int64) *AlistClient {
+func GetClientByIDContext(ctx context.Context, alistID int64) (*AlistClient, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -48,7 +44,7 @@ func GetClientByIDContext(ctx context.Context, alistID int64) *AlistClient {
 	client, ok := alistClientList[alistID]
 	alistClientListMu.RUnlock()
 	if ok {
-		return client
+		return client, nil
 	}
 
 	load, owner := beginAlistClientLoad(alistID)
@@ -56,21 +52,21 @@ func GetClientByIDContext(ctx context.Context, alistID int64) *AlistClient {
 		select {
 		case <-load.done:
 		case <-ctx.Done():
-			panicAlistClientLoadError(ctx.Err())
+			return nil, alistClientLoadError(ctx.Err())
 		}
 		if load.err != nil {
-			panicAlistClientLoadError(load.err)
+			return nil, alistClientLoadError(load.err)
 		}
-		return load.client
+		return load.client, nil
 	}
 
-	alist, err := getAlistByID(alistID)
+	alist, err := alistDeps.GetAlistByID(alistID)
 	if err != nil {
 		finishAlistClientLoad(alistID, load, nil, err)
-		panicAlistClientLoadError(err)
+		return nil, alistClientLoadError(err)
 	}
 
-	newClient, err := newAlistClientContext(
+	newClient, err := alistDeps.NewAlistClientCtx(
 		ctx,
 		fmt.Sprintf("%v", alist["url"]),
 		fmt.Sprintf("%v", alist["token"]),
@@ -78,11 +74,11 @@ func GetClientByIDContext(ctx context.Context, alistID int64) *AlistClient {
 	)
 	if err != nil {
 		finishAlistClientLoad(alistID, load, nil, err)
-		panicAlistClientLoadError(err)
+		return nil, alistClientLoadError(err)
 	}
 
 	finishAlistClientLoad(alistID, load, newClient, nil)
-	return load.client
+	return load.client, nil
 }
 
 func beginAlistClientLoad(alistID int64) (*alistClientLoad, bool) {
@@ -151,22 +147,22 @@ func removeCachedAlistClient(alistID int64) {
 	}
 }
 
-func panicAlistClientLoadError(err error) {
+func alistClientLoadError(err error) error {
 	if err == nil {
-		return
+		return nil
 	}
 	// "Not found" is already a sanitized, actionable public message — pass it
 	// through so a stale client ID gets a meaningful error. Everything else may
 	// include internal host/IP/port details: log it and return only a generic
 	// message so network topology is not leaked through the API response.
-	if err.Error() == msg.AlistNotFound {
-		panicPublic(msg.AlistNotFound)
+	if err.Error() == msg.T(msg.AlistNotFound) {
+		return publicError(msg.T(msg.AlistNotFound))
 	}
 	log.Printf("alist client load failed: %v", err)
-	panicPublic(msg.AlistConnectFail)
+	return publicError(msg.T(msg.AlistConnectFail))
 }
 
-func normalizeAlistInput(alist map[string]interface{}) string {
+func normalizeAlistInput(alist map[string]interface{}) (string, error) {
 	remark, _ := alist["remark"]
 	if remark != nil {
 		if s, ok := remark.(string); ok && strings.TrimSpace(s) == "" {
@@ -176,59 +172,67 @@ func normalizeAlistInput(alist map[string]interface{}) string {
 
 	urlStr := strings.TrimRight(fmt.Sprintf("%v", alist["url"]), "/")
 	if err := validateAlistURL(urlStr); err != nil {
-		panicPublic(err.Error())
+		return "", publicError(err.Error())
 	}
 	alist["url"] = urlStr
-	return urlStr
+	return urlStr, nil
 }
 
 func validateAlistURL(rawURL string) error {
-	return util.ValidateHTTPURL(rawURL, msg.AlistURLInvalid)
+	return util.ValidateHTTPURL(rawURL, msg.T(msg.AlistURLInvalid))
 }
 
-func normalizeAlistToken(alist map[string]interface{}, required bool) (string, bool) {
+func normalizeAlistToken(alist map[string]interface{}, required bool) (string, bool, error) {
 	token, ok := alist["token"]
 	if !ok || token == nil {
 		if required {
-			panicPublic(msg.AlistTokenRequired)
+			return "", false, publicError(msg.T(msg.AlistTokenRequired))
 		}
 		delete(alist, "token")
-		return "", false
+		return "", false, nil
 	}
 	tokenStr := strings.TrimSpace(fmt.Sprintf("%v", token))
 	if tokenStr == "" || tokenStr == "<nil>" {
 		if required {
-			panicPublic(msg.AlistTokenRequired)
+			return "", false, publicError(msg.T(msg.AlistTokenRequired))
 		}
 		delete(alist, "token")
-		return "", false
+		return "", false, nil
 	}
 	alist["token"] = tokenStr
-	return tokenStr, true
+	return tokenStr, true, nil
 }
 
 // UpdateClient updates an AList client
-func UpdateClient(alist map[string]interface{}) {
+func UpdateClient(alist map[string]interface{}) error {
 	alistID := util.ToInt64(alist["id"])
-	urlStr := normalizeAlistInput(alist)
+	urlStr, err := normalizeAlistInput(alist)
+	if err != nil {
+		return err
+	}
 
-	token, hasToken := normalizeAlistToken(alist, false)
+	token, hasToken, err := normalizeAlistToken(alist, false)
+	if err != nil {
+		return err
+	}
 
 	alistOld, err := mapper.GetAlistByID(alistID)
 	if err != nil {
-		panicPublicIf(err, msg.AlistNotFound)
+		if err := publicErrorIf(err, msg.T(msg.AlistNotFound)); err != nil {
+			return err
+		}
 	}
 
 	oldURL := fmt.Sprintf("%v", alistOld["url"])
 	var client *AlistClient
 	if oldURL != urlStr || hasToken {
 		if !hasToken {
-			panicPublic(msg.WithoutToken)
+			return publicError(msg.T(msg.WithoutToken))
 		}
-		client, err = newAlistClient(urlStr, token, alistID)
+		client, err = alistDeps.NewAlistClient(urlStr, token, alistID)
 		if err != nil {
 			log.Printf("alist client update failed: %v", err)
-			panicPublic(msg.AlistConnectFail)
+			return publicError(msg.T(msg.AlistConnectFail))
 		}
 	}
 
@@ -245,22 +249,29 @@ func UpdateClient(alist map[string]interface{}) {
 		if client != nil {
 			client.Close()
 		}
-		panic(err.Error())
+		return fmt.Errorf("update alist: %w", err)
 	}
 	if client != nil {
 		storeAlistClient(alistID, client)
 	}
+	return nil
 }
 
 // AddClient adds a new AList client
-func AddClient(alist map[string]interface{}) {
-	urlStr := normalizeAlistInput(alist)
-	token, _ := normalizeAlistToken(alist, true)
+func AddClient(alist map[string]interface{}) error {
+	urlStr, err := normalizeAlistInput(alist)
+	if err != nil {
+		return err
+	}
+	token, _, err := normalizeAlistToken(alist, true)
+	if err != nil {
+		return err
+	}
 
 	client, err := NewAlistClient(urlStr, token, 0)
 	if err != nil {
 		log.Printf("Failed to add alist client: %v", err)
-		panicPublic(msg.AlistConnectFail)
+		return publicError(msg.T(msg.AlistConnectFail))
 	}
 
 	remarkStr := ""
@@ -271,13 +282,14 @@ func AddClient(alist map[string]interface{}) {
 	newID, err := mapper.AddAlist(remarkStr, urlStr, client.User, token)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			panicPublic(msg.AlistExists)
+			return publicError(msg.T(msg.AlistExists))
 		}
-		panic(err.Error())
+		return fmt.Errorf("add alist: %w", err)
 	}
 
 	client.AlistID = newID
 	storeAlistClient(newID, client)
+	return nil
 }
 
 // alistRefMu serializes (validate alist exists → insert job) against
@@ -286,29 +298,32 @@ func AddClient(alist map[string]interface{}) {
 var alistRefMu sync.Mutex
 
 // RemoveClient removes an AList client
-func RemoveClient(alistID int64) {
+func RemoveClient(alistID int64) error {
 	alistRefMu.Lock()
 	defer alistRefMu.Unlock()
 	count, err := mapper.CountJobsByAlistID(alistID)
 	if err != nil {
-		panic(err.Error())
+		return fmt.Errorf("count jobs by alist: %w", err)
 	}
 	if count > 0 {
-		panicPublic(msg.AlistInUse)
+		return publicError(msg.T(msg.AlistInUse))
 	}
 
 	removeCachedAlistClient(alistID)
 	if err := mapper.RemoveAlist(alistID); err != nil {
-		panic(err.Error())
+		return fmt.Errorf("remove alist: %w", err)
 	}
+	return nil
 }
 
 // TestClient tests connectivity to an existing AList engine by creating a fresh
 // connection (bypassing the cache) so we know the engine is reachable right now.
-func TestClient(ctx context.Context, alistID int64) {
-	alist, err := getAlistByID(alistID)
+func TestClient(ctx context.Context, alistID int64) error {
+	alist, err := alistDeps.GetAlistByID(alistID)
 	if err != nil {
-		panicPublicIf(err, msg.AlistNotFound)
+		if err := publicErrorIf(err, msg.T(msg.AlistNotFound)); err != nil {
+			return err
+		}
 	}
 	// util.StringValue, not a bare type assertion: a DB row can carry a
 	// non-string (or NULL) here, and an assertion would silently degrade the
@@ -316,23 +331,27 @@ func TestClient(ctx context.Context, alistID int64) {
 	url := util.StringValue(alist["url"])
 	token := util.StringValue(alist["token"])
 	if url == "" {
-		panicPublic(msg.AlistURLInvalid)
+		return publicError(msg.T(msg.AlistURLInvalid))
 	}
-	client, err := newAlistClientContext(ctx, url, token, alistID)
+	client, err := alistDeps.NewAlistClientCtx(ctx, url, token, alistID)
 	if err != nil {
 		log.Printf("alist test failed: alistID=%d: %v", alistID, err)
-		panicPublic(msg.AlistConnectFail)
+		return publicError(msg.T(msg.AlistConnectFail))
 	}
 	client.Close()
+	return nil
 }
 
 // GetChildPath gets child directory paths for path selector
-func GetChildPath(ctx context.Context, alistID int64, path string) []map[string]string {
-	client := GetClientByIDContext(ctx, alistID)
+func GetChildPath(ctx context.Context, alistID int64, path string) ([]map[string]string, error) {
+	client, err := GetClientByIDContext(ctx, alistID)
+	if err != nil {
+		return nil, err
+	}
 	result, err := client.FilePathList(ctx, path)
 	if err != nil {
 		log.Printf("alist path list failed: alistID=%d path=%q: %v", alistID, path, err)
-		panicPublic(msg.AlistConnectFail)
+		return nil, publicError(msg.T(msg.AlistConnectFail))
 	}
-	return result
+	return result, nil
 }

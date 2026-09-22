@@ -30,6 +30,9 @@ import (
 // Note that a non-browser client can forge every header it likes and is not
 // constrained here at all; the gateway's session check is the real boundary.
 func GatewayRequired(development bool, allowedOrigins []string) gin.HandlerFunc {
+	if !development && len(allowedOrigins) == 0 {
+		log.Printf("Warning: allowed_origins is not configured; write requests from non-browser clients are accepted without origin check")
+	}
 	return func(c *gin.Context) {
 		if !sameOriginWrite(c, allowedOrigins) {
 			logRejectedWrite(c, allowedOrigins)

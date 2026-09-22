@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"log"
+	"net"
 	"opensync/internal/msg"
 	"opensync/pkg/crypto"
 	"os"
@@ -37,6 +38,9 @@ type ServerConfig struct {
 	// TLSCertFile and TLSKeyFile enable HTTPS/HTTP2 and opportunistic HTTP3.
 	TLSCertFile string
 	TLSKeyFile  string
+	// Locale controls the language for user-facing messages (e.g. "zh", "en").
+	// Defaults to "zh".
+	Locale string
 }
 
 // DBConfig holds database configuration
@@ -139,7 +143,10 @@ func GetConfig() *Config {
 
 	if _, err := os.Stat(filepath.Join(ConfigDir(), "config.ini")); err == nil {
 		// Read config.ini
-		iniMap := readINI(filepath.Join(ConfigDir(), "config.ini"))
+		iniMap, err := readINI(filepath.Join(ConfigDir(), "config.ini"))
+		if err != nil {
+			log.Printf("配置文件读取失败: %v", err)
+		}
 		if opensync, ok := iniMap["opensync"]; ok {
 			if v, ok := opensync["bind"]; ok {
 				sCfg.Bind = stringConfigValue(v, sCfg.Bind)
@@ -174,6 +181,9 @@ func GetConfig() *Config {
 			if v, ok := opensync["allowed_origins"]; ok {
 				sCfg.AllowedOrigins = splitList(v)
 			}
+			if v, ok := opensync["locale"]; ok {
+				sCfg.Locale = stringConfigValue(v, sCfg.Locale)
+			}
 		}
 	} else {
 		// Read from environment variables
@@ -188,6 +198,7 @@ func GetConfig() *Config {
 		sCfg.ScanConcurrency = envIntConfigValue("OPENSYNC_SCAN_CONCURRENCY", sCfg.ScanConcurrency)
 		sCfg.MaxRetries = envIntConfigValue("OPENSYNC_MAX_RETRIES", sCfg.MaxRetries)
 		sCfg.AllowedOrigins = splitList(os.Getenv("OPENSYNC_ALLOWED_ORIGINS"))
+		sCfg.Locale = envStringConfigValue("OPENSYNC_LOCALE", sCfg.Locale)
 	}
 	sCfg.TLSCertFile = envStringConfigValue("OPENSYNC_TLS_CERT", sCfg.TLSCertFile)
 	sCfg.TLSKeyFile = envStringConfigValue("OPENSYNC_TLS_KEY", sCfg.TLSKeyFile)
@@ -197,6 +208,9 @@ func GetConfig() *Config {
 		Server: sCfg,
 	}
 	clampServerConfig(&sysConfig.Server)
+	if sysConfig.Server.Locale != "" {
+		msg.SetLocale(sysConfig.Server.Locale)
+	}
 	return sysConfig
 }
 
@@ -208,6 +222,16 @@ func GetConfig() *Config {
 // timeout).
 func clampServerConfig(sCfg *ServerConfig) {
 	sCfg.Bind = stringConfigValue(sCfg.Bind, defaultBind)
+	if sCfg.Bind != "" {
+		if ip := net.ParseIP(sCfg.Bind); ip == nil && sCfg.Bind != "0.0.0.0" && sCfg.Bind != "localhost" {
+			log.Printf("配置项 bind=%q 不是有效的 IP 地址，将使用默认值 %s", sCfg.Bind, defaultBind)
+			sCfg.Bind = defaultBind
+		}
+	}
+	if sCfg.Port < 1 || sCfg.Port > 65535 {
+		log.Printf("配置项 port=%d 不在有效范围 1-65535，将使用默认值 %d", sCfg.Port, defaultPort)
+		sCfg.Port = defaultPort
+	}
 	sCfg.Timeout = clampInt(sCfg.Timeout, minTaskTimeout, maxTaskTimeout, defaultTaskTimeout)
 	sCfg.TaskSave = clampInt(sCfg.TaskSave, minTaskSave, maxTaskSave, defaultTaskSave)
 	sCfg.CopyConcurrency = clampInt(sCfg.CopyConcurrency, MinCopyConcurrency, MaxCopyConcurrency, DefaultCopyConcurrency)
@@ -286,11 +310,11 @@ func validateSystemSettings(settings SystemSettings) error {
 		value    int
 		min, max int
 	}{
-		{msg.SettingsTaskTimeout, settings.TaskTimeout, minTaskTimeout, maxTaskTimeout},
-		{msg.SettingsTaskSave, settings.TaskSave, minTaskSave, maxTaskSave},
-		{msg.SettingsCopyConcurrency, settings.CopyConcurrency, MinCopyConcurrency, MaxCopyConcurrency},
-		{msg.SettingsScanConcurrency, settings.ScanConcurrency, MinScanConcurrency, MaxScanConcurrency},
-		{msg.SettingsMaxRetries, settings.MaxRetries, MinMaxRetries, MaxRetryAttempts},
+		{msg.T(msg.SettingsTaskTimeout), settings.TaskTimeout, minTaskTimeout, maxTaskTimeout},
+		{msg.T(msg.SettingsTaskSave), settings.TaskSave, minTaskSave, maxTaskSave},
+		{msg.T(msg.SettingsCopyConcurrency), settings.CopyConcurrency, MinCopyConcurrency, MaxCopyConcurrency},
+		{msg.T(msg.SettingsScanConcurrency), settings.ScanConcurrency, MinScanConcurrency, MaxScanConcurrency},
+		{msg.T(msg.SettingsMaxRetries), settings.MaxRetries, MinMaxRetries, MaxRetryAttempts},
 	}
 	for _, item := range checks {
 		if item.value < item.min || item.value > item.max {
@@ -439,7 +463,7 @@ func writeConfigFile(sCfg ServerConfig) error {
 		_ = tmpFile.Close()
 		return err
 	}
-	if err := tmpFile.Chmod(0644); err != nil {
+	if err := tmpFile.Chmod(0600); err != nil {
 		_ = tmpFile.Close()
 		return err
 	}
@@ -471,12 +495,11 @@ func stringConfigValue(value string, fallback string) string {
 }
 
 // readINI parses a simple INI file
-func readINI(filename string) map[string]map[string]string {
+func readINI(filename string) (map[string]map[string]string, error) {
 	result := make(map[string]map[string]string)
 	f, err := os.Open(filename)
 	if err != nil {
-		log.Printf("配置文件读取失败: %v", err)
-		return result
+		return nil, fmt.Errorf("配置文件读取失败: %w", err)
 	}
 	defer f.Close()
 
@@ -499,5 +522,8 @@ func readINI(filename string) map[string]map[string]string {
 			result[section][strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
 		}
 	}
-	return result
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
 }

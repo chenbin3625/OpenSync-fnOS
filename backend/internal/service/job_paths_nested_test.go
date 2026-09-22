@@ -34,35 +34,33 @@ func TestSrcSelectionsNested(t *testing.T) {
 // ValidateJobInput must reject nested source selections: both of them resolve
 // into the same destination subtree and would mutate it concurrently.
 func TestValidateJobInputRejectsNestedSourcePaths(t *testing.T) {
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatal("ValidateJobInput accepted nested source paths")
-		}
-		publicErr, ok := r.(model.PublicError)
-		if !ok {
-			t.Fatalf("panic value = %#v, want model.PublicError", r)
-		}
-		if string(publicErr) != msg.SrcPathNested {
-			t.Fatalf("message = %q, want %q", string(publicErr), msg.SrcPathNested)
-		}
-	}()
-
-	ValidateJobInput(map[string]interface{}{
+	err := ValidateJobInput(map[string]interface{}{
 		"srcPath": `["/data/x","/data/x/y"]`,
 		"dstPath": `["/backup"]`,
 		"alistId": 1,
 		"method":  1,
 		"isCron":  1,
 	})
+	if err == nil {
+		t.Fatal("ValidateJobInput accepted nested source paths")
+	}
+	publicErr, ok := err.(model.PublicError)
+	if !ok {
+		t.Fatalf("error = %#v, want model.PublicError", err)
+	}
+	if string(publicErr) != msg.T(msg.SrcPathNested) {
+		t.Fatalf("message = %q, want %q", string(publicErr), msg.T(msg.SrcPathNested))
+	}
 }
 
 func TestValidateJobInputAllowsDisjointSourcePaths(t *testing.T) {
-	ValidateJobInput(map[string]interface{}{
+	if err := ValidateJobInput(map[string]interface{}{
 		"srcPath": `["/data/a","/data/b"]`,
 		"dstPath": `["/backup"]`,
 		"alistId": 1,
 		"method":  1,
 		"isCron":  1,
-	})
+	}); err != nil {
+		t.Fatalf("ValidateJobInput() error: %v", err)
+	}
 }

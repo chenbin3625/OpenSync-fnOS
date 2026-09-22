@@ -161,11 +161,16 @@ func (t *protocolTripper) markHTTP3(host string) {
 	t.h3Hosts[host] = struct{}{}
 }
 
+const maxH3FailedEntries = 1000
+
 func (t *protocolTripper) markHTTP3Failed(host string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	delete(t.h3Hosts, host)
 	if t.h3Failed == nil {
+		t.h3Failed = make(map[string]struct{})
+	}
+	if len(t.h3Failed) >= maxH3FailedEntries {
 		t.h3Failed = make(map[string]struct{})
 	}
 	t.h3Failed[host] = struct{}{}

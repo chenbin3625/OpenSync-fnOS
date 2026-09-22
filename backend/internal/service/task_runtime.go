@@ -3,7 +3,6 @@ package service
 import (
 	"errors"
 	"opensync/internal/config"
-	"opensync/internal/mapper"
 	"time"
 )
 
@@ -15,12 +14,6 @@ const (
 )
 
 var errScanAborted = errors.New("scan aborted")
-
-var persistJobTaskItems = mapper.AddJobTaskItemMany
-var forEachJobTaskItemsByStatuses = mapper.ForEachJobTaskItemsByStatuses
-var countJobTaskItemsByStatuses = mapper.CountJobTaskItemsByStatuses
-var copyRetryDelay = defaultCopyRetryDelay
-var scanListRetryDelay = defaultScanListRetryDelay
 
 type taskRuntimeLimits struct {
 	CopyConcurrency int

@@ -15,6 +15,7 @@ import (
 	"opensync/internal/handler"
 	"opensync/internal/mapper"
 	"opensync/internal/model"
+	"opensync/internal/msg"
 	"opensync/internal/platform"
 	"opensync/internal/service"
 	"os"
@@ -44,27 +45,19 @@ func newRouter(development bool, allowedOrigins []string) *gin.Engine {
 	r.Use(gin.Logger(), func(c *gin.Context) {
 		defer func() {
 			if value := recover(); value != nil {
-				log.Printf("request failed: %v", value)
-				msg := "操作失败，请检查引擎连接或查看服务日志"
-				if public, ok := value.(model.PublicError); ok {
-					msg = string(public)
-				}
+				log.Printf("unexpected panic (safety net): %v", value)
 				if c.Writer.Written() {
-					// Headers and body are already on the wire (e.g. an SSE
-					// stream mid-flight). Appending a JSON error object would
-					// corrupt the event stream the client is parsing, so just
-					// abort and let the connection close.
 					c.Abort()
 					return
 				}
-				c.AbortWithStatusJSON(500, gin.H{"code": 500, "msg": msg})
+				c.AbortWithStatusJSON(500, gin.H{"code": 500, "msg": msg.T(msg.InternalError)})
 			}
 		}()
 		c.Header("X-Content-Type-Options", "nosniff")
 		c.Header("Referrer-Policy", "same-origin")
 		c.Header("Content-Security-Policy", "frame-ancestors 'self'; object-src 'none'; base-uri 'self'")
 		if c.Request.ContentLength > maxRequestBodyBytes {
-			c.AbortWithStatusJSON(413, gin.H{"code": 413, "msg": "请求内容过大"})
+			c.AbortWithStatusJSON(413, gin.H{"code": 413, "msg": msg.T(msg.RequestTooLarge)})
 			return
 		}
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxRequestBodyBytes)

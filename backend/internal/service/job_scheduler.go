@@ -42,6 +42,19 @@ func NewScheduler() *Scheduler {
 	return &Scheduler{cron: c}
 }
 
+func newSchedulerStopped() *Scheduler {
+	c := cron.New(cron.WithSeconds(), cron.WithLocation(schedulerLocation()))
+	return &Scheduler{cron: c}
+}
+
+func (s *Scheduler) Start() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cron != nil {
+		s.cron.Start()
+	}
+}
+
 func schedulerLocation() *time.Location {
 	timeZone := strings.TrimSpace(os.Getenv("TZ"))
 	if timeZone == "" {
@@ -114,7 +127,7 @@ func (s *Scheduler) Resume(isCron int, jobData map[string]interface{}, fn func()
 		return nil
 	}
 	if s.cron == nil {
-		return errors.New(msg.CannotResumeLostJob)
+		return errors.New(msg.T(msg.CannotResumeLostJob))
 	}
 	if s.entryID != 0 {
 		return nil
@@ -130,12 +143,12 @@ func (s *Scheduler) Resume(isCron int, jobData map[string]interface{}, fn func()
 
 func (s *Scheduler) addJobLocked(isCron int, jobData map[string]interface{}, fn func()) (cron.EntryID, error) {
 	if s.cron == nil {
-		return 0, errors.New(msg.CannotResumeLostJob)
+		return 0, errors.New(msg.T(msg.CannotResumeLostJob))
 	}
 	if isCron == 0 {
 		interval := util.ToInt(jobData["interval"])
 		if interval <= 0 {
-			return 0, errors.New(msg.IntervalLost)
+			return 0, errors.New(msg.T(msg.IntervalLost))
 		}
 		spec := fmt.Sprintf("@every %dm", interval)
 		return s.cron.AddFunc(spec, fn)
@@ -145,7 +158,7 @@ func (s *Scheduler) addJobLocked(isCron int, jobData map[string]interface{}, fn 
 		return 0, err
 	}
 	if spec == "" {
-		return 0, errors.New(msg.CronLost)
+		return 0, errors.New(msg.T(msg.CronLost))
 	}
 	entryID, err := s.cron.AddFunc(spec, fn)
 	if err != nil {
@@ -185,7 +198,7 @@ func buildCronSpec(jobData map[string]interface{}) (string, error) {
 			parts[i] = "*"
 		} else {
 			if !isSafeCronField(val) {
-				return "", errors.New(msg.CronLost)
+				return "", errors.New(msg.T(msg.CronLost))
 			}
 			parts[i] = val
 			hasValue = true

@@ -168,12 +168,24 @@ func (jt *JobTask) markScanFinished() {
 }
 
 func (jt *JobTask) syncRetryItems() {
-	err := forEachJobTaskItemsByStatuses(jt.RetrySourceTaskID, taskStatusValues(jt.RetryStatuses...), retryTaskItemBatchSize, func(items []map[string]interface{}) error {
+	err := jobDeps.ForEachJobTaskItemsByStatuses(jt.RetrySourceTaskID, taskStatusValues(jt.RetryStatuses...), retryTaskItemBatchSize, func(items []map[string]interface{}) error {
 		for _, item := range items {
 			if jt.isBreak() {
 				return errScanAborted
 			}
-			jt.retryTaskItem(item)
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						errMsg := fmt.Sprintf("retry item panic: %v", r)
+						log.Printf("Task %d %s", jt.TaskID, errMsg)
+						srcPath := util.StringValue(item["srcPath"])
+						dstPath := util.StringValue(item["dstPath"])
+						fileName := util.StringValue(item["fileName"])
+						jt.CopyHook(srcPath, dstPath, fileName, item["fileSize"], "", taskStatusFailed, &errMsg, taskItemPath, taskItemTypeCopy, time.Now().Unix())
+					}
+				}()
+				jt.retryTaskItem(item)
+			}()
 		}
 		return nil
 	})
@@ -424,7 +436,7 @@ func (jt *JobTask) listDir(path string, firstDst bool, spec *excludeMatcher, roo
 			break
 		}
 		log.Printf("Directory scan failed for %q; retrying (%d/%d): %v", path, attempt+1, maxScanListRetries, err)
-		if !jt.waitForBreak(scanListRetryDelay(attempt)) {
+		if !jt.waitForBreak(jobDeps.ScanListRetryDelay(attempt)) {
 			return nil, context.Canceled
 		}
 	}
@@ -432,9 +444,9 @@ func (jt *JobTask) listDir(path string, firstDst bool, spec *excludeMatcher, roo
 		if jt.isBreak() && errors.Is(err, context.Canceled) {
 			return nil, err
 		}
-		srcOrDst := msg.Src
+		srcOrDst := msg.T(msg.Src)
 		if !isSrc {
-			srcOrDst = msg.Dst
+			srcOrDst = msg.T(msg.Dst)
 		}
 		errMsg := msg.ScanError(srcOrDst, err.Error())
 		log.Printf("%s", errMsg)
@@ -448,7 +460,7 @@ func (jt *JobTask) listDir(path string, firstDst bool, spec *excludeMatcher, roo
 		filtered := make(FileListResult, len(result))
 		for key, val := range result {
 			checkPath := excludeMatchPath(rootPath, path, key)
-			if !spec.matches(checkPath) {
+			if !spec.matches(checkPath, strings.HasSuffix(key, "/")) {
 				filtered[key] = val
 			}
 		}
@@ -463,7 +475,7 @@ func shouldRetryScanList(ctx context.Context, err error) bool {
 		return false
 	}
 	errMsg := err.Error()
-	return errMsg != msg.AlistUnAuth && errMsg != msg.AddressIncorrect
+	return errMsg != msg.T(msg.AlistUnAuth) && errMsg != msg.T(msg.AddressIncorrect)
 }
 
 func defaultScanListRetryDelay(attempt int) time.Duration {

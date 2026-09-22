@@ -44,9 +44,9 @@ func (c *AlistClient) FileListApiContext(ctx context.Context, path string, useCa
 		Path:    path,
 		Refresh: useCache != 1,
 		Page:    1,
-		PerPage: fileListPageSize,
+		PerPage: alistDeps.FileListPageSize,
 	}
-	result := make(FileListResult, fileListPageSize)
+	result := make(FileListResult, alistDeps.FileListPageSize)
 	n, total, err := c.fetchFileListPage(ctx, req, result)
 	if err != nil {
 		return nil, err
@@ -67,8 +67,8 @@ func (c *AlistClient) FileListApiContext(ctx context.Context, path string, useCa
 	// first page comes back short while more entries exist, the clamp is the
 	// observed page size and the page count must be derived from it — deriving
 	// pages from the requested size would silently drop every later page.
-	listPageSize := fileListPageSize
-	if n < fileListPageSize {
+	listPageSize := alistDeps.FileListPageSize
+	if n < alistDeps.FileListPageSize {
 		listPageSize = n
 	}
 	if fileListLimitExceeded(len(result)) {
@@ -138,7 +138,7 @@ func (c *AlistClient) FileListApiContext(ctx context.Context, path string, useCa
 
 					pageReq := req
 					pageReq.Page = page
-					pageResult := make(FileListResult, fileListPageSize)
+					pageResult := make(FileListResult, alistDeps.FileListPageSize)
 					fetched, _, err := c.fetchFileListPage(ctx, pageReq, pageResult)
 					if err != nil {
 						fail(err)
@@ -200,7 +200,7 @@ func (c *AlistClient) fetchFileListPage(ctx context.Context, req alistListReques
 	if resp.StatusCode != http.StatusOK {
 		return 0, 0, &alistStatusError{httpStatus: resp.StatusCode}
 	}
-	n, total, code, message, err := decodeFileListResponse(resp.Body, maxResponseBytes, result)
+	n, total, code, message, err := decodeFileListResponse(resp.Body, alistDeps.MaxResponseBytes, result)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -353,7 +353,16 @@ func decodeObjectKey(dec *json.Decoder) (string, error) {
 	return key, nil
 }
 
+const maxJSONSkipDepth = 64
+
 func skipJSONValue(dec *json.Decoder) error {
+	return skipJSONValueDepth(dec, 0)
+}
+
+func skipJSONValueDepth(dec *json.Decoder, depth int) error {
+	if depth > maxJSONSkipDepth {
+		return fmt.Errorf("JSON nesting exceeds max depth %d", maxJSONSkipDepth)
+	}
 	tok, err := dec.Token()
 	if err != nil {
 		return err
@@ -368,14 +377,14 @@ func skipJSONValue(dec *json.Decoder) error {
 			if _, err := dec.Token(); err != nil {
 				return err
 			}
-			if err := skipJSONValue(dec); err != nil {
+			if err := skipJSONValueDepth(dec, depth+1); err != nil {
 				return err
 			}
 		}
 		return consumeDelim(dec, '}')
 	case '[':
 		for dec.More() {
-			if err := skipJSONValue(dec); err != nil {
+			if err := skipJSONValueDepth(dec, depth+1); err != nil {
 				return err
 			}
 		}

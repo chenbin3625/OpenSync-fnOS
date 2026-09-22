@@ -51,7 +51,10 @@ func TestGetTaskListFillsMissingTaskNumsInBatch(t *testing.T) {
 	restore := mapper.SetDBForTest(testDB)
 	defer restore()
 
-	result := GetTaskList(map[string]interface{}{"id": int64(1)})
+	result, err := GetTaskList(map[string]interface{}{"id": int64(1)})
+	if err != nil {
+		t.Fatalf("GetTaskList() error: %v", err)
+	}
 	items := result["dataList"].([]map[string]interface{})
 	if len(items) != 2 {
 		t.Fatalf("task len = %d, want 2: %#v", len(items), items)
@@ -103,13 +106,16 @@ func TestGetJobCurrentReturnsStalePageWhenExpectedTaskIDDiffers(t *testing.T) {
 	jobClientList[1] = &JobClient{JobID: 1, CurrentJobTask: task}
 	jobClientListMu.Unlock()
 
-	result := GetJobCurrent(1, map[string]interface{}{
+	result, err := GetJobCurrent(1, map[string]interface{}{
 		"status":             "1",
 		"pageSize":           "10",
 		"pageNum":            "1",
 		"expectedTaskId":     "999",
 		"expectedCreateTime": "456",
 	})
+	if err != nil {
+		t.Fatalf("GetJobCurrent() error: %v", err)
+	}
 
 	page, ok := result.(map[string]interface{})
 	if !ok {

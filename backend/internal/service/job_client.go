@@ -197,13 +197,37 @@ func cloneJobConfig(job map[string]interface{}) map[string]interface{} {
 			cloned[key] = cloneJobConfig(v)
 		case []interface{}:
 			cp := make([]interface{}, len(v))
-			copy(cp, v)
+			for i, elem := range v {
+				switch e := elem.(type) {
+				case map[string]interface{}:
+					cp[i] = cloneJobConfig(e)
+				case []interface{}:
+					cp[i] = deepCopySlice(e)
+				default:
+					cp[i] = elem
+				}
+			}
 			cloned[key] = cp
 		default:
 			cloned[key] = value
 		}
 	}
 	return cloned
+}
+
+func deepCopySlice(src []interface{}) []interface{} {
+	cp := make([]interface{}, len(src))
+	for i, elem := range src {
+		switch e := elem.(type) {
+		case map[string]interface{}:
+			cp[i] = cloneJobConfig(e)
+		case []interface{}:
+			cp[i] = deepCopySlice(e)
+		default:
+			cp[i] = elem
+		}
+	}
+	return cp
 }
 
 func cloneTaskRows(rows []map[string]interface{}) []map[string]interface{} {
@@ -233,7 +257,7 @@ func jobTaskHasStatus(taskID int64, statuses ...taskStatus) bool {
 }
 
 // NewJobClient creates a new job client
-func NewJobClient(job map[string]interface{}, isInit bool) *JobClient {
+func NewJobClient(job map[string]interface{}, isInit bool) (*JobClient, error) {
 	// Clone first: the defaults below must not mutate the caller's map.
 	job = cloneJobConfig(job)
 	jc := &JobClient{
@@ -251,13 +275,13 @@ func NewJobClient(job map[string]interface{}, isInit bool) *JobClient {
 	if _, ok := job["id"]; !ok {
 		id, err := mapper.AddJob(job)
 		if err != nil {
-			panic(err.Error())
+			return nil, fmt.Errorf("add job: %w", err)
 		}
 		addJobID = id
 		var err2 error
 		job, err2 = mapper.GetJobByID(id)
 		if err2 != nil {
-			panic(err2.Error())
+			return nil, fmt.Errorf("get job after add: %w", err2)
 		}
 	}
 
@@ -284,10 +308,10 @@ func NewJobClient(job map[string]interface{}, isInit bool) *JobClient {
 			}
 			jc.setEnable(0)
 		}
-		panicPublic(err.Error())
+		return nil, publicError(err.Error())
 	}
 
-	return jc
+	return jc, nil
 }
 
 func (jc *JobClient) runMarkedJob() {
@@ -325,7 +349,8 @@ func (jc *JobClient) runMarkedJobConfig(sourceTaskID int64, statuses []taskStatu
 	taskID, err = mapper.AddJobTask(jc.idSnapshot(), time.Now().Unix())
 	if err != nil {
 		log.Printf("Failed to create task for job %d: %v", jc.JobID, err)
-		panic(err.Error())
+		jc.markDone()
+		return
 	}
 	if !jc.enabled() {
 		if err := UpdateJobTaskStatusSimple(taskID, taskStatusStopped, nil); err != nil {
@@ -334,7 +359,16 @@ func (jc *JobClient) runMarkedJobConfig(sourceTaskID int64, statuses []taskStatu
 		jc.markDone()
 		return
 	}
-	task := newJobTask(taskID, jc)
+	task, err := newJobTask(taskID, jc)
+	if err != nil {
+		errMsg := err.Error()
+		log.Printf("Failed to init task for job %d: %v", jc.JobID, err)
+		if err := UpdateJobTaskStatusSimple(taskID, taskStatusSystemFailed, &errMsg); err != nil {
+			log.Printf("Failed to mark task %d as failed: %v", taskID, err)
+		}
+		jc.markDone()
+		return
+	}
 	if sourceTaskID > 0 {
 		task.RetrySourceTaskID = sourceTaskID
 		task.RetryStatuses = append([]taskStatus(nil), statuses...)
@@ -370,49 +404,52 @@ func (jc *JobClient) DoScheduled() bool {
 }
 
 // DoManual triggers manual execution
-func (jc *JobClient) DoManual() {
+func (jc *JobClient) DoManual() error {
 	if !jc.tryMarkDoing() {
-		panicPublic(msg.JobRunning)
+		return publicError(msg.T(msg.JobRunning))
 	}
 	go jc.runMarkedJob()
+	return nil
 }
 
 // DoRetryFailedTaskItems triggers a manual execution that replays the non-success
 // items of a historical task.
-func (jc *JobClient) DoRetryFailedTaskItems(sourceTaskID int64) {
+func (jc *JobClient) DoRetryFailedTaskItems(sourceTaskID int64) error {
 	if !jc.tryMarkDoing() {
-		panicPublic(msg.JobRunning)
+		return publicError(msg.T(msg.JobRunning))
 	}
 	go jc.runMarkedJobConfig(sourceTaskID, retryableTaskStatuses)
+	return nil
 }
 
 // ResumeJob enables and resumes the job
-func (jc *JobClient) ResumeJob() {
+func (jc *JobClient) ResumeJob() error {
 	jobID, job, scheduler := jc.configSnapshot()
 	isCron := util.ToInt(job["isCron"])
 	if isCron == 2 {
 		// Manual only, just enable
 		if err := mapper.UpdateJobEnable(jobID, 1); err != nil {
-			panic(err.Error())
+			return fmt.Errorf("enable job: %w", err)
 		}
 		jc.setEnable(1)
-		return
+		return nil
 	}
 
 	if scheduler == nil {
-		panicPublic(msg.CannotResumeLostJob)
+		return publicError(msg.T(msg.CannotResumeLostJob))
 	}
 	err := scheduler.Resume(isCron, job, func() {
 		jc.DoScheduled()
 	})
 	if err != nil {
-		panicPublic(err.Error())
+		return publicError(err.Error())
 	}
 	if err := mapper.UpdateJobEnable(jobID, 1); err != nil {
 		scheduler.Pause()
-		panic(err.Error())
+		return fmt.Errorf("enable job: %w", err)
 	}
 	jc.setEnable(1)
+	return nil
 }
 
 // AbortJob aborts the current running task
@@ -423,7 +460,7 @@ func (jc *JobClient) AbortJob() {
 }
 
 // StopJob stops the job (for disable or delete)
-func (jc *JobClient) StopJob(remove bool) {
+func (jc *JobClient) StopJob(remove bool) error {
 	jobID := jc.idSnapshot()
 	scheduler := jc.schedulerSnapshot()
 	if remove {
@@ -434,22 +471,24 @@ func (jc *JobClient) StopJob(remove bool) {
 		if scheduler != nil {
 			scheduler.Stop()
 		}
-	} else {
-		if err := mapper.UpdateJobEnable(jobID, 0); err != nil {
-			panic(err.Error())
-		}
-		jc.setEnable(0)
-		// Break the task before rewriting history. The reverse order marked the
-		// row aborted while the task was still running, so the task's own final
-		// write could land afterwards and resurrect it as running.
-		if task := jc.currentTask(); task != nil {
-			task.requestBreak()
-		}
-		if err := mapper.UpdateJobTaskStatusByStatusAndJobID(jobID); err != nil {
-			panic(err.Error())
-		}
-		if scheduler != nil {
-			scheduler.Pause()
-		}
+		return nil
 	}
+	if err := mapper.UpdateJobEnable(jobID, 0); err != nil {
+		return fmt.Errorf("disable job: %w", err)
+	}
+	jc.setEnable(0)
+	// Break the task before rewriting history. The reverse order marked the
+	// row aborted while the task was still running, so the task's own final
+	// write could land afterwards and resurrect it as running.
+	if task := jc.currentTask(); task != nil {
+		task.requestBreak()
+	}
+	jc.waitUntilIdle(30 * time.Second)
+	if err := mapper.UpdateJobTaskStatusByStatusAndJobID(jobID); err != nil {
+		return fmt.Errorf("mark tasks aborted: %w", err)
+	}
+	if scheduler != nil {
+		scheduler.Pause()
+	}
+	return nil
 }

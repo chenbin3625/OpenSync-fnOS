@@ -104,7 +104,11 @@ func taskDuration(createTime float64) int {
 	if createTime <= 0 {
 		return 0
 	}
-	return int(float64(time.Now().Unix()) - createTime)
+	d := int(float64(time.Now().Unix()) - createTime)
+	if d < 0 {
+		return 0
+	}
+	return d
 }
 
 // UpdateJobTaskStatusSimple updates task status with error message

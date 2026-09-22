@@ -165,7 +165,7 @@ func newExcludeMatcher(exclude string) *excludeMatcher {
 	return matcher
 }
 
-func (matcher *excludeMatcher) matches(relativePath string) bool {
+func (matcher *excludeMatcher) matches(relativePath string, isDir bool) bool {
 	if matcher == nil {
 		return false
 	}
@@ -174,7 +174,7 @@ func (matcher *excludeMatcher) matches(relativePath string) bool {
 	if relativePath == "" {
 		return false
 	}
-	isDirectory := strings.HasSuffix(relativePath, "/")
+	isDirectory := isDir || strings.HasSuffix(relativePath, "/")
 	cleanPath := strings.Trim(path.Clean(strings.TrimSuffix(relativePath, "/")), "/")
 	if cleanPath == "" || cleanPath == "." {
 		return false
@@ -207,12 +207,14 @@ func (matcher *excludeMatcher) matches(relativePath string) bool {
 }
 
 func simpleWildcardMatch(pattern, value string) bool {
+	pRunes := []rune(pattern)
+	vRunes := []rune(value)
 	patternIndex, valueIndex := 0, 0
 	lastStar, lastMatch := -1, 0
-	for valueIndex < len(value) {
-		if patternIndex < len(pattern) &&
-			(pattern[patternIndex] == value[valueIndex] || pattern[patternIndex] == '*') {
-			if pattern[patternIndex] == '*' {
+	for valueIndex < len(vRunes) {
+		if patternIndex < len(pRunes) &&
+			(pRunes[patternIndex] == vRunes[valueIndex] || pRunes[patternIndex] == '*') {
+			if pRunes[patternIndex] == '*' {
 				lastStar = patternIndex
 				lastMatch = valueIndex
 				patternIndex++
@@ -229,8 +231,8 @@ func simpleWildcardMatch(pattern, value string) bool {
 		lastMatch++
 		valueIndex = lastMatch
 	}
-	for patternIndex < len(pattern) && pattern[patternIndex] == '*' {
+	for patternIndex < len(pRunes) && pRunes[patternIndex] == '*' {
 		patternIndex++
 	}
-	return patternIndex == len(pattern)
+	return patternIndex == len(pRunes)
 }

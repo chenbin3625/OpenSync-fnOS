@@ -1,8 +1,11 @@
 package handler
 
 import (
+	"errors"
 	"opensync/internal/msg"
 	"opensync/internal/service"
+	"opensync/pkg/util"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -19,7 +22,7 @@ func GetJob(c *gin.Context) {
 	if idStr != "" {
 		id, err := parseRequiredID(idStr)
 		if err != nil {
-			respondError(c, msg.LostPart)
+			respondError(c, msg.T(msg.LostPart))
 			return
 		}
 		// Check for current (real-time progress)
@@ -32,8 +35,7 @@ func GetJob(c *gin.Context) {
 				"expectedCreateTime": c.Query("expectedCreateTime"),
 			}
 			removeEmptyStringValues(req)
-			result := service.GetJobCurrent(id, req)
-			respondOK(c, result)
+			handleService(c, func() (interface{}, error) { return service.GetJobCurrent(id, req) })
 			return
 		}
 		// Task list for this job
@@ -51,8 +53,7 @@ func GetJob(c *gin.Context) {
 			req["statusIn"] = statusIn
 		}
 		removeEmptyStringValues(req)
-		result := service.GetTaskList(req)
-		respondOK(c, result)
+		handleService(c, func() (interface{}, error) { return service.GetTaskList(req) })
 		return
 	}
 
@@ -70,8 +71,7 @@ func GetJob(c *gin.Context) {
 		}
 		// Remove empty params
 		removeEmptyStringValues(req)
-		result := service.GetTaskItemList(req)
-		respondOK(c, result)
+		handleService(c, func() (interface{}, error) { return service.GetTaskItemList(req) })
 		return
 	}
 
@@ -81,8 +81,7 @@ func GetJob(c *gin.Context) {
 		"pageNum":  c.Query("pageNum"),
 	}
 	removeEmptyStringValues(req)
-	result := service.GetJobList(req)
-	respondOK(c, result)
+	handleService(c, func() (interface{}, error) { return service.GetJobList(req) })
 }
 
 func removeEmptyStringValues(req map[string]interface{}) {
@@ -93,19 +92,51 @@ func removeEmptyStringValues(req map[string]interface{}) {
 	}
 }
 
+func validateJobFields(req map[string]interface{}) error {
+	if v, ok := req["enable"]; ok {
+		if _, err := parseEnableValue(v); err != nil {
+			return errors.New(msg.T(msg.LostPart))
+		}
+	}
+	if v, ok := req["interval"]; ok {
+		interval := util.ToInt(v)
+		if interval < 0 {
+			return errors.New(msg.T(msg.LostPart))
+		}
+	}
+	if v, ok := req["method"]; ok {
+		method := util.ToInt(v)
+		if method < 0 || method > 2 {
+			return errors.New(msg.T(msg.LostPart))
+		}
+	}
+	for _, field := range []string{"srcPath", "dstPath"} {
+		if v, ok := req[field]; ok {
+			s := util.StringValue(v)
+			if strings.Contains(s, "..") {
+				return errors.New(msg.T(msg.LostPart))
+			}
+		}
+	}
+	return nil
+}
+
 // AddJob handles POST /svr/job
 func AddJob(c *gin.Context) {
 	var req map[string]interface{}
 	if !bindJSON(c, &req) {
 		return
 	}
+	if err := validateJobFields(req); err != nil {
+		respondError(c, err.Error())
+		return
+	}
 	// Check if it's an edit (has 'id') or add
 	if _, hasID := req["id"]; hasID {
-		service.EditJobClient(req)
+		handleServiceVoid(c, func() error { return service.EditJobClient(req) })
 	} else {
-		service.AddJobClient(req, false)
+		handleServiceVoid(c, func() error { return service.AddJobClient(req, false) })
 	}
-	respondOK(c, nil)
 }
 
 // UpdateJob handles PUT /svr/job
@@ -129,14 +160,12 @@ func UpdateJob(c *gin.Context) {
 		}
 		switch req.Action {
 		case "stop":
-			service.StopTask(taskID)
+			handleServiceVoid(c, func() error { return service.StopTask(taskID) })
 		case "retry":
-			service.RetryFailedTask(taskID)
+			handleServiceVoid(c, func() error { return service.RetryFailedTask(taskID) })
 		default:
-			respondError(c, msg.LostPart)
-			return
+			respondError(c, msg.T(msg.LostPart))
 		}
-		respondOK(c, nil)
 		return
 	}
 
@@ -148,14 +177,14 @@ func UpdateJob(c *gin.Context) {
 				respondError(c, err.Error())
 				return
 			}
-			service.DoJobManual(id)
+			handleServiceVoid(c, func() error { return service.DoJobManual(id) })
 		} else {
-			service.DoAllJobManual()
+			handleServiceVoid(c, func() error { return service.DoAllJobManual() })
 		}
 	} else if *req.Pause {
 		// Disable or abort
 		if req.ID == nil {
-			respondError(c, msg.LostPart)
+			respondError(c, msg.T(msg.LostPart))
 			return
 		}
 		id, err := parseRequiredID(*req.ID)
@@ -164,14 +193,14 @@ func UpdateJob(c *gin.Context) {
 			return
 		}
 		if req.Abort != nil && *req.Abort {
-			service.AbortJob(id)
+			handleServiceVoid(c, func() error { return service.AbortJob(id) })
 		} else {
-			service.PauseJob(id)
+			handleServiceVoid(c, func() error { return service.PauseJob(id) })
 		}
 	} else {
 		// Enable
 		if req.ID == nil {
-			respondError(c, msg.LostPart)
+			respondError(c, msg.T(msg.LostPart))
 			return
 		}
 		id, err := parseRequiredID(*req.ID)
@@ -179,9 +208,8 @@ func UpdateJob(c *gin.Context) {
 			respondError(c, err.Error())
 			return
 		}
-		service.ContinueJob(id)
+		handleServiceVoid(c, func() error { return service.ContinueJob(id) })
 	}
-	respondOK(c, nil)
 }
 
 // DeleteJob handles DELETE /svr/job
@@ -195,17 +223,15 @@ func DeleteJob(c *gin.Context) {
 			respondError(c, err.Error())
 			return
 		}
-		service.RemoveJobClient(id)
+		handleServiceVoid(c, func() error { return service.RemoveJobClient(id) })
 	} else if taskIDStr != "" {
 		taskID, err := parseRequiredID(taskIDStr)
 		if err != nil {
 			respondError(c, err.Error())
 			return
 		}
-		service.RemoveTask(taskID)
+		handleServiceVoid(c, func() error { return service.RemoveTask(taskID) })
 	} else {
-		respondError(c, msg.LostPart)
-		return
+		respondError(c, msg.T(msg.LostPart))
 	}
-	respondOK(c, nil)
 }

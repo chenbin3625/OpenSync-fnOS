@@ -10,6 +10,12 @@ import (
 	"time"
 )
 
+const (
+	pollIntervalActive       = 610 * time.Millisecond
+	pollIntervalIdle         = 2930 * time.Millisecond
+	activeWatchThresholdSecs = 3
+)
+
 type copyTaskWatch struct {
 	ci            *CopyItem
 	taskID        string
@@ -26,13 +32,14 @@ func (watch *copyTaskWatch) closeDone() {
 }
 
 type copyTaskMonitor struct {
-	jt       *JobTask
-	mu       sync.Mutex
-	watches  map[string]*copyTaskWatch
-	stopCh   chan struct{}
-	once     sync.Once
-	stopOnce sync.Once
-	wg       sync.WaitGroup
+	jt         *JobTask
+	mu         sync.Mutex
+	watches    map[string]*copyTaskWatch
+	stopCh     chan struct{}
+	watchAdded chan struct{}
+	once       sync.Once
+	stopOnce   sync.Once
+	wg         sync.WaitGroup
 	// stopped is set under mu once the monitor loop has exited (task broken,
 	// timed out, or shut down). A track() call that arrives after the loop has
 	// exited must not enqueue a watch nobody will ever process, otherwise the
@@ -48,9 +55,10 @@ func (jt *JobTask) ensureCopyMonitor() *copyTaskMonitor {
 		return jt.copyMonitor
 	}
 	jt.copyMonitor = &copyTaskMonitor{
-		jt:      jt,
-		watches: make(map[string]*copyTaskWatch),
-		stopCh:  make(chan struct{}),
+		jt:         jt,
+		watches:    make(map[string]*copyTaskWatch),
+		stopCh:     make(chan struct{}),
+		watchAdded: make(chan struct{}, 1),
 	}
 	return jt.copyMonitor
 }
@@ -97,6 +105,12 @@ func (m *copyTaskMonitor) track(ci *CopyItem) {
 		m.watches[m.watchKey(taskID, ci.CopyType)] = watch
 	}
 	m.mu.Unlock()
+	if !abortSelf {
+		select {
+		case m.watchAdded <- struct{}{}:
+		default:
+		}
+	}
 	if abortSelf {
 		watch.ci.stopRemoteTask(m.jt.copyMonitorClient(), m.jt.context().Err())
 		return
@@ -141,7 +155,7 @@ func (m *copyTaskMonitor) loop() {
 			select {
 			case <-m.stopCh:
 				return
-			case <-time.After(200 * time.Millisecond):
+			case <-m.watchAdded:
 				continue
 			}
 		}
@@ -186,10 +200,10 @@ func (m *copyTaskMonitor) snapshotWatches() []*copyTaskWatch {
 func (m *copyTaskMonitor) waitForPollInterval() bool {
 	cuTime := time.Now().Unix()
 	var sleepFor time.Duration
-	if cuTime-m.jt.lastWatchingUnix() < 3 {
-		sleepFor = 610 * time.Millisecond
+	if cuTime-m.jt.lastWatchingUnix() < activeWatchThresholdSecs {
+		sleepFor = pollIntervalActive
 	} else {
-		sleepFor = 2930 * time.Millisecond
+		sleepFor = pollIntervalIdle
 	}
 	return m.jt.waitForBreak(sleepFor)
 }
@@ -262,7 +276,7 @@ func (m *copyTaskMonitor) pollTaskInfo(watch *copyTaskWatch) bool {
 				m.finishWatch(watch)
 				return true
 			}
-			eMsg = msg.TaskMayDelete
+			eMsg = msg.T(msg.TaskMayDelete)
 			watch.ci.setProgress(taskStatusFailed, 0, &eMsg)
 			m.finishWatch(watch)
 			return true

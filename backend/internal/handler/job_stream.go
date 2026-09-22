@@ -6,17 +6,22 @@ import (
 	"opensync/internal/model"
 	"opensync/internal/msg"
 	"opensync/internal/service"
+	"sync/atomic"
 
 	"time"
 
 	"github.com/gin-gonic/gin"
 )
 
+var globalSSEConns atomic.Int32
+
+const maxGlobalSSEConns = 64
+
 // StreamJobCurrent handles GET /svr/job/stream as Server-Sent Events.
 func StreamJobCurrent(c *gin.Context) {
 	jobID, err := parseRequiredID(c.Query("id"))
 	if err != nil {
-		c.JSON(http.StatusOK, model.Error(msg.LostPart))
+		c.JSON(http.StatusOK, model.Error(msg.T(msg.LostPart)))
 		return
 	}
 
@@ -35,12 +40,21 @@ func StreamJobCurrent(c *gin.Context) {
 		return
 	}
 
+	if globalSSEConns.Load() >= maxGlobalSSEConns {
+		c.JSON(http.StatusTooManyRequests, model.Error(msg.T(msg.SSEConnLimit)))
+		return
+	}
+
 	updates := service.SubscribeJobProgress(jobID)
 	if updates == nil {
 		c.JSON(http.StatusTooManyRequests, model.Error("too many progress streams"))
 		return
 	}
-	defer service.UnsubscribeJobProgress(jobID, updates)
+	globalSSEConns.Add(1)
+	defer func() {
+		service.UnsubscribeJobProgress(jobID, updates)
+		globalSSEConns.Add(-1)
+	}()
 
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	c.Writer.Header().Set("Cache-Control", "no-cache")

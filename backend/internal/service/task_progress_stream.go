@@ -269,7 +269,10 @@ func queueProgressPayload(ch chan []byte, payload []byte) (queued, dropped bool)
 }
 
 func marshalJobProgress(jobID int64, snapshot bool) ([]byte, error) {
-	data := GetJobCurrent(jobID, map[string]interface{}{})
+	data, err := GetJobCurrent(jobID, map[string]interface{}{})
+	if err != nil {
+		return nil, err
+	}
 	if data == nil {
 		jobProgressHub.clearFrame(jobID)
 		return marshalProgressJSON(model.Success(nil))
@@ -311,7 +314,10 @@ func (f *progressFrames) snapshot() ([]byte, error) {
 }
 
 func buildProgressFrames(jobID int64) (*progressFrames, error) {
-	data := GetJobCurrent(jobID, map[string]interface{}{})
+	data, err := GetJobCurrent(jobID, map[string]interface{}{})
+	if err != nil {
+		return nil, err
+	}
 	if data == nil {
 		jobProgressHub.clearFrame(jobID)
 		payload, err := marshalProgressJSON(model.Success(nil))

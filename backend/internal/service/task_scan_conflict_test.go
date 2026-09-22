@@ -314,9 +314,10 @@ func scanTestTask(t *testing.T, serverURL string, client *http.Client, job map[s
 // A destination root that does not exist yet must be created rather than
 // failing the whole job with "destination scan failed".
 func TestSyncCreatesMissingDestinationRoot(t *testing.T) {
-	oldDelay := scanListRetryDelay
-	scanListRetryDelay = func(int) time.Duration { return 0 }
-	defer func() { scanListRetryDelay = oldDelay }()
+	d := *jobDeps
+	d.ScanListRetryDelay = func(int) time.Duration { return 0 }
+	restore := SetJobDepsForTest(&d)
+	defer restore()
 
 	var persisted []map[string]interface{}
 	restorePersist := stubPersistJobTaskItems(t, &persisted, nil)

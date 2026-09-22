@@ -7,6 +7,18 @@ import (
 	appcrypto "opensync/pkg/crypto"
 )
 
+type credentialTarget struct {
+	table, column string
+}
+
+// allowedCredentialTargets is the exhaustive set of (table, column) pairs
+// that may appear in the migration loop. These are compile-time constants,
+// NOT user input. Any future addition must be listed here.
+var allowedCredentialTargets = map[credentialTarget]struct{}{
+	{table: "alist_list", column: "token"}: {},
+	{table: "notify", column: "params"}:    {},
+}
+
 func encryptCredential(value string) (string, error) {
 	return appcrypto.EncryptString(value, config.GetConfig().Server.PasswdStr)
 }
@@ -49,6 +61,9 @@ func migrateStoredCredentials(db *sql.DB) error {
 		{table: "alist_list", column: "token"},
 		{table: "notify", column: "params"},
 	} {
+		if _, ok := allowedCredentialTargets[credentialTarget{table: target.table, column: target.column}]; !ok {
+			return fmt.Errorf("credential migration: unknown target %s.%s", target.table, target.column)
+		}
 		rows, err := tx.Query(fmt.Sprintf("SELECT id, %s FROM %s", target.column, target.table))
 		if err != nil {
 			return err

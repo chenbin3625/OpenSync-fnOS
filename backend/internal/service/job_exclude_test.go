@@ -1,6 +1,9 @@
 package service
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseExcludePatternsSupportsNewlinesAndComments(t *testing.T) {
 	input := "# macOS\n.DS_Store\n\n._*\r\n# Windows\nThumbs.db\n"
@@ -75,7 +78,8 @@ func TestExcludeMatcherSeparatesNamesExtensionsAndDirectories(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		if got := matcher.matches(test.path); got != test.expected {
+		isDir := strings.HasSuffix(test.path, "/")
+		if got := matcher.matches(test.path, isDir); got != test.expected {
 			t.Errorf("%s: matches(%q) = %v, want %v", test.name, test.path, got, test.expected)
 		}
 	}
@@ -133,10 +137,8 @@ func TestInvalidExcludeRulesAcceptsShippedDefaults(t *testing.T) {
 }
 
 func TestCleanJobInputRejectsUnsupportedExcludeRule(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("CleanJobInput() accepted an unsupported exclude rule")
-		}
-	}()
-	CleanJobInput(map[string]interface{}{"exclude": "*.tmp\n!keep.txt"})
+	err := CleanJobInput(map[string]interface{}{"exclude": "*.tmp\n!keep.txt"})
+	if err == nil {
+		t.Fatal("CleanJobInput() accepted an unsupported exclude rule")
+	}
 }

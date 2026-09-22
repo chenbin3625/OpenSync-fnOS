@@ -136,6 +136,7 @@ func (jt *JobTask) scanFullSyncTree(root string, firstDst bool, spec *excludeMat
 				firstErr = err
 			}
 			errMu.Unlock()
+			jt.requestBreak()
 			return
 		}
 		snapshot.mu.Lock()
@@ -168,6 +169,7 @@ func (jt *JobTask) scanFullSyncTree(root string, firstDst bool, spec *excludeMat
 							firstErr = childErr
 						}
 						errMu.Unlock()
+						jt.requestBreak()
 					}()
 					defer jt.recoverWorkerPanic("full-sync child scan", &childErr)
 					scanDir(child)
@@ -501,9 +503,22 @@ func (jt *JobTask) executeFullSyncPlan(plan *fullSyncPlan) {
 		return
 	}
 
+	const maxConsecutiveDeleteErrors = 10
+	consecutiveErrors := 0
 	for _, key := range deleteKeys {
+		if jt.isBreak() {
+			break
+		}
 		item := plan.extraDeletes[key]
-		jt.queueDelFile(item.dir, item.name, item.metadata.Size, strings.HasSuffix(item.name, "/"))
+		if jt.delFile(item.dir, item.name, item.metadata.Size) == taskStatusSuccess {
+			consecutiveErrors = 0
+		} else {
+			consecutiveErrors++
+			if consecutiveErrors >= maxConsecutiveDeleteErrors {
+				log.Printf("Task %d aborting delete phase after %d consecutive failures", jt.TaskID, consecutiveErrors)
+				break
+			}
+		}
 	}
 }
 

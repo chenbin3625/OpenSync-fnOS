@@ -215,7 +215,7 @@ func (ci *CopyItem) DoIt() {
 			}
 			if attempt < maxRetries {
 				ci.setRetrying(err)
-				if completed := runtime.waitForBreak(copyRetryDelay(attempt)); !completed {
+				if completed := runtime.waitForBreak(jobDeps.CopyRetryDelay(attempt)); !completed {
 					ci.setStatus(taskStatusStopped)
 					break
 				}
@@ -235,10 +235,10 @@ func (ci *CopyItem) DoIt() {
 			// AList accepted the request but returned no task id, and the file
 			// never arrived at the destination. Treat the attempt as failed so
 			// the bounded retry loop can resubmit it.
-			emptyTaskErr := errors.New(msg.AlistNoCopyTask)
+			emptyTaskErr := errors.New(msg.T(msg.AlistNoCopyTask))
 			if attempt < maxRetries {
 				ci.setRetrying(emptyTaskErr)
-				if completed := runtime.waitForBreak(copyRetryDelay(attempt)); !completed {
+				if completed := runtime.waitForBreak(jobDeps.CopyRetryDelay(attempt)); !completed {
 					ci.setStatus(taskStatusStopped)
 					break
 				}
@@ -254,7 +254,7 @@ func (ci *CopyItem) DoIt() {
 		}
 		if ci.status() == taskStatusFailed && attempt < maxRetries {
 			ci.setRetrying(errors.New(ci.errorMessage()))
-			if completed := runtime.waitForBreak(copyRetryDelay(attempt)); !completed {
+			if completed := runtime.waitForBreak(jobDeps.CopyRetryDelay(attempt)); !completed {
 				ci.setStatus(taskStatusStopped)
 				break
 			}
@@ -298,7 +298,7 @@ func (ci *CopyItem) confirmSynchronousCopy(runtime copyItemRuntime, client copyI
 		if runtime.isBreak() {
 			return false
 		}
-		if attempt < maxTransientPollErrors-1 && !runtime.waitForBreak(copyRetryDelay(attempt)) {
+		if attempt < maxTransientPollErrors-1 && !runtime.waitForBreak(jobDeps.CopyRetryDelay(attempt)) {
 			return false
 		}
 	}

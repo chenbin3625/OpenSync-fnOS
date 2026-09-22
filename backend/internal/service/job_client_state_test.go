@@ -90,20 +90,16 @@ func TestPauseJobKeepsMemoryStateWhenDatabaseUpdateFails(t *testing.T) {
 	task.initRuntime()
 	client.setCurrentTask(task)
 
-	defer func() {
-		recovered := recover()
-		if recovered == nil {
-			t.Fatalf("StopJob(false) did not panic after database update failure")
-		}
-		if task.isBreak() {
-			t.Fatalf("StopJob(false) requested task break before database update succeeded")
-		}
-		if got := util.ToInt(client.Job["enable"]); got != 1 {
-			t.Fatalf("job enable after failed pause = %d, want 1", got)
-		}
-	}()
-
-	client.StopJob(false)
+	err := client.StopJob(false)
+	if err == nil {
+		t.Fatalf("StopJob(false) did not return error after database update failure")
+	}
+	if task.isBreak() {
+		t.Fatalf("StopJob(false) requested task break before database update succeeded")
+	}
+	if got := util.ToInt(client.Job["enable"]); got != 1 {
+		t.Fatalf("job enable after failed pause = %d, want 1", got)
+	}
 }
 
 func TestDoScheduledSkipsWhenJobAlreadyRunning(t *testing.T) {
@@ -183,39 +179,35 @@ func TestJobClientJobSnapshotIsIndependentAndRaceSafe(t *testing.T) {
 }
 
 func TestDoAllJobManualPropagatesMapperErrors(t *testing.T) {
-	oldGetEnableJobList := getEnableJobList
-	defer func() {
-		getEnableJobList = oldGetEnableJobList
-	}()
-	getEnableJobList = func() ([]map[string]interface{}, error) {
+	d := *jobDeps
+	d.GetEnableJobList = func() ([]map[string]interface{}, error) {
 		return nil, errors.New("database unavailable")
 	}
+	restore := SetJobDepsForTest(&d)
+	defer restore()
 
-	defer func() {
-		recovered := recover()
-		if recovered == nil {
-			t.Fatalf("DoAllJobManual() did not panic")
-		}
-		if err, ok := recovered.(interface{ Error() string }); ok && err.Error() == msg.NoJobForRun {
-			t.Fatalf("DoAllJobManual() masked database error as no jobs")
-		}
-	}()
-
-	DoAllJobManual()
+	err := DoAllJobManual()
+	if err == nil {
+		t.Fatalf("DoAllJobManual() did not return error")
+	}
+	if err.Error() == msg.T(msg.NoJobForRun) {
+		t.Fatalf("DoAllJobManual() masked database error as no jobs")
+	}
 }
 
-func TestDoAllJobManualSkipsJobClientCreationPanic(t *testing.T) {
-	oldGetEnableJobList := getEnableJobList
+func TestDoAllJobManualSkipsJobClientCreationError(t *testing.T) {
+	d := *jobDeps
 	previousClients := jobClientList
+	d.GetEnableJobList = func() ([]map[string]interface{}, error) {
+		return []map[string]interface{}{{"id": int64(999)}}, nil
+	}
+	restore := SetJobDepsForTest(&d)
 	defer func() {
-		getEnableJobList = oldGetEnableJobList
+		restore()
 		jobClientListMu.Lock()
 		jobClientList = previousClients
 		jobClientListMu.Unlock()
 	}()
-	getEnableJobList = func() ([]map[string]interface{}, error) {
-		return []map[string]interface{}{{"id": int64(999)}}, nil
-	}
 	jobClientListMu.Lock()
 	jobClientList = map[int64]*JobClient{}
 	jobClientListMu.Unlock()
@@ -228,10 +220,28 @@ func TestDoAllJobManualSkipsJobClientCreationPanic(t *testing.T) {
 	restoreDB := mapper.SetDBForTest(testDB)
 	defer restoreDB()
 
-	DoAllJobManual()
+	// Should not panic — errors from GetJobClientByID are logged and skipped.
+	if err := DoAllJobManual(); err != nil {
+		t.Fatalf("DoAllJobManual() error: %v", err)
+	}
 }
 
-func TestRemoveJobClientRejectsRunningJobWithoutStoppingIt(t *testing.T) {
+func TestRemoveJobClientStopsRunningJobBeforeDeleting(t *testing.T) {
+	testDB, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open() error: %v", err)
+	}
+	defer testDB.Close()
+	if _, err := testDB.Exec(`CREATE TABLE job(id integer primary key autoincrement, enable integer DEFAULT 1,
+		srcPath text, dstPath text, alistId integer)`); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if _, err := testDB.Exec("INSERT INTO job(id, enable) VALUES (99, 1)"); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+	restoreDB := mapper.SetDBForTest(testDB)
+	defer restoreDB()
+
 	client := &JobClient{
 		JobID:     99,
 		Job:       map[string]interface{}{"id": int64(99), "enable": 1, "isCron": 2},
@@ -256,29 +266,33 @@ func TestRemoveJobClientRejectsRunningJobWithoutStoppingIt(t *testing.T) {
 		jobClientListMu.Unlock()
 	}()
 
-	panicCh := make(chan interface{}, 1)
 	go func() {
-		defer func() {
-			panicCh <- recover()
-		}()
-		RemoveJobClient(client.JobID)
+		time.Sleep(50 * time.Millisecond)
+		if task.isBreak() {
+			client.markDone()
+			client.clearCurrentTask(nil)
+		}
+	}()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- RemoveJobClient(client.JobID)
 	}()
 
 	select {
-	case recovered := <-panicCh:
-		err, ok := recovered.(interface{ Error() string })
-		if !ok || err.Error() != msg.JobRunningCannotDelete {
-			t.Fatalf("RemoveJobClient() panic = %#v, want %q", recovered, msg.JobRunningCannotDelete)
+	case err := <-errCh:
+		if err != nil {
+			t.Logf("RemoveJobClient() error: %v", err)
 		}
-	case <-time.After(100 * time.Millisecond):
-		t.Fatalf("RemoveJobClient() did not reject running job immediately")
+	case <-time.After(5 * time.Second):
+		t.Fatalf("RemoveJobClient() did not complete within timeout")
 	}
 
-	if task.isBreak() {
-		t.Fatalf("RemoveJobClient() requested task break while rejecting delete")
+	if !task.isBreak() {
+		t.Fatalf("RemoveJobClient() did not request task break")
 	}
-	if got := util.ToInt(client.Job["enable"]); got != 1 {
-		t.Fatalf("job enable after rejected delete = %d, want 1", got)
+	if got := util.ToInt(client.Job["enable"]); got != 0 {
+		t.Fatalf("job enable after remove = %d, want 0", got)
 	}
 }
 
@@ -305,23 +319,18 @@ func TestRemoveTaskRejectsRunningTaskWithoutDeletingIt(t *testing.T) {
 		jobClientListMu.Unlock()
 	}()
 
-	defer func() {
-		recovered := recover()
-		err, ok := recovered.(interface{ Error() string })
-		if !ok || err.Error() != msg.JobRunningCannotDelete {
-			t.Fatalf("RemoveTask() panic = %#v, want %q", recovered, msg.JobRunningCannotDelete)
-		}
+	err := RemoveTask(10)
+	if err == nil || err.Error() != msg.T(msg.JobRunningCannotDelete) {
+		t.Fatalf("RemoveTask() error = %v, want %q", err, msg.T(msg.JobRunningCannotDelete))
+	}
 
-		var count int
-		if err := testDB.QueryRow("SELECT COUNT(*) FROM job_task WHERE id=10").Scan(&count); err != nil {
-			t.Fatalf("count job_task: %v", err)
-		}
-		if count != 1 {
-			t.Fatalf("job_task row count = %d, want 1", count)
-		}
-	}()
-
-	RemoveTask(10)
+	var count int
+	if err := testDB.QueryRow("SELECT COUNT(*) FROM job_task WHERE id=10").Scan(&count); err != nil {
+		t.Fatalf("count job_task: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("job_task row count = %d, want 1", count)
+	}
 }
 
 func TestRemoveTaskRejectsWaitingTaskFromDatabaseState(t *testing.T) {
@@ -332,23 +341,18 @@ func TestRemoveTaskRejectsWaitingTaskFromDatabaseState(t *testing.T) {
 		t.Fatalf("set waiting status: %v", err)
 	}
 
-	defer func() {
-		recovered := recover()
-		err, ok := recovered.(interface{ Error() string })
-		if !ok || err.Error() != msg.JobRunningCannotDelete {
-			t.Fatalf("RemoveTask() panic = %#v, want %q", recovered, msg.JobRunningCannotDelete)
-		}
+	err := RemoveTask(10)
+	if err == nil || err.Error() != msg.T(msg.JobRunningCannotDelete) {
+		t.Fatalf("RemoveTask() error = %v, want %q", err, msg.T(msg.JobRunningCannotDelete))
+	}
 
-		var count int
-		if err := testDB.QueryRow("SELECT COUNT(*) FROM job_task WHERE id=10").Scan(&count); err != nil {
-			t.Fatalf("count job_task: %v", err)
-		}
-		if count != 1 {
-			t.Fatalf("job_task row count = %d, want 1", count)
-		}
-	}()
-
-	RemoveTask(10)
+	var count int
+	if err := testDB.QueryRow("SELECT COUNT(*) FROM job_task WHERE id=10").Scan(&count); err != nil {
+		t.Fatalf("count job_task: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("job_task row count = %d, want 1", count)
+	}
 }
 
 // startCopyItem is reached from both the submit executor and the full-sync

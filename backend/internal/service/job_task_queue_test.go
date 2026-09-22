@@ -225,13 +225,13 @@ func TestRuntimeTaskLimitsClampInvalidConfiguredValues(t *testing.T) {
 
 func TestCopyItemRetriesFailedCopyBeforeSuccess(t *testing.T) {
 	oldConfig := config.GetConfig()
-	oldDelay := copyRetryDelay
+	d := *jobDeps
+	d.CopyRetryDelay = func(int) time.Duration { return 0 }
+	restore := SetJobDepsForTest(&d)
 	defer func() {
 		config.SetConfigForTest(oldConfig)
-		copyRetryDelay = oldDelay
+		restore()
 	}()
-
-	copyRetryDelay = func(int) time.Duration { return 0 }
 	config.SetConfigForTest(&config.Config{
 		Server: config.ServerConfig{
 			Timeout:         0,
@@ -495,11 +495,12 @@ func TestCopyHookPersistsFinishedItemsImmediately(t *testing.T) {
 
 func TestCopyHookRecordsPersistenceError(t *testing.T) {
 	writeErr := errors.New("write failed")
-	restorePersist := stubPersistJobTaskItems(t, nil, nil)
-	persistJobTaskItems = func([]map[string]interface{}) error {
+	d := *jobDeps
+	d.PersistJobTaskItems = func([]map[string]interface{}) error {
 		return writeErr
 	}
-	defer restorePersist()
+	restore := SetJobDepsForTest(&d)
+	defer restore()
 
 	jt := &JobTask{
 		TaskID: 42,
@@ -758,8 +759,8 @@ func mapperDBForServiceTest(testDB *sql.DB) func() {
 
 func stubPersistJobTaskItems(t *testing.T, persisted *[]map[string]interface{}, after func([]map[string]interface{})) func() {
 	t.Helper()
-	oldPersist := persistJobTaskItems
-	persistJobTaskItems = func(items []map[string]interface{}) error {
+	d := *jobDeps
+	d.PersistJobTaskItems = func(items []map[string]interface{}) error {
 		if persisted != nil {
 			*persisted = append(*persisted, items...)
 		}
@@ -768,9 +769,7 @@ func stubPersistJobTaskItems(t *testing.T, persisted *[]map[string]interface{}, 
 		}
 		return nil
 	}
-	return func() {
-		persistJobTaskItems = oldPersist
-	}
+	return SetJobDepsForTest(&d)
 }
 
 func readServiceTaskStatus(t *testing.T, testDB *sql.DB, taskID int64) (int, string) {
@@ -1000,13 +999,9 @@ func TestGetCurrentByStatusPagePaginatesRecentFinishedItems(t *testing.T) {
 }
 
 func TestSyncRetryItemsReadsRetrySourceInBatches(t *testing.T) {
-	oldForEach := forEachJobTaskItemsByStatuses
-	defer func() {
-		forEachJobTaskItemsByStatuses = oldForEach
-	}()
-
+	d := *jobDeps
 	var batchSizes []int
-	forEachJobTaskItemsByStatuses = func(taskID int64, statuses []int, batchSize int, fn func([]map[string]interface{}) error) error {
+	d.ForEachJobTaskItemsByStatuses = func(taskID int64, statuses []int, batchSize int, fn func([]map[string]interface{}) error) error {
 		if taskID != 55 {
 			t.Fatalf("taskID = %d, want 55", taskID)
 		}
@@ -1033,6 +1028,8 @@ func TestSyncRetryItemsReadsRetrySourceInBatches(t *testing.T) {
 		}
 		return nil
 	}
+	restore := SetJobDepsForTest(&d)
+	defer restore()
 
 	jt := &JobTask{
 		TaskID:            123,

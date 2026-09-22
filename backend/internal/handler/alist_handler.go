@@ -18,13 +18,15 @@ func GetAlist(c *gin.Context) {
 			respondError(c, err.Error())
 			return
 		}
-		result := service.GetChildPath(c.Request.Context(), alistID, path)
-		respondOK(c, result)
+		handleService(c, func() (interface{}, error) {
+			return service.GetChildPath(c.Request.Context(), alistID, path)
+		})
 		return
 	}
 	// Return client list
-	result := service.GetClientList()
-	respondOK(c, result)
+	handleService(c, func() (interface{}, error) {
+		return service.GetClientList()
+	})
 }
 
 // AddAlist handles POST /svr/alist
@@ -33,8 +35,9 @@ func AddAlist(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
-	service.AddClient(req)
-	respondOK(c, nil)
+	handleServiceVoid(c, func() error {
+		return service.AddClient(req)
+	})
 }
 
 // UpdateAlist handles PUT /svr/alist
@@ -43,15 +46,16 @@ func UpdateAlist(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
-	service.UpdateClient(req)
-	respondOK(c, nil)
+	handleServiceVoid(c, func() error {
+		return service.UpdateClient(req)
+	})
 }
 
 // TestAlist handles POST /svr/alist/test
 func TestAlist(c *gin.Context) {
 	idStr := c.Query("id")
 	if idStr == "" {
-		respondError(c, msg.LostPart)
+		respondError(c, msg.T(msg.LostPart))
 		return
 	}
 	id, err := parseRequiredID(idStr)
@@ -59,8 +63,9 @@ func TestAlist(c *gin.Context) {
 		respondError(c, err.Error())
 		return
 	}
-	service.TestClient(c.Request.Context(), id)
-	respondOK(c, nil)
+	handleServiceVoid(c, func() error {
+		return service.TestClient(c.Request.Context(), id)
+	})
 }
 
 // DeleteAlist handles DELETE /svr/alist
@@ -71,7 +76,7 @@ func DeleteAlist(c *gin.Context) {
 		idStr = c.PostForm("id")
 	}
 	if idStr == "" {
-		respondError(c, msg.LostPart)
+		respondError(c, msg.T(msg.LostPart))
 		return
 	}
 	id, err := parseRequiredID(idStr)
@@ -79,6 +84,7 @@ func DeleteAlist(c *gin.Context) {
 		respondError(c, err.Error())
 		return
 	}
-	service.RemoveClient(id)
-	respondOK(c, nil)
+	handleServiceVoid(c, func() error {
+		return service.RemoveClient(id)
+	})
 }

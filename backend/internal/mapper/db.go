@@ -3,6 +3,7 @@ package mapper
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"log"
 	"math"
 	"net/url"
@@ -223,6 +224,8 @@ func SetDBForTest(testDB *sql.DB) func() {
 }
 
 // FetchAllToTable executes a query and returns results as []map[string]interface{}
+const maxFetchAllRows = 10000
+
 func FetchAllToTable(query string, args ...interface{}) ([]map[string]interface{}, error) {
 	rows, err := GetDB().Query(query, args...)
 	if err != nil {
@@ -256,6 +259,10 @@ func FetchAllToTable(query string, args ...interface{}) ([]map[string]interface{
 			}
 		}
 		results = append(results, row)
+		if len(results) > maxFetchAllRows {
+			rows.Close()
+			return nil, fmt.Errorf("query returned more than %d rows; use pagination", maxFetchAllRows)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -356,7 +363,7 @@ func fetchPage(baseSQL string, limit int, offset int64, paginated bool, sqlArgs 
 		// read: the response looked complete while rows were missing. Refusing it
 		// puts the choice back with the caller, which can page or narrow the
 		// filter.
-		return nil, errors.New(msg.ListTooLarge)
+		return nil, errors.New(msg.T(msg.ListTooLarge))
 	}
 	return map[string]interface{}{"dataList": dataList, "count": total}, nil
 }
@@ -408,13 +415,13 @@ func takePageTotal(rows []map[string]interface{}) (int64, bool) {
 
 func pageOffset(pageSize, pageNum int) (int64, error) {
 	if pageSize <= 0 || pageNum <= 0 {
-		return 0, errors.New(msg.LostPart)
+		return 0, errors.New(msg.T(msg.LostPart))
 	}
 	index := int64(pageNum) - 1
 	size := int64(pageSize)
 	maxInt64 := int64(^uint64(0) >> 1)
 	if index > maxInt64/size {
-		return 0, errors.New(msg.LostPart)
+		return 0, errors.New(msg.T(msg.LostPart))
 	}
 	return index * size, nil
 }
@@ -426,16 +433,16 @@ func parsePageParams(params map[string]interface{}) (pageSize, pageNum int, pagi
 		return 0, 0, false, nil
 	}
 	if !hasPageSize || !hasPageNum {
-		return 0, 0, false, errors.New(msg.LostPart)
+		return 0, 0, false, errors.New(msg.T(msg.LostPart))
 	}
 
 	pageSize, err = positiveInt(pageSizeVal)
 	if err != nil {
-		return 0, 0, false, errors.New(msg.LostPart)
+		return 0, 0, false, errors.New(msg.T(msg.LostPart))
 	}
 	pageNum, err = positiveInt(pageNumVal)
 	if err != nil {
-		return 0, 0, false, errors.New(msg.LostPart)
+		return 0, 0, false, errors.New(msg.T(msg.LostPart))
 	}
 	if pageSize > maxPageSize {
 		pageSize = maxPageSize
@@ -445,11 +452,11 @@ func parsePageParams(params map[string]interface{}) (pageSize, pageNum int, pagi
 
 func positiveInt(v interface{}) (int, error) {
 	if value, ok := v.(float64); ok && math.Trunc(value) != value {
-		return 0, errors.New(msg.LostPart)
+		return 0, errors.New(msg.T(msg.LostPart))
 	}
 	n := util.ToInt64(v)
 	if n <= 0 || n > int64(math.MaxInt) {
-		return 0, errors.New(msg.LostPart)
+		return 0, errors.New(msg.T(msg.LostPart))
 	}
 	return int(n), nil
 }

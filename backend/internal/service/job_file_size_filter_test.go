@@ -59,7 +59,9 @@ func TestJobAllowsFileSizeTreatsZeroMaxAsUnlimited(t *testing.T) {
 func TestCleanJobInputDefaultsFileSizeRangeToUnlimited(t *testing.T) {
 	job := map[string]interface{}{}
 
-	CleanJobInput(job)
+	if err := CleanJobInput(job); err != nil {
+		t.Fatalf("CleanJobInput() error: %v", err)
+	}
 
 	if job["minFileSize"] != int64(0) {
 		t.Fatalf("minFileSize = %#v, want int64(0)", job["minFileSize"])
@@ -75,13 +77,10 @@ func TestCleanJobInputRejectsInvalidFileSizeRange(t *testing.T) {
 		"maxFileSize": int64(1024),
 	}
 
-	defer func() {
-		if recover() == nil {
-			t.Fatalf("CleanJobInput() did not panic, want validation failure")
-		}
-	}()
-
-	CleanJobInput(job)
+	err := CleanJobInput(job)
+	if err == nil {
+		t.Fatalf("CleanJobInput() did not return error, want validation failure")
+	}
 }
 
 func TestCleanJobInputRejectsFloat64AboveInt64Range(t *testing.T) {
@@ -89,11 +88,8 @@ func TestCleanJobInputRejectsFloat64AboveInt64Range(t *testing.T) {
 		"maxFileSize": float64(math.MaxInt64),
 	}
 
-	defer func() {
-		if recover() == nil {
-			t.Fatalf("CleanJobInput() did not panic for overflowing float64 file size")
-		}
-	}()
-
-	CleanJobInput(job)
+	err := CleanJobInput(job)
+	if err == nil {
+		t.Fatalf("CleanJobInput() did not return error for overflowing float64 file size")
+	}
 }

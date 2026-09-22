@@ -74,7 +74,7 @@ type JobTask struct {
 	copyMonitorClientOverride copyItemClient
 }
 
-func newJobTask(taskID int64, jc *JobClient) *JobTask {
+func newJobTask(taskID int64, jc *JobClient) (*JobTask, error) {
 	job := jc.jobSnapshot()
 	limits := runtimeTaskLimits()
 	jt := &JobTask{
@@ -91,8 +91,13 @@ func newJobTask(taskID int64, jc *JobClient) *JobTask {
 		cachedLimits:   &limits,
 	}
 	jt.ctx, jt.cancel = newTaskContext(config.GetConfig().Server.Timeout)
-	jt.AlistClient = GetClientByIDContext(jt.ctx, util.ToInt64(job["alistId"]))
-	return jt
+	client, err := GetClientByIDContext(jt.ctx, util.ToInt64(job["alistId"]))
+	if err != nil {
+		jt.cancel()
+		return nil, err
+	}
+	jt.AlistClient = client
+	return jt, nil
 }
 
 // taskLimits returns the cached runtime limits for this task, avoiding

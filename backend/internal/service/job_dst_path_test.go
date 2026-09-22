@@ -2,14 +2,11 @@ package service
 
 import "testing"
 
-func requirePublicPanic(t *testing.T, fn func()) {
+func requirePublicError(t *testing.T, fn func() error) {
 	t.Helper()
-	defer func() {
-		if recovered := recover(); recovered == nil {
-			t.Fatalf("expected panic")
-		}
-	}()
-	fn()
+	if err := fn(); err == nil {
+		t.Fatalf("expected error")
+	}
 }
 
 func TestParsePathListPreservesColonInJSONPaths(t *testing.T) {
@@ -45,7 +42,9 @@ func TestCleanJobInputNormalizesDstPathToJSON(t *testing.T) {
 		"dstPath": []interface{}{"/movies/director:cut", " /backup "},
 	}
 
-	CleanJobInput(job)
+	if err := CleanJobInput(job); err != nil {
+		t.Fatalf("CleanJobInput() error: %v", err)
+	}
 	got := parsePathList(job["dstPath"])
 	want := []string{"/movies/director:cut", "/backup"}
 
@@ -92,7 +91,9 @@ func TestCleanJobInputNormalizesSrcPathToJSON(t *testing.T) {
 		"srcPath": []interface{}{"/photos", " /videos "},
 	}
 
-	CleanJobInput(job)
+	if err := CleanJobInput(job); err != nil {
+		t.Fatalf("CleanJobInput() error: %v", err)
+	}
 	got := parsePathList(job["srcPath"])
 	want := []string{"/photos", "/videos"}
 
@@ -111,8 +112,8 @@ func TestValidateJobInputRejectsMissingRequiredFields(t *testing.T) {
 		"isCron": 2,
 	}
 
-	requirePublicPanic(t, func() {
-		ValidateJobInput(job)
+	requirePublicError(t, func() error {
+		return ValidateJobInput(job)
 	})
 }
 
@@ -125,7 +126,9 @@ func TestValidateJobInputAcceptsManualJobWithRequiredFields(t *testing.T) {
 		"method":  0,
 	}
 
-	ValidateJobInput(job)
+	if err := ValidateJobInput(job); err != nil {
+		t.Fatalf("ValidateJobInput() error: %v", err)
+	}
 }
 
 func TestValidateJobInputRejectsOverlappingSourceAndDestinationPaths(t *testing.T) {
@@ -154,8 +157,8 @@ func TestValidateJobInputRejectsOverlappingSourceAndDestinationPaths(t *testing.
 				"isCron":  2,
 				"method":  1,
 			}
-			requirePublicPanic(t, func() {
-				ValidateJobInput(job)
+			requirePublicError(t, func() error {
+				return ValidateJobInput(job)
 			})
 		})
 	}

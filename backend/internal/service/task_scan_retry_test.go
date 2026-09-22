@@ -13,9 +13,10 @@ import (
 )
 
 func TestListDirRetriesTransientAListFailures(t *testing.T) {
-	oldDelay := scanListRetryDelay
-	scanListRetryDelay = func(int) time.Duration { return 0 }
-	defer func() { scanListRetryDelay = oldDelay }()
+	d := *jobDeps
+	d.ScanListRetryDelay = func(int) time.Duration { return 0 }
+	restore := SetJobDepsForTest(&d)
+	defer restore()
 
 	var attempts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -43,9 +44,10 @@ func TestListDirRetriesTransientAListFailures(t *testing.T) {
 }
 
 func TestListDirDoesNotRetryAuthenticationFailure(t *testing.T) {
-	oldDelay := scanListRetryDelay
-	scanListRetryDelay = func(int) time.Duration { return 0 }
-	defer func() { scanListRetryDelay = oldDelay }()
+	d := *jobDeps
+	d.ScanListRetryDelay = func(int) time.Duration { return 0 }
+	restore := SetJobDepsForTest(&d)
+	defer restore()
 
 	var attempts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -81,7 +83,7 @@ func TestShouldRetryScanListHonorsCanceledContext(t *testing.T) {
 	if shouldRetryScanList(ctx, errors.New("temporary failure")) {
 		t.Fatal("shouldRetryScanList() = true for canceled context")
 	}
-	if shouldRetryScanList(context.Background(), errors.New(msg.AlistUnAuth)) {
+	if shouldRetryScanList(context.Background(), errors.New(msg.T(msg.AlistUnAuth))) {
 		t.Fatal("shouldRetryScanList() = true for authentication failure")
 	}
 	if !shouldRetryScanList(context.Background(), errors.New("temporary failure")) {

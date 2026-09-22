@@ -117,7 +117,7 @@ func cleanPathList(paths []string) []string {
 			continue
 		}
 		seen[key] = struct{}{}
-		cleaned = append(cleaned, item)
+		cleaned = append(cleaned, key)
 	}
 	return cleaned
 }

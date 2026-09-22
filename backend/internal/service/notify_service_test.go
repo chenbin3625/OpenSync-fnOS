@@ -171,16 +171,13 @@ func TestSendWebhookCustomBodyEscapesPlaceholderValues(t *testing.T) {
 	}))
 	defer server.Close()
 
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			t.Fatalf("sendWebhook() panic = %v, want escaped JSON body", recovered)
-		}
-	}()
-
-	sendWebhook(server.Client(), map[string]interface{}{
+	err := sendWebhook(server.Client(), map[string]interface{}{
 		"url":  server.URL,
 		"body": `{"text":"{title}: {content}"}`,
 	}, `title "quoted"`, `content with "quotes"`)
+	if err != nil {
+		t.Fatalf("sendWebhook() error = %v, want escaped JSON body", err)
+	}
 
 	want := `title "quoted": content with "quotes"`
 	if got["text"] != want {
@@ -196,12 +193,10 @@ func TestNotifyHTTPClientAllowsLoopbackWebhook(t *testing.T) {
 	}))
 	defer server.Close()
 
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			t.Fatalf("sendWebhook() panic = %v, want loopback target to be reachable", recovered)
-		}
-	}()
-	sendWebhook(notifyHTTPClient, map[string]interface{}{"url": server.URL}, "title", "content")
+	err := sendWebhook(notifyHTTPClient, map[string]interface{}{"url": server.URL}, "title", "content")
+	if err != nil {
+		t.Fatalf("sendWebhook() error = %v, want loopback target to be reachable", err)
+	}
 	select {
 	case <-received:
 	default:
@@ -223,22 +218,18 @@ func TestSendNotifyRequestDoesNotPanicWithSecretURL(t *testing.T) {
 	}
 	client := &http.Client{Transport: notifyErrorTransport{}}
 
-	defer func() {
-		recovered := recover()
-		if recovered == nil {
-			t.Fatalf("sendNotifyRequest() panic = nil, want public notify failure")
-		}
-		publicErr, ok := recovered.(model.PublicError)
-		if !ok {
-			t.Fatalf("panic type = %T, want model.PublicError", recovered)
-		}
-		if string(publicErr) != msg.NotifySendFail {
-			t.Fatalf("panic = %q, want generic notify failure", publicErr)
-		}
-		if strings.Contains(string(publicErr), "very-secret-token") || strings.Contains(string(publicErr), "access_token") {
-			t.Fatalf("panic leaked secret URL: %q", publicErr)
-		}
-	}()
-
-	sendNotifyRequest(client, req)
+	sendErr := sendNotifyRequest(client, req)
+	if sendErr == nil {
+		t.Fatalf("sendNotifyRequest() error = nil, want public notify failure")
+	}
+	publicErr, ok := sendErr.(model.PublicError)
+	if !ok {
+		t.Fatalf("error type = %T, want model.PublicError", sendErr)
+	}
+	if string(publicErr) != msg.T(msg.NotifySendFail) {
+		t.Fatalf("error = %q, want generic notify failure", publicErr)
+	}
+	if strings.Contains(string(publicErr), "very-secret-token") || strings.Contains(string(publicErr), "access_token") {
+		t.Fatalf("error leaked secret URL: %q", publicErr)
+	}
 }

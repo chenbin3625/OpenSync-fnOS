@@ -22,14 +22,15 @@ func captureNotifySendResults(t *testing.T) *[]recordedNotifyResult {
 	t.Helper()
 	var mu sync.Mutex
 	recorded := make([]recordedNotifyResult, 0, 4)
-	original := recordNotifySendOutcome
-	recordNotifySendOutcome = func(notifyID int64, status int, sentAt int64, errMsg string) error {
+	d := *notifyDeps
+	d.RecordSendOutcome = func(notifyID int64, status int, sentAt int64, errMsg string) error {
 		mu.Lock()
 		defer mu.Unlock()
 		recorded = append(recorded, recordedNotifyResult{notifyID, status, sentAt, errMsg})
 		return nil
 	}
-	t.Cleanup(func() { recordNotifySendOutcome = original })
+	restore := SetNotifyDepsForTest(&d)
+	t.Cleanup(restore)
 	return &recorded
 }
 

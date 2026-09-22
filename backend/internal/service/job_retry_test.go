@@ -31,13 +31,14 @@ func setupRetryFailedTaskTest(t *testing.T, enable int) (*JobClient, int64) {
 	resetJobClientsForTest()
 
 	// AddJobClient validates that the engine exists before inserting the job.
-	oldGetAlist := getAlistByID
-	getAlistByID = func(alistID int64) (map[string]interface{}, error) {
+	ad := *alistDeps
+	ad.GetAlistByID = func(alistID int64) (map[string]interface{}, error) {
 		return map[string]interface{}{"id": alistID, "url": "https://alist.test", "token": "t"}, nil
 	}
-	t.Cleanup(func() { getAlistByID = oldGetAlist })
+	restoreAlistDeps := SetAlistDepsForTest(&ad)
+	t.Cleanup(restoreAlistDeps)
 
-	AddJobClient(map[string]interface{}{
+	if err := AddJobClient(map[string]interface{}{
 		"enable":        enable,
 		"remark":        "retry-test",
 		"srcPath":       []string{"/src"},
@@ -52,7 +53,9 @@ func setupRetryFailedTaskTest(t *testing.T, enable int) (*JobClient, int64) {
 		"isCron":        0,
 		"minFileSize":   0,
 		"maxFileSize":   0,
-	}, false)
+	}, false); err != nil {
+		t.Fatalf("AddJobClient: %v", err)
+	}
 	client := onlyJobClientForTest(t)
 
 	taskID, err := mapper.AddJobTask(client.JobID, time.Now().Unix())
@@ -81,19 +84,17 @@ func addRetryTestItem(t *testing.T, taskID int64, name string, status int) {
 	}
 }
 
-func TestRetryFailedTaskPanicsWhenNoUnfinishedItems(t *testing.T) {
+func TestRetryFailedTaskReturnsErrorWhenNoUnfinishedItems(t *testing.T) {
 	_, taskID := setupRetryFailedTaskTest(t, 1)
 	addRetryTestItem(t, taskID, "ok.txt", taskStatusSuccess.Int())
 
-	defer func() {
-		if recovered := recover(); recovered == nil {
-			t.Fatalf("RetryFailedTask did not panic when there are no unfinished items")
-		}
-	}()
-	RetryFailedTask(taskID)
+	err := RetryFailedTask(taskID)
+	if err == nil {
+		t.Fatalf("RetryFailedTask did not return error when there are no unfinished items")
+	}
 }
 
-func TestRetryFailedTaskPanicsWhenJobBusy(t *testing.T) {
+func TestRetryFailedTaskReturnsErrorWhenJobBusy(t *testing.T) {
 	client, taskID := setupRetryFailedTaskTest(t, 1)
 	addRetryTestItem(t, taskID, "bad.txt", taskStatusFailed.Int())
 	if !client.tryMarkDoing() {
@@ -101,22 +102,18 @@ func TestRetryFailedTaskPanicsWhenJobBusy(t *testing.T) {
 	}
 	t.Cleanup(func() { client.markDone() })
 
-	defer func() {
-		if recovered := recover(); recovered == nil {
-			t.Fatalf("RetryFailedTask did not panic when job is busy")
-		}
-	}()
-	RetryFailedTask(taskID)
+	err := RetryFailedTask(taskID)
+	if err == nil {
+		t.Fatalf("RetryFailedTask did not return error when job is busy")
+	}
 }
 
-func TestRetryFailedTaskPanicsWhenJobDisabled(t *testing.T) {
+func TestRetryFailedTaskReturnsErrorWhenJobDisabled(t *testing.T) {
 	_, taskID := setupRetryFailedTaskTest(t, 0)
 	addRetryTestItem(t, taskID, "bad.txt", taskStatusFailed.Int())
 
-	defer func() {
-		if recovered := recover(); recovered == nil {
-			t.Fatalf("RetryFailedTask did not panic when job is disabled")
-		}
-	}()
-	RetryFailedTask(taskID)
+	err := RetryFailedTask(taskID)
+	if err == nil {
+		t.Fatalf("RetryFailedTask did not return error when job is disabled")
+	}
 }

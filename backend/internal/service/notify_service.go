@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"opensync/internal/mapper"
@@ -14,7 +15,6 @@ import (
 	"opensync/internal/msg"
 	"opensync/pkg/util"
 	"regexp"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -35,14 +35,61 @@ const (
 // long, and the list endpoint returns one of these per config.
 const maxNotifyErrorLength = 300
 
-// recordNotifySendOutcome is a seam so the recording rules can be tested without
-// a database, following the same pattern as the task item persistence helpers.
-var recordNotifySendOutcome = mapper.UpdateNotifySendResult
+var wecomTokenCache struct {
+	sync.Mutex
+	token   string
+	expires time.Time
+}
 
 // notifyErrorURLPattern finds URLs inside an error message so they can be
 // masked before the text is stored. The character class stops at quotes because
 // net/http formats its errors as `Post "<url>": <cause>`.
 var notifyErrorURLPattern = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s"']+`)
+
+var cloudMetadataCIDRs []*net.IPNet
+
+func init() {
+	for _, cidr := range []string{
+		"169.254.169.254/32", // AWS/GCP/Azure metadata
+		"fe80::/10",          // IPv6 link-local
+	} {
+		_, network, _ := net.ParseCIDR(cidr)
+		cloudMetadataCIDRs = append(cloudMetadataCIDRs, network)
+	}
+}
+
+func isCloudMetadataIP(ip net.IP) bool {
+	for _, cidr := range cloudMetadataCIDRs {
+		if cidr.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func validateWebhookDestination(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return err
+	}
+	host := u.Hostname()
+	ips, err := net.LookupHost(host)
+	if err != nil {
+		return nil // DNS failure is not a security block; let the HTTP client handle it
+	}
+	for _, ipStr := range ips {
+		if ip := net.ParseIP(ipStr); ip != nil && isCloudMetadataIP(ip) {
+			return fmt.Errorf("webhook destination %s resolves to blocked address %s", host, ipStr)
+		}
+	}
+	return nil
+}
+
+var forbiddenWebhookHeaders = map[string]struct{}{
+	"host": {}, "cookie": {}, "set-cookie": {},
+	"transfer-encoding": {}, "content-length": {},
+	"connection": {}, "upgrade": {},
+}
 
 var notifyHTTPClient = &http.Client{
 	Timeout: 30 * time.Second,
@@ -58,16 +105,16 @@ var notifyHTTPClient = &http.Client{
 // GetNotifyList returns notify list with secret fields redacted so tokens
 // never reach the client DOM. Raw secrets are still held in the DB and used
 // internally by SendTaskNotification; only the list response is masked.
-func GetNotifyList() []map[string]interface{} {
+func GetNotifyList() ([]map[string]interface{}, error) {
 	list, err := mapper.GetNotifyList(false)
 	if err != nil {
-		panic(err.Error())
+		return nil, fmt.Errorf("get notify list: %w", err)
 	}
 	for _, notify := range list {
 		method := util.ToInt(notify["method"])
 		notify["params"] = redactNotifyParams(method, fmt.Sprintf("%v", notify["params"]))
 	}
-	return list
+	return list, nil
 }
 
 // notifySecretKeys are param keys whose values are redacted in list responses.
@@ -89,7 +136,7 @@ const notifyRedactionMarker = "****"
 const notifyBodyRedacted = "******"
 
 func maskSecretValue(value string) string {
-	if len(value) <= 4 {
+	if len(value) <= 8 {
 		return notifyRedactionMarker
 	}
 	return notifyRedactionMarker + value[len(value)-4:]
@@ -328,7 +375,7 @@ func validateNotifyParams(method int, params map[string]interface{}) error {
 		return validateWebhookMethod(paramString(params, "method", "httpMethod"))
 	case 1:
 		if paramString(params, "sendKey") == "" {
-			return errors.New(msg.NotifyParamInvalid)
+			return errors.New(msg.T(msg.NotifyParamInvalid))
 		}
 		return nil
 	case 2, 4:
@@ -337,11 +384,11 @@ func validateNotifyParams(method int, params map[string]interface{}) error {
 		if paramString(params, "corpid", "corpId") == "" ||
 			paramString(params, "corpsecret", "corpSecret") == "" ||
 			paramString(params, "agentid", "agentId") == "" {
-			return errors.New(msg.NotifyParamInvalid)
+			return errors.New(msg.T(msg.NotifyParamInvalid))
 		}
 		return nil
 	default:
-		return errors.New(msg.NotifyMethodInvalid)
+		return errors.New(msg.T(msg.NotifyMethodInvalid))
 	}
 }
 
@@ -353,21 +400,27 @@ func validateWebhookMethod(method string) error {
 	case http.MethodGet, http.MethodPost, http.MethodPut:
 		return nil
 	default:
-		return errors.New(msg.NotifyParamInvalid)
+		return errors.New(msg.T(msg.NotifyParamInvalid))
 	}
 }
 
 func validateNotifyWebhookURL(rawURL string) error {
-	return util.ValidateHTTPURL(rawURL, msg.NotifyURLInvalid)
+	if err := util.ValidateHTTPURL(rawURL, msg.T(msg.NotifyURLInvalid)); err != nil {
+		return err
+	}
+	if u, err := url.Parse(rawURL); err == nil && strings.ToLower(u.Scheme) == "http" {
+		log.Printf("Warning: webhook URL uses plain HTTP, notification content will be transmitted unencrypted: %s", u.Host)
+	}
+	return nil
 }
 
 func validateNotifyHTTPSURL(rawURL string) error {
 	u, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil || u.Scheme == "" || u.Host == "" {
-		return errors.New(msg.NotifyURLInvalid)
+		return errors.New(msg.T(msg.NotifyURLInvalid))
 	}
 	if strings.ToLower(u.Scheme) != "https" {
-		return errors.New(msg.NotifyURLInvalid)
+		return errors.New(msg.T(msg.NotifyURLInvalid))
 	}
 	return nil
 }
@@ -390,97 +443,93 @@ func notifyParamsValue(value interface{}) (map[string]interface{}, error) {
 // (and API clients) need the id to address the row they just created; deriving
 // it from "the last entry of GET /notify" is wrong as soon as two configs are
 // created concurrently, or when the list is not ordered by insertion.
-func AddNewNotify(notify map[string]interface{}) int64 {
+func AddNewNotify(notify map[string]interface{}) (int64, error) {
 	params, err := notifyParamsValue(notify["params"])
 	if err != nil {
-		panic(err.Error())
+		return 0, fmt.Errorf("parse notify params: %w", err)
 	}
 	method := util.ToInt(notify["method"])
 	notify["method"] = method
 	notify["enable"] = util.ToInt(notify["enable"])
 	if err := validateNotifyParams(method, params); err != nil {
-		panicPublic(err.Error())
+		return 0, publicError(err.Error())
 	}
 	out, err := json.Marshal(params)
 	if err != nil {
-		panic(err.Error())
+		return 0, fmt.Errorf("marshal notify params: %w", err)
 	}
 	notify["params"] = string(out)
 	id, err := mapper.AddNotify(notify)
 	if err != nil {
-		panic(err.Error())
+		return 0, fmt.Errorf("add notify: %w", err)
 	}
-	return id
+	return id, nil
 }
 
 // EditNotify updates a notify config. Secret fields that were redacted in
 // the list view (or left empty) are preserved from the stored config so the
 // user can edit other fields without re-entering credentials.
-func EditNotify(notify map[string]interface{}) {
+func EditNotify(notify map[string]interface{}) error {
 	resolved, err := resolveNotifyParams(notify)
 	if err != nil {
-		panic(err.Error())
+		return fmt.Errorf("resolve notify params: %w", err)
 	}
 	if err := validateNotifyParams(util.ToInt(notify["method"]), resolved); err != nil {
-		panicPublic(err.Error())
+		return publicError(err.Error())
 	}
 	out, err := json.Marshal(resolved)
 	if err != nil {
-		panic(err.Error())
+		return fmt.Errorf("marshal notify params: %w", err)
 	}
 	notify["params"] = string(out)
 	if err := mapper.EditNotify(notify); err != nil {
-		panic(err.Error())
+		return fmt.Errorf("edit notify: %w", err)
 	}
+	return nil
 }
 
 // UpdateNotifyStatus updates notify enable status
-func UpdateNotifyStatus(notifyID int64, enable int) {
+func UpdateNotifyStatus(notifyID int64, enable int) error {
 	err := mapper.UpdateNotifyStatus(notifyID, enable)
-	panicPublicIf(err, msg.NotifyNotFound)
+	return publicErrorIf(err, msg.T(msg.NotifyNotFound))
 }
 
 // DeleteNotify deletes a notify config
-func DeleteNotify(notifyID int64) {
+func DeleteNotify(notifyID int64) error {
 	err := mapper.DeleteNotify(notifyID)
-	panicPublicIf(err, msg.NotifyNotFound)
+	return publicErrorIf(err, msg.T(msg.NotifyNotFound))
 }
 
 // TestNotify sends a test notification. Secrets that were redacted in the
 // list view are restored from the stored config (when an id is given) so the
 // test sends with real credentials.
-func TestNotify(notify map[string]interface{}) {
-	defer func() {
-		if r := recover(); r != nil {
-			if publicErr, ok := r.(model.PublicError); ok {
-				panic(publicErr)
-			}
-			// A runtime error here is a bug in our own code, not a bad webhook
-			// config. Reporting it as "check your configuration" sent users
-			// hunting through settings for something they cannot fix, so it is
-			// re-panicked and surfaces as a generic 500 instead.
-			if runtimeErr, ok := r.(runtime.Error); ok {
-				log.Printf("notify test failed with a runtime error: %v", runtimeErr)
-				panic(r)
-			}
-			log.Printf("notify test failed: %v", r)
-			panicPublic(msg.NotifySendFail)
-		}
-	}()
+func TestNotify(notify map[string]interface{}) error {
 	resolved, err := resolveNotifyParams(notify)
 	if err != nil {
-		panic(err.Error())
+		return fmt.Errorf("resolve notify params: %w", err)
 	}
 	if err := validateNotifyParams(util.ToInt(notify["method"]), resolved); err != nil {
-		panicPublic(err.Error())
+		return publicError(err.Error())
 	}
 	out, err := json.Marshal(resolved)
 	if err != nil {
-		panic(err.Error())
+		return fmt.Errorf("marshal notify params: %w", err)
 	}
 	notify["params"] = string(out)
-	testMsg := msg.NotifyTestMsg
-	sendNotify(notify, "OpenSync Test", testMsg, false)
+	testMsg := msg.T(msg.NotifyTestMsg)
+	_, sendErr := sendNotify(notify, "OpenSync Test", testMsg, false)
+	if sendErr != nil {
+		// A PublicError is an actionable message for the user (e.g. invalid URL,
+		// bad config). Other errors are opaque failures; wrap them with the
+		// generic "send failed" message so the user is not shown raw internals.
+		var pubErr model.PublicError
+		if errors.As(sendErr, &pubErr) {
+			return sendErr
+		}
+		log.Printf("notify test failed: %v", sendErr)
+		return publicError(msg.T(msg.NotifySendFail))
+	}
+	return nil
 }
 
 // SendTaskNotification sends notification after task completion.
@@ -585,10 +634,11 @@ func sendNotifyFanOut(notifyList []map[string]interface{}, title, content string
 	wg.Wait()
 }
 
-// trySendNotify turns the panic-based send path into a value. The outcome has to
-// survive as data, not just as a log line: a config whose token expired kept
-// reporting nothing at all through the API, so the UI showed a healthy channel
-// while every message was being rejected.
+// trySendNotify turns the send path into a value. The outcome has to survive as
+// data, not just as a log line: a config whose token expired kept reporting
+// nothing at all through the API, so the UI showed a healthy channel while every
+// message was being rejected. The defer/recover is kept as a safety net for any
+// unexpected panic that might still escape.
 func trySendNotify(notify map[string]interface{}, title, content string, needNotSync bool) (sent bool, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -596,7 +646,7 @@ func trySendNotify(notify map[string]interface{}, title, content string, needNot
 			err = notifySendFailure(r)
 		}
 	}()
-	return sendNotify(notify, title, content, needNotSync), nil
+	return sendNotify(notify, title, content, needNotSync)
 }
 
 func notifySendFailure(recovered interface{}) error {
@@ -624,7 +674,7 @@ func recordNotifySendResult(notify map[string]interface{}, sent bool, sendErr er
 		reason = sanitizeNotifyError(sendErr.Error())
 		log.Printf("%s", msg.NotifyError(reason))
 	}
-	if err := recordNotifySendOutcome(notifyID, status, time.Now().Unix(), reason); err != nil {
+	if err := notifyDeps.RecordSendOutcome(notifyID, status, time.Now().Unix(), reason); err != nil {
 		log.Printf("Failed to record delivery result for notify %d: %v", notifyID, err)
 	}
 }
@@ -637,7 +687,7 @@ func recordNotifySendResult(notify map[string]interface{}, sent bool, sendErr er
 func sanitizeNotifyError(text string) string {
 	cleaned := strings.TrimSpace(notifyErrorURLPattern.ReplaceAllStringFunc(text, maskNotifyErrorURL))
 	if cleaned == "" {
-		return msg.NotifySendFail
+		return msg.T(msg.NotifySendFail)
 	}
 	// Truncated by rune, so a split multi-byte character cannot produce invalid
 	// UTF-8 in the JSON response.
@@ -664,44 +714,48 @@ func maskNotifyErrorURL(rawURL string) string {
 // sendNotify sends a notification via the configured method. It reports whether
 // a message was actually sent, so a config skipped by notSendNull is not
 // recorded as a successful delivery.
-func sendNotify(notify map[string]interface{}, title, content string, needNotSync bool) bool {
+func sendNotify(notify map[string]interface{}, title, content string, needNotSync bool) (bool, error) {
 	params, err := notifyParamsValue(notify["params"])
 	if err != nil {
-		panic(err.Error())
+		return false, fmt.Errorf("parse notify params: %w", err)
 	}
 
 	method := util.ToInt(notify["method"])
 	if err := validateNotifyParams(method, params); err != nil {
-		panicPublic(err.Error())
+		return false, publicError(err.Error())
 	}
 
 	// Check notSendNull flag
 	if needNotSync {
 		if v, ok := params["notSendNull"]; ok {
 			if util.ToBool(v) {
-				return false
+				return false, nil
 			}
 		}
 	}
 
+	var sendErr error
 	switch method {
 	case 0: // Custom webhook
-		sendWebhook(notifyHTTPClient, params, title, content)
+		sendErr = sendWebhook(notifyHTTPClient, params, title, content)
 	case 1: // ServerChan
-		sendServerChan(notifyHTTPClient, params, title, content)
+		sendErr = sendServerChan(notifyHTTPClient, params, title, content)
 	case 2: // DingTalk
-		sendDingTalk(notifyHTTPClient, params, title, content)
+		sendErr = sendDingTalk(notifyHTTPClient, params, title, content)
 	case 3: // WeCom (Enterprise WeChat)
-		sendWeCom(notifyHTTPClient, params, title, content)
+		sendErr = sendWeCom(notifyHTTPClient, params, title, content)
 	case 4: // Lark (Feishu)
-		sendLark(notifyHTTPClient, params, title, content)
+		sendErr = sendLark(notifyHTTPClient, params, title, content)
 	default:
 		// validateNotifyParams rejects unknown methods, so this is unreachable
 		// unless a new method is added without a send branch. Reporting it as a
 		// failure beats recording a delivery that never happened.
-		panicPublic(msg.NotifyMethodInvalid)
+		return false, publicError(msg.T(msg.NotifyMethodInvalid))
 	}
-	return true
+	if sendErr != nil {
+		return false, sendErr
+	}
+	return true, nil
 }
 
 func parseNotifyParams(paramsStr string) (map[string]interface{}, error) {
@@ -725,6 +779,9 @@ func buildNotifyRequest(method, urlStr string, body io.Reader, contentType strin
 	if urlStr == "" {
 		return nil, fmt.Errorf("url is required")
 	}
+	if err := validateWebhookDestination(urlStr); err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequest(method, urlStr, body)
 	if err != nil {
 		return nil, err
@@ -735,45 +792,52 @@ func buildNotifyRequest(method, urlStr string, body io.Reader, contentType strin
 	return req, nil
 }
 
-func sendNotifyRequest(client *http.Client, req *http.Request) {
-	sendNotifyRequestBytes(client, req)
+func sendNotifyRequest(client *http.Client, req *http.Request) error {
+	_, err := sendNotifyRequestBytes(client, req)
+	return err
 }
 
 // sendNotifyRequestBytes sends the request, validates the HTTP status, and
 // returns the response body so callers can inspect provider-specific error
 // codes. DingTalk/Lark/ServerChan/WeCom return HTTP 200 with a non-zero
 // errcode/code/errno in the body on failure, which a status-only check misses.
-func sendNotifyRequestBytes(client *http.Client, req *http.Request) []byte {
-	resp := doNotifyRequest(client, req)
+func sendNotifyRequestBytes(client *http.Client, req *http.Request) ([]byte, error) {
+	resp, err := doNotifyRequest(client, req)
+	if err != nil {
+		return nil, err
+	}
 	defer resp.Body.Close()
 	bodyBytes, err := readAllWithLimit(resp.Body, maxNotifyResponseBytes)
 	if err != nil {
-		panic(err.Error())
+		return nil, fmt.Errorf("read notify response: %w", err)
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		msg := strings.TrimSpace(string(bodyBytes))
-		if msg != "" {
-			log.Printf("notify request failed: status=%s body=%q", resp.Status, msg)
+		respMsg := strings.TrimSpace(string(bodyBytes))
+		if respMsg != "" {
+			log.Printf("notify request failed: status=%s body=%q", resp.Status, respMsg)
 		}
-		panic(fmt.Sprintf("notify request failed: %s", resp.Status))
+		return nil, fmt.Errorf("notify request failed: %s", resp.Status)
 	}
-	return bodyBytes
+	return bodyBytes, nil
 }
 
-func sendJSONNotify(client *http.Client, urlStr string, body interface{}, errorFields ...string) []byte {
+func sendJSONNotify(client *http.Client, urlStr string, body interface{}, errorFields ...string) ([]byte, error) {
 	jsonData, err := json.Marshal(body)
 	if err != nil {
-		panic(err.Error())
+		return nil, fmt.Errorf("marshal notify body: %w", err)
 	}
 	req, err := buildNotifyRequest(http.MethodPost, urlStr, bytes.NewReader(jsonData), "application/json")
 	if err != nil {
-		panic(err.Error())
+		return nil, fmt.Errorf("build notify request: %w", err)
 	}
-	respBody := sendNotifyRequestBytes(client, req)
+	respBody, err := sendNotifyRequestBytes(client, req)
+	if err != nil {
+		return nil, err
+	}
 	if err := notifyProviderError(respBody, errorFields...); err != nil {
-		panic(err.Error())
+		return nil, err
 	}
-	return respBody
+	return respBody, nil
 }
 
 // notifyProviderError returns a non-nil error when the provider's JSON response
@@ -801,7 +865,7 @@ func notifyProviderError(body []byte, fields ...string) error {
 	return nil
 }
 
-func doNotifyRequest(client *http.Client, req *http.Request) *http.Response {
+func doNotifyRequest(client *http.Client, req *http.Request) (*http.Response, error) {
 	if client == nil {
 		client = http.DefaultClient
 	}
@@ -813,9 +877,9 @@ func doNotifyRequest(client *http.Client, req *http.Request) *http.Response {
 			_ = resp.Body.Close()
 		}
 		log.Printf("notify request failed: target=%s error=%s", notifyRequestTarget(req), notifyNetworkError(err))
-		panicPublic(msg.NotifySendFail)
+		return nil, publicError(msg.T(msg.NotifySendFail))
 	}
-	return resp
+	return resp, nil
 }
 
 func notifyRequestTarget(req *http.Request) string {
@@ -833,7 +897,7 @@ func notifyNetworkError(err error) string {
 	return fmt.Sprintf("%T", err)
 }
 
-func sendWebhook(client *http.Client, params map[string]interface{}, title, content string) {
+func sendWebhook(client *http.Client, params map[string]interface{}, title, content string) error {
 	urlStr := paramString(params, "url", "webhook")
 	method := "POST"
 	if m := paramString(params, "method", "httpMethod"); m != "" {
@@ -868,7 +932,7 @@ func sendWebhook(client *http.Client, params map[string]interface{}, title, cont
 		bodyStr = strings.ReplaceAll(bodyStr, "{content}", jsonStringContent(content))
 		body = nil
 		if err := json.Unmarshal([]byte(bodyStr), &body); err != nil {
-			panic(err.Error())
+			return publicError("通知自定义 Body 格式无效")
 		}
 	}
 
@@ -877,7 +941,7 @@ func sendWebhook(client *http.Client, params map[string]interface{}, title, cont
 	if method == "GET" {
 		req, err = buildNotifyRequest(http.MethodGet, urlStr, nil, "")
 		if err != nil {
-			panic(err.Error())
+			return fmt.Errorf("build webhook request: %w", err)
 		}
 		q := req.URL.Query()
 		q.Set(titleName, title)
@@ -895,24 +959,27 @@ func sendWebhook(client *http.Client, params map[string]interface{}, title, cont
 		} else {
 			jsonData, marshalErr := json.Marshal(body)
 			if marshalErr != nil {
-				panic(marshalErr.Error())
+				return fmt.Errorf("marshal webhook body: %w", marshalErr)
 			}
 			req, err = buildNotifyRequest(method, urlStr, bytes.NewReader(jsonData), contentType)
 		}
 		if err != nil {
-			panic(err.Error())
+			return fmt.Errorf("build webhook request: %w", err)
 		}
 	}
 
 	if headers, ok := params["headers"]; ok && headers != nil {
 		if hMap, ok := headers.(map[string]interface{}); ok {
 			for k, v := range hMap {
+				if _, blocked := forbiddenWebhookHeaders[strings.ToLower(k)]; blocked {
+					continue
+				}
 				req.Header.Set(k, fmt.Sprintf("%v", v))
 			}
 		}
 	}
 
-	sendNotifyRequest(client, req)
+	return sendNotifyRequest(client, req)
 }
 
 func jsonStringContent(value string) string {
@@ -927,7 +994,7 @@ func jsonStringContent(value string) string {
 	return encodedStr[1 : len(encodedStr)-1]
 }
 
-func sendServerChan(client *http.Client, params map[string]interface{}, title, content string) {
+func sendServerChan(client *http.Client, params map[string]interface{}, title, content string) error {
 	sendKey := paramString(params, "sendKey")
 	version := "v1"
 	if v, ok := params["version"]; ok {
@@ -945,10 +1012,11 @@ func sendServerChan(client *http.Client, params map[string]interface{}, title, c
 		"title": title,
 		"desp":  content,
 	}
-	sendJSONNotify(client, urlStr, body, "code", "errno")
+	_, err := sendJSONNotify(client, urlStr, body, "code", "errno")
+	return err
 }
 
-func sendDingTalk(client *http.Client, params map[string]interface{}, title, content string) {
+func sendDingTalk(client *http.Client, params map[string]interface{}, title, content string) error {
 	webhook := paramString(params, "url", "webhook")
 	body := map[string]interface{}{
 		"msgtype": "text",
@@ -956,10 +1024,56 @@ func sendDingTalk(client *http.Client, params map[string]interface{}, title, con
 			"content": title + "\n" + content,
 		},
 	}
-	sendJSONNotify(client, webhook, body, "errcode")
+	_, err := sendJSONNotify(client, webhook, body, "errcode")
+	return err
 }
 
-func sendWeCom(client *http.Client, params map[string]interface{}, title, content string) {
+func getWeComAccessToken(client *http.Client, corpID, corpSecret string) (string, error) {
+	wecomTokenCache.Lock()
+	defer wecomTokenCache.Unlock()
+	if wecomTokenCache.token != "" && time.Now().Before(wecomTokenCache.expires) {
+		return wecomTokenCache.token, nil
+	}
+
+	tokenURL := "https://qyapi.weixin.qq.com/cgi-bin/gettoken?" + url.Values{
+		"corpid":     {corpID},
+		"corpsecret": {corpSecret},
+	}.Encode()
+	req, err := buildNotifyRequest(http.MethodGet, tokenURL, nil, "")
+	if err != nil {
+		return "", fmt.Errorf("build WeCom token request: %w", err)
+	}
+	resp, err := doNotifyRequest(client, req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	tokenBody, err := readAllWithLimit(resp.Body, maxNotifyResponseBytes)
+	if err != nil {
+		return "", fmt.Errorf("read WeCom token response: %w", err)
+	}
+	var tokenResult struct {
+		AccessToken string `json:"access_token"`
+		ExpiresIn   int    `json:"expires_in"`
+		ErrCode     int    `json:"errcode"`
+	}
+	if err := json.Unmarshal(tokenBody, &tokenResult); err != nil {
+		return "", fmt.Errorf("parse WeCom token response: %w", err)
+	}
+	if tokenResult.ErrCode != 0 {
+		return "", fmt.Errorf("WeCom token error: %s", strings.TrimSpace(string(tokenBody)))
+	}
+
+	wecomTokenCache.token = tokenResult.AccessToken
+	expiresIn := tokenResult.ExpiresIn
+	if expiresIn <= 60 {
+		expiresIn = 7200
+	}
+	wecomTokenCache.expires = time.Now().Add(time.Duration(expiresIn-60) * time.Second)
+	return tokenResult.AccessToken, nil
+}
+
+func sendWeCom(client *http.Client, params map[string]interface{}, title, content string) error {
 	corpID := paramString(params, "corpid", "corpId")
 	corpSecret := paramString(params, "corpsecret", "corpSecret")
 	agentID := paramString(params, "agentid", "agentId")
@@ -968,30 +1082,10 @@ func sendWeCom(client *http.Client, params map[string]interface{}, title, conten
 		toUser = u
 	}
 
-	// Get access token
-	tokenURL := "https://qyapi.weixin.qq.com/cgi-bin/gettoken?" + url.Values{
-		"corpid":     {corpID},
-		"corpsecret": {corpSecret},
-	}.Encode()
-	req, err := buildNotifyRequest(http.MethodGet, tokenURL, nil, "")
+	// Get access token (cached)
+	accessToken, err := getWeComAccessToken(client, corpID, corpSecret)
 	if err != nil {
-		panic(err.Error())
-	}
-	resp := doNotifyRequest(client, req)
-	defer resp.Body.Close()
-	tokenBody, err := readAllWithLimit(resp.Body, maxNotifyResponseBytes)
-	if err != nil {
-		panic(err.Error())
-	}
-	var tokenResult struct {
-		AccessToken string `json:"access_token"`
-		ErrCode     int    `json:"errcode"`
-	}
-	if err := json.Unmarshal(tokenBody, &tokenResult); err != nil {
-		panic(err.Error())
-	}
-	if tokenResult.ErrCode != 0 {
-		panic(fmt.Sprintf("WeCom token error: %s", strings.TrimSpace(string(tokenBody))))
+		return err
 	}
 
 	// Send message
@@ -1004,12 +1098,13 @@ func sendWeCom(client *http.Client, params map[string]interface{}, title, conten
 		},
 	}
 	msgURL := "https://qyapi.weixin.qq.com/cgi-bin/message/send?" + url.Values{
-		"access_token": {tokenResult.AccessToken},
+		"access_token": {accessToken},
 	}.Encode()
-	sendJSONNotify(client, msgURL, msgBody, "errcode")
+	_, err = sendJSONNotify(client, msgURL, msgBody, "errcode")
+	return err
 }
 
-func sendLark(client *http.Client, params map[string]interface{}, title, content string) {
+func sendLark(client *http.Client, params map[string]interface{}, title, content string) error {
 	webhook := paramString(params, "url", "webhook")
 	body := map[string]interface{}{
 		"msg_type": "interactive",
@@ -1028,7 +1123,8 @@ func sendLark(client *http.Client, params map[string]interface{}, title, content
 			},
 		},
 	}
-	sendJSONNotify(client, webhook, body, "code", "StatusCode")
+	_, err := sendJSONNotify(client, webhook, body, "code", "StatusCode")
+	return err
 }
 
 func paramString(params map[string]interface{}, keys ...string) string {

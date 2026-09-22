@@ -10,7 +10,7 @@ import (
 
 func TestAlistClientRejectsOversizedResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(strings.Repeat("x", int(maxResponseBytes+1))))
+		_, _ = w.Write([]byte(strings.Repeat("x", int(alistDeps.MaxResponseBytes+1))))
 	}))
 	defer server.Close()
 
@@ -84,15 +84,11 @@ func TestSendNotifyRequestRejectsOversizedResponse(t *testing.T) {
 		t.Fatalf("NewRequest() error = %v", err)
 	}
 
-	defer func() {
-		recovered := recover()
-		if recovered == nil {
-			t.Fatalf("sendNotifyRequest() panic = nil, want response size panic")
-		}
-		if !strings.Contains(strings.ToLower(recovered.(string)), "response body exceeds") {
-			t.Fatalf("sendNotifyRequest() panic = %q, want response size panic", recovered)
-		}
-	}()
-
-	sendNotifyRequest(server.Client(), req)
+	sendErr := sendNotifyRequest(server.Client(), req)
+	if sendErr == nil {
+		t.Fatalf("sendNotifyRequest() error = nil, want response size error")
+	}
+	if !strings.Contains(strings.ToLower(sendErr.Error()), "response body exceeds") {
+		t.Fatalf("sendNotifyRequest() error = %q, want response size error", sendErr)
+	}
 }

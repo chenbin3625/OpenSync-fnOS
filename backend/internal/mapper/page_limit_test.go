@@ -39,8 +39,8 @@ func TestUnpaginatedQueryOverLimitFailsInsteadOfTruncating(t *testing.T) {
 	if err == nil {
 		t.Fatalf("fetchPage() error = nil, want an over-limit error")
 	}
-	if err.Error() != msg.ListTooLarge {
-		t.Fatalf("error = %q, want %q", err, msg.ListTooLarge)
+	if err.Error() != msg.T(msg.ListTooLarge) {
+		t.Fatalf("error = %q, want %q", err, msg.T(msg.ListTooLarge))
 	}
 }
 
@@ -54,8 +54,8 @@ func TestUnpaginatedUnionQueryOverLimitFails(t *testing.T) {
 		"SELECT id, name FROM widget WHERE id <= 4 UNION SELECT id, name FROM widget WHERE id > 4",
 		5, 0, false, nil,
 	)
-	if err == nil || err.Error() != msg.ListTooLarge {
-		t.Fatalf("fetchPage() error = %v, want %q", err, msg.ListTooLarge)
+	if err == nil || err.Error() != msg.T(msg.ListTooLarge) {
+		t.Fatalf("fetchPage() error = %v, want %q", err, msg.T(msg.ListTooLarge))
 	}
 }
 
@@ -113,7 +113,7 @@ func TestMaxPageSizeMatchesUnpagedLimit(t *testing.T) {
 	if MaxPageSize != maxPageSize {
 		t.Fatalf("MaxPageSize=%d maxPageSize=%d, want equal", MaxPageSize, maxPageSize)
 	}
-	if !strings.Contains(msg.ListTooLarge, "pageNum") || !strings.Contains(msg.ListTooLarge, "pageSize") {
-		t.Fatalf("ListTooLarge = %q, want it to name the pagination parameters", msg.ListTooLarge)
+	if !strings.Contains(msg.T(msg.ListTooLarge), "pageNum") || !strings.Contains(msg.T(msg.ListTooLarge), "pageSize") {
+		t.Fatalf("ListTooLarge = %q, want it to name the pagination parameters", msg.T(msg.ListTooLarge))
 	}
 }
