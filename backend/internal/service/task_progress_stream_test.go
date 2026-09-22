@@ -8,11 +8,7 @@ import (
 )
 
 func TestProgressHubUnsubscribeDoesNotCloseChannel(t *testing.T) {
-	hub := &progressHub{
-		subscribers: make(map[int64]map[chan []byte]struct{}),
-		pending:     make(map[int64]struct{}),
-		frames:      make(map[int64]progressFrame),
-	}
+	hub := newProgressHub()
 	ch := make(chan []byte, 1)
 
 	hub.subscribe(1, ch)
@@ -31,11 +27,7 @@ func TestProgressHubUnsubscribeDoesNotCloseChannel(t *testing.T) {
 }
 
 func TestProgressHubUnsubscribeReleasesFrame(t *testing.T) {
-	hub := &progressHub{
-		subscribers: make(map[int64]map[chan []byte]struct{}),
-		pending:     make(map[int64]struct{}),
-		frames:      make(map[int64]progressFrame),
-	}
+	hub := newProgressHub()
 	ch := make(chan []byte, 1)
 	hub.subscribe(1, ch)
 	current := sampleCurrent(10)
@@ -103,11 +95,7 @@ func TestJobCurrentPayloadEmitsEmptyDoingTaskSnapshot(t *testing.T) {
 }
 
 func TestPrepareStreamPayloadPatchesUnchangedFileSet(t *testing.T) {
-	hub := &progressHub{
-		subscribers: make(map[int64]map[chan []byte]struct{}),
-		pending:     make(map[int64]struct{}),
-		frames:      make(map[int64]progressFrame),
-	}
+	hub := newProgressHub()
 
 	first := sampleCurrent(10)
 	hub.prepareStreamPayload(7, &first, true)
@@ -163,11 +151,7 @@ func TestMarshalProgressJSONDoesNotEscapePathSlashes(t *testing.T) {
 }
 
 func TestPrepareStreamPayloadSnapshotsWhenFileSetChanges(t *testing.T) {
-	hub := &progressHub{
-		subscribers: make(map[int64]map[chan []byte]struct{}),
-		pending:     make(map[int64]struct{}),
-		frames:      make(map[int64]progressFrame),
-	}
+	hub := newProgressHub()
 	first := sampleCurrent(10)
 	hub.prepareStreamPayload(7, &first, true)
 
@@ -192,11 +176,7 @@ func TestPrepareStreamPayloadSnapshotsWhenFileSetChanges(t *testing.T) {
 }
 
 func TestPrepareStreamPayloadSnapshotsWhenFileSetShrinks(t *testing.T) {
-	hub := &progressHub{
-		subscribers: make(map[int64]map[chan []byte]struct{}),
-		pending:     make(map[int64]struct{}),
-		frames:      make(map[int64]progressFrame),
-	}
+	hub := newProgressHub()
 	first := sampleCurrent(10, streamDoingItem{
 		AlistTaskID: "copy-2",
 		FileName:    "b.bin",
@@ -222,11 +202,7 @@ func TestPrepareStreamPayloadSnapshotsWhenFileSetShrinks(t *testing.T) {
 }
 
 func TestPrepareStreamPayloadEmitsEmptyPatchWhenProgressIsUnchanged(t *testing.T) {
-	hub := &progressHub{
-		subscribers: make(map[int64]map[chan []byte]struct{}),
-		pending:     make(map[int64]struct{}),
-		frames:      make(map[int64]progressFrame),
-	}
+	hub := newProgressHub()
 	first := sampleCurrent(10)
 	hub.prepareStreamPayload(7, &first, true)
 
@@ -267,11 +243,7 @@ func benchmarkProgressPayload(itemCount int) jobCurrentPayload {
 }
 
 func BenchmarkPrepareStreamPayloadProgressPatch1000(b *testing.B) {
-	hub := &progressHub{
-		subscribers: make(map[int64]map[chan []byte]struct{}),
-		pending:     make(map[int64]struct{}),
-		frames:      make(map[int64]progressFrame),
-	}
+	hub := newProgressHub()
 	first := benchmarkProgressPayload(1000)
 	hub.prepareStreamPayload(7, &first, true)
 	base := benchmarkProgressPayload(1000)

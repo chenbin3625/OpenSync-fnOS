@@ -36,18 +36,37 @@ type progressFrame struct {
 	keys       map[progressItemKey]progressItemState
 }
 
+// progressSubscriber tracks one SSE connection.
+//
+// needsSnapshot marks a client whose view can no longer be repaired by a diff:
+// the outbound buffer holds a single frame, so a slow reader's queued frame is
+// evicted to make room for a newer one. A patch describes the delta from the
+// frame the client was supposed to have, so once one is dropped every later
+// patch applies to a baseline that client never saw — progress bars freeze at
+// stale values and completed rows never disappear. The next publish sends that
+// subscriber a full snapshot instead.
+type progressSubscriber struct {
+	ch chan []byte
+	// Guarded by progressHub.mu.
+	needsSnapshot bool
+}
+
 type progressHub struct {
 	mu          sync.Mutex
 	framesMu    sync.Mutex
-	subscribers map[int64]map[chan []byte]struct{}
+	subscribers map[int64]map[chan []byte]*progressSubscriber
 	pending     map[int64]struct{}
 	frames      map[int64]progressFrame
 }
 
-var jobProgressHub = &progressHub{
-	subscribers: make(map[int64]map[chan []byte]struct{}),
-	pending:     make(map[int64]struct{}),
-	frames:      make(map[int64]progressFrame),
+var jobProgressHub = newProgressHub()
+
+func newProgressHub() *progressHub {
+	return &progressHub{
+		subscribers: make(map[int64]map[chan []byte]*progressSubscriber),
+		pending:     make(map[int64]struct{}),
+		frames:      make(map[int64]progressFrame),
+	}
 }
 
 func SubscribeJobProgress(jobID int64) <-chan []byte {
@@ -66,12 +85,12 @@ func (h *progressHub) subscribe(jobID int64, ch chan []byte) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.subscribers[jobID] == nil {
-		h.subscribers[jobID] = make(map[chan []byte]struct{})
+		h.subscribers[jobID] = make(map[chan []byte]*progressSubscriber)
 	}
 	if len(h.subscribers[jobID]) >= maxProgressSubscribersPerJob {
 		return false
 	}
-	h.subscribers[jobID][ch] = struct{}{}
+	h.subscribers[jobID][ch] = &progressSubscriber{ch: ch}
 	return true
 }
 
@@ -152,17 +171,45 @@ func (h *progressHub) publish(jobID int64) {
 		return
 	}
 
-	payload, err := marshalJobProgress(jobID, false)
+	frames, err := buildProgressFrames(jobID)
 	if err != nil {
 		log.Printf("Failed to marshal job %d progress stream payload: %v", jobID, err)
 		return
 	}
-	for _, ch := range subs {
-		sendProgressPayload(ch, payload)
+	h.dispatchFrames(jobID, subs, frames)
+}
+
+// dispatchFrames delivers one published observation to each subscriber, sending
+// a full snapshot to any whose diff baseline is no longer trustworthy.
+func (h *progressHub) dispatchFrames(jobID int64, subs []*progressSubscriber, frames *progressFrames) {
+	for _, sub := range subs {
+		// A subscriber that lost a frame gets the whole state instead of a diff
+		// it could not apply. The flag is only cleared once the snapshot is
+		// actually sitting in the buffer unevicted.
+		if h.subscriberNeedsSnapshot(jobID, sub) {
+			snapshot, err := frames.snapshot()
+			if err != nil {
+				log.Printf("Failed to marshal job %d progress snapshot: %v", jobID, err)
+				continue
+			}
+			queued, dropped := queueProgressPayload(sub.ch, snapshot)
+			if queued && !dropped {
+				h.setSubscriberNeedsSnapshot(jobID, sub, false)
+			}
+			continue
+		}
+
+		queued, dropped := queueProgressPayload(sub.ch, frames.update)
+		// Only a patch leaves the client dependent on the frame it just lost. A
+		// dropped full snapshot is self-contained, so the newer one replacing it
+		// is all the client needs.
+		if frames.isPatch && (dropped || !queued) {
+			h.setSubscriberNeedsSnapshot(jobID, sub, true)
+		}
 	}
 }
 
-func (h *progressHub) subscriberSnapshot(jobID int64) []chan []byte {
+func (h *progressHub) subscriberSnapshot(jobID int64) []*progressSubscriber {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -170,25 +217,54 @@ func (h *progressHub) subscriberSnapshot(jobID int64) []chan []byte {
 	if len(subs) == 0 {
 		return nil
 	}
-	channels := make([]chan []byte, 0, len(subs))
-	for ch := range subs {
-		channels = append(channels, ch)
+	subscribers := make([]*progressSubscriber, 0, len(subs))
+	for _, sub := range subs {
+		subscribers = append(subscribers, sub)
 	}
-	return channels
+	return subscribers
 }
 
-func sendProgressPayload(ch chan []byte, payload []byte) {
+func (h *progressHub) subscriberNeedsSnapshot(jobID int64, sub *progressSubscriber) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	// Re-read through the map: the subscriber may have unsubscribed since the
+	// snapshot was taken, and a stale pointer must not resurrect it.
+	current, ok := h.subscribers[jobID][sub.ch]
+	if !ok {
+		return false
+	}
+	return current.needsSnapshot
+}
+
+func (h *progressHub) setSubscriberNeedsSnapshot(jobID int64, sub *progressSubscriber, needs bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if current, ok := h.subscribers[jobID][sub.ch]; ok {
+		current.needsSnapshot = needs
+	}
+}
+
+// queueProgressPayload puts payload in ch, evicting an unread frame if the
+// buffer is full. It reports whether the payload was queued, and whether doing
+// so discarded a frame the client had not read yet.
+func queueProgressPayload(ch chan []byte, payload []byte) (queued, dropped bool) {
 	select {
 	case ch <- payload:
+		return true, false
 	default:
-		select {
-		case <-ch:
-		default:
-		}
-		select {
-		case ch <- payload:
-		default:
-		}
+	}
+	select {
+	case <-ch:
+		dropped = true
+	default:
+	}
+	select {
+	case ch <- payload:
+		return true, dropped
+	default:
+		// The reader took the slot between the eviction and this send, so its
+		// view is still whatever it just read — older than this payload.
+		return false, dropped
 	}
 }
 
@@ -204,6 +280,62 @@ func marshalJobProgress(jobID int64, snapshot bool) ([]byte, error) {
 	}
 	jobProgressHub.prepareStreamPayload(jobID, &current, snapshot)
 	return marshalProgressJSON(model.Success(current))
+}
+
+// progressFrames holds the frame to publish plus the means to render the same
+// observation as a full snapshot, for a subscriber that cannot apply a diff.
+//
+// Both come from ONE call to GetJobCurrent. Observing the job twice would let
+// the diff baseline and the resync snapshot describe different states, and the
+// client would then be corrected to a state the server no longer treats as its
+// baseline — the exact desync this resync exists to repair.
+type progressFrames struct {
+	update  []byte
+	isPatch bool
+
+	full      jobCurrentPayload
+	doingTask []streamDoingItem
+	plain     bool
+}
+
+// snapshot renders the observation as a self-contained frame.
+func (f *progressFrames) snapshot() ([]byte, error) {
+	if f.plain || !f.isPatch {
+		// Already a full frame; nothing to reconstruct.
+		return f.update, nil
+	}
+	full := f.full
+	full.DoingTask = f.doingTask
+	full.DoingPatch = nil
+	return marshalProgressJSON(model.Success(full))
+}
+
+func buildProgressFrames(jobID int64) (*progressFrames, error) {
+	data := GetJobCurrent(jobID, map[string]interface{}{})
+	if data == nil {
+		jobProgressHub.clearFrame(jobID)
+		payload, err := marshalProgressJSON(model.Success(nil))
+		return &progressFrames{update: payload, plain: true}, err
+	}
+	current, ok := data.(jobCurrentPayload)
+	if !ok {
+		payload, err := marshalProgressJSON(model.Success(data))
+		return &progressFrames{update: payload, plain: true}, err
+	}
+
+	// Captured before prepareStreamPayload clears DoingTask to emit a patch.
+	doingTask := current.DoingTask
+	isPatch := jobProgressHub.prepareStreamPayload(jobID, &current, false)
+	payload, err := marshalProgressJSON(model.Success(current))
+	if err != nil {
+		return nil, err
+	}
+	return &progressFrames{
+		update:    payload,
+		isPatch:   isPatch,
+		full:      current,
+		doingTask: doingTask,
+	}, nil
 }
 
 var progressJSONPool = sync.Pool{
@@ -275,7 +407,9 @@ func (item streamDoingItem) toPatch(includePaths bool) streamDoingPatch {
 	return patch
 }
 
-func (h *progressHub) prepareStreamPayload(jobID int64, payload *jobCurrentPayload, snapshot bool) {
+// prepareStreamPayload converts payload into either a full snapshot or a patch
+// relative to the previous frame, and reports whether it produced a patch.
+func (h *progressHub) prepareStreamPayload(jobID int64, payload *jobCurrentPayload, snapshot bool) bool {
 	doing := payload.DoingTask
 	patch := make([]streamDoingPatch, 0, len(doing))
 
@@ -327,10 +461,11 @@ func (h *progressHub) prepareStreamPayload(jobID int64, payload *jobCurrentPaylo
 	h.framesMu.Unlock()
 
 	if snapshot || !hasPrev || !sameTask || fileSetChanged {
-		return
+		return false
 	}
 	payload.DoingTask = nil
 	payload.DoingPatch = patch
+	return true
 }
 
 func (h *progressHub) clearFrame(jobID int64) {

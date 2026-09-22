@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState, type MutableRefObject } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import { Form } from "@douyinfe/semi-ui/lib/es/form";
 import Input from "@douyinfe/semi-ui/lib/es/input";
@@ -39,10 +39,16 @@ import {
   formatSchedulePlan,
   methodOptions,
 } from "./Home/homeUtils";
-import { fileSizeUnitOptions, type FileSizeUnit } from "./Home/fileSizeUnits";
+import {
+  fileSizeUnitOptions,
+  parseFileSizeInput,
+  type FileSizeUnit,
+} from "./Home/fileSizeUnits";
 import type { AlistItem, JobItem } from "../types";
 
 type CronFieldName = "second" | "minute" | "hour" | "day" | "month" | "day_of_week";
+type FileSizeDraftKey = "minFileSize" | "maxFileSize";
+type FileSizeDrafts = Partial<Record<FileSizeDraftKey, string>>;
 
 const taskEditorTabs = [
   { key: "engine", label: "引擎与路径" },
@@ -83,6 +89,7 @@ export default function TaskEditor({
   const { form, dirty, change, patch, setForm, setDirty } = useEditorForm<JobForm>(() =>
     job ? jobToForm(job) : defaultJobForm(engines[0]?.id),
   );
+  const fileSizeDrafts = useRef<FileSizeDrafts>({});
   const isNew = !job;
   const [step, setStep] = useState(0);
   const [activeTab, setActiveTab] = useState("engine");
@@ -101,14 +108,20 @@ export default function TaskEditor({
   };
   const previousStep = () => setStep((s) => Math.max(s - 1, 0));
   const save = () => {
-    const validation = validateJobForm(form);
+    const formToSave: JobForm = {
+      ...form,
+      minFileSize: fileSizeDrafts.current.minFileSize ?? form.minFileSize,
+      maxFileSize: fileSizeDrafts.current.maxFileSize ?? form.maxFileSize,
+    };
+    const validation = validateJobForm(formToSave);
     if (validation) {
       Toast.warning(validation);
       return;
     }
     void action.run(async () => {
       try {
-        await api.saveJob(buildJobPayload(form));
+        await api.saveJob(buildJobPayload(formToSave));
+        fileSizeDrafts.current = {};
         setDirty(false);
         Toast.success(job ? "编辑成功，下次任务生效" : "任务已创建");
         onSaved();
@@ -321,6 +334,7 @@ export default function TaskEditor({
                       form={form}
                       change={change}
                       patch={patch}
+                      drafts={fileSizeDrafts}
                     />
                   ))}
                 </div>
@@ -403,21 +417,18 @@ function FileSizeFilterRow({
   form,
   change,
   patch,
+  drafts,
 }: {
   kind: "min" | "max";
   form: JobForm;
   change: <K extends keyof JobForm>(key: K, value: JobForm[K]) => void;
   patch: (values: Partial<JobForm>) => void;
+  drafts: MutableRefObject<FileSizeDrafts>;
 }) {
   const config = fileSizeFilterDefaults[kind];
   const valueKey = `${kind}FileSize` as const;
   const unitKey = `${kind}FileSizeUnit` as const;
-  const currentValue = Number(form[valueKey]);
-  // draft holds exactly what the user typed while the field has focus. Without
-  // it, round-tripping every keystroke through Number() ate the decimal point
-  // ("1." -> 1), so typing 1.2 silently stored 12 — and a leading "0" parsed to
-  // 0, which flipped `enabled` off and disabled the input mid-entry, making
-  // "0.5" impossible to type.
+  const currentValue = parseFileSizeInput(form[valueKey]) ?? 0;
   const [draft, setDraft] = useState<string | null>(null);
   const editing = draft !== null;
   const enabled = editing || currentValue > 0;
@@ -429,17 +440,13 @@ function FileSizeFilterRow({
   const displayUnit = currentValue > 0 ? form[unitKey] : config.unit;
   const controlLabel = `${config.label}文件大小`;
 
-  const commitDraft = (raw: string) => {
+  const commitInput = (raw: string) => {
     setDraft(null);
-    const trimmed = raw.trim();
-    const parsed = Number(trimmed);
-    // An empty or unparseable field means "no limit" (0); a valid number is
-    // stored with its decimals intact.
+    delete drafts.current[valueKey];
+    const parsed = parseFileSizeInput(raw);
     change(
       valueKey,
-      (trimmed === "" || !Number.isFinite(parsed) || parsed < 0
-        ? 0
-        : parsed) as JobForm[typeof valueKey],
+      (parsed === null ? 0 : parsed) as JobForm[typeof valueKey],
     );
   };
 
@@ -451,6 +458,7 @@ function FileSizeFilterRow({
         onChange={(event) => {
           const checked = Boolean(event.target.checked);
           setDraft(null);
+          delete drafts.current[valueKey];
           patch({
             [valueKey]: checked
               ? currentValue > 0
@@ -467,9 +475,12 @@ function FileSizeFilterRow({
         inputMode="decimal"
         disabled={!enabled}
         value={displayValue}
-        onChange={(value) => setDraft(value)}
+        onChange={(value) => {
+          setDraft(value);
+          drafts.current[valueKey] = value;
+        }}
         onBlur={(event) =>
-          commitDraft((event.target as HTMLInputElement).value ?? "")
+          commitInput((event.target as HTMLInputElement).value ?? "")
         }
       />
       <Select

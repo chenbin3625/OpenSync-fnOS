@@ -34,8 +34,9 @@ func AddNotify(c *gin.Context) {
 		respondError(c, msg.LostPart)
 		return
 	}
-	service.AddNewNotify(notify)
-	respondOK(c, nil)
+	// The created id is returned so a client can address the new row directly
+	// instead of guessing it from the tail of GET /svr/notify.
+	respondOK(c, gin.H{"id": service.AddNewNotify(notify)})
 }
 
 // TestNotify handles POST /svr/notify/test

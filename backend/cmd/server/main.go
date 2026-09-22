@@ -134,8 +134,14 @@ func main() {
 	config.GetConfig()
 	platform.LogOriginPolicy(config.GetConfig().Server.AllowedOrigins)
 	mapper.InitSQL()
-	defer mapper.CloseDB()
+	// ShutdownDB, not CloseDB: a straggler (debounced persist flush, cron tick)
+	// reaching GetDB afterwards must fail rather than reopen the database and
+	// recreate the files shutdown just released.
+	defer mapper.ShutdownDB()
 	service.InitJobs()
+	// Completion notifications are delivered by background workers so a slow or
+	// unreachable webhook cannot hold up a finishing task.
+	service.StartNotifyDispatcher()
 	stopRetention := service.StartTaskRetentionScheduler()
 	defer stopRetention()
 	var listener net.Listener
@@ -194,6 +200,10 @@ func main() {
 	shutdown, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	service.ShutdownJobs(shutdown)
+	// Drain queued notifications after the jobs stop (stopping them enqueues the
+	// last ones) and within the same deadline, so a wedged webhook delays exit by
+	// at most shutdownTimeout instead of indefinitely.
+	service.ShutdownNotifyDispatcher(shutdown)
 	// Ends the SSE handlers before Shutdown waits on them.
 	cancelRequests()
 	if server.Shutdown(shutdown) != nil {

@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, serializeParams, apiBase, request } from "../src/api/client";
+import {
+  api,
+  serializeParams,
+  apiBase,
+  request,
+  warnIfTruncated,
+} from "../src/api/client";
 import { jobGetTaskCurrent } from "../src/api/job";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -81,5 +87,32 @@ describe("gateway-aware API requests", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(request("/job")).rejects.toThrow("真实后端错误");
+  });
+  it("reports a truncated list instead of rendering it as complete", () => {
+    // The backend caps an unpaginated list at its row limit and marks the
+    // response. Nothing read the flag, so a short list looked like the whole
+    // thing.
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(
+        warnIfTruncated("/job", {
+          dataList: [{ id: 1 }],
+          count: 900,
+          truncated: true,
+        }),
+      ).toBe(true);
+      expect(error).toHaveBeenCalledOnce();
+      expect(String(error.mock.calls[0][0])).toContain("pageNum/pageSize");
+
+      error.mockClear();
+      expect(
+        warnIfTruncated("/job", { dataList: [{ id: 1 }], count: 1 }),
+      ).toBe(false);
+      expect(warnIfTruncated("/notify", [{ id: 1 }])).toBe(false);
+      expect(warnIfTruncated("/session", null)).toBe(false);
+      expect(error).not.toHaveBeenCalled();
+    } finally {
+      error.mockRestore();
+    }
   });
 });

@@ -5,23 +5,59 @@ on:
     tags:
       - "v*"
 
+# Read-only by default. Only the job that publishes the Release widens this,
+# so a compromised dependency in the test/build steps cannot push commits,
+# move tags, or rewrite releases.
 permissions:
-  contents: write
+  contents: read
 
+# Every action below is pinned to a commit SHA rather than a floating major tag:
+# a tag can be repointed at new code, which would silently change what runs in
+# the job that builds and publishes our release. The trailing comment on each
+# `uses:` records the human-readable version that SHA corresponds to.
 jobs:
+  version:
+    name: Verify version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # The tag is what users install; the manifest version is what fnOS shows
+      # and what the artifact filenames carry. Publishing them out of sync
+      # ships a package that claims a different version than the release.
+      - name: Tag matches manifest and package.json
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          manifest="$(sed -n 's/^version=//p' fnos/manifest)"
+          pkg="$(node -p "require('./frontend/package.json').version")"
+          echo "tag=$tag manifest=$manifest package.json=$pkg"
+          if [ -z "$manifest" ]; then
+            echo "::error::fnos/manifest 未声明 version"
+            exit 1
+          fi
+          if [ "$tag" != "$manifest" ]; then
+            echo "::error::Git tag ($tag) 与 fnos/manifest ($manifest) 版本不一致"
+            exit 1
+          fi
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::Git tag ($tag) 与 frontend/package.json ($pkg) 版本不一致"
+            exit 1
+          fi
+
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
@@ -53,29 +89,41 @@ jobs:
 
   build:
     name: Build and upload
-    needs: test
+    needs: [version, test]
     runs-on: ubuntu-latest
+    # Only this job may create the Release. Scoped here instead of at workflow
+    # level so test/e2e run without any write token in their environment.
+    permissions:
+      contents: write
     env:
       FNPACK_VERSION: "1.2.3"
+      # fnpack is a third-party binary fetched over the network with no vendor
+      # signature or published checksum. Pinning the hash we verified for this
+      # version means a swapped or tampered download fails the build instead of
+      # silently packaging our release with an unknown tool. Bumping
+      # FNPACK_VERSION requires updating this hash in the same commit.
+      FNPACK_SHA256: "54b97fa7b70968c4d05c79840f5daeff508957d0bb2062fdb0376d00d9615c93"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
 
-      - name: Download fnpack
+      - name: Download and verify fnpack
         run: |
-          curl -fsSL --retry 3 -o /usr/local/bin/fnpack \
+          set -euo pipefail
+          curl -fsSL --retry 3 -o /tmp/fnpack \
             "https://static2.fnnas.com/fnpack/fnpack-${FNPACK_VERSION}-linux-amd64"
-          chmod +x /usr/local/bin/fnpack
+          echo "${FNPACK_SHA256}  /tmp/fnpack" | sha256sum --check --strict
+          install -m 0755 /tmp/fnpack /usr/local/bin/fnpack
 
       - name: Build release artifacts
         run: node scripts/release.mjs --skip-tests

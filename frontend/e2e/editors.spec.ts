@@ -123,6 +123,93 @@ test("task editor keeps size filters disabled until selected", async ({
   await expect(systemDirFilter).toHaveCSS("border-radius", "8px");
 });
 
+test("saves a fractional file-size threshold while the input is focused", async ({
+  page,
+}) => {
+  let saved: Record<string, unknown> | null = null;
+  await page.route("**/app/opensync/svr/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const success = (data: unknown) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ code: 200, data, msg: "" }),
+      });
+    if (url.pathname.endsWith("/session")) {
+      return success({ uid: 1, development: false, version: "test" });
+    }
+    if (
+      url.pathname.endsWith("/alist") &&
+      url.searchParams.has("alistId")
+    ) {
+      return success([]);
+    }
+    if (url.pathname.endsWith("/alist")) {
+      return success([
+        { id: 1, remark: "测试引擎", url: "https://engine.test", userName: "a" },
+      ]);
+    }
+    if (url.pathname.endsWith("/job") && request.method() === "POST") {
+      saved = request.postDataJSON() as Record<string, unknown>;
+      return success(null);
+    }
+    if (url.pathname.endsWith("/job") && url.searchParams.get("current")) {
+      return success(null);
+    }
+    if (url.pathname.endsWith("/job")) {
+      return success({
+        dataList: [
+          {
+            id: 42,
+            enable: 1,
+            remark: "过滤任务",
+            alistId: 1,
+            srcPath: "[\"/Photos\"]",
+            dstPath: "[\"/Backup\"]",
+            method: 0,
+            isCron: 2,
+            interval: 1440,
+            minFileSize: 0,
+            maxFileSize: 0,
+            exclude: "",
+          },
+        ],
+        count: 1,
+      });
+    }
+    return success(null);
+  });
+
+  await page.goto("/app/opensync/tasks?jobId=42");
+  await page
+    .locator(".overview-card")
+    .getByRole("button", { name: "更多操作", exact: true })
+    .click();
+  await page.locator(".semi-dropdown-menu").getByText("设置", { exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await page.getByRole("tab", { name: "文件过滤", exact: true }).click();
+
+  const minRow = dialog.locator(".file-size-filter-row").filter({ hasText: "排除小于" });
+  await minRow.locator(".semi-checkbox").click();
+  await minRow.locator(".semi-select").click();
+  await page.locator(".semi-select-option").filter({ hasText: "MB" }).click();
+  await expect(minRow.locator(".semi-select")).toContainText("MB");
+  const input = minRow.getByRole("textbox", { name: "排除小于文件大小" });
+  await input.click();
+  await input.press("ControlOrMeta+A");
+  await input.type("1.2");
+  await expect(input).toHaveValue("1.2");
+  await dialog.locator("form").evaluate((form: HTMLFormElement) => {
+    form.requestSubmit();
+  });
+
+  await expect.poll(() => saved).not.toBeNull();
+  expect(saved).toMatchObject({
+    minFileSize: Math.round(1.2 * 1024 ** 2),
+    maxFileSize: 0,
+  });
+});
+
 test("task editor provides preset and custom file type filters", async ({
   page,
 }) => {

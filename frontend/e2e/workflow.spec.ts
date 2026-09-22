@@ -80,10 +80,23 @@ test("sends a webhook template and preserves masked credentials when editing", a
     await expect.poll(() => webhookCalls).toBe(initialCalls + 1);
     expect(webhookBody).toHaveProperty("subject");
     expect(JSON.stringify(webhookBody)).not.toContain("{title}");
-    await page.getByRole("button", { name: "保存", exact: true }).click();
+    // The id is read from the create response rather than the tail of the list:
+    // the finally block deletes it, and "last item" would be someone else's
+    // real notification config whenever the list is not insertion-ordered.
+    const [createResponse] = await Promise.all([
+      // The path has to match exactly: this test sends a test notification
+      // first, and POST /svr/notify/test also contains "/svr/notify" while
+      // returning a null data payload.
+      page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === "/app/opensync/svr/notify" &&
+          response.request().method() === "POST",
+      ),
+      page.getByRole("button", { name: "保存", exact: true }).click(),
+    ]);
     await expect(page.getByRole("dialog")).not.toBeVisible();
-    const result = await (await request.get("/app/opensync/svr/notify")).json();
-    id = result.data.at(-1).id;
+    id = (await createResponse.json()).data.id;
+    expect(id).toBeTruthy();
     const card = page
       .getByLabel(`通知 ${id} 开关`, { exact: true })
       .locator("xpath=ancestor::*[contains(@class, 'notification-item')][1]");

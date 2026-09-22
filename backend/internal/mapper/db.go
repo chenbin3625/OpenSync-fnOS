@@ -21,6 +21,15 @@ var (
 	db   *sql.DB
 	once = &sync.Once{}
 	dbMu sync.RWMutex
+	// closedDB is the handle ShutdownDB tore down. GetDB hands it back instead
+	// of opening a new one, so a straggler goroutine gets "sql: database is
+	// closed" rather than a nil handle to dereference.
+	closedDB *sql.DB
+	// shutdown records that the process is exiting for good. Without it any
+	// caller reaching GetDB after CloseDB — a debounced persist timer, a cron
+	// tick, an in-flight request — silently re-opened the database, recreating
+	// the file and its WAL after shutdown had deliberately released them.
+	shutdown bool
 )
 
 // currentOnce reads the once guard under dbMu. CloseDB replaces it, so reading
@@ -31,8 +40,12 @@ func currentOnce() *sync.Once {
 	return once
 }
 
-const maxPageSize = 500
-const defaultUnpagedLimit = 500
+// MaxPageSize is the largest page a caller can request, and also the cap applied
+// to a request that omits pagination entirely.
+const MaxPageSize = 500
+
+const maxPageSize = MaxPageSize
+const defaultUnpagedLimit = MaxPageSize
 const sqliteMaxOpenConns = 12
 
 // InitDB initializes the database connection
@@ -137,11 +150,20 @@ func sqliteDSN(dbName string) string {
 	return "file:" + dbName + "?" + query
 }
 
-// GetDB returns the database connection
+// GetDB returns the database connection.
+//
+// After ShutdownDB it returns the closed handle instead of opening a new one:
+// every query then fails with "sql: database is closed", which is what a caller
+// running past shutdown should see.
 func GetDB() *sql.DB {
 	dbMu.RLock()
 	if db != nil {
 		handle := db
+		dbMu.RUnlock()
+		return handle
+	}
+	if shutdown {
+		handle := closedDB
 		dbMu.RUnlock()
 		return handle
 	}
@@ -150,15 +172,40 @@ func GetDB() *sql.DB {
 }
 
 // CloseDB closes the global database handle and allows later reinitialization.
+// Use ShutdownDB on the process exit path; this exists for callers that intend
+// to open the database again afterwards.
 func CloseDB() error {
 	dbMu.Lock()
 	defer dbMu.Unlock()
+	return closeDBLocked(false)
+}
+
+// ShutdownDB closes the handle for good: a later GetDB will not reopen it.
+//
+// CloseDB alone only cleared the handle and reset the once guard, so anything
+// still running — a debounced persist flush, the retention cron, a request that
+// outlived the server — reopened the database through GetDB and recreated the
+// file and WAL that shutdown had just released.
+func ShutdownDB() error {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+	return closeDBLocked(true)
+}
+
+func closeDBLocked(forGood bool) error {
+	if forGood {
+		shutdown = true
+	}
 	if db == nil {
 		return nil
 	}
-	err := db.Close()
+	handle := db
+	err := handle.Close()
 	db = nil
 	once = &sync.Once{}
+	if forGood {
+		closedDB = handle
+	}
 	return err
 }
 
@@ -265,7 +312,9 @@ func ExecuteMany(query string, argsList [][]interface{}) error {
 }
 
 // FetchAllToPage executes a paginated query with a window count when SQLite
-// can keep the list and total in one round-trip.
+// can keep the list and total in one round-trip. A request that omits pagination
+// is capped at defaultUnpagedLimit rows and fails when the result would not fit,
+// rather than returning a short list next to the full count.
 func FetchAllToPage(baseSQL string, params map[string]interface{}, sqlArgs ...interface{}) (map[string]interface{}, error) {
 	ps, pn, paginated, err := parsePageParams(params)
 	if err != nil {
@@ -284,7 +333,7 @@ func FetchAllToPage(baseSQL string, params map[string]interface{}, sqlArgs ...in
 const pageTotalColumn = "__opensync_page_total"
 
 func fetchPage(baseSQL string, limit int, offset int64, paginated bool, sqlArgs []interface{}) (map[string]interface{}, error) {
-	query, args, window := pageQuery(baseSQL, limit, offset, paginated, sqlArgs)
+	query, args, _ := pageQuery(baseSQL, limit, offset, paginated, sqlArgs)
 	dataList, err := FetchAllToTable(query, args...)
 	if err != nil {
 		return nil, err
@@ -301,11 +350,15 @@ func fetchPage(baseSQL string, limit int, offset int64, paginated bool, sqlArgs 
 			total = util.ToInt64(count)
 		}
 	}
-	result := map[string]interface{}{"dataList": dataList, "count": total}
-	if !paginated && window && total > int64(len(dataList)) {
-		result["truncated"] = true
+	if !paginated && total > int64(len(dataList)) {
+		// An unpaginated request that hits the cap used to answer with the first
+		// `limit` rows and the real total, plus a "truncated" flag no caller ever
+		// read: the response looked complete while rows were missing. Refusing it
+		// puts the choice back with the caller, which can page or narrow the
+		// filter.
+		return nil, errors.New(msg.ListTooLarge)
 	}
-	return result, nil
+	return map[string]interface{}{"dataList": dataList, "count": total}, nil
 }
 
 func pageQuery(baseSQL string, limit int, offset int64, paginated bool, sqlArgs []interface{}) (string, []interface{}, bool) {
@@ -316,10 +369,11 @@ func pageQuery(baseSQL string, limit int, offset int64, paginated bool, sqlArgs 
 		}
 		return query + " LIMIT ?", appendSQLArgs(sqlArgs, limit), true
 	}
+	wrapped := "SELECT * FROM (" + baseSQL + ")"
 	if paginated {
-		return baseSQL + " LIMIT ? OFFSET ?", appendSQLArgs(sqlArgs, limit, offset), false
+		return wrapped + " LIMIT ? OFFSET ?", appendSQLArgs(sqlArgs, limit, offset), false
 	}
-	return baseSQL + " LIMIT ?", appendSQLArgs(sqlArgs, limit), false
+	return wrapped + " LIMIT ?", appendSQLArgs(sqlArgs, limit), false
 }
 
 func appendSQLArgs(args []interface{}, extra ...interface{}) []interface{} {

@@ -272,6 +272,11 @@ describe("existing synchronization contracts", () => {
       srcPath: '["/a"]',
       dstPath: '["/b"]',
       method: 2,
+      enable: 1,
+      useCacheS: 0,
+      useCacheT: 0,
+      interval: 0,
+      isCron: 2,
     });
 
     expect(form.method).toBe(0);

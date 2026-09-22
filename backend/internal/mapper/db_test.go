@@ -16,6 +16,12 @@ func resetGlobalDBForTest(t *testing.T, cfg *config.Config) {
 	dbMu.Lock()
 	oldDB := db
 	oldOnce := once
+	oldShutdown := shutdown
+	oldClosedDB := closedDB
+	// A test that calls ShutdownDB latches the package-level guard, which would
+	// leave every later test in this package unable to open a database.
+	shutdown = false
+	closedDB = nil
 	dbMu.Unlock()
 	oldConfig := config.GetConfig()
 	t.Cleanup(func() {
@@ -25,6 +31,8 @@ func resetGlobalDBForTest(t *testing.T, cfg *config.Config) {
 		}
 		db = oldDB
 		once = oldOnce
+		shutdown = oldShutdown
+		closedDB = oldClosedDB
 		dbMu.Unlock()
 		config.SetConfigForTest(oldConfig)
 	})

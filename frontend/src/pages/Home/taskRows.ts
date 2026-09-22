@@ -60,7 +60,13 @@ export function realtimeTaskPageMatches(
 }
 
 export function normalizeTaskItemPage(
-  data: CurrentTaskData | PageData<TaskItem> | TaskItem[] | null | undefined,
+  data:
+    | CurrentTaskData
+    | RealtimeTaskItemPage
+    | PageData<TaskItem>
+    | TaskItem[]
+    | null
+    | undefined,
   expected?: RealtimeTaskPageIdentity,
 ): { rows: TaskItem[]; total: number } {
   if (!data) return { rows: [], total: 0 };

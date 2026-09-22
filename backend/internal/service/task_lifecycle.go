@@ -29,12 +29,14 @@ func (jt *JobTask) finishSuccessfulTask() {
 		jt.finishFailedTask(taskStatusUpdateErrorMessage(err))
 		return
 	}
-	// Mark the job idle after the DB update succeeds, before synchronous
-	// notification delivery can block the next run.
+	// Mark the job idle after the DB update succeeds, before notification
+	// delivery is handed off, so the next run is never gated on it.
 	jt.JobClient.markDone()
 	jt.JobClient.clearCurrentTask(jt)
 	jt.notifyProgressNow()
-	SendTaskNotification(jt.TaskID, status.Int(), taskNum, duration, jt.CreateTime)
+	// Queued rather than sent here: delivery costs one HTTP timeout per
+	// unreachable destination, and the task is already finished.
+	QueueTaskNotification(jt.TaskID, status.Int(), taskNum, duration, jt.CreateTime)
 }
 
 func taskPersistenceErrorMessage(err error) string {

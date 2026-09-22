@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const currentVersion = 260920
+const currentVersion = 260922
 
 // InitSQL initializes the database schema and runs migrations
 func InitSQL() {
@@ -102,6 +102,9 @@ func InitSQL() {
 				enable integer DEFAULT 1,
 				method integer,
 				params text,
+				lastSendStatus integer DEFAULT 0,
+				lastSendTime integer DEFAULT 0,
+				lastSendError text DEFAULT NULL,
 				createTime integer DEFAULT (strftime('%s', 'now'))
 			)`,
 		)
@@ -264,6 +267,16 @@ func migrationStatements(fromVersion int64) []string {
 			"DELETE FROM schema_version",
 			fmt.Sprintf("INSERT INTO schema_version(version) VALUES(%d)", currentVersion),
 			"DROP TABLE IF EXISTS user_list",
+		)
+	}
+	if fromVersion < 260922 {
+		// Delivery outcome per notify config. Task-completion sends used to fail
+		// with nothing but a log line, so the UI showed a healthy config while
+		// every message was being rejected.
+		stmts = append(stmts,
+			"ALTER TABLE notify ADD COLUMN lastSendStatus integer DEFAULT 0",
+			"ALTER TABLE notify ADD COLUMN lastSendTime integer DEFAULT 0",
+			"ALTER TABLE notify ADD COLUMN lastSendError text DEFAULT NULL",
 		)
 	}
 	stmts = append(stmts, fmt.Sprintf("UPDATE schema_version SET version=%d", currentVersion))

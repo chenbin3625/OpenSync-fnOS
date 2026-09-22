@@ -222,11 +222,14 @@ test("task management expands in the sidebar and lists task names", async ({
 test("task tabs and page commands share an integrated toolbar row", async ({
   page,
 }) => {
-  for (const [path, tab, action] of [
-    ["tasks?tab=overview", "总览", "新建任务"],
-    ["tasks?tab=realtime", "实时任务", null],
-    ["tasks?tab=history", "历史任务", null],
-  ]) {
+  // Typed explicitly: inferred as (string | null)[] the tab name was not
+  // assignable to getByRole's `name`, and only `action` is ever null.
+  const toolbars: { path: string; tab: string; action: string | null }[] = [
+    { path: "tasks?tab=overview", tab: "总览", action: "新建任务" },
+    { path: "tasks?tab=realtime", tab: "实时任务", action: null },
+    { path: "tasks?tab=history", tab: "历史任务", action: null },
+  ];
+  for (const { path, tab, action } of toolbars) {
     await page.goto(`/app/opensync/${path}`);
     const toolbar = page.locator(".page-toolbar");
     await expect(toolbar).toHaveCSS("border-radius", "8px 8px 0px 0px");
@@ -441,27 +444,30 @@ test("data fixture renders inspectable engine, task and notification rows", asyn
       (item: { remark: string }) => item.remark === name,
     ).id;
 
-    await request.post("/app/opensync/svr/notify", {
-      data: {
-        notify: {
-          method: 0,
-          enable: 1,
-          params: JSON.stringify({
-            url: engineUrl + "/hook",
-            httpMethod: "POST",
-            contentType: "application/json",
-            needContent: true,
-            titleName: "title",
-            contentName: "content",
-            notSendNull: false,
-          }),
+    // The id comes from the create response, never from the tail of the list:
+    // the finally block deletes notifyId, so guessing it would delete whatever
+    // config happened to sort last in the user's real data.
+    const created = await (
+      await request.post("/app/opensync/svr/notify", {
+        data: {
+          notify: {
+            method: 0,
+            enable: 1,
+            params: JSON.stringify({
+              url: engineUrl + "/hook",
+              httpMethod: "POST",
+              contentType: "application/json",
+              needContent: true,
+              titleName: "title",
+              contentName: "content",
+              notSendNull: false,
+            }),
+          },
         },
-      },
-    });
-    const notifications = await (
-      await request.get("/app/opensync/svr/notify")
+      })
     ).json();
-    notifyId = notifications.data.at(-1).id;
+    notifyId = created.data.id;
+    expect(notifyId).toBeTruthy();
 
     await page.goto("/app/opensync/engines");
     const engineCard = page

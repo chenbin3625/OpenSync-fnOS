@@ -72,3 +72,67 @@ func TestNotifyTargetChangedGuardsSecretMerge(t *testing.T) {
 		})
 	}
 }
+
+// A name-based list of sensitive parameters can never be complete. Real webhook
+// URLs carry credentials under k, sig, sign, auth, pwd and other short names,
+// all of which used to be returned in cleartext.
+func TestMaskNotifyURLMasksEveryQueryValue(t *testing.T) {
+	cases := []struct {
+		name   string
+		rawURL string
+		secret string
+	}{
+		{"short key name", "https://sctapi.example/send?k=SUPERSECRETVALUE", "SUPERSECRETVALUE"},
+		{"signature", "https://oapi.example/robot?sig=SUPERSECRETVALUE", "SUPERSECRETVALUE"},
+		{"auth", "https://hook.example/push?auth=SUPERSECRETVALUE", "SUPERSECRETVALUE"},
+		{"sign", "https://hook.example/push?sign=SUPERSECRETVALUE", "SUPERSECRETVALUE"},
+		{"password", "https://hook.example/push?pwd=SUPERSECRETVALUE", "SUPERSECRETVALUE"},
+		{"opaque single letter", "https://hook.example/push?u=SUPERSECRETVALUE", "SUPERSECRETVALUE"},
+		{"known name still masked", "https://oapi.example/robot?access_token=SUPERSECRETVALUE", "SUPERSECRETVALUE"},
+		{"second parameter", "https://hook.example/push?id=7&t=SUPERSECRETVALUE", "SUPERSECRETVALUE"},
+		{"percent-encoded value", "https://hook.example/push?k=SUPER%2FSECRETVALUE", "SECRETVALUE"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := maskNotifyURL(tc.rawURL)
+			if strings.Contains(got, tc.secret) {
+				t.Fatalf("maskNotifyURL(%q) = %q, still contains %q", tc.rawURL, got, tc.secret)
+			}
+			if !strings.Contains(got, "hook.example") &&
+				!strings.Contains(got, "oapi.example") &&
+				!strings.Contains(got, "sctapi.example") {
+				t.Fatalf("maskNotifyURL(%q) = %q, host should stay visible", tc.rawURL, got)
+			}
+		})
+	}
+}
+
+// A query string url.ParseQuery rejects used to be written back verbatim,
+// because nothing was recognised as maskable and RawQuery was left untouched.
+func TestMaskNotifyURLMasksUnparseableQuery(t *testing.T) {
+	got := maskNotifyURL("https://hook.example/push?token=SUPERSECRETVALUE&%zz")
+	if strings.Contains(got, "SUPERSECRETVALUE") {
+		t.Fatalf("maskNotifyURL leaked a secret from an unparseable query: %q", got)
+	}
+}
+
+// Masking must not turn the summary into something unrecognisable: the host and
+// the parameter names stay, only values are replaced.
+func TestMaskNotifyURLKeepsParameterNamesAndOrder(t *testing.T) {
+	got := maskNotifyURL("https://hook.example/push?id=7&access_token=SUPERSECRETVALUE&debug")
+	for _, want := range []string{"hook.example", "id=", "access_token=", "debug"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("maskNotifyURL() = %q, want it to keep %q", got, want)
+		}
+	}
+	if strings.Index(got, "id=") > strings.Index(got, "access_token=") {
+		t.Fatalf("maskNotifyURL() = %q, parameter order changed", got)
+	}
+}
+
+func TestRedactNotifyParamsMasksShortQueryParamNames(t *testing.T) {
+	out := redactNotifyParams(2, `{"url":"https://oapi.example.com/robot/send?k=SUPERSECRETVALUE"}`)
+	if strings.Contains(out, "SUPERSECRETVALUE") {
+		t.Fatalf("redactNotifyParams leaked a short-named query secret:\n%s", out)
+	}
+}

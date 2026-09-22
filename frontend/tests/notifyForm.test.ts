@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   buildNotifyParams,
+  notifyDeliveryState,
+  notifySendStatus,
   notifyToForm,
   validateNotifyForm,
 } from "../src/lib/notifyForm";
@@ -79,5 +81,93 @@ describe("notification compatibility", () => {
         url: "javascript:alert(1)",
       }),
     ).toContain("URL");
+  });
+  it("passes the untouched redaction marker straight through", () => {
+    // The backend replaces a redacted headers value with exactly "****" and a
+    // body template with exactly "******"; both must round-trip unchanged so
+    // saving an unedited form keeps the stored credentials.
+    expect(
+      buildNotifyParams({
+        method: 0,
+        enable: true,
+        url: "https://example.com",
+        headers: "****",
+        body: "******",
+      }),
+    ).toMatchObject({ headers: "****", body: "******" });
+    expect(
+      validateNotifyForm({
+        method: 0,
+        enable: true,
+        url: "https://example.com",
+        headers: "****",
+        body: "******",
+      }),
+    ).toBe("");
+  });
+  it("rejects malformed JSON that merely contains the marker", () => {
+    // `includes("****")` used to short-circuit here, so this was submitted as a
+    // bare string and silently discarded by the backend instead of reported.
+    expect(
+      validateNotifyForm({
+        method: 0,
+        enable: true,
+        url: "https://example.com",
+        headers: '{"Authorization":"****"',
+      }),
+    ).toContain("JSON");
+    expect(() =>
+      buildNotifyParams({
+        method: 0,
+        enable: true,
+        url: "https://example.com",
+        headers: '{"Authorization":"****"',
+      }),
+    ).toThrow();
+  });
+  it("still rejects a JSON array of headers that contains the marker", () => {
+    expect(
+      validateNotifyForm({
+        method: 0,
+        enable: true,
+        url: "https://example.com",
+        headers: '["****"]',
+      }),
+    ).toContain("JSON");
+  });
+});
+
+describe("notification delivery state", () => {
+  it("reports a failure with its reason", () => {
+    expect(
+      notifyDeliveryState({
+        lastSendStatus: notifySendStatus.failed,
+        lastSendError: "notify request failed: 403 Forbidden",
+      }),
+    ).toEqual({
+      tone: "error",
+      label: "最近一次发送失败",
+      reason: "notify request failed: 403 Forbidden",
+    });
+  });
+  it("reports a failure without a stored reason", () => {
+    expect(
+      notifyDeliveryState({
+        lastSendStatus: notifySendStatus.failed,
+        lastSendError: "   ",
+      }),
+    ).toEqual({ tone: "error", label: "最近一次发送失败" });
+  });
+  it("reports a success as muted meta text", () => {
+    expect(
+      notifyDeliveryState({ lastSendStatus: notifySendStatus.success }),
+    ).toEqual({ tone: "muted", label: "最近一次发送成功" });
+  });
+  it("shows nothing for a config that was never used", () => {
+    // 新建渠道没有投递记录，显示"失败"或"成功"都是假信息。
+    expect(notifyDeliveryState({})).toBeNull();
+    expect(
+      notifyDeliveryState({ lastSendStatus: notifySendStatus.unknown }),
+    ).toBeNull();
   });
 });

@@ -1354,8 +1354,15 @@ test("switching realtime tab clears the previous tab rows immediately", async ({
   await expect(visibleList.getByText("running-file.txt")).toBeVisible({
     timeout: 8000,
   });
+  const previousTable = await visibleList.elementHandle();
+  expect(previousTable).not.toBeNull();
 
   await page.getByRole("tab", { name: /成功/ }).click();
+
+  // 切换状态时直接重建表格，避免 Semi Table 复用上一 tab 的内部状态。
+  await expect
+    .poll(() => previousTable?.evaluate((element) => element.isConnected))
+    .toBe(false);
 
   // 成功 tab 的响应还在路上，运行中的行必须立刻消失，
   // 否则就是上一个 tab 的脏数据残留。

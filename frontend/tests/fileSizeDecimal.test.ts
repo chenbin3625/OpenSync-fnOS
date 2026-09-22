@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   fileSizeToBytes,
+  parseFileSizeInput,
   splitBytesToFileSize,
 } from "../src/pages/Home/fileSizeUnits";
 
@@ -30,5 +31,10 @@ describe("fractional file size thresholds", () => {
 
   it("does not confuse 1.2 with 12", () => {
     expect(fileSizeToBytes(1.2, "MB")).not.toBe(fileSizeToBytes(12, "MB"));
+  });
+
+  it("parses the raw decimal text kept by the editor", () => {
+    expect(parseFileSizeInput("1.2")).toBe(1.2);
+    expect(fileSizeToBytes("1.2", "MB")).toBe(Math.round(1.2 * 1024 ** 2));
   });
 });

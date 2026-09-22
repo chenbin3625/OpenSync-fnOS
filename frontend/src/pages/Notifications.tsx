@@ -28,12 +28,29 @@ import {
   buildNotifyParams,
   channelNames,
   defaultNotifyForm,
+  notifyDeliveryState,
   notifyToForm,
   supportedWebhookMethods,
   validateNotifyForm,
   type NotifyForm,
 } from "../lib/notifyForm";
+import { formatTimestamp } from "../utils/date";
 import type { NotifyItem } from "../types";
+
+// 后台投递的结果只存在配置行上，不显示就等于没有反馈：令牌过期的渠道会一直安静
+// 地失败，用户以为通知正常。
+function DeliveryNote({ item }: { item: NotifyItem }) {
+  const delivery = notifyDeliveryState(item);
+  if (!delivery) return null;
+  const time = Number(item.lastSendTime || 0);
+  return (
+    <div className={delivery.tone === "error" ? "inline-error" : "item-meta"}>
+      {delivery.label}
+      {time > 0 ? ` · ${formatTimestamp(time, true)}` : ""}
+      {delivery.reason ? `：${delivery.reason}` : ""}
+    </div>
+  );
+}
 
 export default function Notifications() {
   const resource = useResource((signal) => api.notifications(signal));
@@ -107,6 +124,7 @@ export default function Notifications() {
                     }
                   })() || "—"}
                 </div>
+                <DeliveryNote item={item} />
               </div>
               <div className="row-actions">
                 <Switch

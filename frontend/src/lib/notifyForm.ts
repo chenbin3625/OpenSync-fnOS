@@ -8,6 +8,36 @@ export const channelNames = [
   "飞书 / Lark",
 ];
 export const supportedWebhookMethods = ["POST", "GET", "PUT"] as const;
+
+/** 与后端 notifySendStatus* 常量一致。 */
+export const notifySendStatus = { unknown: 0, success: 1, failed: 2 } as const;
+
+export interface NotifyDeliveryState {
+  tone: "muted" | "error";
+  label: string;
+  reason?: string;
+}
+
+// 任务完成通知在后台投递，失败此前只写进日志，界面看不到任何异常。这里把行里
+// 记录的投递结果翻译成卡片上的一行提示：从未投递过就不显示，避免新建的渠道被
+// 误认为出过问题。
+export function notifyDeliveryState(
+  item: Pick<NotifyItem, "lastSendStatus" | "lastSendError">,
+): NotifyDeliveryState | null {
+  const status = Number(item.lastSendStatus ?? notifySendStatus.unknown);
+  if (status === notifySendStatus.failed) {
+    const reason = (item.lastSendError || "").trim();
+    return {
+      tone: "error",
+      label: "最近一次发送失败",
+      ...(reason ? { reason } : {}),
+    };
+  }
+  if (status === notifySendStatus.success) {
+    return { tone: "muted", label: "最近一次发送成功" };
+  }
+  return null;
+}
 export interface NotifyForm {
   method: number;
   enable: boolean;
@@ -41,9 +71,20 @@ export function defaultNotifyForm(): NotifyForm {
     touser: "@all",
   };
 }
+// The backend replaces a redacted headers/body value with the marker in full
+// ("****" / "******"), never with JSON that merely contains it. Matching the
+// whole trimmed value — instead of `includes("****")` — keeps the untouched
+// round-trip working while malformed JSON such as {"A":"****" is rejected here
+// rather than submitted as a bare string and silently ignored on save.
+const redactedMarkers = ["****", "******"];
+
+function isRedactedPlaceholder(value: string): boolean {
+  return redactedMarkers.includes(value.trim());
+}
+
 function parseObject(value?: string): unknown {
   if (!value?.trim()) return undefined;
-  if (value.includes("****")) return value;
+  if (isRedactedPlaceholder(value)) return value.trim();
   const parsed: unknown = JSON.parse(value);
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
     throw new Error("请输入有效 JSON 对象");

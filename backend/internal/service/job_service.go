@@ -150,6 +150,11 @@ func CleanJobInput(job map[string]interface{}) {
 	}
 	if job["exclude"] != nil {
 		excludeStr := fmt.Sprintf("%v", job["exclude"])
+		// Rejected before normalization, because normalizeExclude is exactly the
+		// step that would drop these lines without a trace.
+		if invalid := invalidExcludeRules(excludeStr); len(invalid) > 0 {
+			panicPublic(msg.ExcludeRulesUnsupported(invalid))
+		}
 		job["exclude"] = normalizeExclude(excludeStr)
 	}
 	if job["srcPath"] != nil {
@@ -420,9 +425,9 @@ func RetryFailedTask(taskID int64) {
 // GetJobList returns paginated job list
 func GetJobList(params map[string]interface{}) map[string]interface{} {
 	result, err := mapper.GetJobList(params)
-	if err != nil {
-		panic(err.Error())
-	}
+	// An over-limit unpaginated request is the caller's to fix, so it reaches the
+	// client as an actionable message instead of a generic 500.
+	panicPublicIf(err, msg.ListTooLarge)
 	return result
 }
 
@@ -461,9 +466,7 @@ func currentRequestStale(taskClient *JobTask, params map[string]interface{}) boo
 // GetTaskList returns paginated task list with task num info
 func GetTaskList(req map[string]interface{}) map[string]interface{} {
 	jobTaskList, err := mapper.GetJobTaskList(req)
-	if err != nil {
-		panic(err.Error())
-	}
+	panicPublicIf(err, msg.ListTooLarge)
 
 	dataList, ok := jobTaskList["dataList"].([]map[string]interface{})
 	if !ok {
@@ -569,9 +572,7 @@ func scheduleTaskNumUpdate(taskNums []map[string]interface{}) {
 
 func GetTaskItemList(req map[string]interface{}) map[string]interface{} {
 	result, err := mapper.GetJobTaskItemList(req)
-	if err != nil {
-		panic(err.Error())
-	}
+	panicPublicIf(err, msg.ListTooLarge)
 	return result
 }
 

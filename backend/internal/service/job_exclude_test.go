@@ -89,3 +89,54 @@ func TestExcludeMatchPathOmitsLeadingSlashForRootFiles(t *testing.T) {
 		t.Fatalf("excludeMatchPath(nested file) = %q, want dir/file.tmp", got)
 	}
 }
+
+// A rule the user typed but we cannot honour must not be dropped in silence:
+// the job would keep syncing files the user believes are excluded.
+func TestInvalidExcludeRulesNamesUnsupportedLines(t *testing.T) {
+	input := "*.tmp\n!important.txt\nfoo/*.txt\nreport[1].txt\n**/cache\n# comment\n\ncache/"
+	got := invalidExcludeRules(input)
+	want := []string{"!important.txt", "foo/*.txt", "report[1].txt", "**/cache"}
+
+	if len(got) != len(want) {
+		t.Fatalf("invalidExcludeRules() = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("invalidExcludeRules()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// Blank lines and comments carry no rule, so they stay silently ignored.
+func TestInvalidExcludeRulesIgnoresBlankLinesAndComments(t *testing.T) {
+	if got := invalidExcludeRules("# macOS\n\n.DS_Store\n# Windows\r\nThumbs.db\n"); len(got) > 0 {
+		t.Fatalf("invalidExcludeRules() = %#v, want none", got)
+	}
+}
+
+// Every rule the UI ships as a default must survive save validation, or the
+// default form would be unsavable.
+func TestInvalidExcludeRulesAcceptsShippedDefaults(t *testing.T) {
+	defaults := []string{
+		".DS_Store", "._*", ".Spotlight-V100/", ".Trashes/", ".fseventsd/",
+		".DocumentRevisions-V100/", ".TemporaryItems/", "Thumbs.db", "Desktop.ini",
+		"$RECYCLE.BIN/", "System Volume Information/", "lost+found/", "@eaDir/",
+		"#recycle/", `\#recycle/`, "@Recycle/", ".Recycle/", ".recycle/", ".Trash/",
+		".Trash-1000/", "*.tmp", "*.temp", "*.part", "*.crdownload", "*.download",
+		".~lock.*#", "~$*", ".#*", "*.swp", "*.swo", "*.swn",
+	}
+	for _, rule := range defaults {
+		if got := invalidExcludeRules(rule); len(got) > 0 {
+			t.Errorf("shipped default %q rejected as %#v", rule, got)
+		}
+	}
+}
+
+func TestCleanJobInputRejectsUnsupportedExcludeRule(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("CleanJobInput() accepted an unsupported exclude rule")
+		}
+	}()
+	CleanJobInput(map[string]interface{}{"exclude": "*.tmp\n!keep.txt"})
+}

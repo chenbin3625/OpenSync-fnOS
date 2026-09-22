@@ -11,7 +11,16 @@
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "noEmit": true,
-    "types": ["vite/client"]
+    "types": ["vite/client", "node"]
   },
-  "include": ["src"]
+  // Tests, E2E specs and the build config are shipped code too: a type error in
+  // vite.config.ts breaks the build and one in a spec breaks the suite, and
+  // with only "src" here `tsc --noEmit` reported neither.
+  "include": [
+    "src",
+    "tests",
+    "e2e",
+    "vite.config.ts",
+    "playwright.config.ts"
+  ]
 }

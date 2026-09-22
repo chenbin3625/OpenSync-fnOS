@@ -66,8 +66,10 @@ describe("mock store", () => {
 
     store.stopTask(running!.taskId);
     expect(store.getCurrentTask(7)).toBeNull();
-    expect(store.listHistory(7, 1, 20).count).toBe(1);
-    expect(store.listHistory(7, 1, 20).dataList[0].status).toBe(4);
+    expect(store.listHistory(7, { pageNum: 1, pageSize: 20 }).count).toBe(1);
+    expect(
+      store.listHistory(7, { pageNum: 1, pageSize: 20 }).dataList[0].status,
+    ).toBe(4);
   });
 
   it("returns a page scoped to the requested realtime status", () => {

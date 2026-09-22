@@ -6,6 +6,7 @@ import {
 } from "../pages/Home/homeUtils";
 import {
   fileSizeToBytes,
+  parseFileSizeInput,
   splitBytesToFileSize,
 } from "../pages/Home/fileSizeUnits";
 
@@ -24,9 +25,9 @@ export function defaultJobForm(alistId?: number) {
     useCacheT: false,
     scanIntervalS: 0,
     scanIntervalT: 0,
-    minFileSize: 0,
+    minFileSize: 0 as number | string,
     minFileSizeUnit: "MB",
-    maxFileSize: 0,
+    maxFileSize: 0 as number | string,
     maxFileSizeUnit: "MB",
     exclude: defaultExclude,
     ...defaultCronFields,
@@ -138,11 +139,9 @@ export function validateJobFormStep(form: JobForm, step: number) {
       }
       return "";
     case 2: {
-      if (
-        ![form.minFileSize, form.maxFileSize].every(
-          (n) => Number.isFinite(n) && n >= 0,
-        )
-      ) {
+      const minValue = parseFileSizeInput(form.minFileSize);
+      const maxValue = parseFileSizeInput(form.maxFileSize);
+      if (minValue === null || maxValue === null) {
         return "文件大小必须是有效的非负数";
       }
       const min = fileSizeToBytes(form.minFileSize, form.minFileSizeUnit),

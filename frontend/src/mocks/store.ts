@@ -135,11 +135,17 @@ function normalizeNotify(input: NotifyInput, id: number, previous?: NotifyItem):
     typeof merged.params === "string"
       ? merged.params
       : JSON.stringify(merged.params || {});
+  const lastSendError =
+    typeof merged.lastSendError === "string" ? merged.lastSendError : null;
   return {
     id: numberValue(merged.id, id),
     enable: merged.enable === true ? 1 : numberValue(merged.enable, 1),
     method: numberValue(merged.method, 0),
     params,
+    // 保留投递结果，界面才能在 mock 模式下也显示"最近一次发送失败"。
+    lastSendStatus: numberValue(merged.lastSendStatus, 0),
+    lastSendTime: numberValue(merged.lastSendTime, 0),
+    lastSendError,
     createTime: numberValue(merged.createTime, now()),
   };
 }

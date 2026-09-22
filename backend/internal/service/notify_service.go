@@ -13,12 +13,36 @@ import (
 	"opensync/internal/model"
 	"opensync/internal/msg"
 	"opensync/pkg/util"
+	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
 const maxNotifyResponseBytes = 1 << 20 // 1MB
+
+// Delivery outcome stored on a notify config and returned by GET /notify.
+// notifySendStatusUnknown is the column default, meaning "no task notification
+// has been attempted for this config yet".
+const (
+	notifySendStatusUnknown = 0
+	notifySendStatusSuccess = 1
+	notifySendStatusFailed  = 2
+)
+
+// maxNotifyErrorLength caps the stored failure reason. Provider responses can be
+// long, and the list endpoint returns one of these per config.
+const maxNotifyErrorLength = 300
+
+// recordNotifySendOutcome is a seam so the recording rules can be tested without
+// a database, following the same pattern as the task item persistence helpers.
+var recordNotifySendOutcome = mapper.UpdateNotifySendResult
+
+// notifyErrorURLPattern finds URLs inside an error message so they can be
+// masked before the text is stored. The character class stops at quotes because
+// net/http formats its errors as `Post "<url>": <cause>`.
+var notifyErrorURLPattern = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s"']+`)
 
 var notifyHTTPClient = &http.Client{
 	Timeout: 30 * time.Second,
@@ -71,32 +95,26 @@ func maskSecretValue(value string) string {
 	return notifyRedactionMarker + value[len(value)-4:]
 }
 
-// maskNotifyURL redacts token-like segments in a webhook URL while keeping
-// the host visible so the card summary stays identifiable. DingTalk embeds
-// the token in a query param (access_token); Lark embeds it in the path.
+// maskNotifyURL redacts credential material in a webhook URL while keeping the
+// host visible so the card summary stays identifiable. DingTalk embeds the
+// token in a query param (access_token); Lark embeds it in the path.
+//
+// Every query value is masked rather than only those whose name contains
+// token/key/secret. That name list could never be complete — real webhook URLs
+// use k, sig, sign, auth, pwd, u, t — and the cost of the two directions is not
+// symmetric: over-masking makes a summary line less descriptive, under-masking
+// publishes a live credential to the page DOM. A query string on a webhook URL
+// is routing and authentication data, not something the user reads here.
 func maskNotifyURL(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil || u.Host == "" {
 		return maskSecretValue(rawURL)
 	}
-	masked := false
 	if u.User != nil {
 		u.User = url.User(notifyRedactionMarker)
-		masked = true
 	}
-	q := u.Query()
-	for k, vals := range q {
-		lk := strings.ToLower(k)
-		if strings.Contains(lk, "token") || strings.Contains(lk, "key") || strings.Contains(lk, "secret") {
-			for i := range vals {
-				vals[i] = maskSecretValue(vals[i])
-			}
-			q[k] = vals
-			masked = true
-		}
-	}
-	if masked {
-		u.RawQuery = q.Encode()
+	if u.RawQuery != "" {
+		u.RawQuery = maskNotifyQuery(u.RawQuery)
 	}
 	segs := strings.Split(strings.Trim(u.Path, "/"), "/")
 	if len(segs) > 0 && segs[len(segs)-1] != "" {
@@ -110,6 +128,45 @@ func maskNotifyURL(rawURL string) string {
 		}
 	}
 	return u.String()
+}
+
+// maskNotifyQuery masks every value in a raw query string, preserving parameter
+// names and their order so the result still reads like the original URL.
+//
+// It works on the raw string instead of url.Values because ParseQuery drops
+// malformed pairs and Encode reorders and re-escapes the rest: a query that
+// failed to parse used to be written back verbatim, leaking the very token this
+// function exists to hide. Anything unparseable is replaced wholesale here.
+func maskNotifyQuery(rawQuery string) string {
+	if _, err := url.ParseQuery(rawQuery); err != nil {
+		return notifyRedactionMarker
+	}
+	pairs := strings.Split(rawQuery, "&")
+	for i, pair := range pairs {
+		if pair == "" {
+			continue
+		}
+		name, value, hasValue := strings.Cut(pair, "=")
+		if !hasValue {
+			// A bare flag such as "?debug" carries no value to mask.
+			continue
+		}
+		if value == "" {
+			continue
+		}
+		decoded, err := url.QueryUnescape(value)
+		if err != nil {
+			decoded = value
+		}
+		// QueryEscape would render the marker as %2A%2A%2A%2A, which makes the
+		// summary line unreadable. "*" needs no escaping in a query value, so it
+		// is restored after escaping the surviving suffix.
+		escaped := strings.ReplaceAll(
+			url.QueryEscape(maskSecretValue(decoded)), "%2A", "*",
+		)
+		pairs[i] = name + "=" + escaped
+	}
+	return strings.Join(pairs, "&")
 }
 
 // redactNotifyParams returns paramsStr with secret fields masked for display.
@@ -329,8 +386,11 @@ func notifyParamsValue(value interface{}) (map[string]interface{}, error) {
 	}
 }
 
-// AddNewNotify adds a new notify config
-func AddNewNotify(notify map[string]interface{}) {
+// AddNewNotify adds a new notify config and returns its new row id. Callers
+// (and API clients) need the id to address the row they just created; deriving
+// it from "the last entry of GET /notify" is wrong as soon as two configs are
+// created concurrently, or when the list is not ordered by insertion.
+func AddNewNotify(notify map[string]interface{}) int64 {
 	params, err := notifyParamsValue(notify["params"])
 	if err != nil {
 		panic(err.Error())
@@ -346,9 +406,11 @@ func AddNewNotify(notify map[string]interface{}) {
 		panic(err.Error())
 	}
 	notify["params"] = string(out)
-	if _, err := mapper.AddNotify(notify); err != nil {
+	id, err := mapper.AddNotify(notify)
+	if err != nil {
 		panic(err.Error())
 	}
+	return id
 }
 
 // EditNotify updates a notify config. Secret fields that were redacted in
@@ -421,7 +483,11 @@ func TestNotify(notify map[string]interface{}) {
 	sendNotify(notify, "OpenSync Test", testMsg, false)
 }
 
-// SendTaskNotification sends notification after task completion
+// SendTaskNotification sends notification after task completion.
+//
+// This is the synchronous delivery path. The task completion path does not call
+// it directly — it hands the work to the background dispatcher via
+// QueueTaskNotification, so a slow webhook cannot hold up the finishing task.
 func SendTaskNotification(taskID int64, status int, taskNum map[string]interface{}, duration int, createTime float64) {
 	notifyList, err := mapper.GetNotifyList(true)
 	if err != nil || len(notifyList) == 0 {
@@ -483,20 +549,122 @@ func SendTaskNotification(taskID int64, status int, taskNum map[string]interface
 		content += fmt.Sprintf(" | Status: %s", statusName)
 	}
 
+	sendNotifyFanOut(notifyList, title, content, needNotSync)
+}
+
+// deliverTaskNotification is the dispatcher worker's entry point: it runs the
+// same delivery as SendTaskNotification for one queued job.
+func deliverTaskNotification(job notifyJob) {
+	SendTaskNotification(job.taskID, job.status, job.taskNum, job.duration, job.createTime)
+}
+
+// sendNotifyFanOut delivers one notification per config concurrently.
+//
+// Sending serially meant the slowest destination decided how long a finished
+// task stayed in its wrap-up phase: notifyHTTPClient allows 30s per request, so
+// five unreachable webhooks held the task for two and a half minutes. The sends
+// are independent HTTP posts to different hosts and nothing depends on their
+// order, so the total wait is now the slowest single destination rather than
+// their sum. Each send keeps its own recover: one bad config must not take down
+// the goroutine and with it the remaining notifications.
+func sendNotifyFanOut(notifyList []map[string]interface{}, title, content string, needNotSync bool) {
+	var wg sync.WaitGroup
+	slots := make(chan struct{}, notifySendConcurrency)
 	for _, notify := range notifyList {
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("%s", msg.NotifyError(fmt.Sprintf("%v", r)))
-				}
-			}()
-			sendNotify(notify, title, content, needNotSync)
-		}()
+		wg.Add(1)
+		go func(notify map[string]interface{}) {
+			defer wg.Done()
+			slots <- struct{}{}
+			defer func() { <-slots }()
+			sent, sendErr := trySendNotify(notify, title, content, needNotSync)
+			recordNotifySendResult(notify, sent, sendErr)
+		}(notify)
+	}
+	// SendTaskNotification is called on the task's completion path, which reports
+	// the task done only after the notifications it promised have been attempted.
+	wg.Wait()
+}
+
+// trySendNotify turns the panic-based send path into a value. The outcome has to
+// survive as data, not just as a log line: a config whose token expired kept
+// reporting nothing at all through the API, so the UI showed a healthy channel
+// while every message was being rejected.
+func trySendNotify(notify map[string]interface{}, title, content string, needNotSync bool) (sent bool, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			sent = false
+			err = notifySendFailure(r)
+		}
+	}()
+	return sendNotify(notify, title, content, needNotSync), nil
+}
+
+func notifySendFailure(recovered interface{}) error {
+	if recoveredErr, ok := recovered.(error); ok {
+		return recoveredErr
+	}
+	return fmt.Errorf("%v", recovered)
+}
+
+// recordNotifySendResult stores the outcome on the config row so GET /notify can
+// report it. A send skipped by notSendNull is neither a success nor a failure,
+// so the previously recorded outcome is left untouched.
+func recordNotifySendResult(notify map[string]interface{}, sent bool, sendErr error) {
+	if !sent && sendErr == nil {
+		return
+	}
+	notifyID := util.ToInt64(notify["id"])
+	if notifyID <= 0 {
+		return
+	}
+	status := notifySendStatusSuccess
+	reason := ""
+	if sendErr != nil {
+		status = notifySendStatusFailed
+		reason = sanitizeNotifyError(sendErr.Error())
+		log.Printf("%s", msg.NotifyError(reason))
+	}
+	if err := recordNotifySendOutcome(notifyID, status, time.Now().Unix(), reason); err != nil {
+		log.Printf("Failed to record delivery result for notify %d: %v", notifyID, err)
 	}
 }
 
-// sendNotify sends a notification via the configured method
-func sendNotify(notify map[string]interface{}, title, content string, needNotSync bool) {
+// sanitizeNotifyError prepares a delivery failure for storage. The text is
+// echoed back by GET /notify, and net/http errors embed the full request URL —
+// which is exactly where ServerChan, DingTalk and Lark keep their tokens. The
+// masking sits at this single boundary rather than at each of the panic sites
+// that produce the text.
+func sanitizeNotifyError(text string) string {
+	cleaned := strings.TrimSpace(notifyErrorURLPattern.ReplaceAllStringFunc(text, maskNotifyErrorURL))
+	if cleaned == "" {
+		return msg.NotifySendFail
+	}
+	// Truncated by rune, so a split multi-byte character cannot produce invalid
+	// UTF-8 in the JSON response.
+	if runes := []rune(cleaned); len(runes) > maxNotifyErrorLength {
+		cleaned = string(runes[:maxNotifyErrorLength]) + "…"
+	}
+	return cleaned
+}
+
+// maskNotifyErrorURL reduces a URL to scheme://host, the same shape
+// notifyRequestTarget already uses for logs. Everything dropped — path, query
+// and userinfo — is where the providers put their credentials, and the host is
+// the only part that helps the user identify which destination failed.
+func maskNotifyErrorURL(rawURL string) string {
+	trimmed := strings.TrimRight(rawURL, `.,;:)]}"'`)
+	suffix := rawURL[len(trimmed):]
+	u, err := url.Parse(trimmed)
+	if err != nil || u.Host == "" {
+		return notifyRedactionMarker + suffix
+	}
+	return u.Scheme + "://" + u.Host + suffix
+}
+
+// sendNotify sends a notification via the configured method. It reports whether
+// a message was actually sent, so a config skipped by notSendNull is not
+// recorded as a successful delivery.
+func sendNotify(notify map[string]interface{}, title, content string, needNotSync bool) bool {
 	params, err := notifyParamsValue(notify["params"])
 	if err != nil {
 		panic(err.Error())
@@ -511,7 +679,7 @@ func sendNotify(notify map[string]interface{}, title, content string, needNotSyn
 	if needNotSync {
 		if v, ok := params["notSendNull"]; ok {
 			if util.ToBool(v) {
-				return
+				return false
 			}
 		}
 	}
@@ -527,7 +695,13 @@ func sendNotify(notify map[string]interface{}, title, content string, needNotSyn
 		sendWeCom(notifyHTTPClient, params, title, content)
 	case 4: // Lark (Feishu)
 		sendLark(notifyHTTPClient, params, title, content)
+	default:
+		// validateNotifyParams rejects unknown methods, so this is unreachable
+		// unless a new method is added without a send branch. Reporting it as a
+		// failure beats recording a delivery that never happened.
+		panicPublic(msg.NotifyMethodInvalid)
 	}
+	return true
 }
 
 func parseNotifyParams(paramsStr string) (map[string]interface{}, error) {

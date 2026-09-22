@@ -1,4 +1,5 @@
 export type FileSizeUnit = "B" | "KB" | "MB" | "GB" | "TB";
+export type FileSizeInput = number | string;
 
 export const fileSizeUnitOptions = [
   { value: "B", label: "B" },
@@ -22,12 +23,21 @@ export function normalizeFileSizeUnit(unit?: string | null): FileSizeUnit {
     : "MB";
 }
 
+export function parseFileSizeInput(
+  value?: FileSizeInput | null,
+): number | null {
+  if (value === null || value === undefined) return 0;
+  if (typeof value === "string" && value.trim() === "") return 0;
+  const parsed = Number(typeof value === "string" ? value.trim() : value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
 export function fileSizeToBytes(
-  value?: number | null,
+  value?: FileSizeInput | null,
   unit?: string | null,
 ): number {
-  const normalized = Number(value || 0);
-  if (!Number.isFinite(normalized) || normalized <= 0) return 0;
+  const normalized = parseFileSizeInput(value);
+  if (normalized === null || normalized <= 0) return 0;
   return Math.round(
     normalized * fileSizeUnitFactors[normalizeFileSizeUnit(unit)],
   );

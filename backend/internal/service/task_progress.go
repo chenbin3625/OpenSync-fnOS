@@ -310,13 +310,18 @@ func (jt *JobTask) waitingTaskPage(pageSize, pageNum int) map[string]interface{}
 }
 
 func (jt *JobTask) finishedTaskPageFromDB(status, pageSize, pageNum int) map[string]interface{} {
-	params := map[string]interface{}{
-		"taskId": jt.TaskID,
-		"status": status,
+	// The page is always requested explicitly. Leaving the parameters out asked
+	// for "everything", which the mapper now refuses once the result exceeds one
+	// page — and this caller wants the same first page it has always returned,
+	// not an error.
+	if pageSize <= 0 || pageNum <= 0 {
+		pageSize, pageNum = mapper.MaxPageSize, 1
 	}
-	if pageSize > 0 && pageNum > 0 {
-		params["pageSize"] = pageSize
-		params["pageNum"] = pageNum
+	params := map[string]interface{}{
+		"taskId":   jt.TaskID,
+		"status":   status,
+		"pageSize": pageSize,
+		"pageNum":  pageNum,
 	}
 	result, err := mapper.GetJobTaskItemList(params)
 	if err != nil {

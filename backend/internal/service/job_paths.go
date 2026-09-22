@@ -81,9 +81,17 @@ func srcSelectionsNested(srcPaths []string) bool {
 	return false
 }
 
+// syncPathContains compares case-insensitively. The overlap and nesting checks
+// exist to prevent two works from writing the same destination subtree, and the
+// storage behind an engine decides whether /Photos and /photos are one
+// directory: SMB, most cloud drives and a macOS/Windows volume fold case, so a
+// case-sensitive comparison let "/Photos" -> "/photos" pass as non-overlapping
+// and then mirror a directory onto itself. Treating them as the same path can
+// at worst reject a genuinely distinct pair on a case-sensitive backend, which
+// is the safe direction for a check whose failure mode is deleting files.
 func syncPathContains(parent, candidate string) bool {
-	parent = path.Clean(strings.TrimSpace(parent))
-	candidate = path.Clean(strings.TrimSpace(candidate))
+	parent = strings.ToLower(path.Clean(strings.TrimSpace(parent)))
+	candidate = strings.ToLower(path.Clean(strings.TrimSpace(candidate)))
 	if parent == candidate {
 		return true
 	}

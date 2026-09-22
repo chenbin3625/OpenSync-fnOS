@@ -33,11 +33,15 @@ export function useRealtimeTaskItems({
   setPageSize: (size: number) => void;
   tabLoading: boolean;
   tabError?: string;
+  tableKey: string;
   retryTabTasks: () => void;
 } {
   const [activeTab, setActiveTabValue] = useState(1);
   const [tabTaskPage, setTabTaskPageValue] = useState(1);
   const [pageSize, setPageSizeValue] = useState(initialPageSize);
+  // 切换状态 Tab 时自增，参与 queryKey，强制重新发起明细请求并重建表格，
+  // 避免复用上一个 Tab 的响应或表格内部状态。
+  const [refreshToken, setRefreshToken] = useState(0);
   const taskIdentity = currentTask
     ? getRealtimeTaskIdentity(currentTask)
     : "";
@@ -47,6 +51,7 @@ export function useRealtimeTaskItems({
     activeTab,
     tabTaskPage,
     pageSize,
+    refreshToken,
   ].join(":");
   const requestIdentity = currentTask
     ? {
@@ -88,6 +93,7 @@ export function useRealtimeTaskItems({
   const setActiveTab = useCallback((status: number) => {
     setActiveTabValue(status);
     setTabTaskPageValue(1);
+    setRefreshToken((token) => token + 1);
   }, []);
   const setTabTaskPage = useCallback((page: number) => {
     setTabTaskPageValue(Math.max(1, Math.trunc(page)));
@@ -111,6 +117,7 @@ export function useRealtimeTaskItems({
     setPageSize,
     tabLoading: resource.loading || pendingCurrentPage,
     tabError: resource.error,
+    tableKey: queryKey,
     retryTabTasks,
   };
 }

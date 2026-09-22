@@ -1,6 +1,9 @@
 package msg
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 const (
 	LostPart                = "入参不全"
@@ -39,6 +42,7 @@ const (
 	NotifyMethodInvalid     = "通知方式不支持"
 	NotifyParamInvalid      = "通知配置参数不完整"
 	NotifySendFail          = "通知发送失败，请检查配置或稍后重试"
+	ListTooLarge            = "结果超出单次返回上限，请带上 pageNum 与 pageSize 分页查询"
 	MinFileSizeInvalid      = "最小文件大小必须是大于等于0的整数"
 	MaxFileSizeInvalid      = "最大文件大小必须是大于等于0的整数"
 	MinFileSizeGtMax        = "最小文件大小不能大于最大文件大小"
@@ -48,6 +52,16 @@ const (
 	SettingsScanConcurrency = "扫描并发数"
 	SettingsMaxRetries      = "最大重试次数"
 )
+
+// ExcludeRulesUnsupported names the filter rules that were rejected. Silently
+// dropping them used to leave the user believing a path was excluded while the
+// job kept syncing it.
+func ExcludeRulesUnsupported(rules []string) string {
+	return fmt.Sprintf(
+		"以下过滤规则不受支持，已拒绝保存：%s。仅支持三种写法：文件名（可含 * 通配）、*.后缀、相对目录/",
+		strings.Join(rules, "、"),
+	)
+}
 
 // MirrorDeleteGuard explains a skipped full-sync delete phase.
 func MirrorDeleteGuard(reason string) string {

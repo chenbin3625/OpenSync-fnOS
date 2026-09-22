@@ -7,6 +7,12 @@ export interface ApiResponse<T> {
 export interface PageData<T> {
   dataList: T[];
   count: number;
+  // Set by the backend when a request without pageNum/pageSize was capped at
+  // its unpaged row limit, so dataList holds fewer rows than count. Every call
+  // in src/api paginates, which is why this should never arrive; it is typed
+  // and checked so a future unpaginated caller fails loudly instead of
+  // silently rendering a short list as if it were complete.
+  truncated?: boolean;
 }
 
 export interface RealtimeTaskItemPage extends PageData<TaskItem> {
@@ -134,5 +140,10 @@ export interface NotifyItem {
   enable: number;
   method: number;
   params: string;
+  /** 最近一次任务完成通知的投递结果：0 未投递过、1 成功、2 失败。 */
+  lastSendStatus?: number;
+  lastSendTime?: number;
+  /** 失败原因，后端已脱敏（URL 只保留 scheme://host）。 */
+  lastSendError?: string | null;
   createTime?: number;
 }

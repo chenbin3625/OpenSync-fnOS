@@ -139,6 +139,7 @@ export function Realtime({ jobId }: { jobId: number }) {
         />
       ) : (
         <FileTable
+          key={items.tableKey}
           rows={tabItems}
           loading={items.tabLoading}
         />

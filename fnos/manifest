@@ -1,5 +1,5 @@
 appname=opensync
-version=0.0.21
+version=0.0.22
 display_name=OpenSync
 desc=<div><p><strong>OpenSync</strong> 是运行在飞牛 fnOS 上的文件同步与备份工具，可作为群晖 Cloud Sync 的替代方案。</p><p>应用依赖 <strong>OpenList / AList</strong> 作为存储引擎。添加本地存储、阿里云盘、百度网盘、OneDrive、S3、WebDAV 等存储后，即可在不同存储之间自动同步文件。</p><ul><li>支持增量同步与全量同步，满足备份和镜像场景。</li><li>支持 Cron、固定间隔和手动触发。</li><li>支持文件名、文件后缀、文件目录、系统目录过滤和文件大小限制。</li><li>提供实时进度、执行历史、失败重试和任务超时控制。</li><li>支持 Webhook、Server酱、钉钉、企业微信、飞书通知。</li></ul><p>开源地址：<a href="https://github.com/chenbin3625/OpenSync-fnOS">https://github.com/chenbin3625/OpenSync-fnOS</a></p></div>
 platform=x86
@@ -16,4 +16,4 @@ ctl_stop=true
 install_type=
 checkport=false
 disable_authorization_path=true
-changelog=v0.0.21：修复全量同步在来源目录列举异常时误删目标文件的问题，并新增删除量安全阀；修复通知配置的请求头明文回传、任务条目在极端时序下可能丢失而仍报成功、实时进度分页参数可触发崩溃等问题；修正历史列表分页排序、文件大小阈值无法输入小数（1.2 被存成 12）；发布包不再包含调试用的 mock 拦截器。
+changelog=v0.0.22：通知投递改为异步队列，webhook 超时不再阻塞任务完成；通知渠道显示最近一次投递结果（成功/失败及原因）；SSE 实时进度修复慢连接丢帧后进度条冻结的问题（自动重同步）；数据库关闭后不再被后台任务意外重新打开；排除规则中不支持的语法（如 ! 反选）在保存时明确拒绝而非静默丢弃；路径重叠检测改为大小写不敏感，兼容 SMB/云盘；webhook URL 脱敏覆盖所有查询参数，错误信息中的凭据同步脱敏；CI 加固：默认只读权限、Actions 锁定 SHA、新增版本一致性校验和 Playwright E2E。

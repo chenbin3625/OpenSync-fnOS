@@ -24,6 +24,9 @@ func UpdateSystemConfig(c *gin.Context) {
 		c.JSON(400, model.Error(err.Error()))
 		return
 	}
-	service.RunTaskRetentionCleanup()
+	// Applying the new retention window can delete a large backlog and VACUUM
+	// the database. That must not hold the config response open, and nothing in
+	// the response depends on it.
+	service.StartTaskRetentionCleanupAsync()
 	respondOK(c, config.GetSystemSettings())
 }

@@ -51,16 +51,33 @@ func AddNotify(notify map[string]interface{}) (int64, error) {
 	)
 }
 
-// EditNotify updates a notify config
+// EditNotify updates a notify config. The recorded delivery outcome is cleared
+// because it describes the previous configuration: keeping it would leave a
+// just-corrected config showing the failure the user edited it to fix.
 func EditNotify(notify map[string]interface{}) error {
 	params, err := encryptCredential(fmt.Sprintf("%v", notify["params"]))
 	if err != nil {
 		return err
 	}
 	return executeNotifyUpdate(
-		"UPDATE notify SET enable=?, method=?, params=? WHERE id=?",
+		"UPDATE notify SET enable=?, method=?, params=?, lastSendStatus=0, lastSendTime=0, lastSendError=NULL WHERE id=?",
 		notify["enable"], notify["method"], params, notify["id"],
 	)
+}
+
+// UpdateNotifySendResult records the outcome of the most recent delivery for one
+// config. A missing row is not an error: the config can be deleted while a
+// queued notification is still in flight.
+func UpdateNotifySendResult(notifyID int64, status int, sentAt int64, errMsg string) error {
+	var storedErr interface{}
+	if errMsg != "" {
+		storedErr = errMsg
+	}
+	_, err := GetDB().Exec(
+		"UPDATE notify SET lastSendStatus=?, lastSendTime=?, lastSendError=? WHERE id=?",
+		status, sentAt, storedErr, notifyID,
+	)
+	return err
 }
 
 // UpdateNotifyStatus updates notify enable status

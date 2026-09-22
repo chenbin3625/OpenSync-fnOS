@@ -60,7 +60,28 @@ export async function request<T>(
       window.dispatchEvent(new CustomEvent("opensync:session-expired"));
     throw new Error(result.msg || "操作失败");
   }
+  warnIfTruncated(path, result.data);
   return result.data;
+}
+
+// The backend caps a list request that carries no pageNum/pageSize and marks the
+// response `truncated`. Nothing read that flag, so such a response rendered as a
+// complete list. Every caller in this module paginates, so this is a guard
+// against a future one that forgets: it is a developer-facing error, not a user
+// message, because the fix is to pass paging parameters.
+export function warnIfTruncated(path: string, data: unknown): boolean {
+  if (
+    !data ||
+    typeof data !== "object" ||
+    !("truncated" in data) ||
+    (data as PageData<unknown>).truncated !== true
+  )
+    return false;
+  const page = data as PageData<unknown>;
+  console.error(
+    `[OpenSync] ${path} 返回了被截断的列表：共 ${page.count} 条，仅取回 ${page.dataList?.length ?? 0} 条。请求必须携带 pageNum/pageSize。`,
+  );
+  return true;
 }
 
 async function requestAllJobs(signal?: AbortSignal) {
