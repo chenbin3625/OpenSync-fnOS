@@ -7,11 +7,12 @@
   background: #f3f3f3;
   font-synthesis: none;
   letter-spacing: 0;
+  --shell-bg: #f3f3f3;
   --accent: #0066ff;
   --surface: #fff;
   --surface-soft: #f7f8fa;
   --line: #e6e6e6;
-  --muted: #858b95;
+  --muted: #636b75;
   --selected: #edf3ff;
   --border-control: #d8d8d8;
   --danger: #e5484d;
@@ -43,6 +44,44 @@
   --danger-hover: #d63c41;
   --mask-bg: rgba(255, 255, 255, 0.65);
   --shadow-modal: 0 16px 48px rgba(0, 0, 0, 0.16);
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  background: #1b1c20;
+}
+body[theme-mode="dark"] {
+  color: #e8eaee;
+  background: #1b1c20;
+  --shell-bg: #1b1c20;
+  --accent: #6aa7ff;
+  --surface: #232429;
+  --surface-soft: #2e3036;
+  --line: #41444d;
+  --muted: #b3bac5;
+  --selected: #293f5c;
+  --border-control: #555965;
+  --danger: #ff777b;
+  --danger-light: #4a2b31;
+  --switch-bg: #555965;
+  --switch-bg-hover: #686c77;
+  --semi-color-primary: var(--accent);
+  --semi-color-primary-hover: #85b8ff;
+  --semi-color-primary-active: #afd0ff;
+  --semi-color-primary-light-default: var(--selected);
+  --semi-color-bg-0: var(--surface);
+  --semi-color-bg-1: var(--surface-soft);
+  --semi-color-border: var(--border-control);
+  --semi-color-focus-border: var(--accent);
+  --semi-color-text-2: var(--muted);
+  --success: #48c78e;
+  --warning: #f4b25d;
+  --danger-hover: #ff9396;
+  --mask-bg: rgba(10, 11, 14, 0.65);
+  --shadow-modal: 0 16px 48px rgba(0, 0, 0, 0.4);
+}
+body[theme-mode="dark"] .semi-button-primary.semi-button-solid,
+body[theme-mode="dark"] .mobile-job-chip.active {
+  color: #17202b;
 }
 * {
   box-sizing: border-box;
@@ -152,7 +191,7 @@ h3 {
   gap: 0;
   height: 100dvh;
   padding: 0 8px 8px 0;
-  background: #f3f3f3;
+  background: var(--shell-bg);
 }
 .app-sidebar {
   display: flex;
@@ -1205,7 +1244,7 @@ body .semi-modal-mask {
   border-top: 1px solid var(--line);
   min-height: 32px;
   font-size: var(--font-size-small);
-  color: var(--text-tertiary);
+  color: var(--muted);
 }
 .table-pagination .semi-select {
   background: transparent;
@@ -1309,8 +1348,8 @@ body .semi-modal-mask {
     font-size: var(--font-size-modal-title);
   }
   .page-toolbar {
-    flex-wrap: wrap;
-    height: auto;
+    flex-wrap: nowrap;
+    height: 53px;
     min-height: 53px;
     margin: -20px -16px 20px;
     padding: 0 16px;
@@ -1319,13 +1358,26 @@ body .semi-modal-mask {
   .page-toolbar .page-tabs .semi-tabs,
   .page-toolbar .page-tabs .semi-tabs-bar,
   .page-toolbar .page-tabs .semi-tabs-tab {
-    height: 53px;
+    height: 52px;
   }
   .page-toolbar .page-tabs .semi-tabs-tab {
-    margin-right: 20px;
+    margin-right: 12px;
   }
   .page-tabs {
-    flex: 1 1 auto;
+    flex: 1 1 0;
+    align-self: flex-start;
+    height: 52px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+  }
+  .page-tabs .semi-tabs,
+  .page-tabs .semi-tabs-bar {
+    width: max-content;
+    min-width: 100%;
+  }
+  .page-tabs::-webkit-scrollbar {
+    display: none;
   }
   .page-actions {
     margin-left: auto;
@@ -1381,7 +1433,7 @@ body .semi-modal-mask {
     border-radius: 16px;
     border: 1px solid var(--line);
     background: var(--surface);
-    color: var(--text);
+    color: inherit;
     font-size: 13px;
     line-height: 1.2;
     white-space: nowrap;
@@ -1425,7 +1477,7 @@ body .semi-modal-mask {
     transform: rotate(90deg);
   }
   .info-row {
-    grid-template-columns: 76px minmax(0, 1fr);
+    grid-template-columns: 90px minmax(0, 1fr);
     gap: 12px;
   }
   .engine-item,
@@ -1499,6 +1551,41 @@ body .semi-modal-mask {
   }
   .numeric-setting span {
     width: 36px;
+  }
+  .settings-page .settings-card-head {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+  .settings-card .setting-row--compact {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+  .settings-card .numeric-setting {
+    width: 112px;
+    flex-shrink: 0;
+  }
+  .settings-card .numeric-setting .semi-input-wrapper {
+    width: 72px;
+  }
+  .settings-card .numeric-setting > span {
+    width: 32px;
+  }
+  .execution-tabs .semi-tabs-bar {
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+  }
+  .execution-tabs .semi-tabs-bar::-webkit-scrollbar {
+    display: none;
+  }
+  .execution-tabs .semi-tabs-bar-line {
+    width: max-content;
+    min-width: 100%;
+    flex-wrap: nowrap;
+  }
+  .execution-tabs .semi-tabs-tab {
+    flex: 0 0 auto;
+    white-space: nowrap;
   }
   .execution-header {
     flex-wrap: wrap;

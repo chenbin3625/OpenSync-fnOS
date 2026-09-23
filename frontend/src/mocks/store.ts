@@ -29,7 +29,7 @@ export type MockStoreSeed = {
 };
 
 const defaultSettings: SystemSettings = {
-  taskTimeout: 86400,
+  taskTimeout: 48,
   taskSave: 30,
   copyConcurrency: 3,
   scanConcurrency: 3,

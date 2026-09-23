@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest";
 import { createMockStore } from "../src/mocks/store";
 
 describe("mock store", () => {
+  it("uses a task timeout in hours within the settings form range", () => {
+    const settings = createMockStore().getSettings();
+    expect(settings.taskTimeout).toBe(48);
+  });
+
   it("paginates jobs using the same page contract as the backend", () => {
     const store = createMockStore({
       jobs: [
