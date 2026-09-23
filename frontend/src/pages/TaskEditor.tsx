@@ -40,6 +40,7 @@ import {
   methodOptions,
 } from "./Home/homeUtils";
 import {
+  commitFileSizeInput,
   fileSizeUnitOptions,
   parseFileSizeInput,
   type FileSizeUnit,
@@ -428,26 +429,23 @@ function FileSizeFilterRow({
   const config = fileSizeFilterDefaults[kind];
   const valueKey = `${kind}FileSize` as const;
   const unitKey = `${kind}FileSizeUnit` as const;
-  const currentValue = parseFileSizeInput(form[valueKey]) ?? 0;
+  const parsedValue = parseFileSizeInput(form[valueKey]);
+  const currentValue = parsedValue ?? 0;
   const [draft, setDraft] = useState<string | null>(null);
   const editing = draft !== null;
-  const enabled = editing || currentValue > 0;
+  const enabled = editing || parsedValue === null || currentValue > 0;
   const displayValue = editing
     ? draft
-    : currentValue > 0
+    : enabled
       ? String(form[valueKey])
       : String(config.value);
-  const displayUnit = currentValue > 0 ? form[unitKey] : config.unit;
+  const displayUnit = enabled ? form[unitKey] : config.unit;
   const controlLabel = `${config.label}文件大小`;
 
   const commitInput = (raw: string) => {
     setDraft(null);
     delete drafts.current[valueKey];
-    const parsed = parseFileSizeInput(raw);
-    change(
-      valueKey,
-      (parsed === null ? 0 : parsed) as JobForm[typeof valueKey],
-    );
+    change(valueKey, commitFileSizeInput(raw));
   };
 
   return (

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -121,11 +122,12 @@ func (jt *JobTask) scanFullSyncTree(root string, firstDst bool, spec *excludeMat
 
 	var firstErr error
 	var errMu sync.Mutex
+	var scanFailed atomic.Bool
 	var scanDir func(string)
 	scanDir = func(relDir string) {
 		jt.ScanTotalDirs.Add(1)
 		defer jt.finishScanWork()
-		if jt.isBreak() {
+		if jt.isBreak() || scanFailed.Load() {
 			return
 		}
 
@@ -136,7 +138,7 @@ func (jt *JobTask) scanFullSyncTree(root string, firstDst bool, spec *excludeMat
 				firstErr = err
 			}
 			errMu.Unlock()
-			jt.requestBreak()
+			scanFailed.Store(true)
 			return
 		}
 		snapshot.mu.Lock()
@@ -169,7 +171,7 @@ func (jt *JobTask) scanFullSyncTree(root string, firstDst bool, spec *excludeMat
 							firstErr = childErr
 						}
 						errMu.Unlock()
-						jt.requestBreak()
+						scanFailed.Store(true)
 					}()
 					defer jt.recoverWorkerPanic("full-sync child scan", &childErr)
 					scanDir(child)

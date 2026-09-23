@@ -1,9 +1,11 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -13,6 +15,113 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestNotifyBlocksRedirectToCloudMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://[fd00:ec2::254]/latest/meta-data/", http.StatusTemporaryRedirect)
+	}))
+	defer server.Close()
+	req, err := buildNotifyRequest(http.MethodGet, server.URL, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := notifyHTTPClient.Do(req)
+	if resp != nil {
+		resp.Body.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "blocked address") {
+		t.Fatalf("redirect error = %v, want blocked address before dialing", err)
+	}
+}
+
+func TestNotifyDialsOnlyResolvedValidatedIP(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.Host, "rebinding.example:") {
+			t.Errorf("unexpected Host: %s", r.Host)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(server.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lookup := func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, nil
+	}
+	dialer := &net.Dialer{}
+	client := &http.Client{Transport: &http.Transport{
+		DialContext: validatedNotifyDialContext(lookup, dialer.DialContext),
+	}}
+	req, err := http.NewRequest(http.MethodGet, "http://rebinding.example:"+port+"/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+}
+
+func TestNotifyNeverDialsBlockedResolvedIP(t *testing.T) {
+	dialed := false
+	dial := validatedNotifyDialContext(func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("fd00:ec2::254")}}, nil
+	}, func(context.Context, string, string) (net.Conn, error) {
+		dialed = true
+		return nil, errors.New("should not dial")
+	})
+	_, err := dial(context.Background(), "tcp", "cloud.example:80")
+	if err == nil || !strings.Contains(err.Error(), "blocked address") || dialed {
+		t.Fatalf("dialed=%v err=%v, want blocked before connection", dialed, err)
+	}
+}
+
+func TestNotifyBlocksIPv6CloudMetadataLiteral(t *testing.T) {
+	if !isCloudMetadataIP(net.ParseIP("fd00:ec2::254")) {
+		t.Fatal("IPv6 cloud metadata literal is not blocked")
+	}
+}
+
+type wecomTokenTransport struct {
+	requests int
+}
+
+func (transport *wecomTokenTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	transport.requests++
+	corp := req.URL.Query().Get("corpid")
+	secret := req.URL.Query().Get("corpsecret")
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(`{"access_token":"` + corp + "-" + secret + `","expires_in":7200,"errcode":0}`)),
+		Header:     make(http.Header),
+	}, nil
+}
+
+func TestWeComTokenCacheIsScopedToCredentials(t *testing.T) {
+	wecomTokenCache.Lock()
+	wecomTokenCache.entries = nil
+	wecomTokenCache.Unlock()
+	t.Cleanup(func() {
+		wecomTokenCache.Lock()
+		wecomTokenCache.entries = nil
+		wecomTokenCache.Unlock()
+	})
+	transport := &wecomTokenTransport{}
+	client := &http.Client{Transport: transport}
+	for _, tc := range []struct{ corp, secret string }{
+		{"alpha", "first"}, {"beta", "second"}, {"alpha", "changed"}, {"alpha", "first"},
+	} {
+		token, err := getWeComAccessToken(client, tc.corp, tc.secret)
+		if err != nil || token != tc.corp+"-"+tc.secret {
+			t.Fatalf("getWeComAccessToken(%q)=%q, err=%v", tc.corp, token, err)
+		}
+	}
+	if transport.requests != 3 {
+		t.Fatalf("token fetches=%d, want 3", transport.requests)
+	}
+}
 
 type notifyErrorTransport struct{}
 

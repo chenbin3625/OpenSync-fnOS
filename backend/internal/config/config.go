@@ -387,7 +387,11 @@ func writeConfigFile(sCfg ServerConfig) error {
 			}
 		}
 	}
-	if existing, err := os.ReadFile(filepath.Join(ConfigDir(), "config.ini")); err == nil {
+	existing, err := os.ReadFile(filepath.Join(ConfigDir(), "config.ini"))
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err == nil {
 		for _, line := range strings.Split(string(existing), "\n") {
 			trimmed := strings.TrimSpace(line)
 			if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
@@ -404,8 +408,8 @@ func writeConfigFile(sCfg ServerConfig) error {
 			if inOpensync {
 				if key, _, isKV := strings.Cut(trimmed, "="); isKV {
 					key = strings.TrimSpace(key)
-					if _, managed := pending[key]; managed {
-						out = append(out, key+"="+pending[key])
+					if value, managed := values[key]; managed {
+						out = append(out, key+"="+value)
 						delete(pending, key)
 						continue
 					}

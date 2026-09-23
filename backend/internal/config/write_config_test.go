@@ -1,11 +1,52 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestWriteConfigFileReplacesDuplicateManagedKeys(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TRIM_PKGETC", dir)
+	path := filepath.Join(dir, "config.ini")
+	if err := os.WriteFile(path, []byte("[opensync]\nport=9000\nport=9001\n[other]\nport=8000\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeConfigFile(testServerConfig()); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "port=9001") || !strings.Contains(string(data), "port=8000") {
+		t.Fatalf("duplicate or foreign key changed: %s", data)
+	}
+	parsed, err := readINI(path)
+	if err != nil || parsed["opensync"]["port"] != "8023" {
+		t.Fatalf("reloaded port=%q, err=%v", parsed["opensync"]["port"], err)
+	}
+}
+
+func TestWriteConfigFileReportsUnreadableExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TRIM_PKGETC", dir)
+	path := filepath.Join(dir, "config.ini")
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	err := writeConfigFile(testServerConfig())
+	if err == nil {
+		t.Fatal("writeConfigFile() succeeded despite failing to read existing config")
+	}
+	var pathErr *os.PathError
+	if !errors.As(err, &pathErr) || pathErr.Op != "read" {
+		t.Fatalf("error = %v, want config read error", err)
+	}
+}
 
 func testServerConfig() ServerConfig {
 	return ServerConfig{

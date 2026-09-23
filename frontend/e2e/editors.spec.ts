@@ -3,6 +3,7 @@ import { test, expect } from "@playwright/test";
 test("task editor keeps size filters disabled until selected", async ({
   page,
 }) => {
+  let saveAttempts = 0;
   await page.route("**/app/opensync/svr/**", async (route) => {
     const url = new URL(route.request().url());
     const success = (data: unknown) =>
@@ -12,6 +13,10 @@ test("task editor keeps size filters disabled until selected", async ({
       });
     if (url.pathname.endsWith("/session")) {
       return success({ uid: 1, development: false, version: "test" });
+    }
+    if (url.pathname.endsWith("/job") && route.request().method() === "POST") {
+      saveAttempts++;
+      return success(null);
     }
     if (
       url.pathname.endsWith("/alist") &&
@@ -103,6 +108,13 @@ test("task editor keeps size filters disabled until selected", async ({
   await expect(minRow.locator(".semi-select")).not.toHaveClass(
     /semi-select-disabled/,
   );
+  const minInput = minRow.getByRole("textbox", { name: "排除小于文件大小" });
+  await minInput.fill("not-a-size");
+  await minRow.getByText("排除小于").click();
+  await expect(minInput).toHaveValue("not-a-size");
+  await dialog.getByRole("button", { name: "保存" }).click();
+  await expect(page.getByText("文件大小必须是有效的非负数")).toBeVisible();
+  expect(saveAttempts).toBe(0);
 
   await page.getByRole("tab", { name: "文件夹过滤", exact: true }).click();
   const rootNode = dialog.locator('.exclude-tree [role="treeitem"][data-key="/Photos"]');
@@ -309,14 +321,15 @@ test("task editor provides preset and custom file type filters", async ({
   }
 
   await page
-    .getByRole("textbox", { name: "自定义文件扩展名", exact: true })
-    .fill("pst");
-  await page.getByRole("button", { name: "新增文件类型", exact: true }).click();
+    .getByRole("textbox", { name: "自定义文件规则", exact: true })
+    .fill("*.pst");
+  await page.getByRole("button", { name: "新增文件规则", exact: true }).click();
   await expect(
     page.getByRole("button", { name: /^其他/ }),
   ).toBeVisible();
   const groupLabels = await dialog.locator(".file-type-group-label").allTextContents();
   expect(groupLabels.at(-1)).toContain("其他");
+  await page.getByRole("button", { name: "展开其他", exact: true }).click();
   await expect(
     page.getByRole("checkbox", { name: "*.pst", exact: true }),
   ).toBeChecked();

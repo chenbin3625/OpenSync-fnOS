@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,6 +38,14 @@ const maxNotifyErrorLength = 300
 
 var wecomTokenCache struct {
 	sync.Mutex
+	entries map[wecomCredentials]wecomTokenEntry
+}
+
+type wecomCredentials struct {
+	corpID, corpSecret string
+}
+
+type wecomTokenEntry struct {
 	token   string
 	expires time.Time
 }
@@ -52,6 +61,7 @@ func init() {
 	for _, cidr := range []string{
 		"169.254.169.254/32", // AWS/GCP/Azure metadata
 		"fe80::/10",          // IPv6 link-local
+		"fd00:ec2::254/128",  // AWS IPv6 metadata
 	} {
 		_, network, _ := net.ParseCIDR(cidr)
 		cloudMetadataCIDRs = append(cloudMetadataCIDRs, network)
@@ -73,6 +83,9 @@ func validateWebhookDestination(rawURL string) error {
 		return err
 	}
 	host := u.Hostname()
+	if host == "" {
+		return errors.New("webhook destination has no host")
+	}
 	ips, err := net.LookupHost(host)
 	if err != nil {
 		return nil // DNS failure is not a security block; let the HTTP client handle it
@@ -83,6 +96,46 @@ func validateWebhookDestination(rawURL string) error {
 		}
 	}
 	return nil
+}
+
+// Resolve on each connection and dial only an address from that resolution.
+// The URL hostname remains unchanged for HTTP Host and TLS certificate checks.
+func validatedNotifyDialContext(
+	lookup func(context.Context, string) ([]net.IPAddr, error),
+	dial func(context.Context, string, string) (net.Conn, error),
+) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, err
+		}
+		var ips []net.IPAddr
+		if ip := net.ParseIP(host); ip != nil {
+			ips = []net.IPAddr{{IP: ip}}
+		} else {
+			ips, err = lookup(ctx, host)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if len(ips) == 0 {
+			return nil, fmt.Errorf("webhook destination %s has no addresses", host)
+		}
+		for _, ip := range ips {
+			if ip.IP == nil || isCloudMetadataIP(ip.IP) {
+				return nil, fmt.Errorf("webhook destination %s resolves to blocked address %s", host, ip.String())
+			}
+		}
+		var dialErr error
+		for _, ip := range ips {
+			conn, err := dial(ctx, network, net.JoinHostPort(ip.String(), port))
+			if err == nil {
+				return conn, nil
+			}
+			dialErr = err
+		}
+		return nil, dialErr
+	}
 }
 
 var forbiddenWebhookHeaders = map[string]struct{}{
@@ -99,6 +152,10 @@ var notifyHTTPClient = &http.Client{
 		MaxIdleConns:        50,
 		MaxIdleConnsPerHost: 10,
 		IdleConnTimeout:     90 * time.Second,
+		DialContext: validatedNotifyDialContext(
+			net.DefaultResolver.LookupIPAddr,
+			(&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		),
 	},
 }
 
@@ -1031,8 +1088,9 @@ func sendDingTalk(client *http.Client, params map[string]interface{}, title, con
 func getWeComAccessToken(client *http.Client, corpID, corpSecret string) (string, error) {
 	wecomTokenCache.Lock()
 	defer wecomTokenCache.Unlock()
-	if wecomTokenCache.token != "" && time.Now().Before(wecomTokenCache.expires) {
-		return wecomTokenCache.token, nil
+	credentials := wecomCredentials{corpID, corpSecret}
+	if entry, ok := wecomTokenCache.entries[credentials]; ok && entry.token != "" && time.Now().Before(entry.expires) {
+		return entry.token, nil
 	}
 
 	tokenURL := "https://qyapi.weixin.qq.com/cgi-bin/gettoken?" + url.Values{
@@ -1064,12 +1122,17 @@ func getWeComAccessToken(client *http.Client, corpID, corpSecret string) (string
 		return "", fmt.Errorf("WeCom token error: %s", strings.TrimSpace(string(tokenBody)))
 	}
 
-	wecomTokenCache.token = tokenResult.AccessToken
 	expiresIn := tokenResult.ExpiresIn
 	if expiresIn <= 60 {
 		expiresIn = 7200
 	}
-	wecomTokenCache.expires = time.Now().Add(time.Duration(expiresIn-60) * time.Second)
+	if wecomTokenCache.entries == nil {
+		wecomTokenCache.entries = make(map[wecomCredentials]wecomTokenEntry)
+	}
+	wecomTokenCache.entries[credentials] = wecomTokenEntry{
+		token:   tokenResult.AccessToken,
+		expires: time.Now().Add(time.Duration(expiresIn-60) * time.Second),
+	}
 	return tokenResult.AccessToken, nil
 }
 

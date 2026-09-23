@@ -7,7 +7,76 @@ import (
 	"opensync/internal/config"
 	"sync"
 	"testing"
+	"time"
 )
+
+func TestFullSyncCreatesMissingDestinationRoot(t *testing.T) {
+	var mu sync.Mutex
+	created := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request: %v", err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/fs/list":
+			if body["path"] == "/dst/" {
+				mu.Lock()
+				exists := created
+				mu.Unlock()
+				if !exists {
+					_, _ = w.Write([]byte(`{"code":500,"message":"failed get dir: object not found","data":null}`))
+					return
+				}
+			}
+			_, _ = w.Write([]byte(`{"code":200,"message":"ok","data":{"content":[]}}`))
+		case "/api/fs/mkdir":
+			mu.Lock()
+			created = true
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"code":200,"message":"ok","data":{}}`))
+		default:
+			t.Errorf("unexpected request %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	d := *jobDeps
+	d.ScanListRetryDelay = func(int) time.Duration { return 0 }
+	restore := SetJobDepsForTest(&d)
+	defer restore()
+	var persisted []map[string]interface{}
+	restorePersist := stubPersistJobTaskItems(t, &persisted, nil)
+	defer restorePersist()
+	jt := scanTestTask(t, server.URL, server.Client(), map[string]interface{}{
+		"method": 1, "srcPath": "/src/", "dstPath": "/dst/",
+	})
+	jt.sync()
+	mu.Lock()
+	defer mu.Unlock()
+	if !created || jt.isBreak() {
+		t.Fatalf("created=%v stopped=%v, want created and running", created, jt.isBreak())
+	}
+}
+
+func TestFullSyncScanFailureDoesNotMarkTaskStopped(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":401,"message":"unauthorized","data":null}`))
+	}))
+	defer server.Close()
+	var persisted []map[string]interface{}
+	restorePersist := stubPersistJobTaskItems(t, &persisted, nil)
+	defer restorePersist()
+	jt := scanTestTask(t, server.URL, server.Client(), map[string]interface{}{
+		"method": 1, "srcPath": "/src/", "dstPath": "/dst/",
+	})
+	jt.sync()
+	if jt.isBreak() {
+		t.Fatal("scan failure marked task as user-stopped")
+	}
+}
 
 func TestFullSyncPlanMatchesMovedFileByStrongFingerprint(t *testing.T) {
 	plan := movedFileFullSyncPlan(FileMetadata{

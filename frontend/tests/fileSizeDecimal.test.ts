@@ -1,15 +1,28 @@
 import { describe, expect, it } from "vitest";
 import {
   fileSizeToBytes,
+  commitFileSizeInput,
   parseFileSizeInput,
   splitBytesToFileSize,
 } from "../src/pages/Home/fileSizeUnits";
+import { defaultJobForm, validateJobForm } from "../src/lib/taskForm";
 
 // The editor used to round-trip every keystroke through Number(), so "1." became
 // 1 and the next digit produced 12 — a 1.2 MB threshold was silently stored as
 // 12 MB, leaving 1.2–12 MB files unsynced. These assert the value pipeline keeps
 // fractional thresholds intact.
 describe("fractional file size thresholds", () => {
+  it("preserves an invalid blurred value for submit validation", () => {
+    const minFileSize = commitFileSizeInput("invalid");
+    expect(minFileSize).toBe("invalid");
+    expect(validateJobForm({
+      ...defaultJobForm(1),
+      remark: "test",
+      srcPath: ["/src/"],
+      dstPath: ["/dst/"],
+      minFileSize,
+    })).toContain("文件大小");
+  });
   it("round-trips a fractional MB threshold", () => {
     const bytes = fileSizeToBytes(1.2, "MB");
     expect(bytes).toBe(Math.round(1.2 * 1024 ** 2));

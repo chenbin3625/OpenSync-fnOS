@@ -17,6 +17,18 @@ var globalSSEConns atomic.Int32
 
 const maxGlobalSSEConns = 64
 
+func reserveSSEConnection() bool {
+	for {
+		count := globalSSEConns.Load()
+		if count >= maxGlobalSSEConns {
+			return false
+		}
+		if globalSSEConns.CompareAndSwap(count, count+1) {
+			return true
+		}
+	}
+}
+
 // StreamJobCurrent handles GET /svr/job/stream as Server-Sent Events.
 func StreamJobCurrent(c *gin.Context) {
 	jobID, err := parseRequiredID(c.Query("id"))
@@ -40,20 +52,19 @@ func StreamJobCurrent(c *gin.Context) {
 		return
 	}
 
-	if globalSSEConns.Load() >= maxGlobalSSEConns {
+	if !reserveSSEConnection() {
 		c.JSON(http.StatusTooManyRequests, model.Error(msg.T(msg.SSEConnLimit)))
 		return
 	}
+	defer globalSSEConns.Add(-1)
 
 	updates := service.SubscribeJobProgress(jobID)
 	if updates == nil {
 		c.JSON(http.StatusTooManyRequests, model.Error("too many progress streams"))
 		return
 	}
-	globalSSEConns.Add(1)
 	defer func() {
 		service.UnsubscribeJobProgress(jobID, updates)
-		globalSSEConns.Add(-1)
 	}()
 
 	c.Writer.Header().Set("Content-Type", "text/event-stream")

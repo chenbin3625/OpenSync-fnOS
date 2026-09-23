@@ -32,6 +32,10 @@ export function parseFileSizeInput(
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
+export function commitFileSizeInput(raw: string): number | string {
+  return parseFileSizeInput(raw) ?? raw;
+}
+
 export function fileSizeToBytes(
   value?: FileSizeInput | null,
   unit?: string | null,
