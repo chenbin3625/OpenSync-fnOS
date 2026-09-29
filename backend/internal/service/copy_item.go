@@ -3,8 +3,12 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"opensync/internal/msg"
 	"opensync/pkg/util"
+	"path"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 )
@@ -33,9 +37,15 @@ type copyItemClient interface {
 	FileExistsContext(context.Context, string, string) (bool, error)
 }
 
-// maxTransientPollErrors is the number of consecutive transient TaskInfo polling
-// errors (network blips, 5xx, connection limits) tolerated before a copy item is
-// declared failed. Each retry rides the loop's existing poll-interval backoff.
+// copyItemStatClient is optionally implemented by clients that can return
+// destination metadata (AlistClient via /api/fs/get). It is kept out of
+// copyItemClient so simple fakes only need the existence probe.
+type copyItemStatClient interface {
+	FileStatContext(context.Context, string, string) (FileStat, error)
+}
+
+// maxTransientPollErrors bounds the destination probes confirmSynchronousCopy
+// makes when the probe itself keeps erroring.
 const maxTransientPollErrors = 3
 
 type CopyItem struct {
@@ -122,6 +132,15 @@ func (ci *CopyItem) setRetrying(err error) {
 
 func (ci *CopyItem) setProgress(status taskStatus, progress float64, errMsg *string) {
 	ci.mu.Lock()
+	if ci.Status == taskStatusStopped && status != taskStatusStopped {
+		// Stopped is terminal for a watch: abortWatch (user stop / task
+		// cancel) can race with the monitor loop applying a poll result it
+		// fetched just before. Letting that stale Running/Success overwrite
+		// Stopped would report a cancelled transfer as done. DoIt resets the
+		// status through setRunning/setRetrying, not through here.
+		ci.mu.Unlock()
+		return
+	}
 	ci.Status = status
 	ci.Progress = progress
 	ci.ErrMsg = errMsg
@@ -207,7 +226,23 @@ func (ci *CopyItem) DoIt() {
 		}
 
 		ci.setRunning()
+		submittedAt := time.Now().Unix()
 		taskID, err := ci.startTransfer(runtime.context(), client)
+		if err != nil && ci.CopyType != taskItemTypeDelete && isAmbiguousTransferError(err) && !runtime.isBreak() {
+			// The request may have reached AList even though no answer came
+			// back (header timeout, connection reset). Copy/move are not
+			// idempotent: resubmitting a completed move fails because the
+			// source is gone, and resubmitting a copy starts a duplicate task.
+			// Look at the server state before deciding to retry.
+			adoptedTaskID, completed := ci.reconcileAmbiguousTransfer(runtime, client, submittedAt)
+			if completed {
+				ci.setProgress(taskStatusSuccess, 100, nil)
+				break
+			}
+			if adoptedTaskID != "" {
+				taskID, err = adoptedTaskID, nil
+			}
+		}
 		if err != nil {
 			if errors.Is(err, context.Canceled) && runtime.isBreak() {
 				ci.setStatus(taskStatusStopped)
@@ -291,7 +326,7 @@ func (ci *CopyItem) startTransfer(ctx context.Context, client copyItemClient) (s
 // reported as failed.
 func (ci *CopyItem) confirmSynchronousCopy(runtime copyItemRuntime, client copyItemClient) bool {
 	for attempt := 0; attempt < maxTransientPollErrors; attempt++ {
-		exists, err := ci.verifyDstExists(runtime, client)
+		exists, err := ci.verifyDstComplete(runtime, client)
 		if err == nil {
 			return exists
 		}
@@ -303,6 +338,127 @@ func (ci *CopyItem) confirmSynchronousCopy(runtime copyItemRuntime, client copyI
 		}
 	}
 	return true
+}
+
+// isAmbiguousTransferError reports whether a copy/move error leaves it unknown
+// whether AList executed the request. Clear server answers (HTTP status or
+// AList business code), auth/address errors and connection refusals mean the
+// operation did not run, so the normal retry applies. Everything else
+// (timeouts, resets, undecodable 200 responses) may follow a server-side
+// success.
+func isAmbiguousTransferError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var statusErr *alistStatusError
+	if errors.As(err, &statusErr) {
+		return false
+	}
+	for _, definite := range []string{msg.T(msg.AlistUnAuth), msg.T(msg.AddressIncorrect), msg.T(msg.AlistConnectFail)} {
+		if strings.Contains(err.Error(), definite) {
+			return false
+		}
+	}
+	return true
+}
+
+// reconcileAmbiguousTransfer inspects AList after an ambiguous copy/move
+// failure. It returns the id of an undone AList task that already carries this
+// exact transfer (so the caller polls it instead of submitting a duplicate),
+// or completed=true when the destination already holds the file (and, for a
+// move, the source is gone). Any probe error yields ("", false): the caller
+// then falls back to the normal bounded retry.
+//
+// For a copy the destination may already have held an older version of the
+// same size (Overwrite:true replaces it), so a matching size alone does not
+// prove this submission ran. The destination must also have been written at or
+// after submittedAt; an unknown mtime falls back to the normal retry.
+func (ci *CopyItem) reconcileAmbiguousTransfer(runtime copyItemRuntime, client copyItemClient, submittedAt int64) (string, bool) {
+	ctx, cancel := runtime.cleanupContext()
+	tasks, err := client.TaskUndoneListContext(ctx, ci.CopyType)
+	cancel()
+	if err == nil {
+		if taskID := ci.matchUndoneTask(tasks); taskID != "" {
+			return taskID, false
+		}
+	}
+
+	if ci.CopyType == taskItemTypeMove {
+		srcCtx, srcCancel := runtime.cleanupContext()
+		srcExists, err := client.FileExistsContext(srcCtx, ci.SrcPath, ci.FileName)
+		srcCancel()
+		if err != nil || srcExists {
+			return "", false
+		}
+	}
+	if ci.CopyType == taskItemTypeMove {
+		// The source is gone, so the destination can only be this move's result.
+		done, err := ci.verifyDstComplete(runtime, client)
+		return "", err == nil && done
+	}
+	done, err := ci.verifyDstWrittenSince(runtime, client, submittedAt)
+	return "", err == nil && done
+}
+
+// verifyDstWrittenSince is verifyDstComplete plus a freshness check: the
+// destination's modification time must not predate since. Storage clocks can
+// round to the second, hence the one-second allowance.
+func (ci *CopyItem) verifyDstWrittenSince(runtime copyItemRuntime, client copyItemClient, since int64) (bool, error) {
+	statClient, canStat := client.(copyItemStatClient)
+	if !canStat {
+		return false, nil
+	}
+	done, err := ci.verifyDstComplete(runtime, client)
+	if err != nil || !done {
+		return false, err
+	}
+	ctx, cancel := runtime.cleanupContext()
+	defer cancel()
+	stat, err := statClient.FileStatContext(ctx, ci.DstPath, ci.FileName)
+	if err != nil {
+		return false, err
+	}
+	modified := stat.Modified
+	if modified > 1e12 {
+		// Some drivers report milliseconds.
+		modified /= 1000
+	}
+	return modified > 0 && modified >= since-1, nil
+}
+
+// alistTaskNamePattern matches AList's copy/move task names:
+// "copy [<src mount>](<src path in storage>) to [<dst mount>](<dst dir in storage>)".
+var alistTaskNamePattern = regexp.MustCompile(`^\w+ \[([^\]]*)\]\((.*)\) to \[([^\]]*)\]\((.*)\)$`)
+
+// matchUndoneTask returns the id of the single undone task whose name encodes
+// exactly this item's source file and destination directory. Unknown name
+// formats and multiple matches return "" so an unrelated task is never
+// adopted.
+func (ci *CopyItem) matchUndoneTask(tasks []map[string]interface{}) string {
+	wantSrc := path.Clean("/" + ci.SrcPath + "/" + ci.FileName)
+	wantDst := path.Clean("/" + ci.DstPath)
+	match := ""
+	for _, task := range tasks {
+		name, _ := task["name"].(string)
+		parts := alistTaskNamePattern.FindStringSubmatch(name)
+		if parts == nil {
+			continue
+		}
+		src := path.Clean("/" + parts[1] + "/" + parts[2])
+		dst := path.Clean("/" + parts[3] + "/" + parts[4])
+		if src != wantSrc || dst != wantDst {
+			continue
+		}
+		id := fmt.Sprintf("%v", task["id"])
+		if id == "" || id == "<nil>" {
+			continue
+		}
+		if match != "" && match != id {
+			return ""
+		}
+		match = id
+	}
+	return match
 }
 
 func defaultCopyRetryDelay(attempt int) time.Duration {
@@ -325,14 +481,46 @@ func (ci *CopyItem) errorMessage() string {
 	return *ci.ErrMsg
 }
 
-// verifyDstExists checks whether the destination file is present. Used when the
-// AList task record has vanished (404) to decide whether a move/copy actually
-// completed. Runs on an independent cleanup context so it is not cut short by a
-// cancelling task context.
-func (ci *CopyItem) verifyDstExists(runtime copyItemRuntime, client copyItemClient) (bool, error) {
+// verifyDstComplete checks whether the destination holds the transferred file.
+// Used when the AList task record has vanished (404) or the copy/move response
+// was lost, to decide whether the transfer actually completed. Copies run with
+// Overwrite:true, so the old version of the file usually already exists at the
+// destination; existence alone would turn a failed update into a success.
+// When the source size is known and the client can report metadata, the
+// destination size must match. Without a known size the historical existence
+// check is kept. Runs on an independent cleanup context so it is not cut short
+// by a cancelling task context.
+func (ci *CopyItem) verifyDstComplete(runtime copyItemRuntime, client copyItemClient) (bool, error) {
 	ctx, cancel := runtime.cleanupContext()
 	defer cancel()
-	return client.FileExistsContext(ctx, ci.DstPath, ci.FileName)
+	statClient, canStat := client.(copyItemStatClient)
+	wantSize, sizeKnown := ci.expectedSize()
+	if !canStat || !sizeKnown {
+		return client.FileExistsContext(ctx, ci.DstPath, ci.FileName)
+	}
+	stat, err := statClient.FileStatContext(ctx, ci.DstPath, ci.FileName)
+	if err != nil {
+		return false, err
+	}
+	if !stat.Exists {
+		return false, nil
+	}
+	if stat.IsDir || ci.IsPath == taskItemPath || !stat.SizeKnown {
+		return true, nil
+	}
+	return stat.Size == wantSize, nil
+}
+
+// expectedSize returns the source size recorded when the item was queued.
+func (ci *CopyItem) expectedSize() (int64, bool) {
+	if ci.FileSize == nil {
+		return 0, false
+	}
+	size := util.ToInt64(ci.FileSize)
+	if size < 0 {
+		return 0, false
+	}
+	return size, true
 }
 
 func (ci *CopyItem) stopRemoteTask(client copyItemClient, cause error) {

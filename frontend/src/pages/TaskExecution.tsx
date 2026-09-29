@@ -1,16 +1,18 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import DatePicker from "@douyinfe/semi-ui/lib/es/datePicker";
 import Input from "@douyinfe/semi-ui/lib/es/input";
 import Pagination from "@douyinfe/semi-ui/lib/es/pagination";
 import Progress from "@douyinfe/semi-ui/lib/es/progress";
 import Select from "@douyinfe/semi-ui/lib/es/select";
+import Spin from "@douyinfe/semi-ui/lib/es/spin";
 import SideSheet from "@douyinfe/semi-ui/lib/es/sideSheet";
 import Table from "@douyinfe/semi-ui/lib/es/table";
 import Tabs from "@douyinfe/semi-ui/lib/es/tabs";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
 import {
+  IconAlertTriangle,
   IconDeleteStroked,
   IconEyeOpenedStroked,
   IconPause,
@@ -29,6 +31,7 @@ import {
 } from "../components/common";
 import { useAction, useResource } from "../lib/hooks";
 import { historyRangeParams } from "../lib/historyFilters";
+import { useClampedPage } from "../lib/pagination";
 import { useRealtimeTask } from "./Home/useRealtimeTask";
 import { useRealtimeTaskItems } from "./Home/useRealtimeTaskItems";
 import {
@@ -59,10 +62,12 @@ const fileTableWidths = {
 } as const;
 
 export function Realtime({ jobId }: { jobId: number }) {
-  const { currentTask, refreshCurrentTask } = useRealtimeTask(
-    String(jobId),
-    true,
-  );
+  const {
+    currentTask,
+    loading: taskLoading,
+    error: taskError,
+    refreshCurrentTask,
+  } = useRealtimeTask(String(jobId), true);
   const items = useRealtimeTaskItems({
     jobId: String(jobId),
     enabled: true,
@@ -71,6 +76,22 @@ export function Realtime({ jobId }: { jobId: number }) {
   });
   const action = useAction();
   if (!currentTask) {
+    // The first poll used to flash "空空如也" before the task arrived, and a
+    // failed first poll looked like "nothing running".
+    if (taskError)
+      return (
+        <LoadState
+          loading={false}
+          error={taskError}
+          retry={refreshCurrentTask}
+        />
+      );
+    if (taskLoading)
+      return (
+        <div className="state-panel">
+          <Spin size="large" />
+        </div>
+      );
     return <EmptyState />;
   }
   const task = currentTask;
@@ -110,6 +131,14 @@ export function Realtime({ jobId }: { jobId: number }) {
         <span>已运行 {formatDuration(task.duration)}</span>
       </div>
       <Progress percent={Math.round(percent)} showInfo strokeColor="var(--accent)" />
+      {taskError && (
+        // Polling keeps the last snapshot on failure; without this notice the
+        // frozen numbers read as a stalled transfer.
+        <div className="realtime-notice" role="status">
+          <IconAlertTriangle aria-hidden="true" size="small" />
+          连接中断，正在重试…
+        </div>
+      )}
       {!task.scanFinish && task.scan && (
         <div className="scan-status">
           已扫描 {task.scan.scannedDirs} 个目录 · 待扫描{" "}
@@ -183,6 +212,9 @@ export function History({ jobId }: { jobId: number }) {
   const realRows = resource.data?.dataList || [];
   const rows = realRows;
   const totalCount = resource.data?.count || 0;
+  // Deleting the last record on the last page left the table empty.
+  useClampedPage(page, resource.data ? totalCount : null, size, setPage);
+  const labelId = useId();
   const retry = (record: TaskRecord) =>
     void action.run(async () => {
       try {
@@ -196,20 +228,17 @@ export function History({ jobId }: { jobId: number }) {
   const controls = (record: TaskRecord) => (
     <div className="row-actions">
       <IconButton
-        aria-hidden="true"
         label="查看执行明细"
         icon={<IconEyeOpenedStroked aria-hidden="true" />}
         onClick={() => setDetail(record.id)}
       />
       <IconButton
-        aria-hidden="true"
         label="重试未完成项"
         icon={<IconRefresh aria-hidden="true" />}
         disabled={action.busy}
         onClick={() => retry(record)}
       />
       <IconButton
-        aria-hidden="true"
         label="删除执行记录"
         icon={<IconDeleteStroked aria-hidden="true" />}
         danger
@@ -225,6 +254,14 @@ export function History({ jobId }: { jobId: number }) {
   return (
     <div className="history-view flex-column">
       <div className="filter-bar">
+        {/* Semi Select/DatePicker drop aria-label and only forward
+            aria-labelledby, so their names come from these hidden labels. */}
+        <span id={`${labelId}-status`} className="sr-only">
+          执行状态
+        </span>
+        <span id={`${labelId}-range`} className="sr-only">
+          执行时间范围
+        </span>
         <Input
           prefix={<IconSearchStroked aria-hidden="true" />}
           aria-label="搜索执行记录"
@@ -244,7 +281,6 @@ export function History({ jobId }: { jobId: number }) {
           }}
           suffix={
             <IconButton
-              aria-hidden="true"
               label="搜索记录"
               icon={<IconSearchStroked aria-hidden="true" />}
               onClick={() => {
@@ -255,7 +291,7 @@ export function History({ jobId }: { jobId: number }) {
           }
         />
         <Select
-          aria-label="执行状态"
+          aria-labelledby={`${labelId}-status`}
           value={status === undefined ? "all" : String(status)}
           optionList={[
             { label: "全部状态", value: "all" },
@@ -271,6 +307,7 @@ export function History({ jobId }: { jobId: number }) {
         />
         <DatePicker
           type="dateRange"
+          aria-labelledby={`${labelId}-range`}
           value={range}
           onChange={(value) => {
             setRange(Array.isArray(value) ? value.map((v) => new Date(v)) : []);
@@ -578,6 +615,13 @@ function FileDetails({
   useEffect(() => {
     if (resource.error) Toast.error(resource.error);
   }, [resource.error]);
+  useClampedPage(
+    page,
+    resource.data ? resource.data.count || 0 : null,
+    size,
+    setPage,
+  );
+  const labelId = useId();
   return (
     <SideSheet
       title="执行明细"
@@ -589,6 +633,11 @@ function FileDetails({
     >
       <div className="detail-drawer-body">
       <div className="filter-bar">
+        {["操作类型", "对象类型", "错误信息"].map((label, index) => (
+          <span key={label} id={`${labelId}-${index}`} className="sr-only">
+            {label}
+          </span>
+        ))}
         <Input
           aria-label="搜索文件明细"
           prefix={<IconSearchStroked aria-hidden="true" />}
@@ -636,10 +685,10 @@ function FileDetails({
               { label: "无错误信息", value: 0 },
             ],
           },
-        ].map((filter) => (
+        ].map((filter, index) => (
           <Select
             key={filter.label}
-            aria-label={filter.label}
+            aria-labelledby={`${labelId}-${index}`}
             value={filter.value === undefined ? "all" : String(filter.value)}
             optionList={[
               { label: "全部" + filter.label, value: "all" },
@@ -694,6 +743,7 @@ function Pager({
   onChange: (page: number) => void;
   onSizeChange?: (size: number) => void;
 }) {
+  const sizeLabelId = useId();
   return (
     <div className="table-pagination">
       <span className="muted">共 {total} 条</span>
@@ -707,7 +757,12 @@ function Pager({
           onPageChange={onChange}
         />
         {onSizeChange && (
+          <>
+          <span id={sizeLabelId} className="sr-only">
+            每页条数
+          </span>
           <Select
+            aria-labelledby={sizeLabelId}
             value={size}
             onChange={(v) => onSizeChange(v as number)}
             size="small"
@@ -717,6 +772,7 @@ function Pager({
               label: `${n} 条/页`,
             }))}
           />
+          </>
         )}
       </div>
     </div>

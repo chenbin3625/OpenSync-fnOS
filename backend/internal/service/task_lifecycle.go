@@ -64,7 +64,12 @@ func (jt *JobTask) finishFailedTask(errMsg string) {
 }
 
 func (jt *JobTask) updateTaskStatus() (taskStatus, map[string]interface{}, int, error) {
-	taskNum := GetCuTaskNum(jt.TaskID)
+	// A failed count must not be read as "zero items": allNum=0 derives the
+	// "nothing to sync" status and the zeros would be cached into taskNum.
+	taskNum, err := GetCuTaskNum(jt.TaskID)
+	if err != nil {
+		return 0, nil, 0, fmt.Errorf("count task items: %w", err)
+	}
 	failOrOtherNum := util.ToInt(taskNum["failNum"]) + util.ToInt(taskNum["otherNum"])
 	allNum := util.ToInt(taskNum["allNum"])
 	status := finalTaskStatus(jt.isBreak(), jt.context().Err(), allNum, failOrOtherNum)
@@ -113,12 +118,21 @@ func taskDuration(createTime float64) int {
 
 // UpdateJobTaskStatusSimple updates task status with error message
 func UpdateJobTaskStatusSimple(taskID int64, status taskStatus, errMsg *string) error {
-	taskNum := GetCuTaskNum(taskID)
+	taskNum, err := GetCuTaskNum(taskID)
+	if err != nil {
+		// The status still has to be recorded; the counters are left for the
+		// task list to recompute rather than persisted as zeros.
+		log.Printf("Failed to count items of task %d, saving status without counters: %v", taskID, err)
+		return mapper.UpdateJobTaskStatusClearNum(taskID, status.Int(), errMsg)
+	}
 	taskNumJSON, _ := json.Marshal(taskNum)
 	return mapper.UpdateJobTaskStatusAndNum(taskID, status.Int(), errMsg, string(taskNumJSON))
 }
 
+// queryJobTaskCounts is swapped in tests to simulate a failed count.
+var queryJobTaskCounts = mapper.QueryJobTaskCounts
+
 // GetCuTaskNum gets current task counts from DB
-func GetCuTaskNum(taskID int64) map[string]interface{} {
-	return mapper.GetJobTaskCounts(taskID)
+func GetCuTaskNum(taskID int64) (map[string]interface{}, error) {
+	return queryJobTaskCounts(taskID)
 }

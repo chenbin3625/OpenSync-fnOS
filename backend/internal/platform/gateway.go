@@ -2,6 +2,7 @@ package platform
 
 import (
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -19,8 +20,10 @@ import (
 // app is reachable only through the fnOS unified gateway, which rewrites Host on
 // the hop to the app socket. On a real device c.Request.Host is therefore not
 // the public host the browser used, so that comparison rejected the app's own
-// writes with 403. Host is consequently never used as evidence here; the
-// browser's own Sec-Fetch-Site metadata decides instead.
+// writes with 403. Host is consequently never used as evidence here. Instead a
+// write must carry Content-Type: application/json (which a cross-origin page
+// cannot send without a CORS preflight the app never grants), and the browser's
+// own Sec-Fetch-Site metadata is honoured where the browser sends it.
 //
 // Threat model: this app has no cookie login of its own — the gateway validates
 // the fnOS session and injects X-Trim-Userid / X-Trim-Isadmin, which only it can
@@ -31,7 +34,7 @@ import (
 // constrained here at all; the gateway's session check is the real boundary.
 func GatewayRequired(development bool, allowedOrigins []string) gin.HandlerFunc {
 	if !development && len(allowedOrigins) == 0 {
-		log.Printf("Warning: allowed_origins is not configured; write requests from non-browser clients are accepted without origin check")
+		log.Printf("Warning: allowed_origins is not configured; JSON write requests without browser fetch metadata are accepted without an Origin check")
 	}
 	return func(c *gin.Context) {
 		if !sameOriginWrite(c, allowedOrigins) {
@@ -61,7 +64,8 @@ func GatewayRequired(development bool, allowedOrigins []string) gin.HandlerFunc 
 // LogOriginPolicy reports the active cross-origin policy once at startup.
 func LogOriginPolicy(allowedOrigins []string) {
 	if len(allowedOrigins) == 0 {
-		log.Printf("跨域策略：未配置 allowed_origins，仅拦截浏览器声明为跨站（Sec-Fetch-Site）的写入请求。" +
+		log.Printf("跨域策略：未配置 allowed_origins，写入请求须携带 Content-Type: application/json（跨站页面无法在不经 CORS 预检的情况下发送），" +
+			"并拦截浏览器声明为跨站（Sec-Fetch-Site，仅 HTTPS/本机访问时发送）的请求。" +
 			"如需严格模式，请在 config.ini 的 [opensync] 中把访问本应用的地址写入 allowed_origins（例如 http://10.10.11.250:5666）后重启应用")
 		return
 	}
@@ -75,24 +79,46 @@ func sameOriginWrite(c *gin.Context, allowedOrigins []string) bool {
 		return true
 	}
 
+	// Every write must declare Content-Type: application/json, with or without a
+	// body. This is the check that actually holds on a typical fnOS install.
+	//
+	// Browsers only send Sec-Fetch-Site to potentially trustworthy origins
+	// (HTTPS or loopback). fnOS is normally opened over plain HTTP at a LAN
+	// address such as http://10.x.x.x:5666, so on most devices the header below
+	// is simply absent and cannot be relied on. The handlers decode with
+	// ShouldBindJSON, which ignores Content-Type, so without this check a
+	// third-party page could forge a JSON body with
+	// <form enctype="text/plain" method="POST"> — a "simple" request that needs
+	// no CORS preflight.
+	//
+	// application/json is not a CORS-safelisted content type: a cross-origin
+	// fetch that sets it must first pass a preflight, and this app never answers
+	// with Access-Control-Allow-* headers, so the preflight fails and the write
+	// is never sent. HTML forms cannot produce it at all. The app's own client
+	// (frontend/src/api/client.ts) sets it on every request, including DELETEs
+	// that carry their arguments in the query string.
+	if !jsonContentType(c.GetHeader("Content-Type")) {
+		return false
+	}
+
 	// Sec-Fetch-Site is set by the browser itself and cannot be forged by a page.
-	// "cross-site" is the classic CSRF shape; "same-site" is another origin on
-	// the same NAS (a different fnOS app on another port is same-site, and the
-	// browser still sends the session cookie), which is just as much an attack.
-	// The app's own UI always speaks to its own origin, so it reports
-	// "same-origin" and keeps working.
+	// When it is present (HTTPS or loopback access), "cross-site" is the classic
+	// CSRF shape; "same-site" is another origin on the same NAS (a different
+	// fnOS app on another port is same-site, and the browser still sends the
+	// session cookie), which is just as much an attack. The app's own UI always
+	// speaks to its own origin, so it reports "same-origin" and keeps working.
 	switch c.GetHeader("Sec-Fetch-Site") {
 	case "cross-site", "same-site":
 		return false
 	}
 
 	if len(allowedOrigins) == 0 {
-		// Auto mode. The remaining callers carry no browser verdict: modern
-		// browsers always send Sec-Fetch-Site above, so what is left is
-		// non-browser clients (curl, monitoring) and browsers too old to send
-		// fetch metadata. Their Origin cannot be verified — the gateway rewrote
-		// Host — so they are accepted rather than breaking legitimate writes.
-		// Configuring allowed_origins replaces this with an exact match.
+		// Auto mode. The remaining callers carry no browser verdict: either a
+		// browser on plain HTTP (which does not send fetch metadata there), a
+		// non-browser client (curl, monitoring), or an old browser. Their Origin
+		// cannot be verified — the gateway rewrote Host — so they are accepted;
+		// the JSON Content-Type requirement above is what keeps a third-party
+		// page out. Configuring allowed_origins adds an exact Origin match.
 		return true
 	}
 
@@ -101,6 +127,18 @@ func sameOriginWrite(c *gin.Context, allowedOrigins []string) bool {
 		return false
 	}
 	return originAllowed(origin, allowedOrigins)
+}
+
+// jsonContentType reports whether a Content-Type header value is
+// application/json. Parameters such as charset are allowed; the media type is
+// parsed rather than prefix-matched so "application/jsonx" or
+// "text/plain; application/json" do not pass.
+func jsonContentType(value string) bool {
+	if strings.TrimSpace(value) == "" {
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(value)
+	return err == nil && mediaType == "application/json"
 }
 
 // callerOrigin is the browser-supplied origin of a request.
@@ -229,8 +267,8 @@ func defaultPort(scheme string) string {
 // a 403 is unactionable: the operator cannot see which origin was rejected, or
 // that an allow-list needs the address they actually browse to.
 func logRejectedWrite(c *gin.Context, allowedOrigins []string) {
-	log.Printf("rejected cross-site %s %s: host=%q origin=%q referer=%q x-forwarded-host=%q sec-fetch-site=%q sec-fetch-mode=%q allowed_origins=%q",
+	log.Printf("rejected cross-site %s %s: host=%q origin=%q referer=%q x-forwarded-host=%q sec-fetch-site=%q sec-fetch-mode=%q content-type=%q allowed_origins=%q",
 		c.Request.Method, c.Request.URL.Path, c.Request.Host,
 		c.GetHeader("Origin"), c.GetHeader("Referer"), c.GetHeader("X-Forwarded-Host"),
-		c.GetHeader("Sec-Fetch-Site"), c.GetHeader("Sec-Fetch-Mode"), allowedOrigins)
+		c.GetHeader("Sec-Fetch-Site"), c.GetHeader("Sec-Fetch-Mode"), c.GetHeader("Content-Type"), allowedOrigins)
 }

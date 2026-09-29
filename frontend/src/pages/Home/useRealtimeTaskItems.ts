@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import { jobGetTaskCurrent } from "../../api/job";
 import { useResource } from "../../lib/hooks";
+import { useClampedPage } from "../../lib/pagination";
 import type { CurrentTaskView, TaskItem } from "../../types";
 import { getRealtimeTaskIdentity, normalizeTaskItemPage } from "./taskRows";
 
@@ -102,6 +103,14 @@ export function useRealtimeTaskItems({
     setPageSizeValue(Math.max(1, Math.trunc(size)));
     setTabTaskPageValue(1);
   }, []);
+  // Items leave a status tab while the task runs, so the total shrinks under a
+  // page the user left open.
+  useClampedPage(
+    tabTaskPage,
+    currentPage ? currentPage.total : null,
+    pageSize,
+    setTabTaskPageValue,
+  );
   const retryTabTasks = useCallback(() => {
     void resource.refresh();
   }, [resource.refresh]);

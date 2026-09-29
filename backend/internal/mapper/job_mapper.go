@@ -1,6 +1,7 @@
 package mapper
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -265,30 +266,55 @@ func DeleteJobTaskByTaskID(taskID int64) error {
 	})
 }
 
-// DeleteJobTaskByRunTime deletes old tasks
+// DeleteJobTaskByRunTime deletes old tasks. It is the context-free form of
+// DeleteJobTaskByRunTimeContext and never skips maintenance.
 func DeleteJobTaskByRunTime(runTime int64) error {
+	return DeleteJobTaskByRunTimeContext(context.Background(), runTime, nil)
+}
+
+// DeleteJobTaskByRunTimeContext deletes finished tasks older than runTime, then
+// reclaims space. ctx is checked between every short delete batch, so shutdown
+// can stop a cleanup of years of history without waiting for it to finish.
+//
+// maintenanceBlocked reports whether a sync is running. The WAL truncate and
+// VACUUM hold the write lock for as long as they take, and a running task's
+// item writes give up after busy_timeout; both are skipped while it returns
+// true, and a VACUUM already under way is interrupted when it turns true.
+// A nil maintenanceBlocked never blocks.
+func DeleteJobTaskByRunTimeContext(ctx context.Context, runTime int64, maintenanceBlocked func() bool) error {
+	if maintenanceBlocked == nil {
+		maintenanceBlocked = func() bool { return false }
+	}
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		taskIDs, err := expiredJobTaskIDs(runTime, expiredTaskDeleteBatchSize)
 		if err != nil {
 			return err
 		}
 		if len(taskIDs) == 0 {
-			// incremental_vacuum only does anything when the database was
-			// created with auto_vacuum=INCREMENTAL, which this schema never
-			// set — so deleting years of history returned no pages to the
-			// filesystem. TRUNCATE actually shrinks the WAL, and the freed
-			// pages are reclaimed by an explicit VACUUM below.
-			_, _ = GetDB().Exec("PRAGMA wal_checkpoint(TRUNCATE)")
-			_, _ = GetDB().Exec("PRAGMA optimize")
-			if err := vacuumIfFreePagesExceed(freePageVacuumThreshold); err != nil {
-				log.Printf("Failed to reclaim free database pages: %v", err)
-			}
-			return nil
+			break
 		}
-		if err := deleteJobTasksByIDs(taskIDs); err != nil {
+		if err := deleteJobTasksByIDs(ctx, taskIDs); err != nil {
 			return err
 		}
 	}
+	if maintenanceBlocked() {
+		log.Printf("Skipping database maintenance after task history cleanup: a sync task is running")
+		return nil
+	}
+	// incremental_vacuum only does anything when the database was created
+	// with auto_vacuum=INCREMENTAL, which this schema never set — so deleting
+	// years of history returned no pages to the filesystem. TRUNCATE actually
+	// shrinks the WAL, and the freed pages are reclaimed by an explicit VACUUM
+	// below.
+	_, _ = GetDB().ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
+	_, _ = GetDB().ExecContext(ctx, "PRAGMA optimize")
+	if err := vacuumIfWorthwhile(ctx, maintenanceBlocked); err != nil {
+		log.Printf("Failed to reclaim free database pages: %v", err)
+	}
+	return nil
 }
 
 // freePageVacuumThreshold is the number of free pages that justifies a VACUUM.
@@ -296,20 +322,107 @@ func DeleteJobTaskByRunTime(runTime int64) error {
 // worth doing once a meaningful amount of space is actually reclaimable.
 const freePageVacuumThreshold = 4096
 
-// vacuumIfFreePagesExceed reclaims disk space only when enough pages are free.
-// VACUUM cannot run inside a transaction and is skipped (not an error) when the
+// freePageVacuumMinPercent is the share of the file that has to be free as
+// well. The absolute threshold alone (16 MiB at 4 KiB pages) is reached by
+// ordinary churn on a multi-GB database, and each such VACUUM rewrote every
+// page of it to give back a rounding error.
+const freePageVacuumMinPercent = 20
+
+// vacuumMaintenancePollInterval is how often a running VACUUM checks whether a
+// sync task has started and it should give way.
+const vacuumMaintenancePollInterval = 500 * time.Millisecond
+
+// shouldVacuum decides whether reclaiming freePages out of pageCount is worth
+// a full rewrite: enough pages in absolute terms and as a share of the file.
+func shouldVacuum(freePages, pageCount, minFreePages int64) bool {
+	if freePages <= 0 || pageCount <= 0 || freePages < minFreePages {
+		return false
+	}
+	return freePages*100 >= pageCount*freePageVacuumMinPercent
+}
+
+// vacuumIfWorthwhile reclaims disk space when shouldVacuum says so. VACUUM
+// cannot run inside a transaction and is skipped (not an error) when the
 // database is busy.
-func vacuumIfFreePagesExceed(threshold int64) error {
-	var freePages int64
-	if err := GetDB().QueryRow("PRAGMA freelist_count").Scan(&freePages); err != nil {
+//
+// It runs on a dedicated connection switched to temp_store=FILE. The pool opens
+// every connection with temp_store=MEMORY, and VACUUM builds its full copy of
+// the database in temp storage: on a NAS with a multi-GB history that copy was
+// built in RAM and the process was OOM-killed mid-rewrite.
+func vacuumIfWorthwhile(ctx context.Context, maintenanceBlocked func() bool) error {
+	conn, err := GetDB().Conn(ctx)
+	if err != nil {
 		return err
 	}
-	if freePages < threshold {
+	defer conn.Close()
+
+	var freePages, pageCount int64
+	if err := conn.QueryRowContext(ctx, "PRAGMA freelist_count").Scan(&freePages); err != nil {
+		return err
+	}
+	if err := conn.QueryRowContext(ctx, "PRAGMA page_count").Scan(&pageCount); err != nil {
+		return err
+	}
+	if !shouldVacuum(freePages, pageCount, freePageVacuumThreshold) {
 		return nil
 	}
-	log.Printf("Reclaiming %d free database pages", freePages)
-	_, err := GetDB().Exec("VACUUM")
+	return vacuumOnConn(ctx, conn, freePages, pageCount, maintenanceBlocked)
+}
+
+// vacuumOnConn runs VACUUM with file-backed temp storage on conn and restores
+// the pool's temp_store afterwards, so the connection goes back to the pool
+// configured like its siblings.
+func vacuumOnConn(ctx context.Context, conn *sql.Conn, freePages, pageCount int64, maintenanceBlocked func() bool) error {
+	if _, err := conn.ExecContext(ctx, "PRAGMA temp_store=FILE"); err != nil {
+		return err
+	}
+	defer func() {
+		// Background, not ctx: an interrupted VACUUM cancelled ctx, and the
+		// connection must still leave with the pool's setting restored.
+		if _, err := conn.ExecContext(context.Background(), "PRAGMA temp_store=MEMORY"); err != nil {
+			log.Printf("Failed to restore sqlite temp_store after VACUUM: %v", err)
+		}
+	}()
+
+	vacuumCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stopWatch := watchMaintenanceBlocked(vacuumCtx, cancel, maintenanceBlocked, vacuumMaintenancePollInterval)
+	defer stopWatch()
+
+	log.Printf("Reclaiming %d of %d database pages", freePages, pageCount)
+	_, err := conn.ExecContext(vacuumCtx, "VACUUM")
 	return err
+}
+
+// watchMaintenanceBlocked cancels ctx (interrupting the VACUUM running under
+// it) as soon as blocked reports a sync task. VACUUM holds the write lock for
+// its whole run, so a task that starts meanwhile would otherwise see its item
+// writes time out and abort. The returned function stops the watcher and must
+// be called exactly once.
+func watchMaintenanceBlocked(ctx context.Context, cancel context.CancelFunc, blocked func() bool, interval time.Duration) func() {
+	if blocked == nil {
+		return func() {}
+	}
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if blocked() {
+					log.Printf("Interrupting VACUUM: a sync task started")
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	return func() { close(done) }
 }
 
 func expiredJobTaskIDs(cutoff int64, limit int) ([]int64, error) {
@@ -344,20 +457,41 @@ func expiredJobTaskIDs(cutoff int64, limit int) ([]int64, error) {
 	return taskIDs, nil
 }
 
-func deleteJobTasksByIDs(taskIDs []int64) error {
+// jobTaskItemDeleteBatchSize bounds the rows removed per write transaction.
+// Each deleted item also fires the FTS delete trigger, so one statement for
+// every item of 500 tasks held the write lock long enough for a running sync's
+// item writes to exceed busy_timeout and abort the task.
+var jobTaskItemDeleteBatchSize = 2000
+
+// deleteJobTasksByIDs removes the tasks' items in short, separately committed
+// batches, then the task rows themselves. An interruption leaves the task rows
+// in place with fewer items; they are still expired, so the next cleanup picks
+// them up again.
+func deleteJobTasksByIDs(ctx context.Context, taskIDs []int64) error {
 	if len(taskIDs) == 0 {
 		return nil
 	}
 	clause, args := int64InClause(taskIDs)
-	return withTx(func(tx *sql.Tx) error {
-		if _, err := tx.Exec("DELETE FROM job_task_item WHERE taskId IN ("+clause+")", args...); err != nil {
+	itemArgs := appendSQLArgs(args, jobTaskItemDeleteBatchSize)
+	deleteItems := "DELETE FROM job_task_item WHERE id IN (SELECT id FROM job_task_item WHERE taskId IN (" + clause + ") LIMIT ?)"
+	for {
+		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if _, err := tx.Exec("DELETE FROM job_task WHERE id IN ("+clause+")", args...); err != nil {
+		result, err := GetDB().ExecContext(ctx, deleteItems, itemArgs...)
+		if err != nil {
 			return err
 		}
-		return nil
-	})
+		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			break
+		}
+	}
+	_, err := GetDB().ExecContext(ctx, "DELETE FROM job_task WHERE id IN ("+clause+")", args...)
+	return err
 }
 
 func withTx(fn func(*sql.Tx) error) error {
@@ -396,6 +530,13 @@ func UpdateJobTaskNumMany(taskNums []map[string]interface{}) error {
 // UpdateJobTaskStatusAndNum updates final status and cached counts in one write.
 func UpdateJobTaskStatusAndNum(taskID int64, status int, errMsg *string, taskNum string) error {
 	return ExecuteUpdate("UPDATE job_task SET status=?, errMsg=?, taskNum=?, runTime=strftime('%s','now') WHERE id=?", status, errMsg, taskNum, taskID)
+}
+
+// UpdateJobTaskStatusClearNum records a final status without counters. taskNum
+// is left NULL so the task list recomputes it on the next read instead of
+// caching counters that could not be read.
+func UpdateJobTaskStatusClearNum(taskID int64, status int, errMsg *string) error {
+	return ExecuteUpdate("UPDATE job_task SET status=?, errMsg=?, taskNum=NULL, runTime=strftime('%s','now') WHERE id=?", status, errMsg, taskID)
 }
 
 // --- Job Task Item ---
@@ -459,7 +600,11 @@ func GetJobTaskItemList(params map[string]interface{}) (map[string]interface{}, 
 	}
 
 	baseSQL := fmt.Sprintf("SELECT %s FROM job_task_item %s ORDER BY createTime DESC, id DESC", jobTaskItemListColumns, where.clause)
-	return FetchAllToPage(baseSQL, params, where.args...)
+	// A separate COUNT(*) instead of FetchAllToPage's window count: the window
+	// forces SQLite to materialize and sort every matching item on each page,
+	// which for a million-item task is a full scan per click.
+	countSQL := fmt.Sprintf("SELECT COUNT(*) FROM job_task_item %s", where.clause)
+	return FetchAllToPageWithCount(baseSQL, countSQL, params, where.args...)
 }
 
 // CountJobTaskItemsByStatuses counts task items matching any of the given statuses.
@@ -479,7 +624,17 @@ func CountJobTaskItemsByStatuses(taskID int64, statuses []int) (int64, error) {
 	return count, nil
 }
 
-// ForEachJobTaskItemsByStatuses reads task items in bounded batches.
+// ForEachJobTaskItemsByStatuses reads task items in bounded batches, in insert
+// (id) order.
+//
+// The cursor is the id alone. The previous (createTime, id) keyset needed an OR
+// that no index could serve, so every batch re-scanned the task's items, and a
+// row with a NULL createTime failed both comparisons and was silently never
+// replayed. ids are assigned monotonically (AUTOINCREMENT), so the cursor never
+// skips or repeats a row. Insert order is the order items finished, not the
+// order they were queued (createTime); for the retry replay that is still the
+// order that matters, since a directory's record is written when it is created,
+// before anything inside it is queued.
 func ForEachJobTaskItemsByStatuses(taskID int64, statuses []int, batchSize int, fn func([]map[string]interface{}) error) error {
 	if len(statuses) == 0 {
 		return nil
@@ -488,21 +643,19 @@ func ForEachJobTaskItemsByStatuses(taskID int64, statuses []int, batchSize int, 
 		batchSize = 500
 	}
 	clause, statusArgs := statusInClause(statuses)
-	lastCreateTime := int64(-1)
+	query := fmt.Sprintf(
+		`SELECT %s FROM job_task_item
+		 WHERE taskId=? AND status IN (%s) AND id > ?
+		 ORDER BY id ASC
+		 LIMIT ?`,
+		jobTaskItemRuntimeColumns,
+		clause,
+	)
 	lastID := int64(0)
 
 	for {
-		query := fmt.Sprintf(
-			`SELECT %s FROM job_task_item
-			 WHERE taskId=? AND status IN (%s)
-			   AND (createTime > ? OR (createTime = ? AND id > ?))
-			 ORDER BY createTime ASC, id ASC
-			 LIMIT ?`,
-			jobTaskItemRuntimeColumns,
-			clause,
-		)
 		args := append([]interface{}{taskID}, statusArgs...)
-		args = append(args, lastCreateTime, lastCreateTime, lastID, batchSize)
+		args = append(args, lastID, batchSize)
 		items, err := FetchAllToTable(query, args...)
 		if err != nil {
 			return err
@@ -513,9 +666,7 @@ func ForEachJobTaskItemsByStatuses(taskID int64, statuses []int, batchSize int, 
 		if err := fn(items); err != nil {
 			return err
 		}
-		last := items[len(items)-1]
-		lastCreateTime = util.ToInt64(last["createTime"])
-		lastID = util.ToInt64(last["id"])
+		lastID = util.ToInt64(items[len(items)-1]["id"])
 	}
 }
 
@@ -552,8 +703,26 @@ func int64InClause(values []int64) (string, []interface{}) {
 	return inClause(args)
 }
 
-// GetJobTaskCounts returns all task item status counters in one query.
+// GetJobTaskCounts is the legacy, error-swallowing form of QueryJobTaskCounts:
+// on failure it logs and returns zero counters. New callers should use
+// QueryJobTaskCounts, which lets them avoid caching or acting on counts that
+// were never actually read.
 func GetJobTaskCounts(taskID int64) map[string]interface{} {
+	counts, err := QueryJobTaskCounts(taskID)
+	if err != nil {
+		log.Printf("Failed to count items of task %d: %v", taskID, err)
+		return EmptyJobTaskCounts()
+	}
+	return counts
+}
+
+// QueryJobTaskCounts returns all task item status counters in one query.
+//
+// A failed read is returned, not folded into zero counts: callers cache the
+// result into job_task.taskNum and derive the final status from allNum, so a
+// transient "database is locked" used to mark a finished task "nothing synced"
+// and keep showing zeros for it forever.
+func QueryJobTaskCounts(taskID int64) (map[string]interface{}, error) {
 	var counts jobTaskCounts
 	if err := GetDB().QueryRow(
 		fmt.Sprintf(`SELECT%s FROM job_task_item WHERE taskId=?`, jobTaskCountSelect),
@@ -567,13 +736,16 @@ func GetJobTaskCounts(taskID int64) map[string]interface{} {
 		&counts.otherNum,
 		&counts.sumSize,
 	); err != nil {
-		return EmptyJobTaskCounts()
+		return nil, err
 	}
-	return counts.toMap()
+	return counts.toMap(), nil
 }
 
-// GetJobTaskCountsByTaskIDs returns task item counters for many tasks in one query.
-func GetJobTaskCountsByTaskIDs(taskIDs []int64) map[int64]map[string]interface{} {
+// GetJobTaskCountsByTaskIDs returns task item counters for many tasks in one
+// query. Tasks without items get zero counters. On error the result is nil:
+// a partial map would be indistinguishable from real zeros to a caller about to
+// cache it.
+func GetJobTaskCountsByTaskIDs(taskIDs []int64) (map[int64]map[string]interface{}, error) {
 	results := make(map[int64]map[string]interface{}, len(taskIDs))
 	uniqueIDs := make([]int64, 0, len(taskIDs))
 	seen := make(map[int64]struct{}, len(taskIDs))
@@ -589,7 +761,7 @@ func GetJobTaskCountsByTaskIDs(taskIDs []int64) map[int64]map[string]interface{}
 		results[taskID] = EmptyJobTaskCounts()
 	}
 	if len(uniqueIDs) == 0 {
-		return results
+		return results, nil
 	}
 
 	clause, args := int64InClause(uniqueIDs)
@@ -602,7 +774,7 @@ func GetJobTaskCountsByTaskIDs(taskIDs []int64) map[int64]map[string]interface{}
 		args...,
 	)
 	if err != nil {
-		return results
+		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
@@ -618,14 +790,14 @@ func GetJobTaskCountsByTaskIDs(taskIDs []int64) map[int64]map[string]interface{}
 			&counts.otherNum,
 			&counts.sumSize,
 		); err != nil {
-			return results
+			return nil, err
 		}
 		results[taskID] = counts.toMap()
 	}
 	if err := rows.Err(); err != nil {
-		return results
+		return nil, err
 	}
-	return results
+	return results, nil
 }
 
 type jobTaskCounts struct {

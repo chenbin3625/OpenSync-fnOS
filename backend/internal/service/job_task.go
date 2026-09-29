@@ -85,7 +85,7 @@ func newJobTask(taskID int64, jc *JobClient) (*JobTask, error) {
 		FinishedCounts: make(map[taskStatus]int),
 		FinishedSizes:  make(map[taskStatus]int64),
 		Doing:          make(map[int64]*CopyItem),
-		Waiting:        newCopyQueue(),
+		Waiting:        newCopyQueueWithCapacity(defaultCopyQueueCapacity),
 		scanSem:        make(chan struct{}, scanConcurrencyLimit()),
 		scanBranchSem:  make(chan struct{}, scanBranchLimit()),
 		cachedLimits:   &limits,
@@ -204,7 +204,7 @@ func (jt *JobTask) initRuntime() {
 
 func (jt *JobTask) ensureRuntimeLocked() {
 	if jt.Waiting == nil {
-		jt.Waiting = newCopyQueue()
+		jt.Waiting = newCopyQueueWithCapacity(defaultCopyQueueCapacity)
 	}
 	if jt.Doing == nil {
 		jt.Doing = make(map[int64]*CopyItem)

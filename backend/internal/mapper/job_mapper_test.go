@@ -338,7 +338,7 @@ func TestAddJobTaskItemManyPersistsProvidedCreateTime(t *testing.T) {
 	}
 }
 
-func TestForEachJobTaskItemsByStatusesReadsBatchesInCreateOrder(t *testing.T) {
+func TestForEachJobTaskItemsByStatusesReadsBatchesInInsertOrder(t *testing.T) {
 	testDB, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatalf("sql.Open() error: %v", err)
@@ -403,7 +403,9 @@ func TestForEachJobTaskItemsByStatusesReadsBatchesInCreateOrder(t *testing.T) {
 		t.Fatalf("ForEachJobTaskItemsByStatuses() error: %v", err)
 	}
 
-	want := []string{"failed-a.txt", "failed-b.txt", "failed-c.txt"}
+	// Insert (id) order, not createTime order: the cursor is the id alone so it
+	// can use an index and cannot skip rows with a NULL createTime.
+	want := []string{"failed-b.txt", "failed-a.txt", "failed-c.txt"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("items = %v, want %v", got, want)
 	}
@@ -459,7 +461,10 @@ func TestGetJobTaskCountsByTaskIDsAggregatesManyTasks(t *testing.T) {
 		db = oldDB
 	}()
 
-	counts := GetJobTaskCountsByTaskIDs([]int64{10, 20, 30, 10})
+	counts, err := GetJobTaskCountsByTaskIDs([]int64{10, 20, 30, 10})
+	if err != nil {
+		t.Fatalf("GetJobTaskCountsByTaskIDs() error: %v", err)
+	}
 	task10 := counts[10]
 	if task10["allNum"] != int64(6) || task10["waitNum"] != int64(1) || task10["runningNum"] != int64(1) {
 		t.Fatalf("task 10 base counts = %#v, want all/wait/running 6/1/1", task10)

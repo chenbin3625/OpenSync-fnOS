@@ -16,15 +16,21 @@ import (
 )
 
 var (
-	jobClientList    = make(map[int64]*JobClient)
-	jobClientListMu  sync.RWMutex
+	jobClientList   = make(map[int64]*JobClient)
+	jobClientListMu sync.RWMutex
 )
 
 var (
-	taskNumUpdateMu      sync.Mutex
-	taskNumUpdateLatest  []map[string]interface{}
-	taskNumUpdateActive  bool
+	taskNumUpdateMu     sync.Mutex
+	taskNumUpdateLatest []map[string]interface{}
+	taskNumUpdateActive bool
 )
+
+// jobTaskCountsByTaskIDs is swapped by tests to inject a count failure.
+var jobTaskCountsByTaskIDs = mapper.GetJobTaskCountsByTaskIDs
+
+// scheduleTaskNumUpdateFn is swapped by tests to observe what gets cached.
+var scheduleTaskNumUpdateFn = scheduleTaskNumUpdate
 
 // InitJobs loads and starts all enabled jobs on startup
 func InitJobs() {
@@ -32,7 +38,12 @@ func InitJobs() {
 	if err := mapper.UpdateJobTaskStatusByStatus(); err != nil {
 		logger.Printf("Failed to mark unfinished task history as aborted: %v", err)
 	}
-	RunTaskRetentionCleanup()
+	// In the background: the cleanup deletes expired history batch by batch and
+	// may VACUUM, which on a multi-GB database takes minutes. Run inline it held
+	// startup before the socket was created, and the fnOS start script gives up
+	// (and stops the app) after 20s without one — so large databases never
+	// started at all. ShutdownJobs cancels it.
+	StartTaskRetentionCleanupAsync()
 	jobList, err := mapper.GetJobListAll()
 	if err != nil {
 		logger.Printf("Failed to get job list: %v", err)
@@ -47,6 +58,10 @@ func InitJobs() {
 }
 
 func ShutdownJobs(ctx context.Context) {
+	// Stop the retention cleanup first and wait for it within ctx: it may be
+	// mid-VACUUM, and the caller closes the database right after this returns.
+	stopTaskRetentionCleanup(ctx)
+
 	jobClientListMu.RLock()
 	clients := make([]*JobClient, 0, len(jobClientList))
 	for _, client := range jobClientList {
@@ -84,13 +99,40 @@ func waitJobClientIdleContext(ctx context.Context, client *JobClient) {
 }
 
 func CleanupExpiredTasks(logger *log.Logger, taskSaveDays int, now time.Time) {
+	cleanupExpiredTasksContext(context.Background(), logger, taskSaveDays, now)
+}
+
+func cleanupExpiredTasksContext(ctx context.Context, logger *log.Logger, taskSaveDays int, now time.Time) {
 	cutoff, ok := taskRetentionCutoff(now, taskSaveDays)
 	if !ok {
 		return
 	}
-	if err := mapper.DeleteJobTaskByRunTime(cutoff); err != nil {
+	if err := mapper.DeleteJobTaskByRunTimeContext(ctx, cutoff, anyJobTaskRunning); err != nil {
+		if ctx.Err() != nil {
+			logger.Printf("Task history cleanup stopped: %v", err)
+			return
+		}
 		logger.Printf("Failed to delete expired task history: %v", err)
 	}
+}
+
+// anyJobTaskRunning reports whether any job is executing a task. Database
+// maintenance that holds the write lock (WAL truncate, VACUUM) waits for this
+// to be false: a running task's item writes fail after busy_timeout, and a
+// failed write aborts the task.
+func anyJobTaskRunning() bool {
+	jobClientListMu.RLock()
+	clients := make([]*JobClient, 0, len(jobClientList))
+	for _, client := range jobClientList {
+		clients = append(clients, client)
+	}
+	jobClientListMu.RUnlock()
+	for _, client := range clients {
+		if client.isBusy() {
+			return true
+		}
+	}
+	return false
 }
 
 func taskRetentionCutoff(now time.Time, taskSaveDays int) (int64, bool) {
@@ -167,6 +209,15 @@ func CleanJobInput(job map[string]interface{}) error {
 }
 
 func ValidateJobInput(job map[string]interface{}) error {
+	return validateJobInput(job, true)
+}
+
+// validateJobInput checks a job definition. rejectNestedDst enables the
+// nested-destination rule, which was added after jobs could already be saved
+// with such layouts: it is enforced when a user creates or edits a job, but a
+// stored job is still loaded at startup (with a warning) instead of silently
+// dropping out of the scheduler while the task list keeps showing it.
+func validateJobInput(job map[string]interface{}, rejectNestedDst bool) error {
 	if len(parsePathList(job["srcPath"])) == 0 ||
 		len(parsePathList(job["dstPath"])) == 0 ||
 		util.ToInt64(job["alistId"]) <= 0 {
@@ -177,6 +228,12 @@ func ValidateJobInput(job map[string]interface{}) error {
 	}
 	if srcSelectionsNested(parsePathList(job["srcPath"])) {
 		return publicError(msg.T(msg.SrcPathNested))
+	}
+	if resolvedDstPathsNested(parsePathList(job["srcPath"]), parsePathList(job["dstPath"])) {
+		if rejectNestedDst {
+			return publicError(msg.T(msg.DstPathNested))
+		}
+		log.Printf("Warning: job %v has nested destination directories; edit it to separate them (%s)", job["id"], msg.T(msg.DstPathNested))
 	}
 
 	if enable, ok := job["enable"]; ok {
@@ -262,7 +319,7 @@ func AddJobClient(job map[string]interface{}, isInit bool) error {
 	if err := CleanJobInput(job); err != nil {
 		return err
 	}
-	if err := ValidateJobInput(job); err != nil {
+	if err := validateJobInput(job, !isInit); err != nil {
 		return err
 	}
 	if !isInit {
@@ -538,7 +595,13 @@ func GetTaskList(req map[string]interface{}) (map[string]interface{}, error) {
 	}
 
 	if len(missingTaskItems) > 0 {
-		taskNumByID := mapper.GetJobTaskCountsByTaskIDs(missingTaskIDs)
+		taskNumByID, err := jobTaskCountsByTaskIDs(missingTaskIDs)
+		if err != nil {
+			// Nothing is cached on failure: writing zeros into taskNum would
+			// make these tasks show "0 items" permanently, since a cached value
+			// is never recomputed.
+			return nil, fmt.Errorf("count task items: %w", err)
+		}
 		for _, item := range missingTaskItems {
 			taskID := util.ToInt64(item["id"])
 			taskNum := taskNumByID[taskID]
@@ -559,7 +622,7 @@ func GetTaskList(req map[string]interface{}) (map[string]interface{}, error) {
 	}
 
 	if len(needUpdateList) > 0 {
-		scheduleTaskNumUpdate(needUpdateList)
+		scheduleTaskNumUpdateFn(needUpdateList)
 	}
 
 	return jobTaskList, nil

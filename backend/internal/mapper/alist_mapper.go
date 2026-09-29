@@ -12,13 +12,14 @@ func GetAlistList() ([]map[string]interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := decryptCredentialColumn(rows, "token"); err != nil {
-		return nil, err
-	}
+	decryptCredentialColumnLenient(rows, "alist_list", "token")
 	return rows, nil
 }
 
-// GetAlistByID gets alist by ID
+// GetAlistByID gets alist by ID. A token that cannot be decrypted fails with
+// ErrCredentialUnreadable rather than returning a blank token, so an edit
+// cannot mistake it for "keep the stored token" and a client is never built
+// with an empty credential.
 func GetAlistByID(alistID int64) (map[string]interface{}, error) {
 	rst, err := FetchAllToTable("SELECT * FROM alist_list WHERE id=?", alistID)
 	if err != nil {

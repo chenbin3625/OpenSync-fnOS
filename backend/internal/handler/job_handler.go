@@ -170,17 +170,19 @@ func UpdateJob(c *gin.Context) {
 	}
 
 	if req.Pause == nil {
-		// Manual execution
-		if req.ID != nil {
-			id, err := parseRequiredID(*req.ID)
-			if err != nil {
-				respondError(c, err.Error())
-				return
-			}
-			handleServiceVoid(c, func() error { return service.DoJobManual(id) })
-		} else {
-			handleServiceVoid(c, func() error { return service.DoAllJobManual() })
+		// Manual execution. The id is mandatory: an empty body ({}), or any
+		// malformed request that happened to drop it, used to fall through to
+		// service.DoAllJobManual and start every enabled job at once.
+		if req.ID == nil {
+			respondError(c, msg.T(msg.LostPart))
+			return
 		}
+		id, err := parseRequiredID(*req.ID)
+		if err != nil {
+			respondError(c, err.Error())
+			return
+		}
+		handleServiceVoid(c, func() error { return service.DoJobManual(id) })
 	} else if *req.Pause {
 		// Disable or abort
 		if req.ID == nil {

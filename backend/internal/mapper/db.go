@@ -227,7 +227,13 @@ func SetDBForTest(testDB *sql.DB) func() {
 const maxFetchAllRows = 10000
 
 func FetchAllToTable(query string, args ...interface{}) ([]map[string]interface{}, error) {
-	rows, err := GetDB().Query(query, args...)
+	return fetchAllToTable(GetDB(), query, args...)
+}
+
+// fetchAllToTable is FetchAllToTable against an explicit querier, so a caller
+// holding a transaction can read several statements from one snapshot.
+func fetchAllToTable(q querier, query string, args ...interface{}) ([]map[string]interface{}, error) {
+	rows, err := q.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -336,6 +342,73 @@ func FetchAllToPage(baseSQL string, params map[string]interface{}, sqlArgs ...in
 	}
 	return fetchPage(baseSQL, ps, offset, true, sqlArgs)
 }
+
+// FetchAllToPageWithCount pages baseSQL like FetchAllToPage, but takes the total
+// from countSQL instead of a COUNT(*) OVER() window column.
+//
+// The window count makes SQLite materialize and sort the entire match set on
+// every page request just to attach the total to each row; for job_task_item,
+// which holds millions of rows for one large task, that turned each page of the
+// detail view into a full scan plus sort. A plain COUNT(*) over the same WHERE
+// clause is answered from an index, and the page itself can then stop after
+// LIMIT rows. countSQL must take exactly sqlArgs.
+//
+// Both statements run in one read transaction so the page and the total come
+// from the same snapshot even while a running task keeps inserting items.
+func FetchAllToPageWithCount(baseSQL, countSQL string, params map[string]interface{}, sqlArgs ...interface{}) (map[string]interface{}, error) {
+	ps, pn, paginated, err := parsePageParams(params)
+	if err != nil {
+		return nil, err
+	}
+	if !paginated {
+		return fetchPageSeparateCount(baseSQL, countSQL, defaultUnpagedLimit, 0, false, sqlArgs)
+	}
+	offset, err := pageOffset(ps, pn)
+	if err != nil {
+		return nil, err
+	}
+	return fetchPageSeparateCount(baseSQL, countSQL, ps, offset, true, sqlArgs)
+}
+
+func fetchPageSeparateCount(baseSQL, countSQL string, limit int, offset int64, paginated bool, sqlArgs []interface{}) (map[string]interface{}, error) {
+	var result map[string]interface{}
+	err := withTx(func(tx *sql.Tx) error {
+		var total int64
+		if err := tx.QueryRow(countSQL, sqlArgs...).Scan(&total); err != nil {
+			return err
+		}
+		if !paginated && total > int64(limit) {
+			// Same contract as fetchPage: an unpaginated request that does not
+			// fit is refused rather than answered with a silently short list.
+			return errors.New(msg.T(msg.ListTooLarge))
+		}
+		dataList := make([]map[string]interface{}, 0)
+		if total > 0 && offset < total {
+			query := baseSQL + " LIMIT ?"
+			args := appendSQLArgs(sqlArgs, limit)
+			if paginated {
+				query += " OFFSET ?"
+				args = appendSQLArgs(args, offset)
+			}
+			pageQueryTrace(query)
+			rows, err := fetchAllToTable(tx, query, args...)
+			if err != nil {
+				return err
+			}
+			dataList = rows
+		}
+		result = map[string]interface{}{"dataList": dataList, "count": total}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// pageQueryTrace observes the data query of a separate-count page; tests use it
+// to assert which SQL a list endpoint actually runs.
+var pageQueryTrace = func(string) {}
 
 const pageTotalColumn = "__opensync_page_total"
 

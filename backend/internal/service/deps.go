@@ -25,6 +25,13 @@ type JobDeps struct {
 	CountJobTaskItemsByStatuses   func(int64, []int) (int64, error)
 	CopyRetryDelay                func(int) time.Duration
 	ScanListRetryDelay            func(int) time.Duration
+	// CopyPollErrorWindow is how long TaskInfo polling for one copy item may
+	// keep failing transiently before the item is declared failed.
+	CopyPollErrorWindow time.Duration
+	// CopyPollMaxBackoff caps the per-item delay between failing polls.
+	CopyPollMaxBackoff time.Duration
+	// Now is the clock used by the copy poller; tests inject a fake one.
+	Now func() time.Time
 }
 
 // NotifyDeps groups the external dependencies used by the notification layer.
@@ -60,6 +67,9 @@ func newDefaultJobDeps() *JobDeps {
 		CountJobTaskItemsByStatuses:   mapper.CountJobTaskItemsByStatuses,
 		CopyRetryDelay:                defaultCopyRetryDelay,
 		ScanListRetryDelay:            defaultScanListRetryDelay,
+		CopyPollErrorWindow:           defaultCopyPollErrorWindow,
+		CopyPollMaxBackoff:            defaultCopyPollMaxBackoff,
+		Now:                           time.Now,
 	}
 }
 

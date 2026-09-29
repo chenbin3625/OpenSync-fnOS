@@ -2,6 +2,11 @@ import { test, expect } from "@playwright/test";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
+// The backend rejects writes without Content-Type: application/json (CSRF
+// guard). Playwright only sets it for requests with a JSON body, so bodiless
+// DELETEs used for cleanup must declare it explicitly.
+const jsonWrite = { headers: { "Content-Type": "application/json" } };
+
 // Only the external engine is substituted; app routes, SQLite and UI are real.
 let engine: Server, engineUrl: string;
 let webhookBody: unknown;
@@ -97,9 +102,7 @@ test("sends a webhook template and preserves masked credentials when editing", a
     await expect(page.getByRole("dialog")).not.toBeVisible();
     id = (await createResponse.json()).data.id;
     expect(id).toBeTruthy();
-    const card = page
-      .getByLabel(`通知 ${id} 开关`, { exact: true })
-      .locator("xpath=ancestor::*[contains(@class, 'notification-item')][1]");
+    const card = page.locator(`.notification-item[data-notify-id="${id}"]`);
     await card
       .getByRole("button", { name: "编辑通知", exact: true })
       .click();
@@ -119,7 +122,7 @@ test("sends a webhook template and preserves masked credentials when editing", a
     await expect.poll(() => webhookCalls).toBe(initialCalls + 3);
   } finally {
     if (id)
-      await request.delete(`/app/opensync/svr/notify?notifyId=${id}`);
+      await request.delete(`/app/opensync/svr/notify?notifyId=${id}`, jsonWrite);
   }
 });
 test.afterAll(async () => {
@@ -287,7 +290,7 @@ test("creates an engine and manual job, then edits without changing sync mode", 
         j.remark?.startsWith(name),
       )?.id;
     }
-    if (jobId) await request.delete(`/app/opensync/svr/job?id=${jobId}`);
-    if (engineId) await request.delete(`/app/opensync/svr/alist?id=${engineId}`);
+    if (jobId) await request.delete(`/app/opensync/svr/job?id=${jobId}`, jsonWrite);
+    if (engineId) await request.delete(`/app/opensync/svr/alist?id=${engineId}`, jsonWrite);
   }
 });

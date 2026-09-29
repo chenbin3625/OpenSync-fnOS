@@ -3,6 +3,7 @@ import {
   isValidElement,
   useEffect,
   useId,
+  useState,
   type ReactNode,
 } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
@@ -262,12 +263,53 @@ export function Status({
       <Tag color={color} size="small" type="light">
         {label}
       </Tag>
-      {error && (
-        <Tooltip content={<div className="error-detail">{error}</div>}>
-          <IconAlertTriangle className="error-indicator" aria-label="查看错误原因" size="small" />
-        </Tooltip>
-      )}
+      {error && <ErrorReason error={error} />}
     </span>
+  );
+}
+/**
+ * The reason used to be a hover-only tooltip on a plain icon, so keyboard and
+ * touch users could not read it. Visibility is controlled so hover, focus and
+ * click/tap all open it and Escape closes it.
+ */
+function ErrorReason({ error }: { error: string }) {
+  const [visible, setVisible] = useState(false);
+  return (
+    <Tooltip
+      trigger="custom"
+      visible={visible}
+      onClickOutSide={() => setVisible(false)}
+      content={<div className="error-detail">{error}</div>}
+    >
+      <span
+        role="button"
+        tabIndex={0}
+        aria-label="查看错误原因"
+        aria-expanded={visible}
+        className="error-indicator"
+        onMouseEnter={() => setVisible(true)}
+        onMouseLeave={() => setVisible(false)}
+        onFocus={() => setVisible(true)}
+        onBlur={() => setVisible(false)}
+        onClick={(event) => {
+          // Mobile rows expand on click; opening the reason must not toggle them.
+          event.stopPropagation();
+          setVisible(true);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.stopPropagation();
+            setVisible(false);
+          } else if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            event.stopPropagation();
+            setVisible((v) => !v);
+          }
+        }}
+      >
+        <IconAlertTriangle aria-hidden="true" size="small" />
+      </span>
+    </Tooltip>
   );
 }
 function confirmAction({

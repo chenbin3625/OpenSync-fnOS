@@ -14,7 +14,36 @@ const (
 	pollIntervalActive       = 610 * time.Millisecond
 	pollIntervalIdle         = 2930 * time.Millisecond
 	activeWatchThresholdSecs = 3
+
+	// defaultCopyPollErrorWindow is how long TaskInfo may fail transiently
+	// before a copy item is failed. It has to outlast an AList restart (often
+	// 10s+): failing items after a few seconds made every in-flight transfer
+	// get resubmitted, duplicating tasks when AList restored persisted ones.
+	defaultCopyPollErrorWindow = 2 * time.Minute
+	// defaultCopyPollMaxBackoff caps the per-item delay between failing polls.
+	defaultCopyPollMaxBackoff = 10 * time.Second
 )
+
+func copyPollNow() time.Time {
+	if jobDeps != nil && jobDeps.Now != nil {
+		return jobDeps.Now()
+	}
+	return time.Now()
+}
+
+func copyPollErrorWindow() time.Duration {
+	if jobDeps != nil && jobDeps.CopyPollErrorWindow > 0 {
+		return jobDeps.CopyPollErrorWindow
+	}
+	return defaultCopyPollErrorWindow
+}
+
+func copyPollMaxBackoff() time.Duration {
+	if jobDeps != nil && jobDeps.CopyPollMaxBackoff > 0 {
+		return jobDeps.CopyPollMaxBackoff
+	}
+	return defaultCopyPollMaxBackoff
+}
 
 type copyTaskWatch struct {
 	ci            *CopyItem
@@ -23,6 +52,12 @@ type copyTaskWatch struct {
 	done          chan struct{}
 	closeOnce     sync.Once
 	transientErrs int
+	// firstErrAt is when the current run of transient TaskInfo errors began;
+	// zero while polls succeed. Only the monitor loop goroutine touches it.
+	firstErrAt time.Time
+	// nextPollAt defers the next TaskInfo call for this watch (exponential
+	// backoff while errors persist) without slowing down the other watches.
+	nextPollAt time.Time
 }
 
 func (watch *copyTaskWatch) closeDone() {
@@ -173,7 +208,11 @@ func (m *copyTaskMonitor) loop() {
 			}
 			taskInfo, ok := undoneByType[watch.copyType][watch.taskID]
 			if ok {
+				watch.resetTransientErrors()
 				m.applyTaskInfo(watch, taskInfo)
+				continue
+			}
+			if !watch.nextPollAt.IsZero() && copyPollNow().Before(watch.nextPollAt) {
 				continue
 			}
 			m.pollTaskInfo(watch)
@@ -271,7 +310,7 @@ func (m *copyTaskMonitor) pollTaskInfo(watch *copyTaskWatch) bool {
 		}
 		eMsg := err.Error()
 		if isAlistObjectNotFound(err) {
-			if exists, verr := watch.ci.verifyDstExists(m.jt, client); verr == nil && exists {
+			if exists, verr := watch.ci.verifyDstComplete(m.jt, client); verr == nil && exists {
 				watch.ci.setProgress(taskStatusSuccess, 100, nil)
 				m.finishWatch(watch)
 				return true
@@ -281,16 +320,45 @@ func (m *copyTaskMonitor) pollTaskInfo(watch *copyTaskWatch) bool {
 			m.finishWatch(watch)
 			return true
 		}
+		now := copyPollNow()
 		watch.transientErrs++
-		if watch.transientErrs < maxTransientPollErrors {
+		if watch.firstErrAt.IsZero() {
+			watch.firstErrAt = now
+		}
+		if now.Sub(watch.firstErrAt) < copyPollErrorWindow() {
+			watch.nextPollAt = now.Add(transientPollBackoff(watch.transientErrs))
 			return false
 		}
 		watch.ci.setProgress(taskStatusFailed, 0, &eMsg)
 		m.finishWatch(watch)
 		return true
 	}
-	watch.transientErrs = 0
+	watch.resetTransientErrors()
 	return m.applyTaskInfo(watch, taskInfo)
+}
+
+func (watch *copyTaskWatch) resetTransientErrors() {
+	watch.transientErrs = 0
+	watch.firstErrAt = time.Time{}
+	watch.nextPollAt = time.Time{}
+}
+
+// transientPollBackoff returns the delay before the next TaskInfo poll after
+// the n-th consecutive transient error: 1s, 2s, 4s, ... capped at
+// copyPollMaxBackoff, on top of the loop's own poll interval.
+func transientPollBackoff(n int) time.Duration {
+	maxDelay := copyPollMaxBackoff()
+	if n < 1 {
+		n = 1
+	}
+	if n > 16 {
+		return maxDelay
+	}
+	delay := time.Second << (n - 1)
+	if delay > maxDelay {
+		return maxDelay
+	}
+	return delay
 }
 
 // mapAlistTaskState converts an AList admin-task state (tache.State: 0 pending,

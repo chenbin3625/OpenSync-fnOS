@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Switch from "@douyinfe/semi-ui/lib/es/switch";
@@ -47,6 +47,8 @@ const History = lazy(() =>
   import("./TaskExecution").then((module) => ({ default: module.History })),
 );
 const JobEditor = lazy(() => import("./TaskEditor"));
+const currentTaskPollMs = 3000;
+const currentTaskFollowUpMs = 1000;
 
 export default function Tasks() {
   const [params, setParams] = useSearchParams();
@@ -71,6 +73,23 @@ export default function Tasks() {
     [selected?.id],
   );
   const hasCurrentTask = !!currentTask.data;
+  const refreshCurrentTask = currentTask.refresh;
+  // The current task was fetched once, so a run started here or by the
+  // scheduler never enabled the realtime tab or flipped 启动/停止. The realtime
+  // tab polls the same endpoint itself, so this poll pauses while it is open.
+  // A separate interval (instead of useResource's poll flag) keeps the last
+  // result instead of resetting it to null whenever the tab changes.
+  const selectedJobId = selected?.id;
+  useEffect(() => {
+    if (!selectedJobId || tab === "realtime") return;
+    void refreshCurrentTask(true);
+    const interval = setInterval(() => {
+      if (document.visibilityState !== "hidden") void refreshCurrentTask(true);
+    }, currentTaskPollMs);
+    return () => clearInterval(interval);
+  }, [selectedJobId, tab, refreshCurrentTask]);
+  const followUp = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(followUp.current), []);
   const update = (values: Record<string, string | number | null>) => {
     const next = new URLSearchParams(params);
     for (const [key, value] of Object.entries(values))
@@ -81,6 +100,13 @@ export default function Tasks() {
     await jobs.refresh();
     await currentTask.refresh();
     window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
+    // Starting or stopping is asynchronous on the backend: the immediate
+    // re-fetch usually still sees the previous state.
+    clearTimeout(followUp.current);
+    followUp.current = setTimeout(
+      () => void refreshCurrentTask(),
+      currentTaskFollowUpMs,
+    );
   };
   const action = (operation: () => Promise<unknown>, message: string) =>
     void actions.run(async () => {

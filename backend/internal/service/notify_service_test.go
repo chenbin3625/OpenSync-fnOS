@@ -25,12 +25,22 @@ func TestNotifyBlocksRedirectToCloudMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Redirects are not followed at all, so the metadata address is never
+	// dialed; the 3xx is handed back and reported as a failed send.
 	resp, err := notifyHTTPClient.Do(req)
-	if resp != nil {
-		resp.Body.Close()
+	if err != nil {
+		t.Fatalf("Do() error = %v, want the redirect response returned unfollowed", err)
 	}
-	if err == nil || !strings.Contains(err.Error(), "blocked address") {
-		t.Fatalf("redirect error = %v, want blocked address before dialing", err)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusTemporaryRedirect {
+		t.Fatalf("status = %d, want the unfollowed 307", resp.StatusCode)
+	}
+	req2, err := buildNotifyRequest(http.MethodGet, server.URL, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sendNotifyRequest(notifyHTTPClient, req2); err == nil {
+		t.Fatal("sendNotifyRequest() = nil, want a redirect reported as failure")
 	}
 }
 

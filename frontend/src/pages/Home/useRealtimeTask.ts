@@ -27,6 +27,10 @@ export function useRealtimeTask(
   enabled: boolean,
 ): {
   currentTask: CurrentTaskView | null;
+  /** True until the first response (or failure) for this job arrives. */
+  loading: boolean;
+  /** Last poll failure; cleared by the next successful poll. */
+  error: string;
   refreshCurrentTask: () => Promise<void>;
 } {
   const resource = useResource(
@@ -43,6 +47,8 @@ export function useRealtimeTask(
 
   return {
     currentTask: resource.data,
+    loading: resource.loading,
+    error: resource.error,
     refreshCurrentTask: async () => {
       await resource.refresh();
     },

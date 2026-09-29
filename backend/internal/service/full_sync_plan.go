@@ -10,12 +10,17 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 type fullSyncSnapshot struct {
 	root string
 	dirs map[string]FileListResult
 	mu   sync.Mutex
+	// subtreeCounts memoizes subtreeEntryCount. It is built on first use, after
+	// the scan has finished writing dirs.
+	subtreeCounts map[string]int
 }
 
 type fullSyncFile struct {
@@ -45,6 +50,9 @@ type fullSyncDelete struct {
 	metadata   FileMetadata
 	object     string
 	blocksPath string
+	// subtree is the destination snapshot key of a directory entry, so the
+	// safety valve can weigh a recursive delete by everything it removes.
+	subtree string
 }
 
 type fullSyncRelocation struct {
@@ -234,7 +242,7 @@ func (plan *fullSyncPlan) compareDir(job map[string]interface{}, srcRelDir, dstR
 
 			if conflictName, conflictMeta, ok := dstIndex.find(name+"/", srcIndex); ok {
 				matchedDst[conflictName] = struct{}{}
-				plan.addBlocker(dstDir, conflictName, conflictMeta, fullSyncObjectPath(dstDir, name))
+				plan.addBlocker(dstDir, conflictName, conflictMeta, fullSyncObjectPath(dstDir, name), dstRelDir+conflictName)
 			}
 			dstName, dstMetadata, exists := dstIndex.find(name, srcIndex)
 			if exists {
@@ -251,7 +259,7 @@ func (plan *fullSyncPlan) compareDir(job map[string]interface{}, srcRelDir, dstR
 		fileName := strings.TrimSuffix(name, "/")
 		if conflictName, conflictMeta, ok := dstIndex.find(fileName, srcIndex); ok {
 			matchedDst[conflictName] = struct{}{}
-			plan.addBlocker(dstDir, conflictName, conflictMeta, fullSyncObjectPath(dstDir, fileName)+"/")
+			plan.addBlocker(dstDir, conflictName, conflictMeta, fullSyncObjectPath(dstDir, fileName)+"/", dstRelDir+conflictName)
 		}
 		dstName, _, exists := dstIndex.find(name, srcIndex)
 		if exists {
@@ -267,7 +275,7 @@ func (plan *fullSyncPlan) compareDir(job map[string]interface{}, srcRelDir, dstR
 			continue
 		}
 		metadata := dstItems[name]
-		deleteRoot := plan.addExtraDelete(dstDir, name, metadata)
+		deleteRoot := plan.addExtraDelete(dstDir, name, metadata, dstRelDir+name)
 		if strings.HasSuffix(name, "/") {
 			plan.collectDestinationFiles(dstRelDir+name, deleteRoot)
 			continue
@@ -366,7 +374,16 @@ func (plan *fullSyncPlan) addExtraFile(dir, name string, metadata FileMetadata, 
 	plan.mu.Unlock()
 }
 
-func (plan *fullSyncPlan) addExtraDelete(dir, name string, metadata FileMetadata) string {
+// subtreeKey keeps the snapshot key only for directory entries; a file has no
+// subtree of its own.
+func subtreeKey(name, relPath string) string {
+	if strings.HasSuffix(name, "/") {
+		return relPath
+	}
+	return ""
+}
+
+func (plan *fullSyncPlan) addExtraDelete(dir, name string, metadata FileMetadata, relPath string) string {
 	object := fullSyncObjectPath(dir, name)
 	plan.mu.Lock()
 	plan.extraDeletes[object] = fullSyncDelete{
@@ -374,12 +391,13 @@ func (plan *fullSyncPlan) addExtraDelete(dir, name string, metadata FileMetadata
 		name:     name,
 		metadata: metadata,
 		object:   object,
+		subtree:  subtreeKey(name, relPath),
 	}
 	plan.mu.Unlock()
 	return object
 }
 
-func (plan *fullSyncPlan) addBlocker(dir, name string, metadata FileMetadata, blocksPath string) {
+func (plan *fullSyncPlan) addBlocker(dir, name string, metadata FileMetadata, blocksPath, relPath string) {
 	object := fullSyncObjectPath(dir, name)
 	plan.mu.Lock()
 	plan.blockers[object] = fullSyncDelete{
@@ -388,6 +406,7 @@ func (plan *fullSyncPlan) addBlocker(dir, name string, metadata FileMetadata, bl
 		metadata:   metadata,
 		object:     object,
 		blocksPath: blocksPath,
+		subtree:    subtreeKey(name, relPath),
 	}
 	plan.mu.Unlock()
 }
@@ -415,12 +434,22 @@ func newFullSyncFile(srcDir, dstDir, name string, metadata FileMetadata) *fullSy
 }
 
 func (jt *JobTask) executeFullSyncPlan(plan *fullSyncPlan) {
+	// Every destructive decision is made before the first mutation. Type
+	// conflicts are removed first and can take whole directory trees with them,
+	// so they pass the same collision check, safety valve and failure cap as
+	// the delete phase instead of running ahead of all three.
+	relocations := plan.relocations()
+	writes := plan.writeIndex()
+	guardReason, deletesUnsafe := plan.unsafeDeleteVolume(plan.plannedDeleteWeight(relocations, writes))
+	deletes := &fullSyncDeleteRun{jt: jt}
+
 	blocked := make(map[string]struct{})
 	// Remove type conflicts first so missing destination directories can be
-	// created before target-side relocations begin.
+	// created before target-side relocations begin. A conflict left in place
+	// blocks its replacement: writing over the other type would only fail.
 	for _, key := range sortedDeleteKeys(plan.blockers, false) {
 		item := plan.blockers[key]
-		if jt.delFile(item.dir, item.name, item.metadata.Size) != taskStatusSuccess {
+		if deletesUnsafe || jt.skipCollidingDelete(writes, item) || !deletes.run(item) {
 			blocked[normalizeBlockedPath(item.blocksPath)] = struct{}{}
 		}
 	}
@@ -435,7 +464,6 @@ func (jt *JobTask) executeFullSyncPlan(plan *fullSyncPlan) {
 		}
 	}
 
-	relocations := plan.relocations()
 	active := make([]fullSyncRelocation, 0, len(relocations))
 	protectedDeletes := make(map[string]struct{})
 	for _, relocation := range relocations {
@@ -497,31 +525,184 @@ func (jt *JobTask) executeFullSyncPlan(plan *fullSyncPlan) {
 	// source did not match", so any listing anomaly on the source side is
 	// amplified into a mass delete. Individual anomalies are rejected upstream,
 	// but the amplifier itself is what turns one of them into data loss, so an
-	// implausible deletion ratio stops the delete phase instead of executing it.
-	if reason, unsafe := plan.unsafeDeleteVolume(len(deleteKeys)); unsafe {
-		log.Printf("Task %d skipped the full-sync delete phase: %s", jt.TaskID, reason)
-		errMsg := msg.MirrorDeleteGuard(reason)
+	// implausible deletion volume stops every delete instead of executing it.
+	if deletesUnsafe {
+		log.Printf("Task %d skipped the full-sync delete phase: %s", jt.TaskID, guardReason)
+		errMsg := msg.MirrorDeleteGuard(guardReason)
+		// The record exists to show the user why nothing was deleted. It names
+		// the destination root with an empty file name so it can never be
+		// replayed as a delete: retry refuses delete records without a name.
 		jt.CopyHook("", plan.dst.root, "", nil, "", taskStatusFailed, &errMsg, taskItemPath, taskItemTypeDelete, time.Now().Unix())
 		return
 	}
 
-	const maxConsecutiveDeleteErrors = 10
-	consecutiveErrors := 0
 	for _, key := range deleteKeys {
-		if jt.isBreak() {
+		if jt.isBreak() || deletes.aborted {
 			break
 		}
 		item := plan.extraDeletes[key]
-		if jt.delFile(item.dir, item.name, item.metadata.Size) == taskStatusSuccess {
-			consecutiveErrors = 0
-		} else {
-			consecutiveErrors++
-			if consecutiveErrors >= maxConsecutiveDeleteErrors {
-				log.Printf("Task %d aborting delete phase after %d consecutive failures", jt.TaskID, consecutiveErrors)
-				break
+		if jt.skipCollidingDelete(writes, item) {
+			continue
+		}
+		deletes.run(item)
+	}
+}
+
+// maxConsecutiveDeleteErrors stops a run of deletes that keeps failing: the
+// destination is most likely unreachable or rejecting writes, and pressing on
+// only piles up failed records.
+const maxConsecutiveDeleteErrors = 10
+
+// fullSyncDeleteRun executes one plan's deletes under a shared consecutive
+// failure cap, so type-conflict removals and extra deletes count together.
+type fullSyncDeleteRun struct {
+	jt                *JobTask
+	consecutiveErrors int
+	aborted           bool
+}
+
+// run deletes item and reports whether it is gone. Once the cap trips, every
+// later delete is refused without contacting the server.
+func (run *fullSyncDeleteRun) run(item fullSyncDelete) bool {
+	if run.aborted || run.jt.isBreak() {
+		return false
+	}
+	if run.jt.delFile(item.dir, item.name, item.metadata.Size) == taskStatusSuccess {
+		run.consecutiveErrors = 0
+		return true
+	}
+	run.consecutiveErrors++
+	if run.consecutiveErrors >= maxConsecutiveDeleteErrors {
+		log.Printf("Task %d aborting delete phase after %d consecutive failures", run.jt.TaskID, run.consecutiveErrors)
+		run.aborted = true
+	}
+	return false
+}
+
+// fullSyncWriteIndex holds, per destination directory, the names this plan
+// writes (copies, updates, relocation targets, new directories), keyed by a
+// case- and Unicode-normalization-folded form of the name. Only directories
+// that hold a delete candidate are tracked; writes elsewhere cannot collide.
+type fullSyncWriteIndex map[string]map[string]fullSyncWrittenName
+
+// fullSyncWrittenName is the first spelling written under a folded key, and
+// whether other spellings were written too.
+type fullSyncWrittenName struct {
+	name     string
+	multiple bool
+}
+
+// foldedEntryName is the collision key for destinations that compare names
+// case-insensitively or normalize Unicode (NFD on macOS/SMB, many cloud
+// drives). It is used only to avoid deleting what is being written, never for
+// matching: on a case-sensitive store "Photo.jpg" and "photo.jpg" are distinct.
+func foldedEntryName(name string) string {
+	return strings.ToLower(norm.NFC.String(strings.TrimSuffix(name, "/")))
+}
+
+// track registers dir as holding a delete candidate.
+func (index fullSyncWriteIndex) track(dir string) {
+	dir = normalizeBlockedPath(dir)
+	if index[dir] == nil {
+		index[dir] = make(map[string]fullSyncWrittenName)
+	}
+}
+
+func (index fullSyncWriteIndex) add(dir, name string) {
+	byName := index[normalizeBlockedPath(dir)]
+	if byName == nil {
+		return
+	}
+	name = strings.TrimSuffix(name, "/")
+	folded := foldedEntryName(name)
+	written, exists := byName[folded]
+	if !exists {
+		byName[folded] = fullSyncWrittenName{name: name}
+		return
+	}
+	if written.name != name {
+		written.multiple = true
+		byName[folded] = written
+	}
+}
+
+// collision returns a differently spelled name written in dir that folds to
+// the same key as name. The exact same spelling is not a collision: a type
+// conflict deletes "X/" precisely so "X" can be written.
+func (index fullSyncWriteIndex) collision(dir, name string) (string, bool) {
+	name = strings.TrimSuffix(name, "/")
+	written, exists := index[normalizeBlockedPath(dir)][foldedEntryName(name)]
+	if !exists || (written.name == name && !written.multiple) {
+		return "", false
+	}
+	// With several spellings written, at most one equals name, so another one
+	// collides; the first spelling is reported for the log.
+	return written.name, true
+}
+
+func (plan *fullSyncPlan) writeIndex() fullSyncWriteIndex {
+	index := make(fullSyncWriteIndex)
+	for _, item := range plan.extraDeletes {
+		index.track(item.dir)
+	}
+	for _, item := range plan.blockers {
+		index.track(item.dir)
+	}
+	if len(index) == 0 {
+		return index
+	}
+	for _, file := range plan.changed {
+		index.add(file.dstDir, file.name)
+	}
+	for _, file := range plan.newFiles {
+		index.add(file.dstDir, file.name)
+	}
+	for _, dir := range plan.newDirs {
+		clean := normalizeBlockedPath(dir.dstDir)
+		index.add(path.Dir(clean), path.Base(clean))
+	}
+	return index
+}
+
+// skipCollidingDelete reports whether item must be kept because the plan is
+// writing a name that the destination may treat as the same entry. Deleting
+// it would run concurrently with the queued copy into that entry, removing the
+// file mid-upload and re-triggering the copy on every round.
+func (jt *JobTask) skipCollidingDelete(writes fullSyncWriteIndex, item fullSyncDelete) bool {
+	written, collides := writes.collision(item.dir, item.name)
+	if collides {
+		log.Printf("Task %d kept %q in %q: it may be the same entry as %q being written there (case or Unicode normalization)",
+			jt.TaskID, item.name, item.dir, written)
+	}
+	return collides
+}
+
+// plannedDeleteWeight is an upper bound on the destination entries this plan
+// removes. A directory delete is recursive, so it weighs everything beneath it
+// in the destination snapshot; files relocated out of a doomed tree are moved,
+// not deleted, and are subtracted. Deletes the collision check will keep are
+// not counted. A relocation that later fails only protects its tree, so the
+// actual volume never exceeds this bound.
+func (plan *fullSyncPlan) plannedDeleteWeight(relocations []fullSyncRelocation, writes fullSyncWriteIndex) int {
+	relocatedOut := make(map[string]int)
+	for _, relocation := range relocations {
+		relocatedOut[relocation.source.deleteRoot]++
+	}
+	weight := 0
+	add := func(items map[string]fullSyncDelete) {
+		for key, item := range items {
+			if _, collides := writes.collision(item.dir, item.name); collides {
+				continue
+			}
+			w := plan.dst.deleteWeight(item) - relocatedOut[key]
+			if w > 0 {
+				weight += w
 			}
 		}
 	}
+	add(plan.blockers)
+	add(plan.extraDeletes)
+	return weight
 }
 
 // mirrorDeleteRatioThreshold / mirrorDeleteFloor gate the delete phase. Both
@@ -533,7 +714,10 @@ const (
 )
 
 // unsafeDeleteVolume reports whether the planned deletions are too large a share
-// of the destination to be plausible.
+// of the destination to be plausible. deleteCount must be the weighted count
+// (plannedDeleteWeight), in the same unit as entryCount: counting a recursive
+// directory delete as one entry would let a missing source subtree of any size
+// slip under the floor.
 func (plan *fullSyncPlan) unsafeDeleteVolume(deleteCount int) (string, bool) {
 	if deleteCount < mirrorDeleteFloor {
 		return "", false
@@ -559,6 +743,41 @@ func (snapshot *fullSyncSnapshot) entryCount() int {
 		total += len(items)
 	}
 	return total
+}
+
+// deleteWeight is how many snapshot entries deleting item removes: the entry
+// itself plus, for a directory, every entry recorded beneath it.
+func (snapshot *fullSyncSnapshot) deleteWeight(item fullSyncDelete) int {
+	if item.subtree == "" {
+		return 1
+	}
+	return 1 + snapshot.subtreeEntryCount(item.subtree)
+}
+
+// subtreeEntryCount totals the entries recorded in relDir and all directories
+// below it. Counts for every directory are built in one pass on first use, so
+// weighing many delete roots stays linear in the snapshot size.
+func (snapshot *fullSyncSnapshot) subtreeEntryCount(relDir string) int {
+	snapshot.mu.Lock()
+	defer snapshot.mu.Unlock()
+	if snapshot.subtreeCounts == nil {
+		counts := make(map[string]int, len(snapshot.dirs))
+		for dir, items := range snapshot.dirs {
+			n := len(items)
+			// Credit the directory and each ancestor ("a/b/" -> "a/b/", "a/").
+			for ancestor := dir; ancestor != ""; {
+				counts[ancestor] += n
+				trimmed := strings.TrimSuffix(ancestor, "/")
+				idx := strings.LastIndex(trimmed, "/")
+				if idx < 0 {
+					break
+				}
+				ancestor = trimmed[:idx+1]
+			}
+		}
+		snapshot.subtreeCounts = counts
+	}
+	return snapshot.subtreeCounts[relDir]
 }
 
 func (plan *fullSyncPlan) relocations() []fullSyncRelocation {

@@ -16,3 +16,11 @@ test-results/
 
 # 本地排查用的一次性脚本（frontend/.tmp-*.mjs）
 frontend/.tmp-*
+
+# 与本项目无关的运维资料：含第三方主机的凭据、数据库 dump 和内网拓扑，
+# 一次 `git add .` 就会推进公开仓库
+/migration/
+/docs/*诊断报告*.md
+
+# Claude Code 本机设置
+.claude/settings.local.json

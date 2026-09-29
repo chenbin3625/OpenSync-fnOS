@@ -1,13 +1,95 @@
 #!/bin/bash
 set -eu
 umask 077
+
+fail() {
+    # 磁盘写满时 TRIM_TEMP_LOGFILE 也可能写不进去，仍要把原因输出到 stderr。
+    if [ -n "${TRIM_TEMP_LOGFILE:-}" ]; then { printf '%s\n' "$1" > "$TRIM_TEMP_LOGFILE"; } 2>/dev/null || true; fi
+    printf '%s\n' "$1" >&2
+    exit 1
+}
+# 下面会对备份目录执行 rm -rf，先在本脚本内确认路径变量有效，不依赖 main 的校验。
+for name in TRIM_PKGVAR TRIM_PKGETC; do
+    value="${!name:-}"
+    [ -n "$value" ] && [ "${value:0:1}" = / ] && [ "$value" != / ] || fail "缺少有效的应用目录变量：$name"
+done
 CMD_DIR="$(cd "$(dirname "$0")" && pwd)"
 "${CMD_DIR}/main" stop
-mkdir -p "${TRIM_PKGVAR}/backups"
-BACKUP="$(mktemp -d "${TRIM_PKGVAR}/backups/upgrade.XXXXXXXX")"
+BACKUP_ROOT="${TRIM_PKGVAR}/backups"
+LAST_BACKUP_FILE="${TRIM_PKGVAR}/last-upgrade-backup"
+# 创建本次备份前保留的历史备份数；本次成功后共 BACKUP_KEEP + 1 份。
+BACKUP_KEEP=2
+DATA_FILES=(openSync.db openSync.db-wal openSync.db-shm secret.key local-mappings.json)
+mkdir -p "$BACKUP_ROOT" || fail "升级备份失败：无法创建 ${BACKUP_ROOT}，已中止升级（请检查磁盘空间）"
+
+# 只处理 mktemp 生成的 upgrade.XXXXXXXX：名字严格匹配、直接位于 BACKUP_ROOT 下且是真实目录。
+is_backup_dir() {
+    local dir="$1" base
+    [ -n "$dir" ] && [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+    [ "$(dirname "$dir")" = "$BACKUP_ROOT" ] || return 1
+    base="$(basename "$dir")"
+    case "$base" in upgrade.????????) ;; *) return 1 ;; esac
+    case "${base#upgrade.}" in *[!A-Za-z0-9]*) return 1 ;; esac
+}
+# 旧备份从不清理会占满数据盘，导致本次复制失败、升级中止。按修改时间保留最新的
+# BACKUP_KEEP 份，并始终保留 last-upgrade-backup 记录的那一份。
+prune_backups() {
+    local base dir kept=0 last=''
+    if [ -f "$LAST_BACKUP_FILE" ]; then IFS= read -r last < "$LAST_BACKUP_FILE" || true; fi
+    # 名字由 mktemp 生成、不含空白与换行，逐行读取 ls -dt（新到旧）的输出即可；
+    # 无匹配时 ls 报错被忽略，异常名字由 is_backup_dir 过滤。
+    while IFS= read -r base; do
+        dir="${BACKUP_ROOT}/${base}"
+        is_backup_dir "$dir" || continue
+        if [ "$kept" -lt "$BACKUP_KEEP" ] || [ "$dir" = "$last" ]; then
+            kept=$((kept + 1))
+            continue
+        fi
+        rm -rf -- "$dir" || printf '%s\n' "清理旧升级备份失败：$dir" >&2
+    done < <(cd "$BACKUP_ROOT" && ls -dt upgrade.* 2>/dev/null || true)
+}
+file_bytes() {
+    local size
+    size="$({ wc -c < "$1"; } 2>/dev/null | tr -d '[:space:]')"
+    case "$size" in ''|*[!0-9]*) size=0 ;; esac
+    printf '%s\n' "$size"
+}
+# 复制前估算所需空间（KiB，另留 10% 与 1 MiB 余量），不足时直接中止，避免写出半份备份。
+# df -Pk 是可移植格式；以容量百分比列为锚点取它前一列（可用），文件系统名含空格也能取对。
+# 取不到可用空间时跳过检查，复制失败仍会被 copy_file 拦下。
+check_free_space() {
+    local name bytes=0 need avail
+    for name in "${DATA_FILES[@]}"; do
+        if [ -f "${TRIM_PKGVAR}/$name" ]; then bytes=$((bytes + $(file_bytes "${TRIM_PKGVAR}/$name"))); fi
+    done
+    if [ -f "${TRIM_PKGETC}/config.ini" ]; then bytes=$((bytes + $(file_bytes "${TRIM_PKGETC}/config.ini"))); fi
+    need=$((bytes / 1024 + bytes / 10240 + 1024))
+    avail="$(df -Pk "$BACKUP_ROOT" 2>/dev/null | awk 'NR == 2 { for (i = 2; i <= NF; i++) if ($i ~ /^[0-9]+%$/) { print $(i - 1); exit } }')" || true
+    case "$avail" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$avail" -ge "$need" ] || fail "磁盘空间不足，无法创建升级备份（约需 ${need} KiB，可用 ${avail} KiB），已中止升级；请清理数据盘或 ${BACKUP_ROOT} 后重试"
+}
+
+prune_backups
+check_free_space
+BACKUP=''
+BACKUP_DONE=0
+# 失败退出时删除本次不完整的备份目录，避免它占用空间或被误当作可用备份。
+cleanup_backup() {
+    rm -f "${LAST_BACKUP_FILE}.tmp"
+    if [ "$BACKUP_DONE" != 1 ] && [ -n "$BACKUP" ] && is_backup_dir "$BACKUP"; then rm -rf -- "$BACKUP"; fi
+}
+trap cleanup_backup EXIT
+BACKUP="$(mktemp -d "${BACKUP_ROOT}/upgrade.XXXXXXXX")" || fail '升级备份失败：无法创建备份目录，已中止升级（请检查磁盘空间）'
+is_backup_dir "$BACKUP" || fail "升级备份失败：备份目录异常：$BACKUP"
+copy_file() {
+    cp -p "$1" "$2" || fail "升级备份失败：无法复制 $1，已中止升级以保护数据（请检查磁盘空间与文件权限）"
+}
 # Copy the database and WAL only after the service is fully stopped.
-for name in openSync.db openSync.db-wal openSync.db-shm secret.key local-mappings.json; do
-    if [ -f "${TRIM_PKGVAR}/$name" ]; then cp -p "${TRIM_PKGVAR}/$name" "$BACKUP/$name"; fi
+for name in "${DATA_FILES[@]}"; do
+    if [ -f "${TRIM_PKGVAR}/$name" ]; then copy_file "${TRIM_PKGVAR}/$name" "$BACKUP/$name"; fi
 done
-if [ -f "${TRIM_PKGETC}/config.ini" ]; then cp -p "${TRIM_PKGETC}/config.ini" "$BACKUP/config.ini"; fi
-printf '%s\n' "$BACKUP" > "${TRIM_PKGVAR}/last-upgrade-backup"
+if [ -f "${TRIM_PKGETC}/config.ini" ]; then copy_file "${TRIM_PKGETC}/config.ini" "$BACKUP/config.ini"; fi
+# 先写临时文件再改名：写入失败时保留上一次的备份记录，而不是留下被截断的空文件。
+{ printf '%s\n' "$BACKUP" > "${LAST_BACKUP_FILE}.tmp" && mv -f "${LAST_BACKUP_FILE}.tmp" "$LAST_BACKUP_FILE"; } || \
+    fail '升级备份失败：无法记录备份位置，已中止升级（请检查磁盘空间）'
+BACKUP_DONE=1

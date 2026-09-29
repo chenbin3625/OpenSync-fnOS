@@ -2,7 +2,11 @@ package mapper
 
 import (
 	"database/sql"
+	"errors"
+	"fmt"
 	"opensync/internal/config"
+	"opensync/internal/model"
+	"opensync/internal/msg"
 	"strings"
 	"testing"
 
@@ -145,6 +149,155 @@ func TestNotifyParamsAreEncryptedAtRestAndDecryptedOnRead(t *testing.T) {
 	}
 	if notify["params"] != params {
 		t.Fatalf("decrypted params = %q, want %q", notify["params"], params)
+	}
+}
+
+// seedUndecryptableCredentials stores one row per table encrypted with a key
+// the test then replaces, reproducing a lost or regenerated secret.key.
+func seedUndecryptableCredentials(t *testing.T, testDB *sql.DB) {
+	t.Helper()
+	for _, stmt := range []string{
+		`CREATE TABLE alist_list(id integer primary key, remark text, url text, userName text, token text)`,
+		`CREATE TABLE notify(id integer primary key, enable integer, method integer, params text)`,
+	} {
+		if _, err := testDB.Exec(stmt); err != nil {
+			t.Fatalf("setup SQL %q: %v", stmt, err)
+		}
+	}
+	config.SetConfigForTest(&config.Config{Server: config.ServerConfig{PasswdStr: "old-key"}})
+	oldToken, err := encryptCredential("old-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldParams, err := encryptCredential(`{"sendKey":"old-key"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.SetConfigForTest(&config.Config{Server: config.ServerConfig{PasswdStr: "new-key"}})
+	goodToken, err := encryptCredential("good-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	goodParams, err := encryptCredential(`{"sendKey":"good-key"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []struct {
+		query string
+		args  []interface{}
+	}{
+		{"INSERT INTO alist_list(id, url, token) VALUES (1, 'https://lost.test', ?)", []interface{}{oldToken}},
+		{"INSERT INTO alist_list(id, url, token) VALUES (2, 'https://good.test', ?)", []interface{}{goodToken}},
+		{"INSERT INTO notify(id, enable, method, params) VALUES (1, 1, 1, ?)", []interface{}{oldParams}},
+		{"INSERT INTO notify(id, enable, method, params) VALUES (2, 1, 1, ?)", []interface{}{goodParams}},
+	} {
+		if _, err := testDB.Exec(row.query, row.args...); err != nil {
+			t.Fatalf("seed row: %v", err)
+		}
+	}
+}
+
+// Losing secret.key used to make InitSQL log.Fatalf on the first unreadable
+// row, so the service never started again.
+func TestMigrateStoredCredentialsSkipsUndecryptableRows(t *testing.T) {
+	testDB, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open() error: %v", err)
+	}
+	defer testDB.Close()
+	defer config.SetConfigForTest(nil)
+	seedUndecryptableCredentials(t, testDB)
+	if _, err := testDB.Exec(`INSERT INTO notify(id, enable, method, params) VALUES (3, 1, 1, '{"sendKey":"legacy"}')`); err != nil {
+		t.Fatal(err)
+	}
+	var before string
+	if err := testDB.QueryRow("SELECT token FROM alist_list WHERE id=1").Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := migrateStoredCredentials(testDB); err != nil {
+		t.Fatalf("migrateStoredCredentials() error = %v, want unreadable rows skipped", err)
+	}
+	var after string
+	if err := testDB.QueryRow("SELECT token FROM alist_list WHERE id=1").Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatal("undecryptable ciphertext was modified; it must be left for recovery with the original key")
+	}
+	var legacy string
+	if err := testDB.QueryRow("SELECT params FROM notify WHERE id=3").Scan(&legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy == `{"sendKey":"legacy"}` {
+		t.Fatal("legacy plaintext row was not migrated after skipping an unreadable row")
+	}
+}
+
+func TestListReadsBlankUndecryptableCredentialsInsteadOfFailing(t *testing.T) {
+	testDB, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open() error: %v", err)
+	}
+	defer testDB.Close()
+	defer config.SetConfigForTest(nil)
+	seedUndecryptableCredentials(t, testDB)
+	restoreDB := SetDBForTest(testDB)
+	defer restoreDB()
+
+	alists, err := GetAlistList()
+	if err != nil {
+		t.Fatalf("GetAlistList() error = %v, want the readable rows", err)
+	}
+	if len(alists) != 2 {
+		t.Fatalf("GetAlistList() returned %d rows, want 2", len(alists))
+	}
+	tokens := map[int64]interface{}{}
+	for _, row := range alists {
+		tokens[row["id"].(int64)] = row["token"]
+	}
+	if tokens[1] != "" || tokens[2] != "good-token" {
+		t.Fatalf("tokens = %#v, want row 1 blanked and row 2 decrypted", tokens)
+	}
+
+	notifies, err := GetNotifyList(false)
+	if err != nil {
+		t.Fatalf("GetNotifyList() error = %v, want the readable rows", err)
+	}
+	if len(notifies) != 2 {
+		t.Fatalf("GetNotifyList() returned %d rows, want 2", len(notifies))
+	}
+	for _, row := range notifies {
+		if strings.HasPrefix(fmt.Sprint(row["params"]), "enc:") {
+			t.Fatalf("ciphertext leaked into the list: %#v", row)
+		}
+	}
+}
+
+func TestSingleReadsReportUndecryptableCredentials(t *testing.T) {
+	testDB, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open() error: %v", err)
+	}
+	defer testDB.Close()
+	defer config.SetConfigForTest(nil)
+	seedUndecryptableCredentials(t, testDB)
+	restoreDB := SetDBForTest(testDB)
+	defer restoreDB()
+
+	if _, err := GetAlistByID(1); !errors.Is(err, ErrCredentialUnreadable) {
+		t.Fatalf("GetAlistByID(unreadable) error = %v, want ErrCredentialUnreadable", err)
+	} else {
+		var pub model.PublicError
+		if !errors.As(err, &pub) || string(pub) != msg.T(msg.CredentialUnreadable) {
+			t.Fatalf("error = %v, want the public credential message", err)
+		}
+	}
+	if _, err := GetNotifyByID(1); !errors.Is(err, ErrCredentialUnreadable) {
+		t.Fatalf("GetNotifyByID(unreadable) error = %v, want ErrCredentialUnreadable", err)
+	}
+	if row, err := GetAlistByID(2); err != nil || row["token"] != "good-token" {
+		t.Fatalf("GetAlistByID(readable) = %#v, %v", row, err)
 	}
 }
 

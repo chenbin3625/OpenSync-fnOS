@@ -71,7 +71,8 @@ func TestFileListApiContextPostsTypedBodyAndOverlapsRemainingPages(t *testing.T)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode list request: %v", err)
 		}
-		if req.Path != "/tv" || req.PerPage != 2 || !req.Refresh {
+		// Only page 1 refreshes; later pages read the cache it rebuilt.
+		if req.Path != "/tv" || req.PerPage != 2 || req.Refresh != (req.Page == 1) {
 			t.Fatalf("list request = %#v", req)
 		}
 
@@ -146,5 +147,113 @@ func TestAddFileListEntryRejectsUnsafeNames(t *testing.T) {
 	}
 	if _, ok := result["dir/"]; !ok {
 		t.Errorf("plain directory name was dropped: %#v", result)
+	}
+}
+
+// pagedListServer serves a 6-entry directory in pages of 2. pages overrides the
+// entry names returned for a page, simulating a driver whose order shifts
+// between page requests.
+func pagedListServer(t *testing.T, pages map[int][]string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req alistListRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode list request: %v", err)
+			return
+		}
+		names, ok := pages[req.Page]
+		if !ok {
+			base := (req.Page - 1) * 2
+			names = []string{"f" + strconv.Itoa(base), "f" + strconv.Itoa(base+1)}
+		}
+		items := make([]string, 0, len(names))
+		for _, name := range names {
+			items = append(items, `{"name":"`+name+`","is_dir":false,"size":1}`)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":200,"message":"ok","data":{"content":[` + strings.Join(items, ",") + `],"total":6}}`))
+	}))
+}
+
+// An entry that shifts across a page boundary shows up twice while its
+// neighbour is never returned. The merged map hides both, so the listing must
+// be rejected rather than reported as a 5-entry directory.
+func TestFileListApiContextRejectsEntryDuplicatedAcrossPages(t *testing.T) {
+	d := *alistDeps
+	d.FileListPageSize = 2
+	restore := SetAlistDepsForTest(&d)
+	defer restore()
+
+	// f3 is lost; f1 is repeated on page 2. The fetched count still equals the
+	// total, so only duplicate detection catches it.
+	server := pagedListServer(t, map[int][]string{2: {"f1", "f2"}})
+	defer server.Close()
+
+	client := &AlistClient{URL: server.URL, client: server.Client()}
+	files, err := client.FileListApiContext(context.Background(), "/tv", 0, 0)
+	if err == nil || !strings.Contains(err.Error(), "incomplete") {
+		t.Fatalf("FileListApiContext() = %d entries, err %v; want listing incomplete error", len(files), err)
+	}
+}
+
+// A page that comes back short while the server still reports the full total
+// means entries were dropped.
+func TestFileListApiContextRejectsDroppedEntries(t *testing.T) {
+	d := *alistDeps
+	d.FileListPageSize = 2
+	restore := SetAlistDepsForTest(&d)
+	defer restore()
+
+	server := pagedListServer(t, map[int][]string{3: {"f4"}})
+	defer server.Close()
+
+	client := &AlistClient{URL: server.URL, client: server.Client()}
+	files, err := client.FileListApiContext(context.Background(), "/tv", 0, 0)
+	if err == nil || !strings.Contains(err.Error(), "incomplete") {
+		t.Fatalf("FileListApiContext() = %d entries, err %v; want listing incomplete error", len(files), err)
+	}
+}
+
+func TestFileListApiContextAcceptsConsistentPages(t *testing.T) {
+	d := *alistDeps
+	d.FileListPageSize = 2
+	restore := SetAlistDepsForTest(&d)
+	defer restore()
+
+	server := pagedListServer(t, nil)
+	defer server.Close()
+
+	client := &AlistClient{URL: server.URL, client: server.Client()}
+	files, err := client.FileListApiContext(context.Background(), "/tv", 1, 0)
+	if err != nil || len(files) != 6 {
+		t.Fatalf("FileListApiContext() = %d entries, err %v; want 6 entries", len(files), err)
+	}
+}
+
+// Drivers that allow several objects under one name return each of them; a
+// repeat across pages with different metadata is such an object, not a page
+// shift, and must not fail the whole listing.
+func TestFileListApiContextAcceptsSameNameObjectsAcrossPages(t *testing.T) {
+	d := *alistDeps
+	d.FileListPageSize = 2
+	restore := SetAlistDepsForTest(&d)
+	defer restore()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req alistListRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		content := `{"name":"a","is_dir":false,"size":1},{"name":"dup","is_dir":false,"size":1}`
+		if req.Page == 2 {
+			content = `{"name":"dup","is_dir":false,"size":2},{"name":"b","is_dir":false,"size":1}`
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":200,"message":"ok","data":{"content":[` + content + `],"total":4}}`))
+	}))
+	defer server.Close()
+
+	client := &AlistClient{URL: server.URL, client: server.Client()}
+	files, err := client.FileListApiContext(context.Background(), "/tv", 1, 0)
+	if err != nil || len(files) != 3 {
+		t.Fatalf("FileListApiContext() = %d entries, err %v; want 3 entries", len(files), err)
 	}
 }

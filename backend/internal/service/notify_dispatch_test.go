@@ -51,27 +51,40 @@ func TestEnqueueDoesNotWaitForDelivery(t *testing.T) {
 // A wedged provider must not grow the backlog without limit: once the queue is
 // full, enqueue reports the drop instead of blocking task completion.
 func TestEnqueueDropsWhenQueueIsFull(t *testing.T) {
+	const capacity = 1
 	release := make(chan struct{})
-	dispatcher := newTestDispatcher(1, func(notifyJob) { <-release })
+	started := make(chan struct{}, notifyWorkerCount)
+	dispatcher := newTestDispatcher(capacity, func(notifyJob) {
+		started <- struct{}{}
+		<-release
+	})
 	defer func() {
 		close(release)
 		dispatcher.shutdown(context.Background())
 	}()
 
-	accepted := 0
-	for i := 0; i < notifyWorkerCount+8; i++ {
-		if dispatcher.enqueue(notifyJob{taskID: int64(i)}) {
-			accepted++
+	// Park every worker inside a delivery first. Enqueueing in a tight loop and
+	// then asserting raced with the workers: one could still pull a job off the
+	// queue after the loop, freeing the slot the final assertion expected full.
+	for i := 0; i < notifyWorkerCount; i++ {
+		if !dispatcher.enqueue(notifyJob{taskID: int64(i)}) {
+			t.Fatalf("enqueue(%d) = false before any worker was busy", i)
+		}
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("worker %d never picked up its job", i)
 		}
 	}
-	if accepted == 0 {
-		t.Fatalf("no job was accepted, want the queue and workers to take some")
+	for i := 0; i < capacity; i++ {
+		if !dispatcher.enqueue(notifyJob{taskID: int64(100 + i)}) {
+			t.Fatalf("enqueue() = false with queue room left")
+		}
 	}
-	if accepted >= notifyWorkerCount+8 {
-		t.Fatalf("accepted %d jobs, want the bounded queue to reject some", accepted)
-	}
-	if dispatcher.enqueue(notifyJob{taskID: 99}) {
-		t.Fatalf("enqueue() = true on a saturated dispatcher, want a drop")
+	for i := 0; i < 8; i++ {
+		if dispatcher.enqueue(notifyJob{taskID: int64(200 + i)}) {
+			t.Fatalf("enqueue() = true on a saturated dispatcher, want a drop")
+		}
 	}
 }
 

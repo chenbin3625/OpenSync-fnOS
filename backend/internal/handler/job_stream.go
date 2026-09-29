@@ -1,7 +1,9 @@
 package handler
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"opensync/internal/model"
 	"opensync/internal/msg"
@@ -74,12 +76,13 @@ func StreamJobCurrent(c *gin.Context) {
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
 
+	rc := http.NewResponseController(c.Writer)
+	// The server has no WriteTimeout, so a deadline set here would outlive the
+	// stream on a kept-alive connection; clear it on the way out.
+	defer func() { _ = rc.SetWriteDeadline(time.Time{}) }()
+
 	writeEvent := func(payload []byte) bool {
-		if _, err := fmt.Fprintf(c.Writer, "data: %s\n\n", payload); err != nil {
-			return false
-		}
-		flusher.Flush()
-		return true
+		return writeSSEFrame(c.Writer, rc, flusher, fmt.Sprintf("data: %s\n\n", payload))
 	}
 
 	service.TouchJobWatching(jobID)
@@ -101,10 +104,35 @@ func StreamJobCurrent(c *gin.Context) {
 			}
 		case <-heartbeat.C:
 			service.TouchJobWatching(jobID)
-			if _, err := fmt.Fprintf(c.Writer, ": heartbeat\n\n"); err != nil {
+			if !writeSSEFrame(c.Writer, rc, flusher, ": heartbeat\n\n") {
 				return
 			}
-			flusher.Flush()
 		}
 	}
+}
+
+// sseWriteTimeout bounds each SSE write. Without it a client that stops reading
+// (a suspended tab, a dead NAT mapping) fills the socket buffer and the write
+// blocks forever, pinning the goroutine, the progress subscription and one of
+// the maxGlobalSSEConns slots.
+const sseWriteTimeout = 30 * time.Second
+
+// sseDeadlineSetter is the part of http.ResponseController used here, so tests
+// can observe or fail the deadline call.
+type sseDeadlineSetter interface {
+	SetWriteDeadline(time.Time) error
+}
+
+// writeSSEFrame arms the write deadline, writes one frame and flushes it. A
+// writer that cannot take deadlines (ErrNotSupported, e.g. a test recorder) is
+// still written to; any other deadline error means the connection is unusable.
+func writeSSEFrame(w io.Writer, rc sseDeadlineSetter, flusher http.Flusher, frame string) bool {
+	if err := rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		return false
+	}
+	if _, err := io.WriteString(w, frame); err != nil {
+		return false
+	}
+	flusher.Flush()
+	return true
 }

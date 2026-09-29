@@ -81,6 +81,40 @@ func srcSelectionsNested(srcPaths []string) bool {
 	return false
 }
 
+// resolvedDstPaths returns the destination root of every top-level (src, dst)
+// scan work, computed exactly as JobTask.sync builds them: both sides
+// normalized to directory form, then mapped through dstPathForSrcSelection.
+// Validation has to look at these rather than the configured dstPath entries,
+// because with several sources each one lands in its own derived subdirectory.
+func resolvedDstPaths(srcPaths, dstPaths []string) []string {
+	resolved := make([]string, 0, len(srcPaths)*len(dstPaths))
+	for _, srcItem := range srcPaths {
+		srcItem = normalizeDirPath(srcItem)
+		for _, dstItem := range dstPaths {
+			resolved = append(resolved, dstPathForSrcSelection(normalizeDirPath(dstItem), srcItem, srcPaths))
+		}
+	}
+	return resolved
+}
+
+// resolvedDstPathsNested reports whether one resolved destination root contains
+// another. Two scan works whose destinations nest mutate one tree
+// concurrently, and in mirror mode the outer one deletes the inner one's files
+// as "extra" on every run. This covers nested dstPath entries (["/d","/d/x"])
+// and sources whose derived subdirectories collide (["/x/a","/y/a","/z/x"]
+// maps to D/x/a and D/x).
+func resolvedDstPathsNested(srcPaths, dstPaths []string) bool {
+	resolved := resolvedDstPaths(srcPaths, dstPaths)
+	for i := range resolved {
+		for j := i + 1; j < len(resolved); j++ {
+			if syncPathContains(resolved[i], resolved[j]) || syncPathContains(resolved[j], resolved[i]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // syncPathContains compares case-insensitively. The overlap and nesting checks
 // exist to prevent two works from writing the same destination subtree, and the
 // storage behind an engine decides whether /Photos and /photos are one

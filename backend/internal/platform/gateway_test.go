@@ -1,8 +1,10 @@
 package platform
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -16,6 +18,8 @@ func gatewayTestRouter(t *testing.T, development bool, allowedOrigins []string) 
 	r.GET("/", func(c *gin.Context) { c.Status(200) })
 	r.HEAD("/", func(c *gin.Context) { c.Status(200) })
 	r.POST("/", func(c *gin.Context) { c.Status(200) })
+	r.PUT("/", func(c *gin.Context) { c.Status(200) })
+	r.DELETE("/", func(c *gin.Context) { c.Status(200) })
 	return r
 }
 
@@ -26,7 +30,17 @@ func serveGatewayRequest(t *testing.T, r *gin.Engine, method, target string, hea
 		req.Header.Set("X-Trim-Userid", "1000")
 		req.Header.Set("X-Trim-Isadmin", "true")
 	}
+	// Writes default to the Content-Type the app's own client always sends, so
+	// the origin cases exercise the origin logic rather than the content-type
+	// check. A case that needs the header absent passes "Content-Type": "".
+	if method != http.MethodGet && method != http.MethodHead {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	for key, value := range headers {
+		if value == "" {
+			req.Header.Del(key)
+			continue
+		}
 		req.Header.Set(key, value)
 	}
 	w := httptest.NewRecorder()
@@ -242,6 +256,78 @@ func TestParseOriginValue(t *testing.T) {
 		if want.ok && (got.host != want.host || got.port != want.port) {
 			t.Fatalf("parseOriginValue(%q) = %q:%q, want %q:%q", value, got.host, got.port, want.host, want.port)
 		}
+	}
+}
+
+// fnOS is normally opened over plain HTTP at a LAN address, where browsers do
+// not send Sec-Fetch-Site. A <form enctype="text/plain"> can then POST a body
+// that ShouldBindJSON happily decodes, so the JSON Content-Type is what has to
+// stop it: a cross-origin page cannot set it without a CORS preflight.
+func TestGatewayRequiresJSONContentTypeForWrites(t *testing.T) {
+	for name, tc := range map[string]struct {
+		method      string
+		contentType string
+		body        string
+		want        int
+	}{
+		"text/plain form post":                {http.MethodPost, "text/plain", `{"id":"1"}`, http.StatusForbidden},
+		"urlencoded form post":                {http.MethodPost, "application/x-www-form-urlencoded", "id=1", http.StatusForbidden},
+		"multipart form post":                 {http.MethodPost, "multipart/form-data; boundary=x", "--x--", http.StatusForbidden},
+		"missing content type with body":      {http.MethodPut, "", `{"id":"1"}`, http.StatusForbidden},
+		"lookalike media type":                {http.MethodPost, "application/jsonx", `{}`, http.StatusForbidden},
+		"media type smuggled as a parameter":  {http.MethodPost, "text/plain; x=application/json", `{}`, http.StatusForbidden},
+		"delete without content type":         {http.MethodDelete, "", "", http.StatusForbidden},
+		"json post":                           {http.MethodPost, "application/json", `{"id":"1"}`, http.StatusOK},
+		"json with charset":                   {http.MethodPut, "application/json; charset=utf-8", `{"id":"1"}`, http.StatusOK},
+		"json media type is case-insensitive": {http.MethodPost, "Application/JSON", `{}`, http.StatusOK},
+		// The frontend sends DELETE with query arguments and no body, but sets
+		// the JSON header on every request.
+		"delete with json header and no body": {http.MethodDelete, "application/json", "", http.StatusOK},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := gatewayTestRouter(t, false, nil)
+			var body io.Reader
+			if tc.body != "" {
+				body = strings.NewReader(tc.body)
+			}
+			req := httptest.NewRequest(tc.method, "http://app.sock/?id=1", body)
+			req.Header.Set("X-Trim-Userid", "1000")
+			req.Header.Set("X-Trim-Isadmin", "true")
+			// Plain-HTTP LAN access: the browser sends Origin but no fetch metadata.
+			req.Header.Set("Origin", "http://evil.test")
+			if tc.contentType != "" {
+				req.Header.Set("Content-Type", tc.contentType)
+			}
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+			if w.Code != tc.want {
+				t.Fatalf("status=%d, want %d", w.Code, tc.want)
+			}
+		})
+	}
+}
+
+func TestGatewayReadsDoNotNeedJSONContentType(t *testing.T) {
+	r := gatewayTestRouter(t, false, nil)
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		code := serveGatewayRequest(t, r, method, "http://app.sock/", map[string]string{
+			"Content-Type": "text/plain",
+		}, true)
+		if code != http.StatusOK {
+			t.Fatalf("%s status=%d, want 200", method, code)
+		}
+	}
+}
+
+// Development mode skips the identity headers, not the CSRF check: a dev
+// server on loopback is still reachable from any page in the same browser.
+func TestGatewayDevelopmentModeStillRequiresJSONContentType(t *testing.T) {
+	r := gatewayTestRouter(t, true, nil)
+	code := serveGatewayRequest(t, r, http.MethodPost, "http://127.0.0.1:8040/", map[string]string{
+		"Content-Type": "text/plain",
+	}, false)
+	if code != http.StatusForbidden {
+		t.Fatalf("status=%d, want 403", code)
 	}
 }
 

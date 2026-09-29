@@ -45,6 +45,10 @@ type AlistClient struct {
 	waits   map[string]time.Time
 	mu      sync.Mutex
 	client  *http.Client
+	// longClient shares client's transport but has a longer overall timeout;
+	// it is used for /api/fs/copy and /api/fs/move, which can block for
+	// minutes on same-storage or synchronous drivers. nil falls back to client.
+	longClient *http.Client
 	// baseURL is parsed once when the client is created. The URL is immutable
 	// for the lifetime of a cached client, so requestURL can copy this small
 	// value instead of reparsing the base string on every AList call.
@@ -78,9 +82,9 @@ func NewAlistClientContext(ctx context.Context, alistURL string, token string, a
 		Token:   token,
 		AlistID: alistID,
 		waits:   make(map[string]time.Time),
-		client:  newAlistHTTPClient(),
 		baseURL: *parsedURL,
 	}
+	c.client, c.longClient = newAlistHTTPClients()
 	if err := c.getUserContext(ctx); err != nil {
 		c.Close()
 		return nil, err
@@ -136,7 +140,11 @@ func (c *AlistClient) startRequest(ctx context.Context, method, apiPath string, 
 		req.Header.Set("Authorization", c.Token)
 	}
 
-	resp, err := c.client.Do(req)
+	httpClient := c.client
+	if c.longClient != nil && isAlistLongOperation(ctx) {
+		httpClient = c.longClient
+	}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
@@ -186,7 +194,7 @@ func (c *AlistClient) doRequestContextLimit(ctx context.Context, method, apiPath
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer closeBody(resp.Body)
 
 	respBody, err := readAllWithLimit(resp.Body, responseLimit)
 	if err != nil {
@@ -562,16 +570,55 @@ func (c *AlistClient) FileExistsContext(ctx context.Context, dir, name string) (
 
 // FileGetContext checks a single file via /api/fs/get (cheaper than listing the directory).
 func (c *AlistClient) FileGetContext(ctx context.Context, dir, name string) (bool, error) {
-	dir = strings.TrimRight(strings.TrimSpace(dir), "/")
-	filePath := dir + "/" + strings.TrimSpace(name)
-	_, err := c.PostContext(ctx, "/api/fs/get", alistPathRequest{Path: filePath}, nil)
+	stat, err := c.FileStatContext(ctx, dir, name)
 	if err != nil {
-		if isAlistObjectNotFound(err) {
-			return false, nil
-		}
 		return false, err
 	}
-	return true, nil
+	return stat.Exists, nil
+}
+
+// FileStat is the subset of /api/fs/get metadata used to verify transfers.
+type FileStat struct {
+	Exists bool
+	IsDir  bool
+	// SizeKnown is false when the response carried no "size" field (some
+	// drivers/proxies omit it); callers must not compare Size then.
+	SizeKnown bool
+	Size      int64
+	Modified  int64
+}
+
+// FileStatContext returns metadata for dir/name via /api/fs/get. A missing
+// object is reported as Exists=false with a nil error.
+//
+// Only trailing slashes are trimmed from dir and name is used verbatim: file
+// names may legitimately start or end with spaces, and trimming them made the
+// probe look at a different path than the one being copied.
+func (c *AlistClient) FileStatContext(ctx context.Context, dir, name string) (FileStat, error) {
+	filePath := strings.TrimRight(dir, "/") + "/" + name
+	data, err := c.PostContext(ctx, "/api/fs/get", alistPathRequest{Path: filePath}, nil)
+	if err != nil {
+		if isAlistObjectNotFound(err) {
+			return FileStat{}, nil
+		}
+		return FileStat{}, err
+	}
+	stat := FileStat{Exists: true}
+	if len(data) > 0 && string(data) != "null" {
+		var raw struct {
+			IsDir    bool            `json:"is_dir"`
+			Size     *int64          `json:"size"`
+			Modified json.RawMessage `json:"modified"`
+		}
+		if err := json.Unmarshal(data, &raw); err == nil {
+			stat.IsDir = raw.IsDir
+			stat.Modified = parseModified(raw.Modified)
+			if raw.Size != nil {
+				stat.SizeKnown, stat.Size = true, *raw.Size
+			}
+		}
+	}
+	return stat, nil
 }
 
 func (c *AlistClient) MkdirContext(ctx context.Context, path string, scanInterval int) error {
@@ -582,7 +629,31 @@ func (c *AlistClient) MkdirContext(ctx context.Context, path string, scanInterva
 	return err
 }
 
+// validateRemoveRequest is the last line of defence before /api/fs/remove.
+// Some AList/OpenList versions join dir with each name without validation, so
+// an empty name (or ".", "..", or a name carrying a separator) removes the
+// directory itself or a sibling tree. A trailing "/" is tolerated because
+// directory names are sometimes passed in their listing form ("sub/").
+func validateRemoveRequest(dir string, names []string) error {
+	if strings.TrimSpace(dir) == "" {
+		return errors.New("alist remove rejected: empty directory")
+	}
+	if len(names) == 0 {
+		return errors.New("alist remove rejected: no names")
+	}
+	for _, name := range names {
+		trimmed := strings.TrimSuffix(name, "/")
+		if trimmed == "" || trimmed == "." || trimmed == ".." || strings.ContainsAny(trimmed, "/\\") {
+			return fmt.Errorf("alist remove rejected: unsafe name %q in %q", name, dir)
+		}
+	}
+	return nil
+}
+
 func (c *AlistClient) DeleteFileContext(ctx context.Context, path string, names []string, scanInterval int) error {
+	if err := validateRemoveRequest(path, names); err != nil {
+		return err
+	}
 	if err := c.CheckWaitContext(ctx, path, scanInterval); err != nil {
 		return err
 	}
@@ -591,7 +662,10 @@ func (c *AlistClient) DeleteFileContext(ctx context.Context, path string, names 
 }
 
 func (c *AlistClient) copyOrMoveFileContext(ctx context.Context, apiPath, srcDir, dstDir, name string) (string, error) {
-	data, err := c.PostContext(ctx, apiPath, alistCopyMoveRequest{
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	data, err := c.PostContext(withAlistLongOperation(ctx), apiPath, alistCopyMoveRequest{
 		SrcDir:    srcDir,
 		DstDir:    dstDir,
 		Overwrite: true,

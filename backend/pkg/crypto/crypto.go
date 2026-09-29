@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -15,6 +16,9 @@ import (
 )
 
 const encryptedValuePrefix = "enc:v1:"
+
+// EncryptedValuePrefix marks values produced by EncryptString.
+const EncryptedValuePrefix = encryptedValuePrefix
 
 // EncryptString encrypts a value with AES-GCM using a key derived from the
 // persisted application secret. The versioned prefix supports future formats.
@@ -91,11 +95,25 @@ func GeneratePassword(length int) string {
 // not exist. Callers must treat a persist error as fatal when the value feeds
 // cryptography: falling back to an in-memory default would silently rotate the
 // secret on every restart and invalidate all stored cookies and tokens.
+//
+// A new value is written only when the file is genuinely absent. Any other read
+// failure (EIO, EACCES, a directory in the way) and an existing file that is
+// empty or whitespace-only are returned as errors: the file may still hold —
+// or have held — the key every stored credential was encrypted with, and
+// replacing it would make all of them permanently undecryptable. force keeps
+// its meaning of "always write defaultVal", and replaces the file atomically.
 func ReadOrSetFile(fileName string, defaultVal string, force bool) (string, error) {
 	if !force {
-		if data, err := os.ReadFile(fileName); err == nil && len(strings.TrimSpace(string(data))) > 0 {
+		data, err := os.ReadFile(fileName)
+		switch {
+		case err == nil:
+			if len(strings.TrimSpace(string(data))) == 0 {
+				return "", fmt.Errorf("%s exists but is empty; refusing to replace it with a new value", fileName)
+			}
 			_ = os.Chmod(fileName, 0600)
 			return string(data), nil
+		case !errors.Is(err, fs.ErrNotExist):
+			return "", fmt.Errorf("read %s: %w", fileName, err)
 		}
 	}
 	dir := filepath.Dir(fileName)
@@ -104,8 +122,91 @@ func ReadOrSetFile(fileName string, defaultVal string, force bool) (string, erro
 			return "", err
 		}
 	}
-	if err := os.WriteFile(fileName, []byte(defaultVal), 0600); err != nil {
+	if force {
+		if err := writeFileAtomic(fileName, []byte(defaultVal)); err != nil {
+			return "", err
+		}
+		return defaultVal, nil
+	}
+	// O_EXCL: if another process created the file between the read above and
+	// here, keep its value instead of overwriting it.
+	if err := writeNewFile(fileName, []byte(defaultVal)); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			data, readErr := os.ReadFile(fileName)
+			if readErr != nil {
+				return "", fmt.Errorf("read %s: %w", fileName, readErr)
+			}
+			if len(strings.TrimSpace(string(data))) == 0 {
+				return "", fmt.Errorf("%s exists but is empty; refusing to replace it with a new value", fileName)
+			}
+			return string(data), nil
+		}
 		return "", err
 	}
 	return defaultVal, nil
+}
+
+// writeNewFile creates fileName exclusively with owner-only permissions and
+// fsyncs both the data and the directory entry, so a crash cannot leave an
+// empty key file behind that the next start would refuse to use.
+func writeNewFile(fileName string, data []byte) error {
+	f, err := os.OpenFile(fileName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(fileName)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(fileName)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(fileName)
+		return err
+	}
+	return syncDir(filepath.Dir(fileName))
+}
+
+// writeFileAtomic replaces fileName via a synced temp file and rename, so a
+// crash leaves either the old or the new content, never a truncated file.
+func writeFileAtomic(fileName string, data []byte) error {
+	dir := filepath.Dir(fileName)
+	tmp, err := os.CreateTemp(dir, filepath.Base(fileName)+".*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, fileName); err != nil {
+		return err
+	}
+	return syncDir(dir)
+}
+
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }

@@ -31,7 +31,9 @@ jobs:
           tag="${GITHUB_REF_NAME#v}"
           manifest="$(sed -n 's/^version=//p' fnos/manifest)"
           pkg="$(node -p "require('./frontend/package.json').version")"
-          echo "tag=$tag manifest=$manifest package.json=$pkg"
+          root_pkg="$(node -p "require('./package.json').version")"
+          readme="$(sed -n 's/^当前版本：\*\*v\([0-9][0-9.]*\)\*\*$/\1/p' README.md)"
+          echo "tag=$tag manifest=$manifest package.json=$pkg root package.json=$root_pkg README=$readme"
           if [ -z "$manifest" ]; then
             echo "::error::fnos/manifest 未声明 version"
             exit 1
@@ -42,6 +44,14 @@ jobs:
           fi
           if [ "$tag" != "$pkg" ]; then
             echo "::error::Git tag ($tag) 与 frontend/package.json ($pkg) 版本不一致"
+            exit 1
+          fi
+          if [ "$tag" != "$root_pkg" ]; then
+            echo "::error::Git tag ($tag) 与根目录 package.json ($root_pkg) 版本不一致"
+            exit 1
+          fi
+          if [ "$tag" != "$readme" ]; then
+            echo "::error::Git tag ($tag) 与 README.md 当前版本 ($readme) 不一致"
             exit 1
           fi
 
@@ -87,6 +97,17 @@ jobs:
       - name: Packaging script tests
         run: npm run test:scripts
 
+      # The lifecycle test drives fnos/cmd/main under bash with the real server
+      # binary and relies on /proc identity checks, so it needs a Linux runner.
+      # The binary embeds backend/cmd/server/web; the tracked .gitkeep keeps
+      # `go:embed all:web` compiling without a frontend build.
+      - name: Build lifecycle test binary
+        run: CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/opensync" ./cmd/server
+        working-directory: backend
+
+      - name: Lifecycle script tests
+        run: OPENSYNC_TEST_BINARY="$RUNNER_TEMP/opensync" npm run test:lifecycle
+
   build:
     name: Build and upload
     needs: [version, test]
@@ -131,11 +152,14 @@ jobs:
           FNPACK: /usr/local/bin/fnpack
 
       - name: Create release and upload assets
+        # The tag name is attacker-influenced text: pass it through the
+        # environment instead of expanding the expression inside the shell script.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
         run: |
-          gh release create "${{ github.ref_name }}" \
+          gh release create "$TAG" \
             dist/*.fpk \
             dist/SHA256SUMS \
-            --title "${{ github.ref_name }}" \
+            --title "$TAG" \
             --generate-notes

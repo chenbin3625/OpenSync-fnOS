@@ -6,13 +6,17 @@ import (
 )
 
 type copyQueue struct {
-	mu        sync.Mutex
-	items     []*CopyItem
-	head      int
-	closed    bool
-	capacity  int
-	notify    chan struct{}
-	space     chan struct{}
+	mu       sync.Mutex
+	items    []*CopyItem
+	head     int
+	closed   bool
+	capacity int
+	notify   chan struct{}
+	space    chan struct{}
+	// done is closed by closeAndDrain. space is a 1-slot signal that wakes a
+	// single producer; closing done wakes every producer blocked on a full
+	// queue so none of them hangs after the executor stopped.
+	done      chan struct{}
 	waitCount int
 	waitSize  int64
 }
@@ -27,8 +31,16 @@ func newCopyQueueWithCapacity(capacity int) *copyQueue {
 		capacity: capacity,
 		notify:   make(chan struct{}, 1),
 		space:    make(chan struct{}, 1),
+		done:     make(chan struct{}),
 	}
 }
+
+// defaultCopyQueueCapacity bounds the waiting queue of a running task. A scan of
+// a huge tree otherwise holds every pending CopyItem in memory before the
+// executor catches up; with the bound the scan goroutine blocks in pushWait
+// (the executor runs in its own goroutine and never pushes, so it cannot wait on
+// itself).
+const defaultCopyQueueCapacity = 10000
 
 func (q *copyQueue) pushWait(ctx context.Context, item *CopyItem) bool {
 	for {
@@ -45,11 +57,13 @@ func (q *copyQueue) pushWait(ctx context.Context, item *CopyItem) bool {
 			return true
 		}
 		space := q.space
+		done := q.done
 		q.mu.Unlock()
 
 		select {
 		case <-ctx.Done():
 			return false
+		case <-done:
 		case <-space:
 		}
 	}
@@ -125,6 +139,9 @@ func (q *copyQueue) closeAndDrain() []*CopyItem {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
+	if !q.closed && q.done != nil {
+		close(q.done)
+	}
 	q.closed = true
 	items := append([]*CopyItem(nil), q.items[q.head:]...)
 	for i := q.head; i < len(q.items); i++ {

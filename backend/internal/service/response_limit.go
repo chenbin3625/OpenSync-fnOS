@@ -29,6 +29,22 @@ func readAllWithLimit(reader io.Reader, limit int64) ([]byte, error) {
 	return data, nil
 }
 
+// maxDrainBytes bounds how much of an unread response body closeBody discards.
+// Draining lets net/http return an HTTP/1.1 connection to the idle pool instead
+// of tearing it down; the cap keeps a huge or endless body from stalling us.
+const maxDrainBytes = 64 << 10
+
+// closeBody drains up to maxDrainBytes of body and then closes it. Use it
+// instead of a bare Close whenever a decoder may stop before EOF (streaming
+// JSON, size-limit errors), so keep-alive connections are reused.
+func closeBody(body io.ReadCloser) {
+	if body == nil {
+		return
+	}
+	_, _ = io.CopyN(io.Discard, body, maxDrainBytes)
+	_ = body.Close()
+}
+
 // capReader errors as soon as more than limit bytes have been pulled, so a
 // streaming JSON decoder cannot buffer an unbounded AList payload.
 type capReader struct {

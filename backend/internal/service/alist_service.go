@@ -229,11 +229,16 @@ func UpdateClient(alist map[string]interface{}) error {
 		if !hasToken {
 			return publicError(msg.T(msg.WithoutToken))
 		}
-		client, err = alistDeps.NewAlistClient(urlStr, token, alistID)
+		// Validate with alistID=0: a bad new token makes /api/me answer 401, and
+		// checkAlistCode would evict the cached client for alistID — the one
+		// that still works with the old, stored credentials. The id is only
+		// attached once validation succeeded.
+		client, err = alistDeps.NewAlistClient(urlStr, token, 0)
 		if err != nil {
 			log.Printf("alist client update failed: %v", err)
 			return publicError(msg.T(msg.AlistConnectFail))
 		}
+		client.AlistID = alistID
 	}
 
 	var tokenPtr *string

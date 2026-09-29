@@ -2,7 +2,11 @@ package config
 
 import (
 	"bufio"
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"log"
 	"net"
 	"opensync/internal/msg"
@@ -30,10 +34,11 @@ type ServerConfig struct {
 	// AllowedOrigins lists the origins allowed to perform mutations. Entries are
 	// full origins ("http://nas.example:5666") or bare hosts ("nas.example");
 	// full origins match scheme and effective port exactly, while bare hosts
-	// accept any port. Configuring it retires the Referer-based same-origin
-	// fallback in platform.GatewayRequired, so a deployment that sets it must
-	// list the address the NAS is actually reached at — otherwise the UI's own
-	// writes are rejected.
+	// accept any port. When empty, platform.GatewayRequired accepts JSON writes
+	// that the browser does not mark cross-site; setting it additionally
+	// requires every write's Origin header to match an entry, so a deployment
+	// that sets it must list the address the NAS is actually reached at —
+	// otherwise the UI's own writes are rejected.
 	AllowedOrigins []string
 	// TLSCertFile and TLSKeyFile enable HTTPS/HTTP2 and opportunistic HTTP3.
 	TLSCertFile string
@@ -102,11 +107,72 @@ type SystemSettings struct {
 // fatal at startup.
 func GetPasswordStr() string {
 	_ = os.MkdirAll(DataDir(), 0700)
-	key, err := crypto.ReadOrSetFile(filepath.Join(DataDir(), "secret.key"), crypto.GeneratePassword(256), false)
+	keyFile := filepath.Join(DataDir(), "secret.key")
+	key, err := crypto.ReadOrSetFile(keyFile, crypto.GeneratePassword(256), false)
+	if err != nil && keyFileEmpty(keyFile) && !databaseHasEncryptedValues(filepath.Join(DataDir(), "openSync.db")) {
+		// Older releases wrote the key non-atomically, so a crash could leave
+		// an empty file behind. Refusing it is right when stored credentials
+		// depend on the lost key, but with nothing encrypted there is nothing
+		// to protect and refusing would only keep the app from ever starting.
+		log.Printf("Warning: %s is empty and no stored credential uses it; generating a new key", keyFile)
+		key, err = crypto.ReadOrSetFile(keyFile, crypto.GeneratePassword(256), true)
+	}
 	if err != nil {
 		log.Fatalf("Failed to persist data/secret.key: %v", err)
 	}
 	return key
+}
+
+func keyFileEmpty(name string) bool {
+	data, err := os.ReadFile(name)
+	return err == nil && len(strings.TrimSpace(string(data))) == 0
+}
+
+// databaseHasEncryptedValues reports whether the database (or its WAL) may
+// hold a value encrypted with the application key. It scans the raw files for
+// the ciphertext prefix instead of opening the database, because the key is
+// needed before the database is initialised. Any read error counts as "yes":
+// the caller only uses a "no" to justify replacing the key.
+func databaseHasEncryptedValues(dbFile string) bool {
+	for _, name := range []string{dbFile, dbFile + "-wal"} {
+		found, err := fileContains(name, []byte(crypto.EncryptedValuePrefix))
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil || found {
+			return true
+		}
+	}
+	return false
+}
+
+func fileContains(name string, needle []byte) (bool, error) {
+	f, err := os.Open(name)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	buf := make([]byte, 1<<20)
+	carry := 0
+	for {
+		n, readErr := f.Read(buf[carry:])
+		window := buf[:carry+n]
+		if bytes.Contains(window, needle) {
+			return true, nil
+		}
+		// Keep the tail so a match spanning two reads is not missed.
+		carry = len(needle) - 1
+		if carry > len(window) {
+			carry = len(window)
+		}
+		copy(buf, window[len(window)-carry:])
+		if readErr == io.EOF {
+			return false, nil
+		}
+		if readErr != nil {
+			return false, readErr
+		}
+	}
 }
 
 // GetConfig returns the global config (singleton)
@@ -127,6 +193,30 @@ func GetConfig() *Config {
 	passwdStr := GetPasswordStr()
 	dbname := filepath.Join(DataDir(), "openSync.db")
 
+	sCfg, err := loadServerConfig(passwdStr)
+	if err != nil {
+		// Fail closed. Falling back to defaults here would silently drop
+		// allowed_origins (and every other operator setting) whenever the file
+		// exists but cannot be read, turning a strict origin policy into the
+		// permissive default without anyone noticing.
+		log.Fatalf("配置文件 %s 存在但无法读取，已停止启动以免以默认配置运行: %v", filepath.Join(ConfigDir(), "config.ini"), err)
+	}
+
+	sysConfig = &Config{
+		DB:     DBConfig{DBName: dbname},
+		Server: sCfg,
+	}
+	clampServerConfig(&sysConfig.Server)
+	if sysConfig.Server.Locale != "" {
+		msg.SetLocale(sysConfig.Server.Locale)
+	}
+	return sysConfig
+}
+
+// loadServerConfig builds the server config from config.ini when it exists, or
+// from environment variables when it does not. An existing file that cannot be
+// stat'ed, opened or parsed is an error rather than a reason to use defaults.
+func loadServerConfig(passwdStr string) (ServerConfig, error) {
 	sCfg := ServerConfig{
 		Bind:            defaultBind,
 		Port:            defaultPort,
@@ -141,11 +231,16 @@ func GetConfig() *Config {
 		PasswdStr:       passwdStr,
 	}
 
-	if _, err := os.Stat(filepath.Join(ConfigDir(), "config.ini")); err == nil {
+	configPath := filepath.Join(ConfigDir(), "config.ini")
+	_, statErr := os.Stat(configPath)
+	if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
+		return ServerConfig{}, statErr
+	}
+	if statErr == nil {
 		// Read config.ini
-		iniMap, err := readINI(filepath.Join(ConfigDir(), "config.ini"))
+		iniMap, err := readINI(configPath)
 		if err != nil {
-			log.Printf("配置文件读取失败: %v", err)
+			return ServerConfig{}, err
 		}
 		if opensync, ok := iniMap["opensync"]; ok {
 			if v, ok := opensync["bind"]; ok {
@@ -202,16 +297,7 @@ func GetConfig() *Config {
 	}
 	sCfg.TLSCertFile = envStringConfigValue("OPENSYNC_TLS_CERT", sCfg.TLSCertFile)
 	sCfg.TLSKeyFile = envStringConfigValue("OPENSYNC_TLS_KEY", sCfg.TLSKeyFile)
-
-	sysConfig = &Config{
-		DB:     DBConfig{DBName: dbname},
-		Server: sCfg,
-	}
-	clampServerConfig(&sysConfig.Server)
-	if sysConfig.Server.Locale != "" {
-		msg.SetLocale(sysConfig.Server.Locale)
-	}
-	return sysConfig
+	return sCfg, nil
 }
 
 // clampServerConfig enforces the same ranges as validateSystemSettings on
@@ -276,6 +362,11 @@ func GetSystemSettings() SystemSettings {
 	}
 }
 
+// ErrConfigWrite marks a failure to persist config.ini. The wrapped cause
+// carries OS paths and errno text, so callers log it instead of showing it;
+// validation errors are returned unwrapped and are safe to display.
+var ErrConfigWrite = errors.New("write config file")
+
 // UpdateSystemSettings validates, persists, and applies runtime-editable settings.
 func UpdateSystemSettings(settings SystemSettings) error {
 	if err := validateSystemSettings(settings); err != nil {
@@ -295,7 +386,7 @@ func UpdateSystemSettings(settings SystemSettings) error {
 	nextServer.MaxRetries = settings.MaxRetries
 
 	if err := writeConfigFile(nextServer); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrConfigWrite, err)
 	}
 	sysConfig = &Config{
 		DB:     cfg.DB,
@@ -471,6 +562,13 @@ func writeConfigFile(sCfg ServerConfig) error {
 		_ = tmpFile.Close()
 		return err
 	}
+	// The data must be durable before the rename publishes it: otherwise a
+	// power loss after the rename can leave config.ini as an empty or partial
+	// file, which startup now (correctly) refuses to run with.
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
 	if err := tmpFile.Close(); err != nil {
 		return err
 	}
@@ -478,7 +576,24 @@ func writeConfigFile(sCfg ServerConfig) error {
 		return err
 	}
 	cleanup = false
+	// The rename itself lives in the directory entry; fsync the directory so it
+	// survives a crash too. The new file is already in place and readable, so a
+	// failure here is only logged: returning it would make the caller keep the
+	// old in-memory settings while the file already holds the new ones.
+	if err := syncDir(ConfigDir()); err != nil {
+		log.Printf("Warning: config.ini was replaced but fsync of its directory failed: %v", err)
+	}
 	return nil
+}
+
+// syncDir fsyncs a directory so a completed rename inside it is durable.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 func intConfigValue(value string, fallback int, key string) int {

@@ -24,6 +24,14 @@ fi
 PID_FILE="${TRIM_PKGVAR}/app.pid"
 SOCKET="${TRIM_APPDEST}/app.sock"
 LOG_FILE="${TRIM_PKGVAR}/app.log"
+# 服务进程会持续运行数周，gin 每个请求写一行日志；启动时按大小轮转，
+# 保留 app.log.1 .. app.log.5，避免日志无限增长占满数据盘。
+LOG_MAX_BYTES=10485760
+LOG_KEEP=5
+# 等待服务创建 Socket 的最长秒数；期间持续确认进程仍存活。
+START_TIMEOUT=60
+# 本脚本的规范路径，用于确认启动锁的持有者仍是本应用的 `main start`。
+SELF="$(readlink -f "$0" 2>/dev/null || true)"
 
 check_process() {
     local pid="$1" executable
@@ -52,6 +60,38 @@ stop_app() {
     rm -f "$PID_FILE"
     [ ! -S "$SOCKET" ] || rm -f "$SOCKET"
 }
+# $1 是锁持有进程 argv 中紧挨 start 之前的参数：必须是名为 main 的脚本；是绝对路径
+# 时还必须解析到本脚本。相对路径依赖对方的工作目录（start_app 会 cd），无法可靠还原，
+# 此时与缺少 readlink -f 时一样只按文件名判断，宁可让用户稍后重试也不重复启动。
+is_self_path() {
+    local path="$1" real
+    case "$path" in main|*/main) ;; *) return 1 ;; esac
+    case "$path" in /*) ;; *) return 0 ;; esac
+    [ -n "$SELF" ] || return 0
+    real="$(readlink -f "$path" 2>/dev/null || true)"
+    [ "$real" = "$SELF" ]
+}
+# 启动锁里的 PID 可能已被无关的长驻进程复用：只有它仍在执行本脚本的 start 才视为
+# 正在启动，否则按残留锁处理，避免启动被永久阻塞。
+is_start_script() {
+    local pid="$1" arg prev='' cmdline
+    kill -0 "$pid" 2>/dev/null || return 1
+    if [ -d /proc ]; then
+        # 读不到命令行时无法确认身份，保守地沿用 kill -0 的结论。
+        [ -r "/proc/$pid/cmdline" ] || return 0
+        while IFS= read -r arg || [ -n "$arg" ]; do
+            if [ "$arg" = start ] && is_self_path "$prev"; then return 0; fi
+            prev="$arg"
+        done < <({ tr '\0' '\n' < "/proc/$pid/cmdline"; } 2>/dev/null || true)
+        return 1
+    fi
+    cmdline="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+    if [ -n "$cmdline" ]; then
+        case " $cmdline " in *[/\ ]main\ start\ *) return 0 ;; *) return 1 ;; esac
+    fi
+    # 没有 /proc 且 ps 给不出命令行时无法确认身份，保守地沿用 kill -0 的结论。
+    kill -0 "$pid" 2>/dev/null
+}
 acquire_start_lock() {
     START_LOCK="${TRIM_PKGTMP}/start.lock"
     if mkdir "$START_LOCK" 2>/dev/null; then
@@ -65,7 +105,7 @@ acquire_start_lock() {
     fi
     case "$lock_pid" in
         ''|*[!0-9]*|0|1) ;;
-        *) if kill -0 "$lock_pid" 2>/dev/null; then fail '应用正在启动，请稍后重试'; fi ;;
+        *) if is_start_script "$lock_pid"; then fail '应用正在启动，请稍后重试'; fi ;;
     esac
     [ ! -f "$START_LOCK/pid" ] || rm -f "$START_LOCK/pid"
     rmdir "$START_LOCK" 2>/dev/null || fail '应用正在启动，请稍后重试'
@@ -73,18 +113,36 @@ acquire_start_lock() {
     printf '%s\n' "$$" > "$START_LOCK/pid"
     trap 'rm -f "$START_LOCK/pid"; rmdir "$START_LOCK" 2>/dev/null || true' EXIT
 }
+# 只在服务未运行时调用；仅对由已校验的 LOG_FILE 派生的固定后缀路径执行 mv/rm -f。
+rotate_log() {
+    local size index
+    [ -f "$LOG_FILE" ] && [ ! -L "$LOG_FILE" ] || return 0
+    size="$({ wc -c < "$LOG_FILE"; } 2>/dev/null | tr -d '[:space:]')" || return 0
+    case "$size" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$size" -ge "$LOG_MAX_BYTES" ] || return 0
+    rm -f "${LOG_FILE}.${LOG_KEEP}" || return 0
+    index=$((LOG_KEEP - 1))
+    while [ "$index" -ge 1 ]; do
+        if [ -e "${LOG_FILE}.${index}" ]; then
+            mv -f "${LOG_FILE}.${index}" "${LOG_FILE}.$((index + 1))" || return 0
+        fi
+        index=$((index - 1))
+    done
+    mv -f "$LOG_FILE" "${LOG_FILE}.1" || return 0
+}
 start_app() {
     if status_app; then return 0; fi
     [ -x "$BIN" ] || fail '应用服务文件缺失，请重新安装对应架构的安装包'
     mkdir -p "$TRIM_PKGVAR" "$TRIM_PKGETC" "$TRIM_PKGTMP"
     acquire_start_lock
     if status_app; then return 0; fi
+    rotate_log
     cd "$TRIM_APPDEST"
     GIN_MODE=release "$BIN" >> "$LOG_FILE" 2>&1 &
     local pid=$!
     printf '%s\n' "$pid" > "$PID_FILE"
     local count=0
-    while [ "$count" -lt 20 ]; do
+    while [ "$count" -lt "$START_TIMEOUT" ]; do
         check_process "$pid" || fail '服务启动失败，请查看应用日志'
         if [ -S "$SOCKET" ]; then return 0; fi
         sleep 1; count=$((count + 1))

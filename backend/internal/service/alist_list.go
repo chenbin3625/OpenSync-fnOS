@@ -104,6 +104,17 @@ func (c *AlistClient) FileListApiContext(ctx context.Context, path string, useCa
 	// earlier means the server's total does not match its content, and merging
 	// what arrived would silently drop files.
 	emptyPage := 0
+	// fetchedTotal counts every entry the server returned across all pages, and
+	// duplicateName records an entry that showed up on more than one page. Pages
+	// are separate requests, so a driver whose ordering is not stable between
+	// them can shift an entry across a page boundary: one page repeats it and
+	// another never returns its neighbour. The map merge would hide both, and in
+	// mirror mode the missing entry would then be deleted at the destination.
+	// A shifted entry is repeated verbatim; a repeat with different metadata is
+	// a second object under the same name (Google Drive and similar drivers
+	// allow that), which is accepted just as it is within a single page.
+	fetchedTotal := n
+	duplicateName := ""
 	var wg sync.WaitGroup
 	fail := func(err error) {
 		mu.Lock()
@@ -138,6 +149,12 @@ func (c *AlistClient) FileListApiContext(ctx context.Context, path string, useCa
 
 					pageReq := req
 					pageReq.Page = page
+					// Only page 1 asks the driver to refresh. A refresh on every
+					// page re-reads the storage backend per request, so each page
+					// is cut from a different snapshot of the directory and entries
+					// can slip between pages. Later pages read the cache page 1
+					// just rebuilt, which keeps all pages on one listing.
+					pageReq.Refresh = false
 					pageResult := make(FileListResult, alistDeps.FileListPageSize)
 					fetched, _, err := c.fetchFileListPage(ctx, pageReq, pageResult)
 					if err != nil {
@@ -145,7 +162,11 @@ func (c *AlistClient) FileListApiContext(ctx context.Context, path string, useCa
 						return
 					}
 					mu.Lock()
+					fetchedTotal += fetched
 					for name, meta := range pageResult {
+						if prev, dup := result[name]; dup && prev == meta && duplicateName == "" {
+							duplicateName = name
+						}
 						result[name] = meta
 					}
 					if fetched == 0 && page < pages && (emptyPage == 0 || page < emptyPage) {
@@ -184,6 +205,12 @@ sendPages:
 	if emptyPage > 0 {
 		return nil, fmt.Errorf("AList directory listing is incomplete: page %d of %d returned no entries (total=%d)", emptyPage, pages, total)
 	}
+	if duplicateName != "" {
+		return nil, fmt.Errorf("AList directory listing is incomplete: entry %q was returned on more than one page (total=%d)", duplicateName, total)
+	}
+	if fetchedTotal != total {
+		return nil, fmt.Errorf("AList directory listing is incomplete: fetched %d entries across %d pages, server reported total=%d", fetchedTotal, pages, total)
+	}
 	return result, nil
 }
 
@@ -196,7 +223,7 @@ func (c *AlistClient) fetchFileListPage(ctx context.Context, req alistListReques
 	if err != nil {
 		return 0, 0, err
 	}
-	defer resp.Body.Close()
+	defer closeBody(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return 0, 0, &alistStatusError{httpStatus: resp.StatusCode}
 	}

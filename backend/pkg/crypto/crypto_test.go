@@ -69,6 +69,72 @@ func TestReadOrSetFileReportsUnwritableLocation(t *testing.T) {
 	}
 }
 
+// An existing key file that reads back empty (truncated by a crash, or a
+// placeholder) must not be silently replaced: the old key may be recoverable,
+// and a new one makes every stored credential undecryptable.
+func TestReadOrSetFileRefusesToReplaceEmptyFile(t *testing.T) {
+	for name, content := range map[string]string{"empty": "", "whitespace": " \n\t"} {
+		t.Run(name, func(t *testing.T) {
+			secretPath := filepath.Join(t.TempDir(), "secret.key")
+			if err := os.WriteFile(secretPath, []byte(content), 0o600); err != nil {
+				t.Fatalf("setup secret: %v", err)
+			}
+			if _, err := ReadOrSetFile(secretPath, "replacement", false); err == nil {
+				t.Fatal("ReadOrSetFile() = nil error, want refusal for an empty existing file")
+			}
+			data, err := os.ReadFile(secretPath)
+			if err != nil {
+				t.Fatalf("read secret: %v", err)
+			}
+			if string(data) != content {
+				t.Fatalf("secret file = %q, want it left untouched as %q", data, content)
+			}
+		})
+	}
+}
+
+// A read failure other than "does not exist" must surface; it is not a
+// licence to generate and write a new key.
+func TestReadOrSetFileReportsReadErrorsWithoutOverwriting(t *testing.T) {
+	// A directory at the key path makes ReadFile fail with an error that is not
+	// fs.ErrNotExist, standing in for EIO/EACCES.
+	secretPath := filepath.Join(t.TempDir(), "secret.key")
+	if err := os.Mkdir(secretPath, 0o700); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if _, err := ReadOrSetFile(secretPath, "replacement", false); err == nil {
+		t.Fatal("ReadOrSetFile() = nil error, want the read error")
+	}
+	info, err := os.Stat(secretPath)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("key path was replaced: info=%v err=%v", info, err)
+	}
+}
+
+func TestReadOrSetFileForceReplacesContentWithOwnerOnlyPermissions(t *testing.T) {
+	dir := t.TempDir()
+	secretPath := filepath.Join(dir, "secret.key")
+	if err := os.WriteFile(secretPath, []byte("old"), 0o644); err != nil {
+		t.Fatalf("setup secret: %v", err)
+	}
+	got, err := ReadOrSetFile(secretPath, "new", true)
+	if err != nil || got != "new" {
+		t.Fatalf("ReadOrSetFile(force) = %q, %v; want new", got, err)
+	}
+	data, err := os.ReadFile(secretPath)
+	if err != nil || string(data) != "new" {
+		t.Fatalf("file = %q, %v; want new", data, err)
+	}
+	info, err := os.Stat(secretPath)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %v, %v; want 0600", info.Mode().Perm(), err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("directory entries = %v, %v; want only the key file (no temp leftovers)", entries, err)
+	}
+}
+
 func TestReadOrSetFileReturnsExistingContent(t *testing.T) {
 	secretPath := filepath.Join(t.TempDir(), "secret.key")
 	if err := os.WriteFile(secretPath, []byte("existing"), 0o600); err != nil {

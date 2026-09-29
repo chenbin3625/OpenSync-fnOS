@@ -136,7 +136,14 @@ func InitSQL() {
 	// setup completed. schemaVersion() returns 0 in that case so the idempotent
 	// migrations run (a no-op on an already-current schema), which is important
 	// when the schema was created by an older binary missing newer columns.
-	sqlVersion := schemaVersion(db)
+	sqlVersion, err := schemaVersion(db)
+	if err != nil {
+		// Guessing 0 here would replay every migration on top of a current
+		// schema. Most are guarded, but not all (UPDATE job SET scanIntervalT…,
+		// the FTS rebuild), and a transient "database is locked" is exactly the
+		// kind of error that must not be mistaken for an old database.
+		log.Fatalf("Failed to read database schema version: %v", err)
+	}
 
 	if sqlVersion < int64(currentVersion) {
 		if err := migrateDB(sqlVersion); err != nil {
@@ -149,20 +156,39 @@ func InitSQL() {
 	}
 }
 
-func schemaVersion(db *sql.DB) int64 {
-	// Try new schema_version table first
+// schemaVersion reads the recorded schema version. Only a missing table or a
+// missing row means "version 0" (a pre-schema_version database, or one stopped
+// before its first write); every other failure is returned so InitSQL stops
+// instead of re-running migrations against a schema it could not read.
+func schemaVersion(db *sql.DB) (int64, error) {
 	var version int64
-	if err := db.QueryRow("SELECT version FROM schema_version LIMIT 1").Scan(&version); err == nil {
-		return version
+	err := db.QueryRow("SELECT version FROM schema_version LIMIT 1").Scan(&version)
+	if err == nil {
+		return version, nil
 	}
-	// Fall back to legacy user_list for databases not yet migrated
-	if !tableHasColumnDB(db, "user_list", "sqlVersion") {
-		return 0
+	if !isNoSuchTableOrNoRows(err) {
+		return 0, err
 	}
-	if err := db.QueryRow("SELECT sqlVersion FROM user_list LIMIT 1").Scan(&version); err == nil {
-		return version
+	// Fall back to legacy user_list for databases not yet migrated.
+	legacy, err := tableHasColumnDBErr(db, "user_list", "sqlVersion")
+	if err != nil {
+		return 0, err
 	}
-	return 0
+	if !legacy {
+		return 0, nil
+	}
+	err = db.QueryRow("SELECT sqlVersion FROM user_list LIMIT 1").Scan(&version)
+	if err == nil {
+		return version, nil
+	}
+	if isNoSuchTableOrNoRows(err) {
+		return 0, nil
+	}
+	return 0, err
+}
+
+func isNoSuchTableOrNoRows(err error) bool {
+	return errors.Is(err, sql.ErrNoRows) || strings.Contains(err.Error(), "no such table")
 }
 
 func ensureIndexes(db *sql.DB) {
@@ -179,6 +205,10 @@ func ensureIndexes(db *sql.DB) {
 		"CREATE INDEX IF NOT EXISTS idx_job_task_item_task_type_time ON job_task_item(taskId, type, createTime DESC)",
 		"DROP INDEX IF EXISTS idx_job_task_item_task_type",
 		"CREATE INDEX IF NOT EXISTS idx_job_task_item_task_is_path_time ON job_task_item(taskId, isPath, createTime DESC)",
+		// Serves the retry replay cursor (taskId=? AND id>? ORDER BY id) over a
+		// multi-status IN list, and the per-task COUNT(*) behind the detail page
+		// total. Without it the cursor walks the rowid across every task's items.
+		"CREATE INDEX IF NOT EXISTS idx_job_task_item_task_id ON job_task_item(taskId, id)",
 	}
 	for _, stmt := range indexes {
 		if _, err := db.Exec(stmt); err != nil {
@@ -467,12 +497,19 @@ type querier interface {
 }
 
 func hasColumn(q querier, tableName, columnName string) bool {
+	ok, err := hasColumnErr(q, tableName, columnName)
+	return err == nil && ok
+}
+
+// hasColumnErr is hasColumn with the query error surfaced, for callers that must
+// tell "column absent" apart from "could not look".
+func hasColumnErr(q querier, tableName, columnName string) (bool, error) {
 	if !isSafeSQLIdentifier(tableName) {
-		return false
+		return false, nil
 	}
 	rows, err := q.Query("PRAGMA table_info(" + tableName + ")")
 	if err != nil {
-		return false
+		return false, err
 	}
 	defer rows.Close()
 
@@ -483,19 +520,19 @@ func hasColumn(q querier, tableName, columnName string) bool {
 		var defaultValue interface{}
 		var pk int
 		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
-			return false
+			return false, err
 		}
 		if name == columnName {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, rows.Err()
 }
 
 func txTableHasColumn(tx *sql.Tx, tableName, columnName string) bool {
 	return hasColumn(tx, tableName, columnName)
 }
 
-func tableHasColumnDB(db *sql.DB, tableName, columnName string) bool {
-	return hasColumn(db, tableName, columnName)
+func tableHasColumnDBErr(db *sql.DB, tableName, columnName string) (bool, error) {
+	return hasColumnErr(db, tableName, columnName)
 }

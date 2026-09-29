@@ -31,6 +31,7 @@ const (
 	JobRunningCannotDelete  = "JobRunningCannotDelete"
 	JobDeleteWaitTimeout    = "JobDeleteWaitTimeout"
 	SyncPathOverlap         = "SyncPathOverlap"
+	DstPathNested           = "DstPathNested"
 	SrcPathNested           = "SrcPathNested"
 	IntervalLost            = "IntervalLost"
 	CronLost                = "CronLost"
@@ -57,12 +58,15 @@ const (
 	RequestTooLarge         = "RequestTooLarge"
 	SSEConnLimit            = "SSEConnLimit"
 	InvalidConfigParams     = "InvalidConfigParams"
+	ConfigSaveFail          = "ConfigSaveFail"
+	CredentialUnreadable    = "CredentialUnreadable"
 )
 
 // Format-string keys
 const (
 	FmtExcludeRulesUnsupported = "FmtExcludeRulesUnsupported"
 	FmtMirrorDeleteGuard       = "FmtMirrorDeleteGuard"
+	FmtUnsafeDeleteTarget      = "FmtUnsafeDeleteTarget"
 	FmtScanError               = "FmtScanError"
 	FmtAlistFailCodeReason     = "FmtAlistFailCodeReason"
 	FmtNotifyError             = "FmtNotifyError"
@@ -99,6 +103,7 @@ var translations = map[string]map[string]string{
 		JobRunningCannotDelete:  "当前同步任务正在执行中，不能删除",
 		JobDeleteWaitTimeout:    "任务仍在停止中，请稍后重试删除",
 		SyncPathOverlap:         "来源目录和目标目录不能相同或互相嵌套",
+		DstPathNested:           "目标目录之间不能相同或互相嵌套（包括多个来源各自同步到的子目录），请调整来源或目标目录",
 		SrcPathNested:           "来源目录之间不能互相嵌套，请去掉被上级目录覆盖的子目录",
 		IntervalLost:            "创建间隔型作业时，间隔必填",
 		CronLost:                "创建cron型任务时，至少有一项不为空",
@@ -125,9 +130,12 @@ var translations = map[string]map[string]string{
 		RequestTooLarge:         "请求内容过大",
 		SSEConnLimit:            "连接数已达上限，请关闭其他页面后重试",
 		InvalidConfigParams:     "配置参数无效",
+		ConfigSaveFail:          "配置保存失败，请查看服务日志",
+		CredentialUnreadable:    "已保存的凭据无法解密（secret.key 可能已丢失或被替换），请删除该配置后重新添加",
 
 		FmtExcludeRulesUnsupported: "以下过滤规则不受支持，已拒绝保存：%s。仅支持三种写法：文件名（可含 * 通配）、*.后缀、相对目录/",
 		FmtMirrorDeleteGuard:       "为防止误删，已跳过本次全量同步的删除阶段：%s。请确认来源目录可正常列举后重试",
+		FmtUnsafeDeleteTarget:      "已拒绝删除 %q（位于 %q）：名称不是单个文件或目录",
 		FmtScanError:               "%s目录扫描失败，原因为: %s",
 		FmtAlistFailCodeReason:     "AList返回%d错误，原因为：%s",
 		FmtNotifyError:             "发送通知过程中失败，原因为：%s",
@@ -157,6 +165,7 @@ var translations = map[string]map[string]string{
 		JobRunningCannotDelete:  "Cannot delete while sync task is running",
 		JobDeleteWaitTimeout:    "Task is still stopping, please try deleting again later",
 		SyncPathOverlap:         "Source and destination directories cannot be the same or nested",
+		DstPathNested:           "Destination directories cannot be the same or nested, including the subdirectories each source is synced into",
 		SrcPathNested:           "Source directories cannot be nested within each other, please remove subdirectories covered by parent directories",
 		IntervalLost:            "Interval is required for interval-based jobs",
 		CronLost:                "At least one field must be non-empty for cron-based jobs",
@@ -183,9 +192,12 @@ var translations = map[string]map[string]string{
 		RequestTooLarge:         "Request body too large",
 		SSEConnLimit:            "Connection limit reached, please close other pages and try again",
 		InvalidConfigParams:     "Invalid configuration parameters",
+		ConfigSaveFail:          "Failed to save configuration, please check the service logs",
+		CredentialUnreadable:    "The stored credential cannot be decrypted (secret.key may have been lost or replaced), please delete this entry and add it again",
 
 		FmtExcludeRulesUnsupported: "The following filter rules are not supported and were rejected: %s. Only three formats are supported: filename (with * wildcard), *.extension, relative/directory/",
 		FmtMirrorDeleteGuard:       "To prevent accidental deletion, the delete phase of this full sync was skipped: %s. Please verify the source directory can be listed correctly and try again",
+		FmtUnsafeDeleteTarget:      "Refused to delete %q in %q: the name is not a single file or directory",
 		FmtScanError:               "%s directory scan failed: %s",
 		FmtAlistFailCodeReason:     "AList returned error %d: %s",
 		FmtNotifyError:             "Notification failed: %s",
@@ -237,6 +249,10 @@ func ExcludeRulesUnsupported(rules []string) string {
 
 func MirrorDeleteGuard(reason string) string {
 	return fmt.Sprintf(T(FmtMirrorDeleteGuard), reason)
+}
+
+func UnsafeDeleteTarget(fileName, dir string) string {
+	return fmt.Sprintf(T(FmtUnsafeDeleteTarget), fileName, dir)
 }
 
 func ScanError(srcOrDst, reason string) string {

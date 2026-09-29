@@ -59,22 +59,15 @@ func (jt *JobTask) tryAcquireScanBranchSlot() bool {
 	if jt.isBreak() {
 		return false
 	}
-	// Try non-blocking first.
+	// Never wait for a slot. The caller falls back to scanning the branch
+	// inline, which is what keeps the recursion deadlock-free (a parent holding
+	// a slot never blocks on its own children). Any wait here is paid once per
+	// subdirectory while the budget is saturated, so even a short timeout turns
+	// a directory with thousands of children into minutes of idle sleeping.
 	select {
 	case jt.scanBranchSem <- struct{}{}:
 		return true
 	default:
-	}
-	// Wait briefly before falling back to sequential execution, giving
-	// sibling branches a chance to finish and free a slot.
-	timer := time.NewTimer(100 * time.Millisecond)
-	defer timer.Stop()
-	select {
-	case jt.scanBranchSem <- struct{}{}:
-		return true
-	case <-timer.C:
-		return false
-	case <-jt.context().Done():
 		return false
 	}
 }
@@ -206,6 +199,20 @@ func (jt *JobTask) retryTaskItem(item map[string]interface{}) {
 
 	switch copyType {
 	case taskItemTypeDelete:
+		// A delete record is only re-executable when it names one concrete entry.
+		// The full-sync safety valve records its "delete phase skipped" notice as
+		// a failed delete of the destination root with no name; replaying that as
+		// DeleteFileContext(root, [""]) would ask AList to remove the root itself.
+		// Re-record it, keeping the original explanation, instead of deleting.
+		if !isSafeDeleteTargetName(fileName) {
+			reason := taskItemErrMsg(item["errMsg"])
+			if reason == "" {
+				reason = unsafeDeleteTargetMessage(dstPath, fileName)
+			}
+			log.Printf("Task %d refused to retry delete of %q in %q: not a single entry name", jt.TaskID, fileName, dstPath)
+			jt.DelHook(dstPath, fileName, nil, taskStatusFailed, &reason, boolToTaskItemObject(isPath), time.Now().Unix())
+			return
+		}
 		jt.queueDelFile(dstPath, fileName, fileSize, isPath)
 	case taskItemTypeCopy, taskItemTypeMove:
 		if isPath {
@@ -353,6 +360,35 @@ func (jt *JobTask) queueCopyFile(srcPath, dstPath, fileName string, fileSize int
 	}
 }
 
+// isSafeDeleteTargetName reports whether fileName (optionally carrying the
+// directory suffix) names exactly one entry inside its directory. AList's remove
+// API joins dir and name, so an empty name, "." or ".." addresses the directory
+// itself or its parent, and a separator reaches into another directory.
+func isSafeDeleteTargetName(fileName string) bool {
+	return isSafeListedName(strings.TrimSuffix(fileName, "/"))
+}
+
+// taskItemErrMsg reads a stored errMsg column. Rows loaded from the database
+// carry a string; in-memory item maps (JobTaskItem.ToMap) carry a *string.
+func taskItemErrMsg(value interface{}) string {
+	switch v := value.(type) {
+	case *string:
+		if v == nil {
+			return ""
+		}
+		return *v
+	case nil:
+		return ""
+	default:
+		return util.StringValue(v)
+	}
+}
+
+// unsafeDeleteTargetMessage explains a refused delete.
+func unsafeDeleteTargetMessage(dir, fileName string) string {
+	return msg.UnsafeDeleteTarget(fileName, dir)
+}
+
 func (jt *JobTask) delFile(path, fileName string, size interface{}) taskStatus {
 	if jt.isBreak() {
 		return taskStatusStopped
@@ -361,6 +397,12 @@ func (jt *JobTask) delFile(path, fileName string, size interface{}) taskStatus {
 	status := taskStatusSuccess
 	var errMsg *string
 	createTime := time.Now().Unix()
+	if !isSafeDeleteTargetName(fileName) {
+		reason := unsafeDeleteTargetMessage(path, fileName)
+		log.Printf("Task %d %s", jt.TaskID, reason)
+		jt.DelHook(path, fileName, nil, taskStatusFailed, &reason, boolToTaskItemObject(isPath), createTime)
+		return taskStatusFailed
+	}
 
 	name := fileName
 	if isPath {
@@ -386,6 +428,12 @@ func (jt *JobTask) delFile(path, fileName string, size interface{}) taskStatus {
 // executor goroutine runs it concurrently, just like copy/move items.
 func (jt *JobTask) queueDelFile(path, fileName string, size interface{}, isPath bool) {
 	if jt.isBreak() {
+		return
+	}
+	if !isSafeDeleteTargetName(fileName) {
+		reason := unsafeDeleteTargetMessage(path, fileName)
+		log.Printf("Task %d %s", jt.TaskID, reason)
+		jt.DelHook(path, fileName, nil, taskStatusFailed, &reason, boolToTaskItemObject(isPath), time.Now().Unix())
 		return
 	}
 	name := fileName

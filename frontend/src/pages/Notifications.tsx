@@ -109,7 +109,11 @@ export default function Notifications() {
       >
         <div className="item-list">
           {resource.data?.map((item) => (
-            <div className="notification-item card-base" key={item.id}>
+            <div
+              className="notification-item card-base"
+              key={item.id}
+              data-notify-id={item.id}
+            >
               <div className="item-content">
                 <h2>
                   {channelNames[item.method]}
@@ -128,7 +132,7 @@ export default function Notifications() {
               </div>
               <div className="row-actions">
                 <Switch
-                  aria-label={`通知 ${item.id} 开关`}
+                  aria-label={`启用${channelNames[item.method] || "通知"}`}
                   checked={item.enable === 1}
                   disabled={togglingId === item.id}
                   onChange={(checked) =>

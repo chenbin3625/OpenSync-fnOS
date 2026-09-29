@@ -20,6 +20,11 @@ func TestEditEnabledJobClientUpdatesNextRunWithoutBreakingCurrentTask(t *testing
 	})
 	defer config.SetConfigForTest(oldConfig)
 
+	// The mapper caches its handle: without closing it, a repeated run
+	// (-count>1) kept writing to the previous run's database and hit the
+	// job unique constraint.
+	_ = mapper.CloseDB()
+	defer func() { _ = mapper.CloseDB() }()
 	mapper.InitSQL()
 	resetJobClientsForTest()
 

@@ -18,13 +18,16 @@ func GetNotifyList(needEnable bool) ([]map[string]interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := decryptCredentialColumn(rows, "params"); err != nil {
-		return nil, err
-	}
+	// An unreadable row comes back with empty params: the list stays usable,
+	// and delivery to that row fails validation and is recorded as a failure
+	// instead of disappearing silently.
+	decryptCredentialColumnLenient(rows, "notify", "params")
 	return rows, nil
 }
 
-// GetNotifyByID gets a single notify config by ID (raw params, internal use only).
+// GetNotifyByID gets a single notify config by ID (raw params, internal use
+// only). It returns (nil, nil) when the row does not exist, and
+// ErrCredentialUnreadable when the stored params cannot be decrypted.
 func GetNotifyByID(notifyID int64) (map[string]interface{}, error) {
 	rows, err := FetchAllToTable("SELECT * FROM notify WHERE id=?", notifyID)
 	if err != nil {

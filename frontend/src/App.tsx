@@ -3,6 +3,7 @@ import {
   lazy,
   Suspense,
   useEffect,
+  useMemo,
   useState,
   type ReactNode,
 } from "react";
@@ -27,9 +28,10 @@ import {
   IconTreeTriangleDown,
   IconTreeTriangleRight,
 } from "@douyinfe/semi-icons";
-import { api } from "./api/client";
+import { api, sessionExpiredEvent } from "./api/client";
 import { applyTheme, connectHost } from "./lib/host";
 import { useResource } from "./lib/hooks";
+import { createGuardedRefresh } from "./lib/sessionGuard";
 import { getJobName } from "./pages/Home/homeUtils";
 
 const Tasks = lazy(() => import("./pages/Tasks"));
@@ -231,12 +233,19 @@ function Shell({ children }: { children: ReactNode }) {
 }
 function Workspace() {
   const session = useResource(() => api.session());
+  const refreshSession = session.refresh;
+  // Parallel requests that all hit 401 each dispatch the event; the guard
+  // collapses them into one /session check instead of aborting and restarting
+  // it once per failure.
+  const expiredRefresh = useMemo(
+    () => createGuardedRefresh(() => refreshSession()),
+    [refreshSession],
+  );
   useEffect(() => {
-    const expired = () => void session.refresh();
-    window.addEventListener("opensync:session-expired", expired);
-    return () =>
-      window.removeEventListener("opensync:session-expired", expired);
-  }, [session.refresh]);
+    const expired = () => void expiredRefresh();
+    window.addEventListener(sessionExpiredEvent, expired);
+    return () => window.removeEventListener(sessionExpiredEvent, expired);
+  }, [expiredRefresh]);
   if (session.error)
     return (
       <div className="session-error">

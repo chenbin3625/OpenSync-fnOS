@@ -2,6 +2,11 @@ import { test, expect, type Page } from "@playwright/test";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
+// The backend rejects writes without Content-Type: application/json (CSRF
+// guard). Playwright only sets it for requests with a JSON body, so bodiless
+// DELETEs used for cleanup must declare it explicitly.
+const jsonWrite = { headers: { "Content-Type": "application/json" } };
+
 let engine: Server;
 let engineUrl: string;
 
@@ -214,8 +219,8 @@ test("task management expands in the sidebar and lists task names", async ({
     await expect(page.locator(".task-list-pane")).toHaveCount(0);
     await expect(page.locator(".task-detail-pane")).toBeVisible();
   } finally {
-    await request.delete(`/app/opensync/svr/job?id=${jobId}`);
-    await request.delete(`/app/opensync/svr/alist?id=${engineId}`);
+    await request.delete(`/app/opensync/svr/job?id=${jobId}`, jsonWrite);
+    await request.delete(`/app/opensync/svr/alist?id=${engineId}`, jsonWrite);
   }
 });
 
@@ -489,7 +494,9 @@ test("data fixture renders inspectable engine, task and notification rows", asyn
     ).toBeVisible();
 
     await page.goto("/app/opensync/notifications");
-    const notifySwitch = page.getByLabel(`通知 ${notifyId} 开关`, { exact: true });
+    const notifySwitch = page
+      .locator(`.notification-item[data-notify-id="${notifyId}"]`)
+      .getByRole("switch", { name: "启用自定义 Webhook", exact: true });
     await expect(notifySwitch).toBeVisible();
     await expect(page.locator(".notification-item .item-symbol")).toHaveCount(0);
     await expect(
@@ -507,13 +514,11 @@ test("data fixture renders inspectable engine, task and notification rows", asyn
     });
   } finally {
     if (notifyId)
-      await request.delete(
-        `/app/opensync/svr/notify?notifyId=${notifyId}`,
-      );
+      await request.delete(`/app/opensync/svr/notify?notifyId=${notifyId}`, jsonWrite);
     if (jobId)
-      await request.delete(`/app/opensync/svr/job?id=${jobId}`);
+      await request.delete(`/app/opensync/svr/job?id=${jobId}`, jsonWrite);
     if (engineId)
-      await request.delete(`/app/opensync/svr/alist?id=${engineId}`);
+      await request.delete(`/app/opensync/svr/alist?id=${engineId}`, jsonWrite);
   }
 });
 
@@ -595,8 +600,8 @@ test("task cards follow the reference card style and fill the detail pane", asyn
     }
     await page.keyboard.press("Escape");
   } finally {
-    await request.delete(`/app/opensync/svr/job?id=${jobId}`);
-    await request.delete(`/app/opensync/svr/alist?id=${engineId}`);
+    await request.delete(`/app/opensync/svr/job?id=${jobId}`, jsonWrite);
+    await request.delete(`/app/opensync/svr/alist?id=${engineId}`, jsonWrite);
   }
 });
 

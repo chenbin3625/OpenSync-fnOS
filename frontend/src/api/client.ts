@@ -22,6 +22,54 @@ export function serializeParams(params: Record<string, unknown>) {
   return result.toString();
 }
 
+export const requestTimeoutMs = 90000;
+export const timeoutMessage = "请求超时，请重试";
+export const sessionExpiredEvent = "opensync:session-expired";
+export const sessionExpiredMessage = "登录已失效，请从飞牛桌面重新打开应用";
+
+/**
+ * Combines abort signals without relying on AbortSignal.any (Chrome 116+ /
+ * Safari 17.4+). Vite does not polyfill runtime APIs, so older fnOS WebViews
+ * threw a TypeError on every request. `cleanup` detaches the fallback
+ * listeners and must run once the request settles.
+ */
+export function combineSignals(
+  signals: (AbortSignal | undefined)[],
+): { signal: AbortSignal; cleanup: () => void } {
+  const list = signals.filter((s): s is AbortSignal => !!s);
+  if (list.length <= 1)
+    return {
+      signal: list[0] ?? new AbortController().signal,
+      cleanup: () => {},
+    };
+  const any = (
+    AbortSignal as { any?: (signals: AbortSignal[]) => AbortSignal }
+  ).any;
+  if (typeof any === "function")
+    return { signal: any.call(AbortSignal, list), cleanup: () => {} };
+  const controller = new AbortController();
+  const listeners: [AbortSignal, () => void][] = [];
+  const cleanup = () => {
+    for (const [signal, listener] of listeners)
+      signal.removeEventListener("abort", listener);
+    listeners.length = 0;
+  };
+  for (const signal of list) {
+    if (signal.aborted) {
+      cleanup();
+      controller.abort(signal.reason);
+      break;
+    }
+    const listener = () => {
+      cleanup();
+      controller.abort(signal.reason);
+    };
+    signal.addEventListener("abort", listener);
+    listeners.push([signal, listener]);
+  }
+  return { signal: controller.signal, cleanup };
+}
+
 export async function request<T>(
   path: string,
   options: {
@@ -32,34 +80,61 @@ export async function request<T>(
     cache?: RequestCache;
   } = {},
 ): Promise<T> {
-  const timeout = AbortSignal.timeout(90000);
+  // A manual timer instead of AbortSignal.timeout keeps older WebViews working
+  // and lets the timeout be told apart from a caller's abort.
+  const timeout = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    timeout.abort();
+  }, requestTimeoutMs);
+  const combined = combineSignals([options.signal, timeout.signal]);
   let response: Response;
-  response = await fetch(
-    `${apiBase}${path}${options.params ? "?" + serializeParams(options.params) : ""}`,
-    {
-      method: options.method || "GET",
-      credentials: "same-origin",
-      cache: options.cache,
-      signal: options.signal
-        ? AbortSignal.any([options.signal, timeout])
-        : timeout,
-      headers: { "Content-Type": "application/json" },
-      ...(options.data !== undefined
-        ? { body: JSON.stringify(options.data) }
-        : {}),
-    },
-  );
-  let result: ApiResponse<T>;
+  let result: ApiResponse<T> | null = null;
   try {
-    result = await response.json();
-  } catch {
-    throw new Error("服务响应异常，请重试");
+    response = await fetch(
+      `${apiBase}${path}${options.params ? "?" + serializeParams(options.params) : ""}`,
+      {
+        method: options.method || "GET",
+        credentials: "same-origin",
+        cache: options.cache,
+        signal: combined.signal,
+        headers: { "Content-Type": "application/json" },
+        ...(options.data !== undefined
+          ? { body: JSON.stringify(options.data) }
+          : {}),
+      },
+    );
+    try {
+      result = await response.json();
+    } catch (err) {
+      // An abort while the body streams in is not a malformed response.
+      if (combined.signal.aborted) throw err;
+    }
+  } catch (err) {
+    if (timedOut && !options.signal?.aborted) throw new Error(timeoutMessage);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    combined.cleanup();
   }
-  if (!response.ok || result.code !== 200) {
-    if (response.status === 401)
-      window.dispatchEvent(new CustomEvent("opensync:session-expired"));
+  // The status is checked before the body: a gateway can answer 401 with an
+  // HTML page, which used to surface as "服务响应异常" and skip expiry handling.
+  if (response.status === 401) {
+    // /session is what the expiry listener re-requests. Dispatching for it too
+    // made a 401 there re-trigger itself forever behind a spinner.
+    if (path !== "/session")
+      window.dispatchEvent(new CustomEvent(sessionExpiredEvent));
+    throw new Error(result?.msg || sessionExpiredMessage);
+  }
+  if (!result)
+    throw new Error(
+      response.ok
+        ? "服务响应异常，请重试"
+        : `服务响应异常（HTTP ${response.status}），请重试`,
+    );
+  if (!response.ok || result.code !== 200)
     throw new Error(result.msg || "操作失败");
-  }
   warnIfTruncated(path, result.data);
   return result.data;
 }

@@ -48,6 +48,55 @@ func TestWriteConfigFileReportsUnreadableExistingFile(t *testing.T) {
 	}
 }
 
+// A config.ini that exists but cannot be read must not fall back to defaults:
+// that silently dropped allowed_origins and loosened the write policy.
+func TestLoadServerConfigFailsWhenExistingFileIsUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TRIM_PKGETC", dir)
+	// A directory at the file path passes Stat but fails to be read as INI.
+	if err := os.Mkdir(filepath.Join(dir, "config.ini"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadServerConfig("secret"); err == nil {
+		t.Fatal("loadServerConfig() = nil error, want failure for an unreadable config.ini")
+	}
+}
+
+func TestLoadServerConfigUsesEnvironmentWhenFileIsAbsent(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TRIM_PKGETC", dir)
+	t.Setenv("OPENSYNC_ALLOWED_ORIGINS", "http://nas.example:5666")
+	cfg, err := loadServerConfig("secret")
+	if err != nil {
+		t.Fatalf("loadServerConfig() error: %v", err)
+	}
+	if len(cfg.AllowedOrigins) != 1 || cfg.AllowedOrigins[0] != "http://nas.example:5666" {
+		t.Fatalf("AllowedOrigins = %#v, want env value", cfg.AllowedOrigins)
+	}
+	if cfg.PasswdStr != "secret" {
+		t.Fatalf("PasswdStr not carried through")
+	}
+}
+
+func TestWriteConfigFileLeavesNoTempFiles(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TRIM_PKGETC", dir)
+	if err := writeConfigFile(testServerConfig()); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "config.ini" {
+		t.Fatalf("directory entries = %v, want only config.ini", entries)
+	}
+	info, err := os.Stat(filepath.Join(dir, "config.ini"))
+	if err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("config.ini mode = %v, err=%v; want 0600", info.Mode().Perm(), err)
+	}
+}
+
 func testServerConfig() ServerConfig {
 	return ServerConfig{
 		Bind:            defaultBind,

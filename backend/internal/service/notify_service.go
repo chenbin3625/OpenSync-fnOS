@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const maxNotifyResponseBytes = 1 << 20 // 1MB
@@ -58,8 +59,12 @@ var notifyErrorURLPattern = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s"
 var cloudMetadataCIDRs []*net.IPNet
 
 func init() {
+	// LAN and loopback destinations stay allowed on purpose: self-hosted
+	// webhook receivers on the NAS or the local network are a supported setup.
+	// Only link-local and the cloud metadata endpoints are blocked.
 	for _, cidr := range []string{
-		"169.254.169.254/32", // AWS/GCP/Azure metadata
+		"169.254.0.0/16",     // IPv4 link-local, incl. AWS/GCP/Azure/OpenStack metadata at .169.254
+		"100.100.100.200/32", // Alibaba Cloud metadata
 		"fe80::/10",          // IPv6 link-local
 		"fd00:ec2::254/128",  // AWS IPv6 metadata
 	} {
@@ -69,6 +74,12 @@ func init() {
 }
 
 func isCloudMetadataIP(ip net.IP) bool {
+	// net.IPNet.Contains already matches an IPv4-mapped IPv6 address
+	// (::ffff:169.254.169.254) against an IPv4 network, but normalising first
+	// keeps that guarantee explicit rather than incidental.
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
 	for _, cidr := range cloudMetadataCIDRs {
 		if cidr.Contains(ip) {
 			return true
@@ -77,6 +88,19 @@ func isCloudMetadataIP(ip net.IP) bool {
 	return false
 }
 
+// webhookLookupTimeout bounds the early destination check. net.LookupHost had
+// no deadline, so a stalled resolver held a test send (and the request
+// goroutine) for as long as the system resolver cared to wait.
+const webhookLookupTimeout = 5 * time.Second
+
+// webhookLookupIPAddr is the resolver used by validateWebhookDestination;
+// tests replace it.
+var webhookLookupIPAddr = net.DefaultResolver.LookupIPAddr
+
+// validateWebhookDestination rejects a URL whose host resolves to a blocked
+// address before any request is built. It is an early, friendly error only:
+// validatedNotifyDialContext repeats the check on every connection (including
+// redirects and DNS rebinding), and that dial-time check is the real boundary.
 func validateWebhookDestination(rawURL string) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -86,13 +110,21 @@ func validateWebhookDestination(rawURL string) error {
 	if host == "" {
 		return errors.New("webhook destination has no host")
 	}
-	ips, err := net.LookupHost(host)
-	if err != nil {
-		return nil // DNS failure is not a security block; let the HTTP client handle it
+	if ip := net.ParseIP(host); ip != nil {
+		if isCloudMetadataIP(ip) {
+			return fmt.Errorf("webhook destination %s is a blocked address", host)
+		}
+		return nil
 	}
-	for _, ipStr := range ips {
-		if ip := net.ParseIP(ipStr); ip != nil && isCloudMetadataIP(ip) {
-			return fmt.Errorf("webhook destination %s resolves to blocked address %s", host, ipStr)
+	ctx, cancel := context.WithTimeout(context.Background(), webhookLookupTimeout)
+	defer cancel()
+	addrs, err := webhookLookupIPAddr(ctx, host)
+	if err != nil {
+		return nil // DNS failure is not a security block; the dial-time check handles it
+	}
+	for _, addr := range addrs {
+		if isCloudMetadataIP(addr.IP) {
+			return fmt.Errorf("webhook destination %s resolves to blocked address %s", host, addr.IP)
 		}
 	}
 	return nil
@@ -146,6 +178,15 @@ var forbiddenWebhookHeaders = map[string]struct{}{
 
 var notifyHTTPClient = &http.Client{
 	Timeout: 30 * time.Second,
+	// Redirects are not followed. net/http forwards custom headers (X-Token,
+	// a user-supplied Authorization, …) to a redirect target on another host
+	// and happily follows https→http, so a compromised or misconfigured
+	// endpoint could harvest the credential or downgrade the transport. No
+	// supported provider redirects a send request, so a 3xx is reported as a
+	// failed delivery by the status check in sendNotifyRequestBytes.
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
 	Transport: &http.Transport{
 		// Webhook destinations may be self-hosted on a LAN or loopback address;
 		// do not reject them after DNS resolution.
@@ -351,6 +392,10 @@ func isMaskedSecretValue(value string) bool {
 	return err == nil && strings.Contains(decoded, notifyRedactionMarker)
 }
 
+// loadStoredNotify reads the stored config that resolveNotifyParams merges
+// secrets from. It is a variable so tests can simulate a failing read.
+var loadStoredNotify = mapper.GetNotifyByID
+
 // resolveNotifyParams merges incoming params with stored secrets for fields
 // that were redacted (masked) or left empty. For new configs (no id) the
 // incoming params are returned unchanged. The returned map contains real
@@ -367,8 +412,17 @@ func resolveNotifyParams(notify map[string]interface{}) (map[string]interface{},
 	if notifyID <= 0 {
 		return incoming, nil
 	}
-	existing, err := mapper.GetNotifyByID(notifyID)
-	if err != nil || existing == nil {
+	existing, err := loadStoredNotify(notifyID)
+	if err != nil {
+		// A read failure must not fall through to the incoming params: they
+		// still carry the redaction placeholders, so a transient DB error (or an
+		// undecryptable row) would permanently overwrite the stored secrets with
+		// "****" strings on save.
+		return nil, fmt.Errorf("load stored notify %d: %w", notifyID, err)
+	}
+	if existing == nil {
+		// Not found: nothing to merge. EditNotify's update then reports the
+		// missing row.
 		return incoming, nil
 	}
 	existingParams, _ := parseNotifyParams(fmt.Sprintf("%v", existing["params"]))
@@ -527,10 +581,19 @@ func AddNewNotify(notify map[string]interface{}) (int64, error) {
 // the list view (or left empty) are preserved from the stored config so the
 // user can edit other fields without re-entering credentials.
 func EditNotify(notify map[string]interface{}) error {
+	// enable is required and normalised exactly as AddNewNotify does. An edit
+	// without it used to write NULL, which the enable=1 filter treats as off,
+	// so the config was silently disabled.
+	enableRaw, ok := notify["enable"]
+	if !ok || enableRaw == nil {
+		return publicError(msg.T(msg.LostPart))
+	}
+	notify["enable"] = util.ToInt(enableRaw)
 	resolved, err := resolveNotifyParams(notify)
 	if err != nil {
 		return fmt.Errorf("resolve notify params: %w", err)
 	}
+	notify["method"] = util.ToInt(notify["method"])
 	if err := validateNotifyParams(util.ToInt(notify["method"]), resolved); err != nil {
 		return publicError(err.Error())
 	}
@@ -869,9 +932,8 @@ func sendNotifyRequestBytes(client *http.Client, req *http.Request) ([]byte, err
 		return nil, fmt.Errorf("read notify response: %w", err)
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		respMsg := strings.TrimSpace(string(bodyBytes))
-		if respMsg != "" {
-			log.Printf("notify request failed: status=%s body=%q", resp.Status, respMsg)
+		if summary := notifyResponseSummary(bodyBytes); summary != "" {
+			log.Printf("notify request failed: status=%s response=%q", resp.Status, summary)
 		}
 		return nil, fmt.Errorf("notify request failed: %s", resp.Status)
 	}
@@ -916,10 +978,87 @@ func notifyProviderError(body []byte, fields ...string) error {
 			continue
 		}
 		if code := util.ToInt(v); code != 0 {
-			return fmt.Errorf("notify %s=%d: %s", field, code, strings.TrimSpace(string(body)))
+			if message := notifyProviderMessage(m); message != "" {
+				return fmt.Errorf("notify %s=%d: %s", field, code, message)
+			}
+			return fmt.Errorf("notify %s=%d", field, code)
 		}
 	}
 	return nil
+}
+
+// maxNotifyResponseExcerpt caps how much of a non-JSON provider response is
+// kept for logs and error text.
+const maxNotifyResponseExcerpt = 200
+
+// notifyProviderMessageFields are the keys providers use for a human-readable
+// failure reason (DingTalk/WeCom errmsg, Lark msg, ServerChan message/info).
+var notifyProviderMessageFields = []string{"errmsg", "msg", "message", "info", "error"}
+
+// notifyProviderMessage returns the provider's failure reason from a parsed
+// JSON response, or "" when none is present.
+//
+// Only the dedicated message field is used, never the whole body: providers
+// echo request data in their responses (webhook receivers in particular often
+// reflect headers or the payload), and the result ends up in logs and in
+// lastSendError, which GET /notify returns to the browser.
+func notifyProviderMessage(m map[string]interface{}) string {
+	for _, field := range notifyProviderMessageFields {
+		v, ok := m[field]
+		if !ok || v == nil {
+			continue
+		}
+		s, isStr := v.(string)
+		if !isStr {
+			continue
+		}
+		if s = strings.TrimSpace(s); s != "" {
+			return truncateNotifyExcerpt(sanitizeNotifyExcerpt(s))
+		}
+	}
+	return ""
+}
+
+// notifyResponseSummary describes a provider response for logs without
+// reproducing it. A JSON body is reduced to its code and message fields; any
+// other body is cut to a short, URL-masked excerpt.
+func notifyResponseSummary(body []byte) string {
+	text := strings.TrimSpace(string(body))
+	if text == "" {
+		return ""
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(body, &m); err == nil {
+		parts := []string{}
+		for _, field := range []string{"errcode", "code", "errno", "StatusCode"} {
+			if v, ok := m[field]; ok && v != nil {
+				parts = append(parts, fmt.Sprintf("%s=%v", field, v))
+			}
+		}
+		if message := notifyProviderMessage(m); message != "" {
+			parts = append(parts, message)
+		}
+		return strings.Join(parts, " ")
+	}
+	return truncateNotifyExcerpt(sanitizeNotifyExcerpt(text))
+}
+
+// sanitizeNotifyExcerpt masks URLs (and the credentials in their paths and
+// queries) in provider-supplied text.
+func sanitizeNotifyExcerpt(text string) string {
+	return notifyErrorURLPattern.ReplaceAllStringFunc(text, maskNotifyErrorURL)
+}
+
+func truncateNotifyExcerpt(text string) string {
+	if len(text) <= maxNotifyResponseExcerpt {
+		return text
+	}
+	// Cut on a rune boundary so the excerpt stays valid UTF-8.
+	cut := maxNotifyResponseExcerpt
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut] + "…"
 }
 
 func doNotifyRequest(client *http.Client, req *http.Request) (*http.Response, error) {
@@ -984,9 +1123,15 @@ func sendWebhook(client *http.Client, params map[string]interface{}, title, cont
 		body[contentName] = content
 	}
 	if customBody, ok := params["body"]; ok && customBody != nil {
-		bodyStr := fmt.Sprintf("%v", customBody)
-		bodyStr = strings.ReplaceAll(bodyStr, "{title}", jsonStringContent(title))
-		bodyStr = strings.ReplaceAll(bodyStr, "{content}", jsonStringContent(content))
+		// One pass over the template. Replacing {title} and then {content}
+		// separately substituted placeholders that came from the inserted
+		// title itself — a job remark containing "{content}" was expanded a
+		// second time. strings.Replacer never rescans replaced text. Values are
+		// still JSON-escaped so they are safe inside the template's strings.
+		bodyStr := strings.NewReplacer(
+			"{title}", jsonStringContent(title),
+			"{content}", jsonStringContent(content),
+		).Replace(fmt.Sprintf("%v", customBody))
 		body = nil
 		if err := json.Unmarshal([]byte(bodyStr), &body); err != nil {
 			return publicError("通知自定义 Body 格式无效")
@@ -1085,56 +1230,113 @@ func sendDingTalk(client *http.Client, params map[string]interface{}, title, con
 	return err
 }
 
+// wecomTokenExpiredCodes are the send-API errcodes meaning the cached access
+// token is no longer valid (40014 invalid token, 41001 token missing, 42001
+// token expired). WeCom can revoke a token before expires_in — e.g. when the
+// app secret is reset or another client refreshes it — so the cache cannot rely
+// on the expiry time alone.
+var wecomTokenExpiredCodes = map[int]struct{}{40014: {}, 41001: {}, 42001: {}}
+
+// getWeComAccessToken returns a cached token for the credentials or fetches a
+// new one. The lock is held only to read and write the cache, never across the
+// gettoken request: holding it there made every WeCom send — for any corp —
+// queue behind one slow or unreachable token fetch for up to the 30s client
+// timeout. Two concurrent misses may both fetch; each gets a valid token and
+// the later one is kept, which is harmless.
 func getWeComAccessToken(client *http.Client, corpID, corpSecret string) (string, error) {
-	wecomTokenCache.Lock()
-	defer wecomTokenCache.Unlock()
 	credentials := wecomCredentials{corpID, corpSecret}
-	if entry, ok := wecomTokenCache.entries[credentials]; ok && entry.token != "" && time.Now().Before(entry.expires) {
+	wecomTokenCache.Lock()
+	entry, ok := wecomTokenCache.entries[credentials]
+	wecomTokenCache.Unlock()
+	if ok && entry.token != "" && time.Now().Before(entry.expires) {
 		return entry.token, nil
 	}
 
-	tokenURL := "https://qyapi.weixin.qq.com/cgi-bin/gettoken?" + url.Values{
+	token, expires, err := fetchWeComAccessToken(client, corpID, corpSecret)
+	if err != nil {
+		return "", err
+	}
+	wecomTokenCache.Lock()
+	if wecomTokenCache.entries == nil {
+		wecomTokenCache.entries = make(map[wecomCredentials]wecomTokenEntry)
+	}
+	wecomTokenCache.entries[credentials] = wecomTokenEntry{token: token, expires: expires}
+	wecomTokenCache.Unlock()
+	return token, nil
+}
+
+// invalidateWeComAccessToken drops the cached token for the credentials, but
+// only if it is still the one that was rejected, so a fresh token stored by a
+// concurrent send is not thrown away.
+func invalidateWeComAccessToken(corpID, corpSecret, rejected string) {
+	credentials := wecomCredentials{corpID, corpSecret}
+	wecomTokenCache.Lock()
+	defer wecomTokenCache.Unlock()
+	if entry, ok := wecomTokenCache.entries[credentials]; ok && entry.token == rejected {
+		delete(wecomTokenCache.entries, credentials)
+	}
+}
+
+// fetchWeComAccessToken calls the gettoken API. It takes no locks.
+func fetchWeComAccessToken(client *http.Client, corpID, corpSecret string) (string, time.Time, error) {
+	tokenURL := wecomTokenURL + "?" + url.Values{
 		"corpid":     {corpID},
 		"corpsecret": {corpSecret},
 	}.Encode()
 	req, err := buildNotifyRequest(http.MethodGet, tokenURL, nil, "")
 	if err != nil {
-		return "", fmt.Errorf("build WeCom token request: %w", err)
+		return "", time.Time{}, fmt.Errorf("build WeCom token request: %w", err)
 	}
 	resp, err := doNotifyRequest(client, req)
 	if err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
 	defer resp.Body.Close()
 	tokenBody, err := readAllWithLimit(resp.Body, maxNotifyResponseBytes)
 	if err != nil {
-		return "", fmt.Errorf("read WeCom token response: %w", err)
+		return "", time.Time{}, fmt.Errorf("read WeCom token response: %w", err)
 	}
 	var tokenResult struct {
 		AccessToken string `json:"access_token"`
 		ExpiresIn   int    `json:"expires_in"`
 		ErrCode     int    `json:"errcode"`
+		ErrMsg      string `json:"errmsg"`
 	}
 	if err := json.Unmarshal(tokenBody, &tokenResult); err != nil {
-		return "", fmt.Errorf("parse WeCom token response: %w", err)
+		return "", time.Time{}, fmt.Errorf("parse WeCom token response: %w", err)
 	}
 	if tokenResult.ErrCode != 0 {
-		return "", fmt.Errorf("WeCom token error: %s", strings.TrimSpace(string(tokenBody)))
+		// errcode/errmsg only: the raw body is not echoed into logs or the
+		// stored lastSendError.
+		return "", time.Time{}, fmt.Errorf("WeCom token error: errcode=%d %s",
+			tokenResult.ErrCode, truncateNotifyExcerpt(sanitizeNotifyExcerpt(tokenResult.ErrMsg)))
+	}
+	if tokenResult.AccessToken == "" {
+		return "", time.Time{}, errors.New("WeCom token error: empty access_token")
 	}
 
 	expiresIn := tokenResult.ExpiresIn
 	if expiresIn <= 60 {
 		expiresIn = 7200
 	}
-	if wecomTokenCache.entries == nil {
-		wecomTokenCache.entries = make(map[wecomCredentials]wecomTokenEntry)
-	}
-	wecomTokenCache.entries[credentials] = wecomTokenEntry{
-		token:   tokenResult.AccessToken,
-		expires: time.Now().Add(time.Duration(expiresIn-60) * time.Second),
-	}
-	return tokenResult.AccessToken, nil
+	return tokenResult.AccessToken, time.Now().Add(time.Duration(expiresIn-60) * time.Second), nil
 }
+
+// wecomSendError carries the send API's errcode so sendWeCom can tell a
+// rejected token from other failures.
+type wecomSendError struct {
+	code int
+	err  error
+}
+
+func (e *wecomSendError) Error() string { return e.err.Error() }
+func (e *wecomSendError) Unwrap() error { return e.err }
+
+// WeCom API endpoints; tests point them at a local server.
+var (
+	wecomTokenURL       = "https://qyapi.weixin.qq.com/cgi-bin/gettoken"
+	wecomMessageSendURL = "https://qyapi.weixin.qq.com/cgi-bin/message/send"
+)
 
 func sendWeCom(client *http.Client, params map[string]interface{}, title, content string) error {
 	corpID := paramString(params, "corpid", "corpId")
@@ -1145,13 +1347,6 @@ func sendWeCom(client *http.Client, params map[string]interface{}, title, conten
 		toUser = u
 	}
 
-	// Get access token (cached)
-	accessToken, err := getWeComAccessToken(client, corpID, corpSecret)
-	if err != nil {
-		return err
-	}
-
-	// Send message
 	msgBody := map[string]interface{}{
 		"touser":  toUser,
 		"msgtype": "text",
@@ -1160,11 +1355,45 @@ func sendWeCom(client *http.Client, params map[string]interface{}, title, conten
 			"content": title + "\n" + content,
 		},
 	}
-	msgURL := "https://qyapi.weixin.qq.com/cgi-bin/message/send?" + url.Values{
+
+	// At most one retry: a token the send API rejects as expired is dropped
+	// from the cache and the send is repeated once with a fresh token. Before,
+	// the rejected token stayed cached until its expires_in ran out, so every
+	// notification in that window (up to two hours) failed.
+	for attempt := 0; ; attempt++ {
+		accessToken, err := getWeComAccessToken(client, corpID, corpSecret)
+		if err != nil {
+			return err
+		}
+		err = sendWeComMessage(client, accessToken, msgBody)
+		var sendErr *wecomSendError
+		if attempt == 0 && errors.As(err, &sendErr) {
+			if _, expired := wecomTokenExpiredCodes[sendErr.code]; expired {
+				invalidateWeComAccessToken(corpID, corpSecret, accessToken)
+				continue
+			}
+		}
+		return err
+	}
+}
+
+func sendWeComMessage(client *http.Client, accessToken string, msgBody map[string]interface{}) error {
+	msgURL := wecomMessageSendURL + "?" + url.Values{
 		"access_token": {accessToken},
 	}.Encode()
-	_, err = sendJSONNotify(client, msgURL, msgBody, "errcode")
-	return err
+	respBody, err := sendJSONNotify(client, msgURL, msgBody)
+	if err != nil {
+		return err
+	}
+	// notifyProviderError decides failure exactly as for the other providers
+	// (including string-typed codes); the code is extracted separately only to
+	// recognise a rejected token.
+	if providerErr := notifyProviderError(respBody, "errcode"); providerErr != nil {
+		var m map[string]interface{}
+		_ = json.Unmarshal(respBody, &m)
+		return &wecomSendError{code: util.ToInt(m["errcode"]), err: providerErr}
+	}
+	return nil
 }
 
 func sendLark(client *http.Client, params map[string]interface{}, title, content string) error {
