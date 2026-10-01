@@ -285,10 +285,6 @@ h3 {
   border-top: 1px solid var(--line);
   padding: 8px 0;
 }
-.version-link {
-  font-size: var(--font-size-small);
-  color: var(--muted);
-}
 .version-update {
   display: inline-flex;
   margin-left: auto;
