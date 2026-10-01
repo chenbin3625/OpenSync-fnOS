@@ -285,6 +285,18 @@ h3 {
   border-top: 1px solid var(--line);
   padding: 8px 0;
 }
+.version-link {
+  font-size: var(--font-size-small);
+  color: var(--muted);
+}
+.version-update {
+  display: inline-flex;
+  margin-left: auto;
+  color: var(--warning);
+}
+.mobile-version {
+  display: none;
+}
 .app-workspace {
   background: var(--surface);
   border-radius: var(--radius);
@@ -1361,6 +1373,15 @@ body .semi-modal-mask {
   }
   .app-sidebar {
     display: none;
+  }
+  .mobile-version {
+    display: block;
+    margin-top: 24px;
+    border-top: 1px solid var(--line);
+    padding-top: 8px;
+  }
+  .mobile-version .version-link {
+    width: 100%;
   }
   .app-workspace {
     height: calc(100dvh - 64px - env(safe-area-inset-bottom));

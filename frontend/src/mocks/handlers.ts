@@ -50,6 +50,13 @@ export const handlers = [
   http.get(`${apiBase}/session`, () =>
     ok({ uid: 0, development: true, version: "mock" }),
   ),
+  http.get(`${apiBase}/version/latest`, () =>
+    ok({
+      latestVersion: "v0.0.27",
+      releaseURL: "https://github.com/chenbin3625/OpenSync-fnOS/releases/latest",
+      hasUpdate: false,
+    }),
+  ),
 
   http.get(`${apiBase}/system/config`, () => ok(mockStore.getSettings())),
   http.put(`${apiBase}/system/config`, async ({ request }) => {

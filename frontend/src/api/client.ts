@@ -11,6 +11,11 @@ import type {
 } from "../types";
 
 export const apiBase = "/app/opensync/svr";
+export type LatestVersion = {
+  latestVersion: string;
+  releaseURL: string;
+  hasUpdate: boolean;
+};
 export function serializeParams(params: Record<string, unknown>) {
   const result = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
@@ -180,6 +185,8 @@ async function requestAllJobs(signal?: AbortSignal) {
 export const api = {
   session: () =>
     request<{ uid: number; development: boolean; version: string }>("/session"),
+  latestVersion: (signal?: AbortSignal) =>
+    request<LatestVersion>("/version/latest", { signal }),
   engines: (signal?: AbortSignal) => request<AlistItem[]>("/alist", { signal }),
   paths: (alistId: number, path: string, signal?: AbortSignal) =>
     request<{ name?: string; path?: string }[]>("/alist", {

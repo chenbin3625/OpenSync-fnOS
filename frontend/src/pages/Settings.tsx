@@ -4,6 +4,7 @@ import Input from "@douyinfe/semi-ui/lib/es/input";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import { IconSaveStroked } from "@douyinfe/semi-icons";
 import { api } from "../api/client";
+import { VersionLink } from "../components/VersionLink";
 import { errorToast, Header, LoadState, SettingRow } from "../components/common";
 import { useAction, useResource } from "../lib/hooks";
 import type { SystemSettings } from "../types";
@@ -177,6 +178,9 @@ export default function Settings() {
           card(group.title, group.keys),
         )}
       </LoadState>
+      <div className="mobile-version">
+        <VersionLink />
+      </div>
     </div>
   );
 }

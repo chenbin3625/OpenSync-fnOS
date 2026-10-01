@@ -41,6 +41,10 @@ const maxRequestBodyBytes = 1 << 20
 const shutdownTimeout = 30 * time.Second
 
 func newRouter(development bool, allowedOrigins []string) *gin.Engine {
+	return newRouterWithVersionChecker(development, allowedOrigins, newVersionChecker(latestReleaseAPI, http.DefaultClient))
+}
+
+func newRouterWithVersionChecker(development bool, allowedOrigins []string, checker *versionChecker) *gin.Engine {
 	r := gin.New()
 	_ = r.SetTrustedProxies(nil)
 	r.Use(gin.Logger(), func(c *gin.Context) {
@@ -67,6 +71,15 @@ func newRouter(development bool, allowedOrigins []string) *gin.Engine {
 	api := r.Group(prefix+"/svr", platform.GatewayRequired(development, allowedOrigins))
 	api.GET("/session", func(c *gin.Context) {
 		c.JSON(200, model.Success(gin.H{"uid": c.GetInt64("uid"), "development": development, "version": appVersion}))
+	})
+	api.GET("/version/latest", func(c *gin.Context) {
+		result, err := checker.check(c.Request.Context(), appVersion)
+		if err != nil {
+			log.Printf("latest release check failed: %v", err)
+			c.JSON(http.StatusBadGateway, model.Error("暂时无法检查最新版本"))
+			return
+		}
+		c.JSON(http.StatusOK, model.Success(result))
 	})
 	api.GET("/system/config", handler.GetSystemConfig)
 	api.PUT("/system/config", handler.UpdateSystemConfig)
