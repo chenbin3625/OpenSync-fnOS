@@ -2,6 +2,7 @@ import {
   createContext,
   lazy,
   Suspense,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -28,8 +29,14 @@ import {
   IconTreeTriangleDown,
   IconTreeTriangleRight,
 } from "@douyinfe/semi-icons";
+import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import { api, sessionExpiredEvent } from "./api/client";
+import { errorToast } from "./components/common";
 import { VersionContext, VersionLink } from "./components/VersionLink";
+import {
+  notifyUpdateAvailable,
+  updateNoticeKey,
+} from "./components/updateNotice";
 import { applyTheme, connectHost } from "./lib/host";
 import { useResource } from "./lib/hooks";
 import { createGuardedRefresh } from "./lib/sessionGuard";
@@ -73,7 +80,9 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
   const [taskMenuTouched, setTaskMenuTouched] = useState(false);
   const taskMenu = useResource((signal) => api.jobMenu(signal));
   const latest = useResource((signal) => api.latestVersion(signal));
+  const [checking, setChecking] = useState(false);
   const lastVersionCheck = useRef(Date.now());
+  const notifiedRelease = useRef<string | null>(null);
   const taskItems = taskMenu.data?.dataList || [];
   const hasTaskItems = taskItems.length > 0;
   const currentTaskId = new URLSearchParams(search).get("jobId");
@@ -112,7 +121,9 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
     return () => window.removeEventListener("opensync:jobs-changed", refresh);
   }, [taskMenu.refresh]);
   useEffect(() => {
-    const intervalMs = 6 * 60 * 60 * 1000;
+    // 后端成功结果缓存 30 分钟（backend/cmd/server/version_checker.go），前端按
+    // 同一节奏在回到前台时刷新：既不漏掉新版本，也不会每次切标签页都请求。
+    const intervalMs = 30 * 60 * 1000;
     const refresh = () => {
       if (
         document.visibilityState !== "visible" ||
@@ -129,9 +140,49 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
       document.removeEventListener("visibilitychange", refresh);
     };
   }, [latest.refresh]);
+  useEffect(() => {
+    const info = latest.data;
+    if (!info?.hasUpdate || notifiedRelease.current === info.latestVersion)
+      return;
+    notifiedRelease.current = info.latestVersion;
+    // 同一次浏览器会话里同一个版本只提醒一次，刷新页面不再重复弹窗。
+    try {
+      if (sessionStorage.getItem(updateNoticeKey) === info.latestVersion) return;
+      sessionStorage.setItem(updateNoticeKey, info.latestVersion);
+    } catch {
+      // 存储被禁用（隐私模式 / 受限 WebView）时退化为每次加载提醒一次。
+    }
+    notifyUpdateAvailable(version, info);
+  }, [latest.data, version]);
+  const checkUpdate = useCallback(async () => {
+    if (checking) return;
+    setChecking(true);
+    try {
+      // refresh=1：用户点了按钮就要真实结果，绕过后端 30 分钟的缓存。
+      const info = await api.latestVersion(undefined, true);
+      latest.setData(info);
+      if (info.hasUpdate) {
+        notifiedRelease.current = info.latestVersion;
+        notifyUpdateAvailable(version, info);
+      } else {
+        Toast.success(`已是最新版本 ${info.latestVersion}`);
+      }
+    } catch (err) {
+      errorToast(err, "检查更新失败");
+    } finally {
+      setChecking(false);
+    }
+  }, [checking, latest.setData, version]);
   const tasksSelected = pathname.startsWith("/tasks") && !hasTaskItems;
   return (
-    <VersionContext value={{ currentVersion: version, latest: latest.data }}>
+    <VersionContext
+      value={{
+        currentVersion: version,
+        latest: latest.data,
+        checking,
+        checkUpdate,
+      }}
+    >
       <div className="app-shell">
         <aside className="app-sidebar" aria-label="主菜单">
           <nav aria-label="主导航">

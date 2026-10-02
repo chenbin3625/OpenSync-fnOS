@@ -185,8 +185,13 @@ async function requestAllJobs(signal?: AbortSignal) {
 export const api = {
   session: () =>
     request<{ uid: number; development: boolean; version: string }>("/session"),
-  latestVersion: (signal?: AbortSignal) =>
-    request<LatestVersion>("/version/latest", { signal }),
+  latestVersion: (signal?: AbortSignal, refresh = false) =>
+    // refresh=1 makes the backend ask GitHub instead of answering from its
+    // 30 minute cache; the version entry's "检查更新" button uses it.
+    request<LatestVersion>("/version/latest", {
+      params: refresh ? { refresh: 1 } : undefined,
+      signal,
+    }),
   engines: (signal?: AbortSignal) => request<AlistItem[]>("/alist", { signal }),
   paths: (alistId: number, path: string, signal?: AbortSignal) =>
     request<{ name?: string; path?: string }[]>("/alist", {

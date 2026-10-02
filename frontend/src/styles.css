@@ -285,10 +285,83 @@ h3 {
   border-top: 1px solid var(--line);
   padding: 8px 0;
 }
+/* 版本入口 = GitHub 链接 + 右侧「检查更新」图标按钮 */
+.version-entry {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.version-entry .version-link {
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 8px;
+  /* 侧边栏列宽固定 220px（.app-shell），这里收窄内边距给右侧按钮让位 */
+  padding: 0 10px;
+}
+.version-tag {
+  flex: 0 0 auto;
+}
+.version-check {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.version-check:hover:not(:disabled) {
+  background: var(--surface-soft);
+  color: var(--accent);
+}
+.version-check:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+.version-check:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+/* 有新版本：蓝底圆形升级图标，比原来的裸箭头更醒目 */
 .version-update {
   display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
   margin-left: auto;
-  color: var(--warning);
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: var(--font-size-small);
+}
+/* 右上角升级提醒：整卡可点，图标与版本入口里的升级图标保持同一视觉 */
+.update-notice {
+  cursor: pointer;
+}
+.update-notice-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: var(--font-size-small);
+}
+.update-notice-content {
+  color: var(--muted);
+}
+.update-notice-link {
+  color: var(--accent);
+  font-weight: 500;
 }
 .mobile-version {
   display: none;
@@ -1376,8 +1449,18 @@ body .semi-modal-mask {
     border-top: 1px solid var(--line);
     padding-top: 8px;
   }
+  .mobile-version .version-entry {
+    width: 100%;
+  }
   .mobile-version .version-link {
     width: 100%;
+    /* 移动端整行可用，不需要为按钮收窄内边距 */
+    padding: 0 16px;
+  }
+  /* 窄屏上 Semi 默认的 320px 最小宽度 + 20px 外边距会顶出视口 */
+  .update-notice {
+    min-width: 0;
+    width: calc(100vw - 40px);
   }
   .app-workspace {
     height: calc(100dvh - 64px - env(safe-area-inset-bottom));

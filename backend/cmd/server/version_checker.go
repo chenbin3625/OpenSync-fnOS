@@ -16,6 +16,20 @@ import (
 const latestReleaseAPI = "https://api.github.com/repos/chenbin3625/OpenSync-fnOS/releases/latest"
 const latestReleaseURL = "https://github.com/chenbin3625/OpenSync-fnOS/releases/latest"
 
+const (
+	// successTTL is how long a successful GitHub answer is reused. Unauthenticated
+	// api.github.com allows 60 requests per hour, so page loads must not hit it
+	// every time; half an hour still surfaces a release published right after a
+	// check without restarting the app. The version entry's "检查更新" button
+	// bypasses this cache for users who do not want to wait.
+	successTTL = 30 * time.Minute
+	failureTTL = 5 * time.Minute
+	// forcedRefreshInterval collapses repeated clicks on that button into one
+	// upstream request. Much shorter than successTTL on purpose: the first click
+	// should return a real answer, not the automatic-check cache the user sees.
+	forcedRefreshInterval = 30 * time.Second
+)
+
 type versionResult struct {
 	LatestVersion string `json:"latestVersion"`
 	ReleaseURL    string `json:"releaseURL"`
@@ -29,6 +43,9 @@ type versionChecker struct {
 	latest    string
 	err       error
 	expiresAt time.Time
+	// lastForcedRefresh gates repeated manual refreshes without preventing the
+	// first button click from bypassing a fresh automatic-check cache.
+	lastForcedRefresh time.Time
 }
 
 func newVersionChecker(endpoint string, client *http.Client) *versionChecker {
@@ -74,16 +91,31 @@ func newerRelease(local, latest string) bool {
 	return false
 }
 
+// check reports the cached release status, refreshing it once successTTL expired.
 func (c *versionChecker) check(ctx context.Context, local string) (versionResult, error) {
+	return c.checkWithRefresh(ctx, local, false)
+}
+
+// checkWithRefresh additionally serves the manual "检查更新" action: force asks
+// for a real upstream answer even while the cached one is still fresh, but a
+// forced check is itself rate limited by forcedRefreshInterval so a button (or
+// a script) cannot turn into an unauthenticated request flood against GitHub.
+func (c *versionChecker) checkWithRefresh(ctx context.Context, local string, force bool) (versionResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if time.Now().After(c.expiresAt) {
+	now := time.Now()
+	stale := now.After(c.expiresAt)
+	forced := force && now.Sub(c.lastForcedRefresh) >= forcedRefreshInterval
+	if stale || forced {
 		c.latest, c.err = c.fetch(ctx)
-		ttl := 6 * time.Hour
-		if c.err != nil {
-			ttl = 5 * time.Minute
+		if force {
+			c.lastForcedRefresh = now
 		}
-		c.expiresAt = time.Now().Add(ttl)
+		ttl := successTTL
+		if c.err != nil {
+			ttl = failureTTL
+		}
+		c.expiresAt = now.Add(ttl)
 	}
 	if c.err != nil {
 		return versionResult{}, c.err

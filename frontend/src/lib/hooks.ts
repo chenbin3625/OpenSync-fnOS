@@ -56,7 +56,9 @@ export function useResource<T>(
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [depsKey, poll, refresh]);
-  return { data, loading, error, refresh };
+  // setData is for callers that fetch outside the hook (the manual
+  // "检查更新" request) and must publish the result without a second round trip.
+  return { data, loading, error, refresh, setData };
 }
 
 /** Returned when a run was dropped because another action was still in flight. */

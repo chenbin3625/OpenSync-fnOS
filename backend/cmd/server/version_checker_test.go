@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -68,6 +69,91 @@ func TestVersionCheckerCachesConcurrentRequests(t *testing.T) {
 	wg.Wait()
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("upstream calls = %d, want 1", got)
+	}
+}
+
+// "检查更新" 按钮要求真实的检查结果，所以手动刷新必须绕过 30 分钟的缓存；
+// 缓存本身不能变短到每次页面加载都打 GitHub（未认证 60 次/小时）。
+func TestVersionCheckerSuccessCacheLivesThirtyMinutes(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_, _ = w.Write([]byte(`{"tag_name":"v0.0.27"}`))
+	}))
+	defer upstream.Close()
+	checker := newVersionChecker(upstream.URL, upstream.Client())
+	if _, err := checker.check(context.Background(), "0.0.26"); err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	if successTTL != 30*time.Minute {
+		t.Fatalf("successTTL = %v, want 30m", successTTL)
+	}
+	if lifetime := time.Until(checker.expiresAt); lifetime < successTTL-time.Minute || lifetime > successTTL {
+		t.Fatalf("success cache lifetime = %v, want %v", lifetime, successTTL)
+	}
+	if _, err := checker.check(context.Background(), "0.0.26"); err != nil {
+		t.Fatalf("cached check: %v", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("upstream calls inside the cache window = %d, want 1", got)
+	}
+	checker.expiresAt = time.Now().Add(-time.Second)
+	if _, err := checker.check(context.Background(), "0.0.26"); err != nil {
+		t.Fatalf("expired check: %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("upstream calls after expiry = %d, want 2", got)
+	}
+}
+
+func TestVersionCheckerForcedRefreshBypassesCache(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"tag_name":"v0.0.%d"}`, 26+calls.Add(1))))
+	}))
+	defer upstream.Close()
+	checker := newVersionChecker(upstream.URL, upstream.Client())
+	ctx := context.Background()
+	first, err := checker.check(ctx, "0.0.26")
+	if err != nil || first.LatestVersion != "v0.0.27" {
+		t.Fatalf("first check = %+v, err = %v", first, err)
+	}
+	// 缓存仍新鲜，但用户点了检查更新：必须重新询问 GitHub。
+	second, err := checker.checkWithRefresh(ctx, "0.0.26", true)
+	if err != nil || second.LatestVersion != "v0.0.28" || !second.HasUpdate {
+		t.Fatalf("forced check = %+v, err = %v", second, err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("upstream calls = %d, want 2", got)
+	}
+}
+
+func TestVersionCheckerForcedRefreshIsThrottled(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"tag_name":"v0.0.%d"}`, 26+calls.Add(1))))
+	}))
+	defer upstream.Close()
+	checker := newVersionChecker(upstream.URL, upstream.Client())
+	ctx := context.Background()
+	if _, err := checker.checkWithRefresh(ctx, "0.0.26", true); err != nil {
+		t.Fatalf("forced check: %v", err)
+	}
+	// 双击按钮不该产生第二次上游请求，也不该报错。
+	result, err := checker.checkWithRefresh(ctx, "0.0.26", true)
+	if err != nil || result.LatestVersion != "v0.0.27" {
+		t.Fatalf("throttled check = %+v, err = %v", result, err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("upstream calls inside the throttle window = %d, want 1", got)
+	}
+	checker.lastForcedRefresh = time.Now().Add(-forcedRefreshInterval - time.Second)
+	result, err = checker.checkWithRefresh(ctx, "0.0.26", true)
+	if err != nil || result.LatestVersion != "v0.0.28" {
+		t.Fatalf("check after the throttle window = %+v, err = %v", result, err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("upstream calls after the throttle window = %d, want 2", got)
 	}
 }
 
@@ -173,6 +259,55 @@ func TestVersionRouteRequiresGatewayIdentity(t *testing.T) {
 	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
 	if recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthorized status = %d", recorder.Code)
+	}
+}
+
+// 前端「检查更新」按钮带 ?refresh=1：handler 必须把它透传成一次真实的检查，
+// 而不是继续返回缓存里的旧版本号。
+func TestVersionHandlerRefreshQueryForcesCheck(t *testing.T) {
+	// 已安装版本由构建注入，这里固定成 v0.0.27 才能断言 hasUpdate 的变化。
+	originalVersion := appVersion
+	appVersion = "0.0.27"
+	defer func() { appVersion = originalVersion }()
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"tag_name":"v0.0.%d"}`, 26+calls.Add(1))))
+	}))
+	defer upstream.Close()
+	checker := newVersionChecker(upstream.URL, upstream.Client())
+	router := newRouterWithVersionChecker(true, nil, checker)
+	get := func(target string) versionResult {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, target, nil))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d, body = %s", target, recorder.Code, recorder.Body.String())
+		}
+		var response struct {
+			Data versionResult `json:"data"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		return response.Data
+	}
+	path := "/app/opensync/svr/version/latest"
+	if first := get(path); first.LatestVersion != "v0.0.27" || first.HasUpdate {
+		t.Fatalf("first = %+v", first)
+	}
+	// 缓存新鲜时普通请求仍然命中缓存。
+	if cached := get(path); cached.LatestVersion != "v0.0.27" {
+		t.Fatalf("cached = %+v", cached)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("upstream calls = %d, want 1", got)
+	}
+	// 即使普通缓存刚写入，首次手动检查也必须立即绕过它。
+	if refreshed := get(path + "?refresh=1"); refreshed.LatestVersion != "v0.0.28" || !refreshed.HasUpdate {
+		t.Fatalf("refreshed = %+v", refreshed)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("upstream calls after refresh = %d, want 2", got)
 	}
 }
 

@@ -73,7 +73,9 @@ func newRouterWithVersionChecker(development bool, allowedOrigins []string, chec
 		c.JSON(200, model.Success(gin.H{"uid": c.GetInt64("uid"), "development": development, "version": appVersion}))
 	})
 	api.GET("/version/latest", func(c *gin.Context) {
-		result, err := checker.check(c.Request.Context(), appVersion)
+		// refresh=1 is what the version entry's "检查更新" button sends: the user
+		// asked explicitly, so answer from GitHub instead of the 30 minute cache.
+		result, err := checker.checkWithRefresh(c.Request.Context(), appVersion, c.Query("refresh") == "1")
 		if err != nil {
 			log.Printf("latest release check failed: %v", err)
 			c.JSON(http.StatusBadGateway, model.Error("暂时无法检查最新版本"))
