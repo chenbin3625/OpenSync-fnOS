@@ -107,12 +107,19 @@ func (c *versionChecker) checkWithRefresh(ctx context.Context, local string, for
 	stale := now.After(c.expiresAt)
 	forced := force && now.Sub(c.lastForcedRefresh) >= forcedRefreshInterval
 	if stale || forced {
-		c.latest, c.err = c.fetch(ctx)
+		latest, err := c.fetch(ctx)
 		if force {
 			c.lastForcedRefresh = now
 		}
+		// A failed manual check reports its error to the user who clicked, but
+		// must not replace a still-valid answer: otherwise one GitHub hiccup
+		// would hide the update badge from every automatic check for failureTTL.
+		if err != nil && !stale && c.err == nil {
+			return versionResult{}, err
+		}
+		c.latest, c.err = latest, err
 		ttl := successTTL
-		if c.err != nil {
+		if err != nil {
 			ttl = failureTTL
 		}
 		c.expiresAt = now.Add(ttl)

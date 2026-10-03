@@ -60,6 +60,7 @@ const (
 	InvalidConfigParams     = "InvalidConfigParams"
 	ConfigSaveFail          = "ConfigSaveFail"
 	CredentialUnreadable    = "CredentialUnreadable"
+	VersionCheckFail        = "VersionCheckFail"
 )
 
 // Format-string keys
@@ -132,6 +133,7 @@ var translations = map[string]map[string]string{
 		InvalidConfigParams:     "配置参数无效",
 		ConfigSaveFail:          "配置保存失败，请查看服务日志",
 		CredentialUnreadable:    "已保存的凭据无法解密（secret.key 可能已丢失或被替换），请删除该配置后重新添加",
+		VersionCheckFail:        "暂时无法检查最新版本",
 
 		FmtExcludeRulesUnsupported: "以下过滤规则不受支持，已拒绝保存：%s。仅支持三种写法：文件名（可含 * 通配）、*.后缀、相对目录/",
 		FmtMirrorDeleteGuard:       "为防止误删，已跳过本次全量同步的删除阶段：%s。请确认来源目录可正常列举后重试",
@@ -194,6 +196,7 @@ var translations = map[string]map[string]string{
 		InvalidConfigParams:     "Invalid configuration parameters",
 		ConfigSaveFail:          "Failed to save configuration, please check the service logs",
 		CredentialUnreadable:    "The stored credential cannot be decrypted (secret.key may have been lost or replaced), please delete this entry and add it again",
+		VersionCheckFail:        "Unable to check for the latest version right now",
 
 		FmtExcludeRulesUnsupported: "The following filter rules are not supported and were rejected: %s. Only three formats are supported: filename (with * wildcard), *.extension, relative/directory/",
 		FmtMirrorDeleteGuard:       "To prevent accidental deletion, the delete phase of this full sync was skipped: %s. Please verify the source directory can be listed correctly and try again",

@@ -49,10 +49,9 @@ export function VersionLink() {
           {version}
         </Tag>
         {hasUpdate && (
+          /* 链接的 aria-label 已经包含新版本信息，这里只做视觉提示。 */
           <span
             className="version-update"
-            role="status"
-            aria-label={`有新版本 ${latest.latestVersion}`}
             title={`有新版本 ${latest.latestVersion}`}
           >
             <IconArrowUp aria-hidden="true" />

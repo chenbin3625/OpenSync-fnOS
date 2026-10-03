@@ -8,6 +8,7 @@ import { formatVersion, latestReleaseURL } from "./VersionLink";
  * does not pop the same reminder again inside one browser session.
  */
 export const updateNoticeKey = "opensync:update-notice";
+const updateNoticeId = "opensync-update-notice";
 
 /**
  * Top-right upgrade reminder. Stays until dismissed (duration 0) because a few
@@ -20,6 +21,8 @@ export function notifyUpdateAvailable(
 ) {
   const url = latest.releaseURL || latestReleaseURL;
   Notification.info({
+    // 固定 id：重复点「检查更新」时更新已有卡片，而不是叠出多张常驻提醒。
+    id: updateNoticeId,
     title: `发现新版本 ${latest.latestVersion}`,
     content: (
       <span className="update-notice-content">

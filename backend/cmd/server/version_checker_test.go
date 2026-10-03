@@ -85,9 +85,6 @@ func TestVersionCheckerSuccessCacheLivesThirtyMinutes(t *testing.T) {
 	if _, err := checker.check(context.Background(), "0.0.26"); err != nil {
 		t.Fatalf("check: %v", err)
 	}
-	if successTTL != 30*time.Minute {
-		t.Fatalf("successTTL = %v, want 30m", successTTL)
-	}
 	if lifetime := time.Until(checker.expiresAt); lifetime < successTTL-time.Minute || lifetime > successTTL {
 		t.Fatalf("success cache lifetime = %v, want %v", lifetime, successTTL)
 	}
@@ -154,6 +151,39 @@ func TestVersionCheckerForcedRefreshIsThrottled(t *testing.T) {
 	}
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("upstream calls after the throttle window = %d, want 2", got)
+	}
+}
+
+// 手动检查失败只报给点按钮的人，不能把仍然有效的成功缓存替换成失败，
+// 否则所有人的自动检查都会在 failureTTL 内丢失升级角标。
+func TestVersionCheckerFailedForcedRefreshKeepsCachedSuccess(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 2 {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte(`{"tag_name":"v0.0.27"}`))
+	}))
+	defer upstream.Close()
+	checker := newVersionChecker(upstream.URL, upstream.Client())
+	ctx := context.Background()
+	if _, err := checker.check(ctx, "0.0.26"); err != nil {
+		t.Fatalf("first check: %v", err)
+	}
+	expiresAt := checker.expiresAt
+	if _, err := checker.checkWithRefresh(ctx, "0.0.26", true); err == nil {
+		t.Fatal("failed forced check should report its error")
+	}
+	result, err := checker.check(ctx, "0.0.26")
+	if err != nil || result.LatestVersion != "v0.0.27" || !result.HasUpdate {
+		t.Fatalf("cached result after failed forced check = %+v, err = %v", result, err)
+	}
+	if !checker.expiresAt.Equal(expiresAt) {
+		t.Fatalf("expiresAt changed from %v to %v", expiresAt, checker.expiresAt)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("upstream calls = %d, want 2", got)
 	}
 }
 

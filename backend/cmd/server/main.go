@@ -78,7 +78,7 @@ func newRouterWithVersionChecker(development bool, allowedOrigins []string, chec
 		result, err := checker.checkWithRefresh(c.Request.Context(), appVersion, c.Query("refresh") == "1")
 		if err != nil {
 			log.Printf("latest release check failed: %v", err)
-			c.JSON(http.StatusBadGateway, model.Error("暂时无法检查最新版本"))
+			c.JSON(http.StatusBadGateway, model.Error(msg.T(msg.VersionCheckFail)))
 			return
 		}
 		c.JSON(http.StatusOK, model.Success(result))

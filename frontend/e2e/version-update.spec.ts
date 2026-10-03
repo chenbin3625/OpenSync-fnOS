@@ -92,7 +92,7 @@ test("desktop sidebar combines GitHub and version with an upgrade icon linking t
   await expect(version).toContainText("v0.0.26");
   await expect(version).toHaveAttribute("href", latestURL);
   await expect(version).toHaveAttribute("target", "_blank");
-  await expect(version.getByRole("status", { name: "有新版本 v0.0.27" })).toBeVisible();
+  await expect(version.locator(".version-update")).toHaveAttribute("title", "有新版本 v0.0.27");
   await expect(version.locator(".semi-icon-arrow_up")).toBeVisible();
   const settings = page.locator(".sidebar-settings").getByRole("link", { name: "设置" });
   const typography = await version.evaluate((el) => {
@@ -120,7 +120,7 @@ test("current version links to the GitHub homepage without an upgrade icon", asy
   });
   await expect(version).toBeVisible();
   await expect(version).toHaveAttribute("href", repositoryURL);
-  await expect(version.getByRole("status")).toHaveCount(0);
+  await expect(version.locator(".version-update")).toHaveCount(0);
 });
 
 test("failed release check does not hide the installed version or show a false update", async ({ page }) => {
@@ -132,7 +132,7 @@ test("failed release check does not hide the installed version or show a false u
   });
   await expect(version).toBeVisible();
   await expect(version).toHaveAttribute("href", repositoryURL);
-  await expect(version.getByRole("status")).toHaveCount(0);
+  await expect(version.locator(".version-update")).toHaveCount(0);
   await expect(page.getByRole("main")).toBeVisible();
 });
 
@@ -149,7 +149,7 @@ test("mobile settings expose the same update link", async ({ page }) => {
   });
   await expect(version).toHaveAttribute("href", latestURL);
   await expect(version.locator(".semi-icon-arrow_up")).toBeVisible();
-  await expect(version.getByRole("status", { name: "有新版本 v0.0.27" })).toBeVisible();
+  await expect(version.locator(".version-update")).toHaveAttribute("title", "有新版本 v0.0.27");
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
 
@@ -248,6 +248,19 @@ test("手动「检查更新」绕过后端缓存，发现新版本后同时提�
   await expect(scope.locator(".version-update")).toBeVisible();
   await expect(page.locator(".update-notice")).toContainText("发现新版本 v0.0.27");
   await expect(button).toBeEnabled();
+});
+
+test("连续点「检查更新」只保留一张升级提醒", async ({ page }) => {
+  await mockVersionByUrl(page, (url) =>
+    url.includes("refresh=1") ? updateAvailable : noUpdate,
+  );
+  await page.goto("/app/opensync/settings");
+  const button = entry(page).getByRole("button", { name: "检查更新" });
+  for (let i = 0; i < 3; i++) {
+    await button.click();
+    await expect(button).toBeEnabled();
+  }
+  await expect(page.locator(".update-notice")).toHaveCount(1);
 });
 
 test("手动「检查更新」在已是最新版本时给出提示，不弹升级提醒", async ({ page }) => {
