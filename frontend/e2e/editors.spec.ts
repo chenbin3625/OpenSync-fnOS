@@ -441,3 +441,78 @@ test("settings uses plain inputs, validates limits and keeps backend units", asy
   await expect(page.getByText("小时", { exact: true })).toBeVisible();
   await expect(page.getByText("天", { exact: true })).toBeVisible();
 });
+
+test("directory picker scrolls when there are many folders", async ({ page }) => {
+  const folders = Array.from({ length: 120 }, (_, i) => ({
+    name: `dir-${String(i).padStart(3, "0")}`,
+  }));
+  await page.route("**/app/opensync/svr/**", async (route) => {
+    const url = new URL(route.request().url());
+    const success = (data: unknown) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ code: 200, data, msg: "" }),
+      });
+    if (url.pathname.endsWith("/session")) {
+      return success({ uid: 1, development: false, version: "test" });
+    }
+    if (url.pathname.endsWith("/alist") && url.searchParams.has("alistId")) {
+      return success(url.searchParams.get("path") === "/" ? folders : []);
+    }
+    if (url.pathname.endsWith("/alist")) {
+      return success([
+        { id: 1, remark: "测试引擎", url: "https://engine.test", userName: "a" },
+      ]);
+    }
+    if (url.pathname.endsWith("/job") && url.searchParams.get("current")) {
+      return success(null);
+    }
+    if (url.pathname.endsWith("/job")) {
+      return success({
+        dataList: [
+          {
+            id: 42,
+            enable: 1,
+            remark: "目录任务",
+            alistId: 1,
+            srcPath: "[\"/dir-000\"]",
+            dstPath: "[\"/Backup\"]",
+            method: 0,
+            isCron: 2,
+            interval: 1440,
+            minFileSize: 0,
+            maxFileSize: 0,
+            exclude: "",
+          },
+        ],
+        count: 1,
+      });
+    }
+    return success(null);
+  });
+
+  await page.goto("/app/opensync/tasks?jobId=42");
+  await page
+    .locator(".overview-card")
+    .getByRole("button", { name: "更多操作", exact: true })
+    .click();
+  await page.locator(".semi-dropdown-menu").getByText("设置", { exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("combobox", { name: "选择引擎目录" }).first().click();
+
+  const list = page.locator(".remote-paths-dropdown .semi-tree-option-list");
+  const last = list.locator('[role="treeitem"][data-key="/dir-119"]');
+  await expect(last).toBeAttached();
+  // 列表必须是可滚动区域，且整体落在视口内，否则底部目录无法到达。
+  const metrics = await list.evaluate((el) => ({
+    scrollable: el.scrollHeight > el.clientHeight,
+    bottom: el.getBoundingClientRect().bottom,
+    viewport: window.innerHeight,
+  }));
+  expect(metrics.scrollable).toBe(true);
+  expect(metrics.bottom).toBeLessThanOrEqual(metrics.viewport);
+
+  await last.scrollIntoViewIfNeeded();
+  await last.locator(".semi-tree-option-label").click();
+  await expect(dialog.locator(".remote-paths").first()).toContainText("/dir-119");
+});

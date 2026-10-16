@@ -171,3 +171,71 @@ describe("notification delivery state", () => {
     ).toBeNull();
   });
 });
+
+describe("signing secrets and Bark", () => {
+  it("submits the DingTalk / Lark secret, sending empty to turn signing off", () => {
+    for (const method of [2, 4]) {
+      expect(
+        buildNotifyParams({
+          method,
+          enable: true,
+          url: "https://open.feishu.cn/hook/x",
+          secret: " SECabc ",
+        }),
+      ).toEqual({ notSendNull: false, url: "https://open.feishu.cn/hook/x", secret: "SECabc" });
+      expect(
+        buildNotifyParams({ method, enable: true, url: "https://x.test" }),
+      ).toEqual({ notSendNull: false, url: "https://x.test", secret: "" });
+    }
+  });
+  it("round-trips a masked secret from the list response", () => {
+    const form = notifyToForm({
+      id: 1,
+      method: 4,
+      enable: 1,
+      params: JSON.stringify({ url: "https://open.feishu.cn/hook/****abcd", secret: "****wxyz" }),
+    });
+    expect(form.secret).toBe("****wxyz");
+    expect(buildNotifyParams(form)).toMatchObject({ secret: "****wxyz" });
+  });
+  it("builds Bark params with the default server and drops empty optionals", () => {
+    expect(
+      buildNotifyParams({ method: 5, enable: true, deviceKey: " KEY ", group: "", sound: "" }),
+    ).toEqual({
+      notSendNull: false,
+      server: "https://api.day.app",
+      deviceKey: "KEY",
+      group: undefined,
+      sound: undefined,
+    });
+    expect(
+      buildNotifyParams({
+        method: 5,
+        enable: true,
+        server: "http://192.168.1.2:8080",
+        deviceKey: "KEY",
+        group: "OpenSync",
+        sound: "bell",
+      }),
+    ).toMatchObject({ server: "http://192.168.1.2:8080", group: "OpenSync", sound: "bell" });
+  });
+  it("validates Bark device key and server", () => {
+    expect(validateNotifyForm({ method: 5, enable: true })).toBe("请输入 Bark Device Key");
+    expect(
+      validateNotifyForm({ method: 5, enable: true, deviceKey: "k", server: "ftp://x" }),
+    ).toBe("请输入有效的 HTTP / HTTPS 服务器地址");
+    expect(
+      validateNotifyForm({ method: 5, enable: true, deviceKey: "k", server: "not a url" }),
+    ).toBe("请输入有效的 Bark 服务器地址");
+    expect(validateNotifyForm({ method: 5, enable: true, deviceKey: "k" })).toBe("");
+  });
+  it("fills the default Bark server when editing an old config", () => {
+    const form = notifyToForm({
+      id: 2,
+      method: 5,
+      enable: 1,
+      params: JSON.stringify({ deviceKey: "****" }),
+    });
+    expect(form.server).toBe("https://api.day.app");
+  });
+});

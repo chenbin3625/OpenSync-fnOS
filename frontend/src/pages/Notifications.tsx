@@ -27,6 +27,7 @@ import { useAction, useEditorForm, useResource } from "../lib/hooks";
 import {
   buildNotifyParams,
   channelNames,
+  defaultBarkServer,
   defaultNotifyForm,
   notifyDeliveryState,
   notifyToForm,
@@ -122,7 +123,7 @@ export default function Notifications() {
                   {(() => {
                     try {
                       const p = JSON.parse(item.params || "{}");
-                      return p.url || p.webhook || "";
+                      return p.url || p.webhook || p.server || "";
                     } catch {
                       return "";
                     }
@@ -259,13 +260,34 @@ function NotificationEditor({
             optionList={channelNames.map((label, value) => ({ label, value }))}
             onChange={(value) => {
               setDirty(true);
-              setForm({ ...defaultNotifyForm(), method: Number(value) });
+              const method = Number(value);
+              setForm({
+                ...defaultNotifyForm(),
+                method,
+                ...(method === 5 ? { server: defaultBarkServer } : {}),
+              });
             }}
           />
         </Field>
         {[0, 2, 4].includes(form.method) && (
           <Field label="Webhook URL" required>
             <Input value={form.url || ""} onChange={(v) => change("url", v)} />
+          </Field>
+        )}
+        {[2, 4].includes(form.method) && (
+          <Field
+            label={form.method === 2 ? "加签 Secret" : "签名校验 Secret"}
+            hint={
+              form.method === 2
+                ? "机器人安全设置开启“加签”时填写，以 SEC 开头；留空则不签名"
+                : "机器人安全设置开启“签名校验”时填写；留空则不签名"
+            }
+          >
+            <Input
+              mode="password"
+              value={form.secret || ""}
+              onChange={(v) => change("secret", v)}
+            />
           </Field>
         )}
         {form.method === 0 && (
@@ -372,6 +394,39 @@ function NotificationEditor({
                 />
               </Field>
             ))}
+          </>
+        )}
+        {form.method === 5 && (
+          <>
+            <Field label="服务器地址" hint="使用自建 Bark 服务时修改">
+              <Input
+                value={form.server || ""}
+                placeholder={defaultBarkServer}
+                onChange={(v) => change("server", v)}
+              />
+            </Field>
+            <Field label="Device Key" required>
+              <Input
+                mode="password"
+                value={form.deviceKey || ""}
+                onChange={(v) => change("deviceKey", v)}
+              />
+            </Field>
+            <div className="form-grid">
+              <Field label="分组">
+                <Input
+                  value={form.group || ""}
+                  onChange={(v) => change("group", v)}
+                />
+              </Field>
+              <Field label="提示音">
+                <Input
+                  value={form.sound || ""}
+                  placeholder="默认"
+                  onChange={(v) => change("sound", v)}
+                />
+              </Field>
+            </div>
           </>
         )}
         <SettingRow label="无变更时不发送" variant="bordered">
