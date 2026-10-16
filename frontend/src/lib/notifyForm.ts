@@ -6,7 +6,10 @@ export const channelNames = [
   "钉钉机器人",
   "企业微信",
   "飞书 / Lark",
+  "Bark",
 ];
+/** Bark 未填写服务器地址时使用的官方服务。 */
+export const defaultBarkServer = "https://api.day.app";
 export const supportedWebhookMethods = ["POST", "GET", "PUT"] as const;
 
 /** 与后端 notifySendStatus* 常量一致。 */
@@ -56,6 +59,12 @@ export interface NotifyForm {
   corpsecret?: string;
   agentid?: string;
   touser?: string;
+  /** 钉钉加签 / 飞书签名校验密钥，留空表示不签名。 */
+  secret?: string;
+  server?: string;
+  deviceKey?: string;
+  group?: string;
+  sound?: string;
 }
 export function defaultNotifyForm(): NotifyForm {
   return {
@@ -115,7 +124,8 @@ export function buildNotifyParams(form: NotifyForm) {
       };
     case 2:
     case 4:
-      return { ...common, url: form.url };
+      // 空字符串也要提交：后端据此关闭签名，而不是回填已保存的 secret。
+      return { ...common, url: form.url, secret: form.secret?.trim() || "" };
     case 3:
       return {
         ...common,
@@ -123,6 +133,14 @@ export function buildNotifyParams(form: NotifyForm) {
         corpsecret: form.corpsecret,
         agentid: form.agentid,
         touser: form.touser || "@all",
+      };
+    case 5:
+      return {
+        ...common,
+        server: form.server?.trim() || defaultBarkServer,
+        deviceKey: form.deviceKey?.trim(),
+        group: form.group?.trim() || undefined,
+        sound: form.sound?.trim() || undefined,
       };
     default:
       throw new Error("通知渠道无效");
@@ -149,6 +167,9 @@ export function notifyToForm(
     corpsecret: params.corpsecret || params.corpSecret || "",
     agentid: params.agentid || params.agentId || "",
     touser: params.touser || params.toUser || "@all",
+    secret: params.secret || "",
+    server: params.server || (item.method === 5 ? defaultBarkServer : ""),
+    deviceKey: params.deviceKey || "",
     body:
       typeof params.body === "object"
         ? JSON.stringify(params.body, null, 2)
@@ -184,6 +205,19 @@ export function validateNotifyForm(form: NotifyForm) {
     (!form.corpid?.trim() || !form.corpsecret?.trim() || !form.agentid?.trim())
   )
     return "请填写企业 ID、Secret 和 AgentId";
+  if (form.method === 5) {
+    if (!form.deviceKey?.trim()) return "请输入 Bark Device Key";
+    const server = form.server?.trim();
+    if (server) {
+      try {
+        const url = new URL(server);
+        if (!["http:", "https:"].includes(url.protocol))
+          return "请输入有效的 HTTP / HTTPS 服务器地址";
+      } catch {
+        return "请输入有效的 Bark 服务器地址";
+      }
+    }
+  }
   try {
     buildNotifyParams(form);
   } catch {

@@ -877,6 +877,12 @@ body .semi-modal-mask {
 .file-size-filter-copy {
   white-space: nowrap;
 }
+/* 目录选择下拉：Semi 不限制弹层高度，目录多时会超出页面无法选中。
+   只让列表滚动，搜索框保持在顶部。 */
+.remote-paths-dropdown .semi-tree-option-list {
+  max-height: min(360px, 50vh);
+  overflow-y: auto;
+}
 /* 文件夹过滤树 */
 .exclude-tree {
   border: 1px solid var(--line);

@@ -3,6 +3,9 @@ package service
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -221,9 +224,10 @@ func GetNotifyList() ([]map[string]interface{}, error) {
 var notifySecretKeys = map[int][]string{
 	0: {"url", "headers", "body"},   // custom webhook: URL may embed token, headers/body carry auth
 	1: {"sendKey"},                  // Server酱
-	2: {"url", "webhook"},           // 钉钉 (access_token in URL query)
+	2: {"url", "webhook", "secret"}, // 钉钉 (access_token in URL query, 加签 secret)
 	3: {"corpsecret", "corpSecret"}, // 企业微信应用密钥
-	4: {"url", "webhook"},           // 飞书 (token in URL path)
+	4: {"url", "webhook", "secret"}, // 飞书 (token in URL path, 签名校验 secret)
+	5: {"deviceKey"},                // Bark 设备 Key
 }
 
 const notifyRedactionMarker = "****"
@@ -443,6 +447,13 @@ func resolveNotifyParams(notify map[string]interface{}) (map[string]interface{},
 		}
 		s, isStr := v.(string)
 		if isStr {
+			// secret (DingTalk 加签 / Lark 签名校验) is optional: an empty value
+			// is the user turning signing off, not an untouched field. Only the
+			// masked placeholder restores the stored one.
+			if key == "secret" && s == "" {
+				delete(incoming, key)
+				continue
+			}
 			if s == "" || isMaskedSecretValue(s) {
 				if ev, ok2 := existingParams[key]; ok2 && ev != nil {
 					incoming[key] = ev
@@ -465,12 +476,15 @@ func resolveNotifyParams(notify map[string]interface{}) (map[string]interface{},
 // notifyTargetChanged reports whether the incoming params point at a different
 // delivery target than the stored ones. A masked or absent URL is not a change:
 // that is the UI round-tripping the redacted value it was given.
+//
+// Bark keeps its target in server rather than url; it is compared the same way
+// so a changed server cannot inherit the stored deviceKey.
 func notifyTargetChanged(incoming, existing map[string]interface{}) bool {
-	incomingURL := paramString(incoming, "url", "webhook")
+	incomingURL := paramString(incoming, "url", "webhook", "server")
 	if incomingURL == "" || isMaskedSecretValue(incomingURL) {
 		return false
 	}
-	existingURL := paramString(existing, "url", "webhook")
+	existingURL := paramString(existing, "url", "webhook", "server")
 	if existingURL == "" {
 		return false
 	}
@@ -496,6 +510,15 @@ func validateNotifyParams(method int, params map[string]interface{}) error {
 			paramString(params, "corpsecret", "corpSecret") == "" ||
 			paramString(params, "agentid", "agentId") == "" {
 			return errors.New(msg.T(msg.NotifyParamInvalid))
+		}
+		return nil
+	case 5:
+		if paramString(params, "deviceKey") == "" {
+			return errors.New(msg.T(msg.NotifyParamInvalid))
+		}
+		// server is optional; an empty value means the public Bark service.
+		if server := paramString(params, "server"); server != "" {
+			return validateNotifyWebhookURL(server)
 		}
 		return nil
 	default:
@@ -866,6 +889,8 @@ func sendNotify(notify map[string]interface{}, title, content string, needNotSyn
 		sendErr = sendWeCom(notifyHTTPClient, params, title, content)
 	case 4: // Lark (Feishu)
 		sendErr = sendLark(notifyHTTPClient, params, title, content)
+	case 5: // Bark
+		sendErr = sendBark(notifyHTTPClient, params, title, content)
 	default:
 		// validateNotifyParams rejects unknown methods, so this is unreachable
 		// unless a new method is added without a send branch. Reporting it as a
@@ -1218,8 +1243,43 @@ func sendServerChan(client *http.Client, params map[string]interface{}, title, c
 	return err
 }
 
+// notifyNow is the clock used for signed webhooks; tests replace it to get a
+// deterministic signature.
+var notifyNow = time.Now
+
+// dingTalkSignedURL appends the 加签 timestamp and sign query params. DingTalk
+// signs "timestamp\nsecret" with the secret as the HMAC key, in milliseconds.
+func dingTalkSignedURL(webhook, secret string, now time.Time) (string, error) {
+	u, err := url.Parse(webhook)
+	if err != nil {
+		return "", fmt.Errorf("parse dingtalk webhook: %w", err)
+	}
+	timestamp := fmt.Sprintf("%d", now.UnixMilli())
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(timestamp + "\n" + secret))
+	query := u.Query()
+	query.Set("timestamp", timestamp)
+	query.Set("sign", base64.StdEncoding.EncodeToString(mac.Sum(nil)))
+	u.RawQuery = query.Encode()
+	return u.String(), nil
+}
+
+// larkSign computes the 签名校验 value. Unlike DingTalk, Lark uses
+// "timestamp\nsecret" as the HMAC key over an empty message, in seconds.
+func larkSign(secret string, timestamp int64) string {
+	mac := hmac.New(sha256.New, []byte(fmt.Sprintf("%d\n%s", timestamp, secret)))
+	return base64.StdEncoding.EncodeToString(mac.Sum(nil))
+}
+
 func sendDingTalk(client *http.Client, params map[string]interface{}, title, content string) error {
 	webhook := paramString(params, "url", "webhook")
+	if secret := paramString(params, "secret"); secret != "" {
+		signed, err := dingTalkSignedURL(webhook, secret, notifyNow())
+		if err != nil {
+			return err
+		}
+		webhook = signed
+	}
 	body := map[string]interface{}{
 		"msgtype": "text",
 		"text": map[string]string{
@@ -1415,8 +1475,61 @@ func sendLark(client *http.Client, params map[string]interface{}, title, content
 			},
 		},
 	}
+	if secret := paramString(params, "secret"); secret != "" {
+		timestamp := notifyNow().Unix()
+		body["timestamp"] = fmt.Sprintf("%d", timestamp)
+		body["sign"] = larkSign(secret, timestamp)
+	}
 	_, err := sendJSONNotify(client, webhook, body, "code", "StatusCode")
 	return err
+}
+
+// defaultBarkServer is used when a Bark config leaves server empty.
+const defaultBarkServer = "https://api.day.app"
+
+// sendBark posts to {server}/push. Bark reports success as code=200, so the
+// shared non-zero check in notifyProviderError would treat every success as a
+// failure; the code is checked here instead.
+func sendBark(client *http.Client, params map[string]interface{}, title, content string) error {
+	server := paramString(params, "server")
+	if server == "" {
+		server = defaultBarkServer
+	}
+	body := map[string]interface{}{
+		"device_key": paramString(params, "deviceKey"),
+		"title":      title,
+		"body":       content,
+	}
+	for _, key := range []string{"group", "sound"} {
+		if v := paramString(params, key); v != "" {
+			body[key] = v
+		}
+	}
+	jsonData, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshal notify body: %w", err)
+	}
+	req, err := buildNotifyRequest(http.MethodPost, strings.TrimRight(server, "/")+"/push", bytes.NewReader(jsonData), "application/json")
+	if err != nil {
+		return fmt.Errorf("build notify request: %w", err)
+	}
+	respBody, err := sendNotifyRequestBytes(client, req)
+	if err != nil {
+		return err
+	}
+	var m map[string]interface{}
+	if json.Unmarshal(respBody, &m) != nil {
+		return nil
+	}
+	if v, ok := m["code"]; ok {
+		if code := util.ToInt(v); code != http.StatusOK {
+			if message := notifyProviderMessage(m); message != "" {
+				return fmt.Errorf("notify code=%d: %s", code, message)
+			}
+			return fmt.Errorf("notify code=%d", code)
+		}
+	}
+	return nil
 }
 
 func paramString(params map[string]interface{}, keys ...string) string {

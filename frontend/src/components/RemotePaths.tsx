@@ -120,6 +120,7 @@ export function RemotePaths({
         expandedKeys={expandedKeys}
         onExpand={(keys) => setExpandedKeys(keys as string[])}
         onChange={handleChange}
+        dropdownClassName="remote-paths-dropdown"
         dropdownStyle={{ maxWidth: "calc(100vw - 32px)" }}
         maxTagCount={2}
         showClear
