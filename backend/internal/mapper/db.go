@@ -70,7 +70,7 @@ func InitDB() *sql.DB {
 		if _, err := handle.Exec("PRAGMA journal_mode=WAL"); err != nil {
 			log.Printf("Failed to set sqlite journal_mode: %v", err)
 		}
-		if _, err := handle.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		if _, err := handle.Exec(fmt.Sprintf("PRAGMA busy_timeout=%d", sqliteBusyTimeoutMS)); err != nil {
 			log.Printf("Failed to set sqlite busy_timeout: %v", err)
 		}
 		for _, pragma := range []string{"PRAGMA foreign_keys=ON", "PRAGMA temp_store=MEMORY", "PRAGMA cache_size=-16384", "PRAGMA mmap_size=67108864"} {
@@ -134,12 +134,18 @@ func sqliteDSN(dbName string) string {
 	// db.Exec instead would configure whichever single connection served that
 	// call, leaving the other 11 in the pool on defaults.
 	pragmas := url.Values{}
-	pragmas.Add("_pragma", "busy_timeout(5000)")
+	pragmas.Add("_pragma", fmt.Sprintf("busy_timeout(%d)", sqliteBusyTimeoutMS))
 	pragmas.Add("_pragma", "journal_mode(WAL)")
 	pragmas.Add("_pragma", "foreign_keys(ON)")
 	pragmas.Add("_pragma", "temp_store(MEMORY)")
 	pragmas.Add("_pragma", "cache_size(-16384)")
 	pragmas.Add("_pragma", "mmap_size(67108864)")
+	// Write transactions start with BEGIN IMMEDIATE so they take the write
+	// lock up front and wait busy_timeout for it. A deferred transaction that
+	// reads first and then writes is handed SQLITE_BUSY at once (no waiting)
+	// when another writer committed in between. Read-only transactions
+	// (sql.TxOptions{ReadOnly: true}) still begin deferred.
+	pragmas.Add("_txlock", "immediate")
 	query := pragmas.Encode()
 	if strings.HasPrefix(dbName, "file:") {
 		sep := "?"
@@ -285,17 +291,24 @@ func FetchFirstVal(query string, args ...interface{}) (interface{}, error) {
 
 // ExecuteInsert executes an insert and returns last insert id
 func ExecuteInsert(query string, args ...interface{}) (int64, error) {
-	result, err := GetDB().Exec(query, args...)
-	if err != nil {
-		return 0, err
-	}
-	return result.LastInsertId()
+	var id int64
+	err := retryOnBusy(func() error {
+		result, err := GetDB().Exec(query, args...)
+		if err != nil {
+			return err
+		}
+		id, err = result.LastInsertId()
+		return err
+	})
+	return id, err
 }
 
-// ExecuteUpdate executes an update/delete query
+// ExecuteUpdate executes an update/delete query, retrying lock contention.
 func ExecuteUpdate(query string, args ...interface{}) error {
-	_, err := GetDB().Exec(query, args...)
-	return err
+	return retryOnBusy(func() error {
+		_, err := GetDB().Exec(query, args...)
+		return err
+	})
 }
 
 // ExecuteMany executes batch operations
@@ -372,7 +385,7 @@ func FetchAllToPageWithCount(baseSQL, countSQL string, params map[string]interfa
 
 func fetchPageSeparateCount(baseSQL, countSQL string, limit int, offset int64, paginated bool, sqlArgs []interface{}) (map[string]interface{}, error) {
 	var result map[string]interface{}
-	err := withTx(func(tx *sql.Tx) error {
+	err := withReadTx(func(tx *sql.Tx) error {
 		var total int64
 		if err := tx.QueryRow(countSQL, sqlArgs...).Scan(&total); err != nil {
 			return err

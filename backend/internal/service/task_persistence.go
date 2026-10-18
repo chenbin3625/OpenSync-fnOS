@@ -1,18 +1,18 @@
 package service
 
 import (
-	"errors"
 	"fmt"
 	"log"
-	"strings"
+	"opensync/internal/mapper"
 	"time"
 )
 
 // persistBusyRetryDelays are the waits between attempts when an item write
 // fails because another connection holds the SQLite write lock. Each attempt
-// already waits busy_timeout (5s) inside SQLite, so five attempts cover roughly
-// 30s of contention — enough for a history cleanup batch, a checkpoint or a
-// user's bulk delete to finish — before the task gives up.
+// already waits busy_timeout (15s) inside SQLite, and the mapper retries once
+// more on its own, so five attempts cover well over a minute of contention —
+// enough for a history cleanup batch, a checkpoint or a user's bulk delete to
+// finish — before the task gives up.
 var persistBusyRetryDelays = []time.Duration{
 	250 * time.Millisecond,
 	500 * time.Millisecond,
@@ -20,28 +20,9 @@ var persistBusyRetryDelays = []time.Duration{
 	2 * time.Second,
 }
 
-// sqliteCodeError is satisfied by modernc.org/sqlite's *Error.
-type sqliteCodeError interface {
-	Code() int
-}
-
-// isSQLiteBusy reports whether err is lock contention (SQLITE_BUSY or
-// SQLITE_LOCKED, including their extended codes) rather than a real failure.
+// isSQLiteBusy reports whether err is lock contention rather than a real failure.
 func isSQLiteBusy(err error) bool {
-	if err == nil {
-		return false
-	}
-	var coded sqliteCodeError
-	if errors.As(err, &coded) {
-		switch coded.Code() & 0xff {
-		case 5, 6: // SQLITE_BUSY, SQLITE_LOCKED
-			return true
-		}
-	}
-	text := strings.ToLower(err.Error())
-	return strings.Contains(text, "database is locked") ||
-		strings.Contains(text, "database table is locked") ||
-		strings.Contains(text, "sqlite_busy")
+	return mapper.IsBusyError(err)
 }
 
 // persistWithBusyRetry writes items, retrying only lock contention. A busy

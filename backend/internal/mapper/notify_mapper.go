@@ -76,11 +76,10 @@ func UpdateNotifySendResult(notifyID int64, status int, sentAt int64, errMsg str
 	if errMsg != "" {
 		storedErr = errMsg
 	}
-	_, err := GetDB().Exec(
+	return ExecuteUpdate(
 		"UPDATE notify SET lastSendStatus=?, lastSendTime=?, lastSendError=? WHERE id=?",
 		status, sentAt, storedErr, notifyID,
 	)
-	return err
 }
 
 // UpdateNotifyStatus updates notify enable status
@@ -94,11 +93,15 @@ func DeleteNotify(notifyID int64) error {
 }
 
 func executeNotifyUpdate(query string, args ...interface{}) error {
-	result, err := GetDB().Exec(query, args...)
-	if err != nil {
+	var affected int64
+	err := retryOnBusy(func() error {
+		result, err := GetDB().Exec(query, args...)
+		if err != nil {
+			return err
+		}
+		affected, err = result.RowsAffected()
 		return err
-	}
-	affected, err := result.RowsAffected()
+	})
 	if err != nil {
 		return err
 	}

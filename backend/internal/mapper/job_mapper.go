@@ -106,8 +106,18 @@ func UpdateJobEnable(jobID int64, enable int) error {
 	return ExecuteUpdate("UPDATE job SET enable=? WHERE id=?", enable, jobID)
 }
 
-// DeleteJob deletes a job and its tasks
+// DeleteJob deletes a job and its tasks.
+//
+// The items go first, in short separately committed batches: one statement
+// for every item of a long-lived job (plus the FTS trigger per row) held the
+// write lock long enough for other jobs' writes to fail with "database is
+// locked". An interruption leaves the job and its tasks in place with fewer
+// items, so deleting again finishes the job.
 func DeleteJob(jobID int64) error {
+	if err := deleteJobTaskItemsInBatches(context.Background(),
+		"taskId IN (SELECT id FROM job_task WHERE jobId=?)", jobID); err != nil {
+		return err
+	}
 	return withTx(func(tx *sql.Tx) error {
 		if _, err := tx.Exec("DELETE FROM job_task_item WHERE taskId IN (SELECT id FROM job_task WHERE jobId=?)", jobID); err != nil {
 			return err
@@ -253,8 +263,12 @@ func UpdateJobTaskStatusByStatusAndJobID(jobID int64) error {
 	return ExecuteUpdate("UPDATE job_task SET status=4 WHERE status IN (0, 1) AND jobId=?", jobID)
 }
 
-// DeleteJobTaskByTaskID deletes a task and its items
+// DeleteJobTaskByTaskID deletes a task and its items. The items are removed in
+// batches first for the same reason as DeleteJob.
 func DeleteJobTaskByTaskID(taskID int64) error {
+	if err := deleteJobTaskItemsInBatches(context.Background(), "taskId=?", taskID); err != nil {
+		return err
+	}
 	return withTx(func(tx *sql.Tx) error {
 		if _, err := tx.Exec("DELETE FROM job_task_item WHERE taskId=?", taskID); err != nil {
 			return err
@@ -472,30 +486,58 @@ func deleteJobTasksByIDs(ctx context.Context, taskIDs []int64) error {
 		return nil
 	}
 	clause, args := int64InClause(taskIDs)
-	itemArgs := appendSQLArgs(args, jobTaskItemDeleteBatchSize)
-	deleteItems := "DELETE FROM job_task_item WHERE id IN (SELECT id FROM job_task_item WHERE taskId IN (" + clause + ") LIMIT ?)"
+	if err := deleteJobTaskItemsInBatches(ctx, "taskId IN ("+clause+")", args...); err != nil {
+		return err
+	}
+	return retryOnBusy(func() error {
+		_, err := GetDB().ExecContext(ctx, "DELETE FROM job_task WHERE id IN ("+clause+")", args...)
+		return err
+	})
+}
+
+// deleteJobTaskItemsInBatches deletes the job_task_item rows matching where,
+// jobTaskItemDeleteBatchSize at a time, each batch its own short write so other
+// writers get the lock in between.
+func deleteJobTaskItemsInBatches(ctx context.Context, where string, args ...interface{}) error {
+	query := "DELETE FROM job_task_item WHERE id IN (SELECT id FROM job_task_item WHERE " + where + " LIMIT ?)"
+	batchArgs := appendSQLArgs(args, jobTaskItemDeleteBatchSize)
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		result, err := GetDB().ExecContext(ctx, deleteItems, itemArgs...)
-		if err != nil {
+		var n int64
+		err := retryOnBusy(func() error {
+			result, err := GetDB().ExecContext(ctx, query, batchArgs...)
+			if err != nil {
+				return err
+			}
+			n, err = result.RowsAffected()
 			return err
-		}
-		n, err := result.RowsAffected()
+		})
 		if err != nil {
 			return err
 		}
 		if n == 0 {
-			break
+			return nil
 		}
 	}
-	_, err := GetDB().ExecContext(ctx, "DELETE FROM job_task WHERE id IN ("+clause+")", args...)
-	return err
 }
 
+// withTx runs fn in a write transaction (BEGIN IMMEDIATE, see sqliteDSN) and
+// repeats the whole transaction when it fails on lock contention. fn must
+// therefore only touch state through tx, or overwrite its outputs each run.
 func withTx(fn func(*sql.Tx) error) error {
-	tx, err := GetDB().Begin()
+	return retryOnBusy(func() error { return runTx(nil, fn) })
+}
+
+// withReadTx runs fn in a read-only transaction: one consistent snapshot that
+// begins deferred and so never queues for the write lock.
+func withReadTx(fn func(*sql.Tx) error) error {
+	return runTx(&sql.TxOptions{ReadOnly: true}, fn)
+}
+
+func runTx(opts *sql.TxOptions, fn func(*sql.Tx) error) error {
+	tx, err := GetDB().BeginTx(context.Background(), opts)
 	if err != nil {
 		return err
 	}
