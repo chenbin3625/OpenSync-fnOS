@@ -119,12 +119,24 @@ func normalizeExcludeRule(input string) (string, excludeRuleKind, excludeRuleOut
 }
 
 func validDirectoryRule(value string) bool {
-	return value != "" &&
-		!strings.HasPrefix(value, "/") &&
-		!strings.HasSuffix(value, "/") &&
-		!strings.Contains(value, "//") &&
-		!strings.ContainsAny(value, `\*?[]{}!`) &&
-		!containsControl(value)
+	if value == "" ||
+		strings.HasPrefix(value, "/") ||
+		strings.HasSuffix(value, "/") ||
+		strings.Contains(value, "//") ||
+		strings.ContainsAny(value, `\?[]{}!`) ||
+		containsControl(value) {
+		return false
+	}
+	if !strings.Contains(value, "*") {
+		return true
+	}
+	// A single-level directory name may use the same simple * wildcard as file
+	// names (e.g. the long-shipped ".Trash-*/" default). Wildcards in nested
+	// paths, "**", and a rule made only of stars (which would exclude every
+	// directory) stay unsupported.
+	return !strings.Contains(value, "/") &&
+		!strings.Contains(value, "**") &&
+		strings.Trim(value, "*") != ""
 }
 
 func validExtensionRule(value string) bool {
@@ -198,7 +210,7 @@ func (matcher *excludeMatcher) matches(relativePath string, isDir bool) bool {
 				if cleanPath == rulePath || strings.HasSuffix(cleanPath, "/"+rulePath) {
 					return true
 				}
-			} else if baseName == rulePath {
+			} else if simpleWildcardMatch(rulePath, baseName) {
 				return true
 			}
 		}

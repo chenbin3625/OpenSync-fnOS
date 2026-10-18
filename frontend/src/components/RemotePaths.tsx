@@ -1,10 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
-import TreeSelect from "@douyinfe/semi-ui/lib/es/treeSelect";
+import Highlight from "@douyinfe/semi-ui/lib/es/highlight";
+import TreeSelect, {
+  type RenderSelectedItem,
+} from "@douyinfe/semi-ui/lib/es/treeSelect";
 import { IconRefresh } from "@douyinfe/semi-icons";
 import type { TreeNodeData } from "@douyinfe/semi-ui/lib/es/tree/interface";
 import { buildPathTreeData } from "../pages/Home/homeUtils";
 import { useAsyncTree } from "../lib/useAsyncTree";
+import { splitDirPath } from "../lib/treeUtils";
 
 function seed(paths: string[]): TreeNodeData[] {
   const convert = (
@@ -18,6 +22,22 @@ function seed(paths: string[]): TreeNodeData[] {
       ...(n.children?.length ? { children: convert(n.children) } : {}),
     }));
   return convert(buildPathTreeData(paths));
+}
+
+/** 选择框内的路径：父路径弱化并可从左侧省略，最后一级目录名始终完整可见 */
+function SelectedPath({ path }: { path: string }) {
+  const { parent, name } = splitDirPath(path);
+  return (
+    <span className="remote-paths-selected" title={path}>
+      {parent && (
+        <span className="remote-paths-selected-parent">
+          {/* 外层 rtl 让省略号出现在左侧，内层 ltr 保证斜杠顺序不被重排 */}
+          <span dir="ltr">{parent}</span>
+        </span>
+      )}
+      <span className="remote-paths-selected-name">{name}</span>
+    </span>
+  );
 }
 
 export function RemotePaths({
@@ -50,7 +70,10 @@ export function RemotePaths({
     treeData,
     expandedKeys,
     setExpandedKeys,
+    loadedKeys,
+    refreshing,
     loadData,
+    refresh,
     resetTree,
   } = useAsyncTree({ engineId, onLoaded, onError, errorFallback: "目录加载失败" });
 
@@ -103,6 +126,50 @@ export function RemotePaths({
     if (engineId) void loadData();
   }, [engineId, resetTree, loadData]);
 
+  // 节点名不换行，过长时可横向滚动；悬停显示完整路径
+  const renderLabel = useCallback(
+    (label?: ReactNode, node?: TreeNodeData, keyword?: string) => (
+      <span className="remote-paths-node" title={String(node?.key ?? "")}>
+        {keyword && typeof label === "string" ? (
+          <Highlight
+            highlightClassName="semi-tree-option-highlight"
+            sourceString={label}
+            searchWords={[keyword]}
+          />
+        ) : (
+          label
+        )}
+      </span>
+    ),
+    [],
+  );
+
+  const renderSelectedItem: RenderSelectedItem = multiple
+    ? (node: TreeNodeData) => ({
+        isRenderInTag: true,
+        content: <SelectedPath path={String(node.value ?? node.key)} />,
+      })
+    : (node: TreeNodeData) => (
+        <SelectedPath path={String(node.value ?? node.key)} />
+      );
+
+  const refreshButton = (
+    <div className="remote-paths-toolbar">
+      <Button
+        size="small"
+        theme="borderless"
+        icon={<IconRefresh aria-hidden="true" />}
+        loading={refreshing}
+        disabled={!engineId}
+        // 阻止按下时抢走焦点，避免下拉框随之关闭
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={() => void refresh()}
+      >
+        刷新目录
+      </Button>
+    </div>
+  );
+
   return (
     <div id={id} className="remote-paths">
       <TreeSelect
@@ -117,9 +184,16 @@ export function RemotePaths({
         searchPlaceholder="搜索已加载目录"
         placeholder="选择目录"
         loadData={loadData}
+        loadedKeys={loadedKeys}
+        // 展开动画期间若异步加载的子目录返回，Semi 会继续渲染动画缓存的旧列表，
+        // 新加载的目录不显示；目录树按需加载，关闭动画
+        motion={false}
         expandedKeys={expandedKeys}
         onExpand={(keys) => setExpandedKeys(keys as string[])}
         onChange={handleChange}
+        renderLabel={renderLabel}
+        renderSelectedItem={renderSelectedItem}
+        outerBottomSlot={refreshButton}
         dropdownClassName="remote-paths-dropdown"
         dropdownStyle={{ maxWidth: "calc(100vw - 32px)" }}
         maxTagCount={2}
@@ -130,7 +204,8 @@ export function RemotePaths({
           className="remote-paths-retry"
           size="small"
           icon={<IconRefresh aria-hidden="true" />}
-          onClick={() => void loadData()}
+          loading={refreshing}
+          onClick={() => void refresh()}
         >
           重试
         </Button>

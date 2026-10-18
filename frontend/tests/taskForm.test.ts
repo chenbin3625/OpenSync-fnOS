@@ -314,4 +314,27 @@ describe("existing synchronization contracts", () => {
     );
     expect(updateExcludeFolders(withFolders, [])).toBe(manualRules);
   });
+
+  // 后端保存时会去掉 "# " 注释，标记块随之消失（issue #4）
+  it("recognizes folder rules after the backend strips the marker block", () => {
+    const saved =
+      ".DS_Store\n.Trashes/\n.Trash-*/\n*.tmp\nphotos/raw/\ncache/";
+
+    expect(parseExcludeFolders(saved)).toEqual(["photos/raw/", "cache/"]);
+
+    const updated = updateExcludeFolders(saved, ["cache/"]);
+    expect(updated).toBe(
+      ".DS_Store\n.Trashes/\n.Trash-*/\n*.tmp\n\n# --- 文件夹过滤（自动生成，请勿手动编辑）---\ncache/\n# --- 文件夹过滤结束 ---",
+    );
+    expect(parseExcludeFolders(updated)).toEqual(["cache/"]);
+    expect(updateExcludeFolders(saved, [])).toBe(
+      ".DS_Store\n.Trashes/\n.Trash-*/\n*.tmp",
+    );
+  });
+
+  it("does not treat system directory presets or disabled lines as folders", () => {
+    const exclude = defaultJobForm().exclude + "\n# cache/";
+    expect(parseExcludeFolders(exclude)).toEqual([]);
+    expect(updateExcludeFolders(exclude, [])).toBe(exclude);
+  });
 });

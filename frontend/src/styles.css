@@ -882,6 +882,56 @@ body .semi-modal-mask {
 .remote-paths-dropdown .semi-tree-option-list {
   max-height: min(360px, 50vh);
   overflow-y: auto;
+  /* 层级深、名称长时横向滚动，而不是把名称挤成多行 */
+  overflow-x: auto;
+}
+/* 选项行按内容撑开，配合列表横向滚动；hover 背景随之覆盖整行 */
+.remote-paths-dropdown .semi-tree-option {
+  min-width: 100%;
+  width: max-content;
+}
+.remote-paths-dropdown .semi-tree-option-indent-unit {
+  width: 14px;
+}
+.remote-paths-node {
+  white-space: nowrap;
+}
+/* 桌面端下拉宽度可以大于选择框，长目录名少滚动 */
+@media (min-width: 768px) {
+  .remote-paths-dropdown {
+    width: 480px;
+  }
+}
+.remote-paths-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px 8px;
+  border-top: 1px solid var(--semi-color-fill-0);
+}
+/* 选择框内路径：父路径从左侧省略，最后一级目录名完整显示 */
+.remote-paths-selected {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+}
+.remote-paths-selected-parent {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  direction: rtl;
+  color: var(--semi-color-text-2);
+}
+.remote-paths-selected-parent > span {
+  unicode-bidi: isolate;
+}
+.remote-paths-selected-name {
+  /* 目录名不参与收缩，空间不足时先省略父路径；目录名本身超长才省略 */
+  flex: 0 0 auto;
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 /* 文件夹过滤树 */
 .exclude-tree {

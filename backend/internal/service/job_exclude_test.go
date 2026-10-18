@@ -142,3 +142,40 @@ func TestCleanJobInputRejectsUnsupportedExcludeRule(t *testing.T) {
 		t.Fatal("CleanJobInput() accepted an unsupported exclude rule")
 	}
 }
+
+// Tasks created before v0.0.21 carry the old ".Trash-*/" default. Rejecting it
+// made every such task unsavable regardless of what the user ticked.
+func TestInvalidExcludeRulesAcceptsLegacyWildcardDirectory(t *testing.T) {
+	if got := invalidExcludeRules(".Trash-*/\n.Trash/"); len(got) > 0 {
+		t.Fatalf("invalidExcludeRules() = %#v, want none", got)
+	}
+	if got := normalizeExclude(".Trash-*/"); got != ".Trash-*/" {
+		t.Fatalf("normalizeExclude() = %q, want .Trash-*/", got)
+	}
+}
+
+func TestInvalidExcludeRulesRejectsUnsafeDirectoryWildcards(t *testing.T) {
+	input := "*/\n**/\nfoo/*/\n*/bar/\nca**he/"
+	got := invalidExcludeRules(input)
+	if len(got) != 5 {
+		t.Fatalf("invalidExcludeRules() = %#v, want all 5 rejected", got)
+	}
+}
+
+func TestExcludeMatcherMatchesWildcardDirectoryName(t *testing.T) {
+	matcher := newExcludeMatcher(".Trash-*/")
+	tests := []struct {
+		path     string
+		isDir    bool
+		expected bool
+	}{
+		{".Trash-1000", true, true},
+		{"share/.Trash-0", true, true},
+		{".Trash", true, false},
+	}
+	for _, test := range tests {
+		if got := matcher.matches(test.path, test.isDir); got != test.expected {
+			t.Errorf("matches(%q, %v) = %v, want %v", test.path, test.isDir, got, test.expected)
+		}
+	}
+}

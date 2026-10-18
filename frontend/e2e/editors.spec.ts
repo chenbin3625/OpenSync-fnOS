@@ -516,3 +516,171 @@ test("directory picker scrolls when there are many folders", async ({ page }) =>
   await last.locator(".semi-tree-option-label").click();
   await expect(dialog.locator(".remote-paths").first()).toContainText("/dir-119");
 });
+
+async function openPickerForEditedTask(
+  page: import("@playwright/test").Page,
+  options: {
+    srcPath: string;
+    listing: (path: string, call: number) => string[];
+    delay?: (path: string) => number;
+  },
+) {
+  const calls = new Map<string, number>();
+  await page.route("**/app/opensync/svr/**", async (route) => {
+    const url = new URL(route.request().url());
+    const success = (data: unknown) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ code: 200, data, msg: "" }),
+      });
+    if (url.pathname.endsWith("/session")) {
+      return success({ uid: 1, development: false, version: "test" });
+    }
+    if (url.pathname.endsWith("/alist") && url.searchParams.has("alistId")) {
+      const path = url.searchParams.get("path") || "/";
+      const call = (calls.get(path) || 0) + 1;
+      calls.set(path, call);
+      const wait = options.delay?.(path) || 0;
+      if (wait) await new Promise((resolve) => setTimeout(resolve, wait));
+      return success(options.listing(path, call).map((name) => ({ path: name })));
+    }
+    if (url.pathname.endsWith("/alist")) {
+      return success([
+        { id: 1, remark: "测试引擎", url: "https://engine.test", userName: "a" },
+      ]);
+    }
+    if (url.pathname.endsWith("/job") && url.searchParams.get("current")) {
+      return success(null);
+    }
+    if (url.pathname.endsWith("/job")) {
+      return success({
+        dataList: [
+          {
+            id: 42,
+            enable: 1,
+            remark: "目录任务",
+            alistId: 1,
+            srcPath: JSON.stringify([options.srcPath]),
+            dstPath: "[\"/Backup\"]",
+            method: 0,
+            isCron: 2,
+            interval: 1440,
+            minFileSize: 0,
+            maxFileSize: 0,
+            exclude: "",
+          },
+        ],
+        count: 1,
+      });
+    }
+    return success(null);
+  });
+
+  await page.goto("/app/opensync/tasks?jobId=42");
+  await page
+    .locator(".overview-card")
+    .getByRole("button", { name: "更多操作", exact: true })
+    .click();
+  await page.locator(".semi-dropdown-menu").getByText("设置", { exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  const source = dialog.locator(".remote-paths").first();
+  await source.getByRole("combobox", { name: "选择引擎目录" }).click();
+  const popover = page.locator(".remote-paths-dropdown");
+  const option = (key: string) =>
+    popover.locator(`[role="treeitem"][data-key="${key}"]`);
+  // 只展开未展开的节点：根目录加载后会自动展开，再点一次会收起
+  const expand = async (key: string) => {
+    await expect(option(key)).toBeVisible();
+    if ((await option(key).getAttribute("aria-expanded")) === "true") return;
+    await option(key).locator(".semi-tree-option-expand-icon").click();
+    await expect(option(key)).toHaveAttribute("aria-expanded", "true");
+  };
+  return { calls, dialog, source, popover, option, expand };
+}
+
+test("editing a task keeps sibling folders of the selected path loadable", async ({
+  page,
+}) => {
+  const listing: Record<string, string[]> = {
+    "/": ["Photos", "Backup"],
+    "/Photos": ["Albums", "Raw"],
+    "/Photos/Albums": ["2024", "2025"],
+  };
+  // 根目录请求慢于用户展开预置路径：这是原来子树被冲掉的触发条件
+  const { option, expand } = await openPickerForEditedTask(page, {
+    srcPath: "/Photos/Albums",
+    listing: (path) => listing[path] || [],
+    delay: (path) => (path === "/" ? 1500 : 0),
+  });
+  await expand("/");
+  await expand("/Photos");
+  await expect(option("/Photos/Raw")).toBeVisible();
+  await expand("/Photos/Albums");
+  await expect(option("/Photos/Albums/2025")).toBeVisible();
+  // 根目录返回后，已加载的下级目录必须仍在
+  await expect(option("/Backup")).toBeVisible();
+  await expect(option("/Photos/Raw")).toBeVisible();
+  await expect(option("/Photos/Albums/2025")).toBeVisible();
+  await option("/Photos/Raw").locator(".semi-tree-option-label").click();
+  await expect(page.getByRole("dialog").locator(".remote-paths").first()).toContainText("Raw");
+});
+
+test("refresh button reloads expanded folders from the engine", async ({ page }) => {
+  const { calls, popover, option, expand } = await openPickerForEditedTask(page, {
+    srcPath: "/Photos",
+    listing: (path, call) => {
+      if (path === "/") return ["Photos"];
+      if (path === "/Photos") return call === 1 ? ["Albums"] : ["Albums", "New"];
+      return [];
+    },
+  });
+  await expect(option("/Photos")).toBeVisible();
+  await expand("/Photos");
+  await expect(option("/Photos/Albums")).toBeVisible();
+  await expect(option("/Photos/New")).toHaveCount(0);
+
+  const before = { root: calls.get("/") || 0, photos: calls.get("/Photos") || 0 };
+  await popover.getByRole("button", { name: "刷新目录" }).click();
+  await expect(option("/Photos/New")).toBeVisible();
+  expect(calls.get("/")).toBe(before.root + 1);
+  expect(calls.get("/Photos")).toBe(before.photos + 1);
+  // 刷新后下拉仍保持打开，可继续选择
+  await option("/Photos/New").locator(".semi-tree-option-label").click();
+  await expect(page.getByRole("dialog").locator(".remote-paths").first()).toContainText("New");
+});
+
+test("deep paths keep folder names readable", async ({ page }) => {
+  const names = [
+    "Photos",
+    "Albums-from-family-devices",
+    "2024-summer-vacation-collection",
+    "very-long-directory-name-level-four",
+    "final-selected-folder-name",
+  ];
+  const paths = names.map((_, i) => "/" + names.slice(0, i + 1).join("/"));
+  const deepest = paths[paths.length - 1];
+  const { source, option, expand } = await openPickerForEditedTask(page, {
+    srcPath: deepest,
+    listing: (path) => {
+      const index = path === "/" ? 0 : paths.indexOf(path) + 1;
+      return names[index] ? [names[index]] : [];
+    },
+  });
+  // 选择框里最后一级目录名完整可见
+  const selectedName = source.locator(".remote-paths-selected-name");
+  await expect(selectedName).toHaveText("final-selected-folder-name");
+  await expect(source.locator(".remote-paths-selected")).toHaveAttribute("title", deepest);
+  const nameMetrics = await selectedName.evaluate((el) => ({
+    scroll: el.scrollWidth,
+    client: el.clientWidth,
+  }));
+  expect(nameMetrics.scroll).toBeLessThanOrEqual(nameMetrics.client);
+
+  await expand("/");
+  for (const path of paths.slice(0, -1)) await expand(path);
+  const label = option(deepest).locator(".remote-paths-node");
+  await expect(label).toHaveText("final-selected-folder-name");
+  // 深层节点名称单行显示，不被挤成多行
+  const box = await label.boundingBox();
+  expect(box!.height).toBeLessThanOrEqual(24);
+});

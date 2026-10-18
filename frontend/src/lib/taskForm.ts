@@ -475,44 +475,88 @@ const FOLDER_BLOCK_START =
   "# --- 文件夹过滤（自动生成，请勿手动编辑）---";
 const FOLDER_BLOCK_END = "# --- 文件夹过滤结束 ---";
 
-/** 从 exclude 文本的标记块中提取文件夹路径列表 */
-export function parseExcludeFolders(exclude: string): string[] {
-  const startIdx = exclude.indexOf(FOLDER_BLOCK_START);
-  const endIdx = exclude.indexOf(FOLDER_BLOCK_END);
-  if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) return [];
-  const block = exclude.slice(
-    startIdx + FOLDER_BLOCK_START.length,
-    endIdx,
-  );
-  return block
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l && !l.startsWith("#"));
+/**
+ * 判断一行是否是「文件夹过滤」生成的目录规则（标记块之外）。
+ *
+ * 后端保存时会去掉所有 `# ` 注释，标记块也随之消失，只剩裸的 `目录/` 行。
+ * 系统目录预设、已停用的注释行和带通配符的旧默认规则（如 `.Trash-*`）
+ * 不属于文件夹树，不能当成文件夹过滤，否则树一保存就会被冲掉。
+ */
+function isUnmarkedFolderRule(line: string): boolean {
+  const value = line.trim();
+  if (!value.endsWith("/") || value.startsWith("# ") || value.includes("*")) {
+    return false;
+  }
+  return !systemDirPresetPatterns().has(filterRuleKey(value));
 }
 
-/** 更新 exclude 文本中的标记块内容，保留手动规则不变 */
+function systemDirPresetPatterns() {
+  return new Set<string>(
+    systemDirFilterGroups.flatMap((group) =>
+      [...group.patterns].map((pattern) => filterRuleKey(pattern)),
+    ),
+  );
+}
+
+function findFolderBlock(exclude: string) {
+  const startIdx = exclude.indexOf(FOLDER_BLOCK_START);
+  const endIdx = exclude.indexOf(FOLDER_BLOCK_END);
+  if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) return null;
+  return { startIdx, endIdx };
+}
+
+/** 从 exclude 文本中提取文件夹路径列表：标记块内的行 + 标记块被后端去掉后残留的目录行 */
+export function parseExcludeFolders(exclude: string): string[] {
+  const block = findFolderBlock(exclude);
+  const inside = block
+    ? exclude
+        .slice(block.startIdx + FOLDER_BLOCK_START.length, block.endIdx)
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l && !l.startsWith("#"))
+    : [];
+  const outside = (
+    block
+      ? exclude.slice(0, block.startIdx) +
+        "\n" +
+        exclude.slice(block.endIdx + FOLDER_BLOCK_END.length)
+      : exclude
+  )
+    .split("\n")
+    .filter(isUnmarkedFolderRule)
+    .map((l) => l.trim());
+  return Array.from(new Set([...inside, ...outside]));
+}
+
+/** 更新 exclude 文本中的文件夹过滤内容，保留手动规则和系统目录预设不变 */
 export function updateExcludeFolders(
   exclude: string,
   folders: string[],
 ): string {
-  const startIdx = exclude.indexOf(FOLDER_BLOCK_START);
-  const endIdx = exclude.indexOf(FOLDER_BLOCK_END);
+  // 先去掉标记块之外残留的目录行，避免同一目录重复且取消勾选后仍生效
+  const cleaned = exclude
+    .split("\n")
+    .filter((line) => !isUnmarkedFolderRule(line))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n");
+  const block = findFolderBlock(cleaned);
 
-  const block =
+  const content =
     folders.length > 0
       ? [FOLDER_BLOCK_START, ...folders, FOLDER_BLOCK_END].join("\n")
       : "";
 
   // 已有标记块 — 替换
-  if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
-    const before = exclude.slice(0, startIdx).trimEnd();
-    const after = exclude.slice(endIdx + FOLDER_BLOCK_END.length).trimStart();
-    const parts = [before, block, after].filter(Boolean);
-    return parts.join("\n\n");
+  if (block) {
+    const before = cleaned.slice(0, block.startIdx).trimEnd();
+    const after = cleaned
+      .slice(block.endIdx + FOLDER_BLOCK_END.length)
+      .trimStart();
+    return [before, content, after].filter(Boolean).join("\n\n");
   }
 
   // 无标记块 — 追加到末尾
-  if (!block) return exclude;
-  const trimmed = exclude.trimEnd();
-  return trimmed ? trimmed + "\n\n" + block : block;
+  if (!content) return cleaned === exclude ? exclude : cleaned.trimEnd();
+  const trimmed = cleaned.trimEnd();
+  return trimmed ? trimmed + "\n\n" + content : content;
 }
