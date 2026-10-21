@@ -138,3 +138,63 @@ func TestGetJobCurrentReturnsStalePageWhenExpectedTaskIDDiffers(t *testing.T) {
 		t.Fatalf("dataList len = %d, want 0", len(items))
 	}
 }
+
+// A cached taskNum that parses but misses counters (old schema, partial write)
+// must be recomputed: cached counters are never refreshed, so the missing
+// columns would otherwise be gone from the UI for good.
+func TestGetTaskListRecomputesIncompleteCachedTaskNum(t *testing.T) {
+	testDB, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open() error: %v", err)
+	}
+	defer testDB.Close()
+	for _, stmt := range []string{
+		`CREATE TABLE job_task(
+			id integer primary key autoincrement,
+			jobId integer,
+			status integer,
+			runTime integer,
+			taskNum text,
+			createTime integer
+		)`,
+		`CREATE TABLE job_task_item(
+			id integer primary key autoincrement,
+			taskId integer,
+			fileSize integer,
+			type integer,
+			status integer
+		)`,
+		`INSERT INTO job_task(id, jobId, status, runTime, taskNum, createTime)
+		 VALUES (10, 1, 2, 100, '{"allNum":1}', 100)`,
+		"INSERT INTO job_task_item(taskId, status, type, fileSize) VALUES (10, 2, 0, 42)",
+	} {
+		if _, err := testDB.Exec(stmt); err != nil {
+			t.Fatalf("exec %q: %v", stmt, err)
+		}
+	}
+	restoreDB := mapper.SetDBForTest(testDB)
+	defer restoreDB()
+
+	var scheduled []map[string]interface{}
+	oldSchedule := scheduleTaskNumUpdateFn
+	scheduleTaskNumUpdateFn = func(rows []map[string]interface{}) {
+		scheduled = append(scheduled, rows...)
+	}
+	defer func() { scheduleTaskNumUpdateFn = oldSchedule }()
+
+	result, err := GetTaskList(map[string]interface{}{"id": int64(1)})
+	if err != nil {
+		t.Fatalf("GetTaskList() error: %v", err)
+	}
+	items, ok := result["dataList"].([]map[string]interface{})
+	if !ok || len(items) != 1 {
+		t.Fatalf("dataList = %#v, want one task", result["dataList"])
+	}
+	item := items[0]
+	if item["successNum"] != int64(1) || item["allNum"] != int64(1) || item["sumSize"] != int64(42) {
+		t.Fatalf("recomputed counters = %#v, want successNum/allNum/sumSize 1/1/42", item)
+	}
+	if len(scheduled) != 1 {
+		t.Fatalf("scheduled taskNum updates = %d, want the complete counters cached once", len(scheduled))
+	}
+}

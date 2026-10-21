@@ -2,6 +2,7 @@ package msg
 
 import (
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 )
@@ -12,6 +13,7 @@ const (
 	AlistNotFound           = "AlistNotFound"
 	AlistInUse              = "AlistInUse"
 	JobNotFound             = "JobNotFound"
+	JobExists               = "JobExists"
 	TaskNotFound            = "TaskNotFound"
 	AlistConnectFail        = "AlistConnectFail"
 	AlistURLInvalid         = "AlistURLInvalid"
@@ -57,10 +59,16 @@ const (
 	InternalError           = "InternalError"
 	RequestTooLarge         = "RequestTooLarge"
 	SSEConnLimit            = "SSEConnLimit"
+	SSEStreamLimit          = "SSEStreamLimit"
 	InvalidConfigParams     = "InvalidConfigParams"
 	ConfigSaveFail          = "ConfigSaveFail"
+	ConfigChangedOnDisk     = "ConfigChangedOnDisk"
 	CredentialUnreadable    = "CredentialUnreadable"
 	VersionCheckFail        = "VersionCheckFail"
+	// Gateway identity/origin rejections, used by platform.GatewayRequired.
+	CrossSiteWriteRejected = "CrossSiteWriteRejected"
+	GatewayLoginRequired   = "GatewayLoginRequired"
+	AdminOnly              = "AdminOnly"
 )
 
 // Format-string keys
@@ -85,6 +93,7 @@ var translations = map[string]map[string]string{
 		AlistNotFound:           "未找到alist，可能已经被删除",
 		AlistInUse:              "该引擎仍被同步任务使用，请先删除相关同步任务",
 		JobNotFound:             "未找到作业，可能已经被删除",
+		JobExists:               "相同来源、目标和引擎的作业已存在",
 		TaskNotFound:            "未找到任务，可能已经被删除",
 		AlistConnectFail:        "alist连接失败，请检查是否填写正确",
 		AlistURLInvalid:         "AList地址必须是有效的 http 或 https URL",
@@ -130,10 +139,15 @@ var translations = map[string]map[string]string{
 		InternalError:           "操作失败，请检查引擎连接或查看服务日志",
 		RequestTooLarge:         "请求内容过大",
 		SSEConnLimit:            "连接数已达上限，请关闭其他页面后重试",
+		SSEStreamLimit:          "该任务的进度订阅数已达上限，请关闭其他页面后重试",
 		InvalidConfigParams:     "配置参数无效",
 		ConfigSaveFail:          "配置保存失败，请查看服务日志",
+		ConfigChangedOnDisk:     "配置文件已被手动修改（%s），为避免覆盖您的修改已拒绝保存，请重启应用后重试",
 		CredentialUnreadable:    "已保存的凭据无法解密（secret.key 可能已丢失或被替换），请删除该配置后重新添加",
 		VersionCheckFail:        "暂时无法检查最新版本",
+		CrossSiteWriteRejected:  "不允许跨站操作",
+		GatewayLoginRequired:    "请从飞牛桌面打开应用",
+		AdminOnly:               "仅管理员可使用此应用",
 
 		FmtExcludeRulesUnsupported: "以下过滤规则不受支持，已拒绝保存：%s。仅支持三种写法：文件名（可含 * 通配）、*.后缀、相对目录/",
 		FmtMirrorDeleteGuard:       "为防止误删，已跳过本次全量同步的删除阶段：%s。请确认来源目录可正常列举后重试",
@@ -148,6 +162,7 @@ var translations = map[string]map[string]string{
 		AlistNotFound:           "AList not found, it may have been deleted",
 		AlistInUse:              "This engine is still used by sync jobs, please delete those jobs first",
 		JobNotFound:             "Job not found, it may have been deleted",
+		JobExists:               "A job with the same source, destination and engine already exists",
 		TaskNotFound:            "Task not found, it may have been deleted",
 		AlistConnectFail:        "Failed to connect to AList, please check your settings",
 		AlistURLInvalid:         "AList URL must be a valid HTTP or HTTPS URL",
@@ -193,10 +208,15 @@ var translations = map[string]map[string]string{
 		InternalError:           "Operation failed, please check engine connection or view service logs",
 		RequestTooLarge:         "Request body too large",
 		SSEConnLimit:            "Connection limit reached, please close other pages and try again",
+		SSEStreamLimit:          "Too many progress streams for this task, please close other pages and try again",
 		InvalidConfigParams:     "Invalid configuration parameters",
 		ConfigSaveFail:          "Failed to save configuration, please check the service logs",
+		ConfigChangedOnDisk:     "The configuration file was edited manually (%s); refusing to overwrite those changes. Restart the app and try again",
 		CredentialUnreadable:    "The stored credential cannot be decrypted (secret.key may have been lost or replaced), please delete this entry and add it again",
 		VersionCheckFail:        "Unable to check for the latest version right now",
+		CrossSiteWriteRejected:  "Cross-site operations are not allowed",
+		GatewayLoginRequired:    "Please open this app from the fnOS desktop",
+		AdminOnly:               "Only administrators can use this app",
 
 		FmtExcludeRulesUnsupported: "The following filter rules are not supported and were rejected: %s. Only three formats are supported: filename (with * wildcard), *.extension, relative/directory/",
 		FmtMirrorDeleteGuard:       "To prevent accidental deletion, the delete phase of this full sync was skipped: %s. Please verify the source directory can be listed correctly and try again",
@@ -230,11 +250,32 @@ func T(key string) string {
 	return key
 }
 
-// SetLocale sets the active locale (e.g. "zh", "en").
+// SetLocale sets the active locale (e.g. "zh", "en"). Values are normalized
+// (whitespace trimmed, lowercased, region suffix dropped) so configuration
+// input such as "EN", "en-US" or "zh_CN" behaves as expected; an unsupported
+// locale falls back to "zh" with a warning instead of silently returning
+// untranslated keys.
 func SetLocale(locale string) {
 	mu.Lock()
-	currentLocale = locale
+	currentLocale = normalizeLocale(locale)
 	mu.Unlock()
+}
+
+// normalizeLocale maps a configured locale onto the supported translation
+// tables, returning "zh" for anything that is not recognized.
+func normalizeLocale(locale string) string {
+	normalized := strings.ToLower(strings.TrimSpace(locale))
+	if i := strings.IndexAny(normalized, "-_."); i >= 0 {
+		normalized = normalized[:i]
+	}
+	if normalized == "" {
+		return "zh"
+	}
+	if _, ok := translations[normalized]; ok {
+		return normalized
+	}
+	log.Printf("Warning: unsupported locale %q, falling back to zh", locale)
+	return "zh"
 }
 
 // Locale returns the current locale.

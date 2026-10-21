@@ -227,7 +227,16 @@ var notifySecretKeys = map[int][]string{
 	2: {"url", "webhook", "secret"}, // 钉钉 (access_token in URL query, 加签 secret)
 	3: {"corpsecret", "corpSecret"}, // 企业微信应用密钥
 	4: {"url", "webhook", "secret"}, // 飞书 (token in URL path, 签名校验 secret)
-	5: {"deviceKey"},                // Bark 设备 Key
+	5: {"server", "deviceKey"},      // Bark: server 是投递目标（可能内嵌凭据），deviceKey 是设备密钥
+}
+
+// allNotifySecretKeys is the union over every method. It is used when a stored
+// row carries an unknown method: redaction must fail closed and mask every
+// known secret field instead of echoing the row, because a malformed method
+// value must not turn the list endpoint into a credential dump.
+var allNotifySecretKeys = []string{
+	"url", "webhook", "headers", "body", "sendKey", "secret",
+	"corpsecret", "corpSecret", "deviceKey", "server",
 }
 
 const notifyRedactionMarker = "****"
@@ -322,13 +331,22 @@ func maskNotifyQuery(rawQuery string) string {
 func redactNotifyParams(method int, paramsStr string) string {
 	params, err := parseNotifyParams(paramsStr)
 	if err != nil {
-		return paramsStr
+		// Fail closed. A hand-written, truncated or legacy row is exactly the
+		// case where the raw string may still contain a token; echoing it back
+		// verbatim would defeat the entire redaction boundary (the same failure
+		// mode maskNotifyQuery already guards against).
+		return "{}"
+	}
+	keys := notifySecretKeys[method]
+	if keys == nil {
+		// Unknown method: mask the union rather than nothing.
+		keys = allNotifySecretKeys
 	}
 	// Redaction is decided by key, never by the value's Go type. headers is
 	// stored as a JSON object, so the old `s, _ := v.(string); if s == ""
 	// { continue }` guard skipped it entirely and returned Authorization in
 	// cleartext — the case "headers" branch below was unreachable.
-	for _, key := range notifySecretKeys[method] {
+	for _, key := range keys {
 		v, ok := params[key]
 		if !ok || v == nil {
 			continue
@@ -358,7 +376,10 @@ func redactNotifyParams(method int, paramsStr string) string {
 			// Unlike sendKey-style masks, no suffix is kept: a body template
 			// may embed a token at any position.
 			params[key] = notifyBodyRedacted
-		case "url", "webhook":
+		case "url", "webhook", "server":
+			// server is Bark's target URL; masking it like url keeps userinfo
+			// and query credentials out of the list response while the host
+			// stays visible.
 			params[key] = maskNotifyURL(s)
 		default:
 			params[key] = maskSecretValue(s)
@@ -366,7 +387,7 @@ func redactNotifyParams(method int, paramsStr string) string {
 	}
 	out, err := json.Marshal(params)
 	if err != nil {
-		return paramsStr
+		return "{}"
 	}
 	return string(out)
 }
@@ -396,9 +417,125 @@ func isMaskedSecretValue(value string) bool {
 	return err == nil && strings.Contains(decoded, notifyRedactionMarker)
 }
 
+// rejectRedactedNotifyParams refuses params that still contain a redaction
+// placeholder. A placeholder is a display value only: persisting one overwrites
+// the stored credential with "****", and sending one ships the placeholder as
+// if it were the secret. Both are silent failures users can neither see nor
+// repair from the UI, so the write/test path must fail closed instead.
+func rejectRedactedNotifyParams(params map[string]interface{}) error {
+	if key := firstRedactedNotifyKey(params); key != "" {
+		return publicError(fmt.Sprintf("通知参数 %s 仍是脱敏占位符，请重新填写后再保存或测试", key))
+	}
+	return nil
+}
+
+func firstRedactedNotifyKey(params map[string]interface{}) string {
+	for _, key := range allNotifySecretKeys {
+		v, ok := params[key]
+		if !ok || v == nil {
+			continue
+		}
+		switch value := v.(type) {
+		case string:
+			if isMaskedSecretValue(value) {
+				return key
+			}
+		case map[string]interface{}:
+			for nestedKey, item := range value {
+				s, isStr := item.(string)
+				if isStr && isMaskedSecretValue(s) {
+					return key + "." + nestedKey
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// normalizeNotifyWebhookBody turns a JSON object/array body into the template
+// string sendWebhook expects. A REST client naturally submits
+// {"body":{"text":"{title}"}}, but sendWebhook replaces placeholders in a
+// string template and json.Unmarshal's it; a raw object was stored happily and
+// then every send failed with "Body 格式无效".
+func normalizeNotifyWebhookBody(params map[string]interface{}) error {
+	raw, ok := params["body"]
+	if !ok || raw == nil {
+		return nil
+	}
+	switch value := raw.(type) {
+	case string:
+		return validateWebhookBodyTemplate(value)
+	case map[string]interface{}, []interface{}:
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return publicError("通知自定义 Body 格式无效")
+		}
+		params["body"] = string(encoded)
+		return nil
+	default:
+		return publicError("通知自定义 Body 格式无效")
+	}
+}
+
+// validateWebhookBodyTemplate checks a custom body template at save time
+// instead of at delivery time. sendWebhook substitutes the placeholders with
+// JSON-escaped strings and then unmarshals the result, so the template must
+// stay valid JSON after substitution.
+func validateWebhookBodyTemplate(template string) error {
+	if strings.TrimSpace(template) == "" {
+		return nil
+	}
+	rendered := strings.NewReplacer("{title}", "title", "{content}", "content").Replace(template)
+	var body interface{}
+	if err := json.Unmarshal([]byte(rendered), &body); err != nil {
+		return publicError("通知自定义 Body 格式无效")
+	}
+	return nil
+}
+
+// normalizeNotifyEnable converts the enable shapes the API accepts (JSON bool,
+// number, numeric/boolean string) into 0/1. util.ToInt silently maps `true` to
+// 0, which used to create/update a config as disabled.
+func normalizeNotifyEnable(value interface{}) (int, error) {
+	switch v := value.(type) {
+	case bool:
+		if v {
+			return 1, nil
+		}
+		return 0, nil
+	case int:
+		if v == 0 || v == 1 {
+			return v, nil
+		}
+	case int64:
+		if v == 0 || v == 1 {
+			return int(v), nil
+		}
+	case float64:
+		if v == 0 || v == 1 {
+			return int(v), nil
+		}
+	case string:
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "0", "false":
+			return 0, nil
+		case "1", "true":
+			return 1, nil
+		}
+	}
+	return 0, publicError(msg.T(msg.LostPart))
+}
+
 // loadStoredNotify reads the stored config that resolveNotifyParams merges
 // secrets from. It is a variable so tests can simulate a failing read.
 var loadStoredNotify = mapper.GetNotifyByID
+
+// Write seams, so the validation/redaction paths can be exercised without a
+// database.
+var (
+	addNotifyRecord  = mapper.AddNotify
+	editNotifyRecord = mapper.EditNotify
+)
 
 // resolveNotifyParams merges incoming params with stored secrets for fields
 // that were redacted (masked) or left empty. For new configs (no id) the
@@ -478,17 +615,26 @@ func resolveNotifyParams(notify map[string]interface{}) (map[string]interface{},
 // that is the UI round-tripping the redacted value it was given.
 //
 // Bark keeps its target in server rather than url; it is compared the same way
-// so a changed server cannot inherit the stored deviceKey.
+// so a changed server cannot inherit the stored deviceKey. A stored row without
+// any target (e.g. a Bark config that relies on the default server) is treated
+// as a change when the caller supplies one: the previous value is unknown, and
+// merging stored secrets into an unknown target would ship them to a
+// destination of the caller's choosing. WeCom has no URL target at all, so its
+// corp id is compared instead.
 func notifyTargetChanged(incoming, existing map[string]interface{}) bool {
 	incomingURL := paramString(incoming, "url", "webhook", "server")
-	if incomingURL == "" || isMaskedSecretValue(incomingURL) {
-		return false
+	if incomingURL != "" && !isMaskedSecretValue(incomingURL) {
+		existingURL := paramString(existing, "url", "webhook", "server")
+		if existingURL == "" {
+			return true
+		}
+		if incomingURL != existingURL {
+			return true
+		}
 	}
-	existingURL := paramString(existing, "url", "webhook", "server")
-	if existingURL == "" {
-		return false
-	}
-	return incomingURL != existingURL
+	incomingCorp := paramString(incoming, "corpid", "corpId")
+	existingCorp := paramString(existing, "corpid", "corpId")
+	return incomingCorp != "" && existingCorp != "" && incomingCorp != existingCorp
 }
 
 func validateNotifyParams(method int, params map[string]interface{}) error {
@@ -497,7 +643,10 @@ func validateNotifyParams(method int, params map[string]interface{}) error {
 		if err := validateNotifyWebhookURL(paramString(params, "url", "webhook")); err != nil {
 			return err
 		}
-		return validateWebhookMethod(paramString(params, "method", "httpMethod"))
+		if err := validateWebhookMethod(paramString(params, "method", "httpMethod")); err != nil {
+			return err
+		}
+		return validateWebhookPayload(params)
 	case 1:
 		if paramString(params, "sendKey") == "" {
 			return errors.New(msg.T(msg.NotifyParamInvalid))
@@ -536,6 +685,27 @@ func validateWebhookMethod(method string) error {
 	default:
 		return errors.New(msg.T(msg.NotifyParamInvalid))
 	}
+}
+
+// validateWebhookPayload checks the two custom-webhook fields sendWebhook can
+// only use in one shape: headers must be an object (a bare string is silently
+// dropped at send time, which looks like an authentication failure) and body
+// must be a template that stays valid JSON after placeholder substitution.
+func validateWebhookPayload(params map[string]interface{}) error {
+	if raw, ok := params["headers"]; ok && raw != nil {
+		if _, isMap := raw.(map[string]interface{}); !isMap {
+			return errors.New("通知自定义 Header 必须是 JSON 对象")
+		}
+	}
+	raw, ok := params["body"]
+	if !ok || raw == nil {
+		return nil
+	}
+	template, isStr := raw.(string)
+	if !isStr {
+		return publicError("通知自定义 Body 格式无效")
+	}
+	return validateWebhookBodyTemplate(template)
 }
 
 func validateNotifyWebhookURL(rawURL string) error {
@@ -584,7 +754,17 @@ func AddNewNotify(notify map[string]interface{}) (int64, error) {
 	}
 	method := util.ToInt(notify["method"])
 	notify["method"] = method
-	notify["enable"] = util.ToInt(notify["enable"])
+	enable, err := normalizeNotifyEnable(notify["enable"])
+	if err != nil {
+		return 0, err
+	}
+	notify["enable"] = enable
+	if err := rejectRedactedNotifyParams(params); err != nil {
+		return 0, err
+	}
+	if err := normalizeNotifyWebhookBody(params); err != nil {
+		return 0, err
+	}
 	if err := validateNotifyParams(method, params); err != nil {
 		return 0, publicError(err.Error())
 	}
@@ -593,7 +773,7 @@ func AddNewNotify(notify map[string]interface{}) (int64, error) {
 		return 0, fmt.Errorf("marshal notify params: %w", err)
 	}
 	notify["params"] = string(out)
-	id, err := mapper.AddNotify(notify)
+	id, err := addNotifyRecord(notify)
 	if err != nil {
 		return 0, fmt.Errorf("add notify: %w", err)
 	}
@@ -611,12 +791,22 @@ func EditNotify(notify map[string]interface{}) error {
 	if !ok || enableRaw == nil {
 		return publicError(msg.T(msg.LostPart))
 	}
-	notify["enable"] = util.ToInt(enableRaw)
+	enable, err := normalizeNotifyEnable(enableRaw)
+	if err != nil {
+		return err
+	}
+	notify["enable"] = enable
 	resolved, err := resolveNotifyParams(notify)
 	if err != nil {
 		return fmt.Errorf("resolve notify params: %w", err)
 	}
 	notify["method"] = util.ToInt(notify["method"])
+	if err := rejectRedactedNotifyParams(resolved); err != nil {
+		return err
+	}
+	if err := normalizeNotifyWebhookBody(resolved); err != nil {
+		return err
+	}
 	if err := validateNotifyParams(util.ToInt(notify["method"]), resolved); err != nil {
 		return publicError(err.Error())
 	}
@@ -625,7 +815,7 @@ func EditNotify(notify map[string]interface{}) error {
 		return fmt.Errorf("marshal notify params: %w", err)
 	}
 	notify["params"] = string(out)
-	if err := mapper.EditNotify(notify); err != nil {
+	if err := editNotifyRecord(notify); err != nil {
 		return fmt.Errorf("edit notify: %w", err)
 	}
 	return nil
@@ -650,6 +840,15 @@ func TestNotify(notify map[string]interface{}) error {
 	resolved, err := resolveNotifyParams(notify)
 	if err != nil {
 		return fmt.Errorf("resolve notify params: %w", err)
+	}
+	// A test send is the other path that reaches the network with the caller's
+	// params. A placeholder must never be sent: it is not a credential, and a
+	// changed target must not inherit the stored one.
+	if err := rejectRedactedNotifyParams(resolved); err != nil {
+		return err
+	}
+	if err := normalizeNotifyWebhookBody(resolved); err != nil {
+		return err
 	}
 	if err := validateNotifyParams(util.ToInt(notify["method"]), resolved); err != nil {
 		return publicError(err.Error())
@@ -682,12 +881,17 @@ func TestNotify(notify map[string]interface{}) error {
 // QueueTaskNotification, so a slow webhook cannot hold up the finishing task.
 func SendTaskNotification(taskID int64, status int, taskNum map[string]interface{}, duration int, createTime float64) {
 	notifyList, err := mapper.GetNotifyList(true)
-	if err != nil || len(notifyList) == 0 {
+	if err != nil {
+		log.Printf("Failed to load notify configs for task %d: %v", taskID, err)
+		return
+	}
+	if len(notifyList) == 0 {
 		return
 	}
 
 	job, err := mapper.GetJobByTaskID(taskID)
 	if err != nil {
+		log.Printf("Failed to load job for task %d notification: %v", taskID, err)
 		return
 	}
 
@@ -817,6 +1021,11 @@ func recordNotifySendResult(notify map[string]interface{}, sent bool, sendErr er
 		reason = sanitizeNotifyError(sendErr.Error())
 		log.Printf("%s", msg.NotifyError(reason))
 	}
+	if notifyBaseContext().Err() != nil {
+		// Shutdown gave up on this send and is closing the database; the
+		// outcome is the cancellation itself, not worth a write after CloseDB.
+		return
+	}
 	if err := notifyDeps.RecordSendOutcome(notifyID, status, time.Now().Unix(), reason); err != nil {
 		log.Printf("Failed to record delivery result for notify %d: %v", notifyID, err)
 	}
@@ -861,6 +1070,14 @@ func sendNotify(notify map[string]interface{}, title, content string, needNotSyn
 	params, err := notifyParamsValue(notify["params"])
 	if err != nil {
 		return false, fmt.Errorf("parse notify params: %w", err)
+	}
+	// Refuse to send a redaction placeholder that a pre-fix row may still
+	// carry, then normalise what a REST add could have stored in another shape.
+	if err := rejectRedactedNotifyParams(params); err != nil {
+		return false, err
+	}
+	if err := normalizeNotifyWebhookBody(params); err != nil {
+		return false, err
 	}
 
 	method := util.ToInt(notify["method"])
@@ -927,7 +1144,7 @@ func buildNotifyRequest(method, urlStr string, body io.Reader, contentType strin
 	if err := validateWebhookDestination(urlStr); err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest(method, urlStr, body)
+	req, err := http.NewRequestWithContext(notifyBaseContext(), method, urlStr, body)
 	if err != nil {
 		return nil, err
 	}

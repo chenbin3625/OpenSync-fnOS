@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const encryptedValuePrefix = "enc:v1:"
@@ -110,7 +111,13 @@ func ReadOrSetFile(fileName string, defaultVal string, force bool) (string, erro
 			if len(strings.TrimSpace(string(data))) == 0 {
 				return "", fmt.Errorf("%s exists but is empty; refusing to replace it with a new value", fileName)
 			}
-			_ = os.Chmod(fileName, 0600)
+			// A secret file that an older release created with wider permissions
+			// must be tightened; silently leaving it world-readable would expose
+			// every stored credential. A failed chmod is treated like any other
+			// persist failure so startup stops instead of running with a leak.
+			if err := os.Chmod(fileName, 0600); err != nil {
+				return "", fmt.Errorf("chmod %s to 0600: %w", fileName, err)
+			}
 			return string(data), nil
 		case !errors.Is(err, fs.ErrNotExist):
 			return "", fmt.Errorf("read %s: %w", fileName, err)
@@ -118,7 +125,9 @@ func ReadOrSetFile(fileName string, defaultVal string, force bool) (string, erro
 	}
 	dir := filepath.Dir(fileName)
 	if dir != "." {
-		if err := os.MkdirAll(dir, 0755); err != nil {
+		// The directory holds key material: keep it owner-only rather than
+		// relying on the caller having created it with the right mode.
+		if err := os.MkdirAll(dir, 0700); err != nil {
 			return "", err
 		}
 	}
@@ -144,6 +153,100 @@ func ReadOrSetFile(fileName string, defaultVal string, force bool) (string, erro
 		return "", err
 	}
 	return defaultVal, nil
+}
+
+// EnsureNonEmptyFile returns the current content of fileName, creating or
+// replacing it with defaultVal only when it is absent or empty/whitespace.
+//
+// Unlike ReadOrSetFile(force=true), which blindly overwrites, this function is
+// safe to call when another process may be doing the same thing: it serializes
+// on a sibling lock file, re-reads before deciding to write, and returns the
+// value that is actually on disk afterwards. Callers use it to recover a
+// secret that a crash left empty without ever rotating a valid key.
+func EnsureNonEmptyFile(fileName string, defaultVal string) (string, error) {
+	dir := filepath.Dir(fileName)
+	if dir != "." {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return "", err
+		}
+	}
+	unlock, err := acquireFileLock(fileName)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+
+	if existing, ok, err := readNonEmptyFile(fileName); err != nil {
+		return "", err
+	} else if ok {
+		return existing, nil
+	}
+	if err := writeFileAtomic(fileName, []byte(defaultVal)); err != nil {
+		return "", err
+	}
+	// Another writer may have replaced the file between our rename and this
+	// read; return what is genuinely persisted so callers never keep a value
+	// that is not on disk.
+	value, ok, err := readNonEmptyFile(fileName)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("%s is empty after writing a new value", fileName)
+	}
+	return value, nil
+}
+
+// readNonEmptyFile reads a non-empty file and tightens its permissions. ok is
+// false when the file does not exist or contains only whitespace.
+func readNonEmptyFile(fileName string) (value string, ok bool, err error) {
+	data, err := os.ReadFile(fileName)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return "", false, nil
+	case err != nil:
+		return "", false, fmt.Errorf("read %s: %w", fileName, err)
+	}
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return "", false, nil
+	}
+	if err := os.Chmod(fileName, 0600); err != nil {
+		return "", false, fmt.Errorf("chmod %s to 0600: %w", fileName, err)
+	}
+	return string(data), true, nil
+}
+
+const (
+	fileLockTimeout      = 5 * time.Second
+	fileLockStaleAfter   = 30 * time.Second
+	fileLockPollInterval = 10 * time.Millisecond
+)
+
+// acquireFileLock serializes key rotation between processes (and goroutines)
+// using an O_EXCL sibling file. A lock older than fileLockStaleAfter is treated
+// as left behind by a crash and removed, so a dead process cannot block startup
+// forever.
+func acquireFileLock(fileName string) (unlock func(), err error) {
+	lockName := fileName + ".lock"
+	deadline := time.Now().Add(fileLockTimeout)
+	for {
+		f, openErr := os.OpenFile(lockName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		if openErr == nil {
+			_ = f.Close()
+			return func() { _ = os.Remove(lockName) }, nil
+		}
+		if !errors.Is(openErr, fs.ErrExist) {
+			return nil, openErr
+		}
+		if info, statErr := os.Stat(lockName); statErr == nil && time.Since(info.ModTime()) > fileLockStaleAfter {
+			_ = os.Remove(lockName)
+			continue
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("timed out waiting for %s; another process may be rotating the key", lockName)
+		}
+		time.Sleep(fileLockPollInterval)
+	}
 }
 
 // writeNewFile creates fileName exclusively with owner-only permissions and

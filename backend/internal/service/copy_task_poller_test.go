@@ -200,7 +200,7 @@ func TestCopyMonitorPollTaskInfo404RejectsSizeMismatch(t *testing.T) {
 			return nil, &alistStatusError{httpStatus: 404}
 		},
 	}
-	monitor, watch := newCopyMonitorWatch(statCopyItemTestClient{client}, func(ci *CopyItem) { ci.FileSize = int64(1024) })
+	monitor, watch := newCopyMonitorWatch(statCopyItemTestClient{copyItemTestClient: client}, func(ci *CopyItem) { ci.FileSize = int64(1024) })
 
 	if !monitor.pollTaskInfo(watch) {
 		t.Fatal("pollTaskInfo() = false, want true")
@@ -217,7 +217,7 @@ func TestCopyMonitorPollTaskInfo404AcceptsMatchingSize(t *testing.T) {
 			return nil, &alistStatusError{httpStatus: 404}
 		},
 	}
-	monitor, watch := newCopyMonitorWatch(statCopyItemTestClient{client}, func(ci *CopyItem) { ci.FileSize = int64(1024) })
+	monitor, watch := newCopyMonitorWatch(statCopyItemTestClient{copyItemTestClient: client}, func(ci *CopyItem) { ci.FileSize = int64(1024) })
 
 	monitor.pollTaskInfo(watch)
 	if status := watch.ci.status(); status != taskStatusSuccess {
@@ -306,5 +306,88 @@ func TestCopyMonitorAbortAllStopsWhenContextCancelled(t *testing.T) {
 	}
 	if client.cancelCalls != 1 || client.deleteCalls != 1 {
 		t.Fatalf("cancel/delete calls = %d/%d, want 1/1", client.cancelCalls, client.deleteCalls)
+	}
+}
+
+type blockingDeleteClient struct {
+	*copyItemTestClient
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (c *blockingDeleteClient) TaskDeleteContext(ctx context.Context, _ string, _ taskItemType) error {
+	c.once.Do(func() { close(c.started) })
+	select {
+	case <-c.release:
+	case <-ctx.Done():
+	}
+	return nil
+}
+
+// finishWatch used to close the watch's done channel only after the remote task
+// deletion returned, so a finished copy kept its executor slot (and blocked a
+// copy goroutine) for up to the 30s cleanup timeout. The cleanup goroutine is
+// still tracked so stop() waits for it.
+func TestCopyMonitorFinishWatchUnblocksBeforeRemoteDelete(t *testing.T) {
+	client := &blockingDeleteClient{
+		copyItemTestClient: &copyItemTestClient{},
+		started:            make(chan struct{}),
+		release:            make(chan struct{}),
+	}
+	monitor, watch := newCopyMonitorWatch(client)
+
+	monitor.finishWatch(watch)
+
+	select {
+	case <-watch.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watch.done stayed open until the remote task deletion finished")
+	}
+	select {
+	case <-client.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("remote task deletion was not started")
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		monitor.stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		t.Fatal("stop() returned while the remote task deletion was still running")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(client.release)
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stop() did not return after the remote task deletion finished")
+	}
+}
+
+// The mapping is hand-written against an external enum (tache.State), so pin
+// every value up to the retry states: a silent default change would make a
+// terminal state look like Running and poll forever.
+func TestMapAlistTaskState(t *testing.T) {
+	cases := map[int]taskStatus{
+		0:  taskStatusWaiting,  // pending
+		1:  taskStatusRunning,  // running
+		2:  taskStatusSuccess,  // succeeded
+		3:  taskStatusRunning,  // canceling
+		4:  taskStatusStopped,  // canceled
+		5:  taskStatusRunning,  // errored (will retry)
+		6:  taskStatusRunning,  // failing (hook running)
+		7:  taskStatusFailed,   // failed
+		8:  taskStatusRunning,  // waiting retry
+		9:  taskStatusRunning,  // before retry
+		42: taskStatusRunning,  // unknown state keeps polling
+	}
+	for state, want := range cases {
+		if got := mapAlistTaskState(state); got != want {
+			t.Errorf("mapAlistTaskState(%d) = %d, want %d", state, got, want)
+		}
 	}
 }

@@ -94,15 +94,29 @@ export function useAsyncTree({
       // 父级先于子级加载；只有父级刷新后仍存在的目录才继续刷新，
       // 已在引擎上删除的目录不再请求，避免一串报错。
       const present = new Set(["/"]);
+      // 加载失败的目录无法确认其子目录是否仍存在：保留它下面已展开的目录，
+      // 否则根目录一次失败就会把整棵树折叠。
+      const failed: string[] = [];
+      const underFailed = (key: string) =>
+        failed.some(
+          (dir) =>
+            dir === "/" || key === dir || key.startsWith(dir.replace(/\/+$/, "") + "/"),
+        );
       const targets = sortPathsByDepth(new Set(["/", ...expandedRef.current]));
       for (const path of targets) {
         if (signal?.aborted) return;
-        if (!present.has(path)) continue;
+        if (!present.has(path) || underFailed(path)) continue;
         const children = await loadChildren(path, engineId, signal);
-        children?.forEach((child) => present.add(String(child.key)));
+        if (!children) {
+          failed.push(path);
+          continue;
+        }
+        children.forEach((child) => present.add(String(child.key)));
       }
       if (signal?.aborted) return;
-      setExpandedKeys((prev) => prev.filter((key) => present.has(key)));
+      setExpandedKeys((prev) =>
+        prev.filter((key) => present.has(key) || underFailed(key)),
+      );
     } finally {
       if (!signal?.aborted) setRefreshing(false);
     }

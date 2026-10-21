@@ -25,11 +25,18 @@ const (
 	maxFileListPages            = 10000
 	maxAlistWaitBuckets         = 1024
 	alistValidationTimeout      = 30 * time.Second
+	// maxListResponseBytesCap bounds OPENSYNC_MAX_LIST_BYTES. The helpers add
+	// one byte to the limit to detect oversized responses, so a value near
+	// math.MaxInt64 would overflow and turn every response into an empty body.
+	maxListResponseBytesCap = 1 << 40 // 1TB
 )
 
 func loadMaxListResponseBytes() int64 {
 	if raw := strings.TrimSpace(os.Getenv("OPENSYNC_MAX_LIST_BYTES")); raw != "" {
 		if n, err := strconv.ParseInt(raw, 10, 64); err == nil && n >= (1<<20) {
+			if n > maxListResponseBytesCap {
+				return maxListResponseBytesCap
+			}
 			return n
 		}
 	}
@@ -42,7 +49,7 @@ type AlistClient struct {
 	Token   string
 	User    string
 	AlistID int64
-	waits   map[string]time.Time
+	waits   map[string]alistWaitSlot
 	mu      sync.Mutex
 	client  *http.Client
 	// longClient shares client's transport but has a longer overall timeout;
@@ -81,7 +88,7 @@ func NewAlistClientContext(ctx context.Context, alistURL string, token string, a
 		URL:     normalizedURL,
 		Token:   token,
 		AlistID: alistID,
-		waits:   make(map[string]time.Time),
+		waits:   make(map[string]alistWaitSlot),
 		baseURL: *parsedURL,
 	}
 	c.client, c.longClient = newAlistHTTPClients()
@@ -196,13 +203,17 @@ func (c *AlistClient) doRequestContextLimit(ctx context.Context, method, apiPath
 	}
 	defer closeBody(resp.Body)
 
+	// The status is checked before the body is read: a large non-200 error
+	// page (e.g. a reverse proxy's HTML) would otherwise surface as a
+	// "response body exceeds" error and hide the HTTP status that callers
+	// branch on (isAlistObjectNotFound, isAmbiguousTransferError).
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.httpStatusError(resp)
+	}
+
 	respBody, err := readAllWithLimit(resp.Body, responseLimit)
 	if err != nil {
 		return nil, err
-	}
-
-	if resp.StatusCode != 200 {
-		return nil, &alistStatusError{httpStatus: resp.StatusCode}
 	}
 
 	var res alistResponse
@@ -215,12 +226,42 @@ func (c *AlistClient) doRequestContextLimit(ctx context.Context, method, apiPath
 	return res.Data, nil
 }
 
+// maxErrorBodyBytes bounds how much of a non-200 response is read to extract
+// an AList business code; the rest is drained by closeBody.
+const maxErrorBodyBytes = 4 << 10
+
+// httpStatusError builds the error for a non-200 response. HTTP 401 means the
+// token was rejected, exactly like AList's business code 401, so both take the
+// same eviction path. Only a small prefix of the body is read.
+func (c *AlistClient) httpStatusError(resp *http.Response) error {
+	if resp.StatusCode == http.StatusUnauthorized {
+		return c.unauthorized()
+	}
+	// Only an embedded 401 is taken from the body. Other business codes stay
+	// out of the error on purpose: the HTTP status is the authoritative answer
+	// here, and isAlistObjectNotFound must not reinterpret, say, an HTTP 500
+	// as "object missing" because its body mentions one.
+	if prefix, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes)); err == nil {
+		var res alistResponse
+		if json.Unmarshal(prefix, &res) == nil && res.Code == http.StatusUnauthorized {
+			return c.unauthorized()
+		}
+	}
+	return &alistStatusError{httpStatus: resp.StatusCode}
+}
+
+// unauthorized evicts this exact client from the cache (never a newer one
+// stored for the same id) and returns the public "unauthorized" error.
+func (c *AlistClient) unauthorized() error {
+	if c.AlistID > 0 {
+		removeCachedAlistClientIf(c.AlistID, c)
+	}
+	return errors.New(msg.T(msg.AlistUnAuth))
+}
+
 func (c *AlistClient) checkAlistCode(code int, message string) error {
 	if code == 401 {
-		if c.AlistID > 0 {
-			removeCachedAlistClient(c.AlistID)
-		}
-		return errors.New(msg.T(msg.AlistUnAuth))
+		return c.unauthorized()
 	}
 	if code != 200 {
 		return &alistStatusError{alistCode: code, message: message}
@@ -300,13 +341,21 @@ func (c *AlistClient) getUserContext(ctx context.Context) error {
 }
 
 func (c *AlistClient) CheckWaitContext(ctx context.Context, path string, scanInterval int) error {
-	return c.checkWaitContextN(ctx, path, scanInterval, 1)
+	return c.checkWaitContext(ctx, path, scanInterval)
 }
 
-// checkWaitContextN is like CheckWaitContext but divides the per-bucket
-// interval by concurrency so N concurrent callers share the window instead
-// of queueing sequentially (0s, interval, 2*interval, …).
-func (c *AlistClient) checkWaitContextN(ctx context.Context, path string, scanInterval, concurrency int) error {
+// checkWaitContext spaces AList requests for the same top-level mount by
+// scanInterval: the value is a request-rate limit for the mount, so concurrent
+// callers start their requests at 0, interval, 2*interval, … while the requests
+// themselves still run concurrently.
+//
+// The previous implementation divided the interval by the scan concurrency,
+// which multiplied the effective request rate by the number of concurrent
+// scanners and contradicted both the config and the comment claiming total
+// throughput stayed the same. Callers must not expect burst capacity from
+// scanInterval. A cancelled caller rolls its reservation back so it does not
+// delay later requests.
+func (c *AlistClient) checkWaitContext(ctx context.Context, path string, scanInterval int) error {
 	if scanInterval <= 0 {
 		return nil
 	}
@@ -319,12 +368,7 @@ func (c *AlistClient) checkWaitContextN(ctx context.Context, path string, scanIn
 		return nil
 	}
 
-	if concurrency < 1 {
-		concurrency = 1
-	}
-	// Spread N concurrent requests evenly across the interval so total
-	// throughput matches the configured rate while parallelism is preserved.
-	interval := time.Duration(scanInterval) * time.Second / time.Duration(concurrency)
+	interval := time.Duration(scanInterval) * time.Second
 	if interval < time.Millisecond {
 		interval = time.Millisecond
 	}
@@ -334,13 +378,22 @@ func (c *AlistClient) checkWaitContextN(ctx context.Context, path string, scanIn
 
 	c.mu.Lock()
 	if c.waits == nil {
-		c.waits = make(map[string]time.Time)
+		c.waits = make(map[string]alistWaitSlot)
 	}
-	c.pruneWaitsLocked(now.Add(-interval))
-	if lastTime, ok := c.waits[pathFirst]; ok && now.Sub(lastTime) < interval {
-		waitUntil = lastTime.Add(interval)
+	// Prune by each bucket's own reserved interval: a reservation made with a
+	// longer interval (an older config value, or a mkdir/remove racing a
+	// listing) must not be dropped early, which would let requests exceed the
+	// configured rate.
+	c.pruneWaitsLocked(now)
+	previous, hadPrevious := c.waits[pathFirst]
+	if hadPrevious && now.Sub(previous.at) < interval {
+		waitUntil = previous.at.Add(interval)
 	}
-	c.waits[pathFirst] = waitUntil
+	slot := alistWaitSlot{at: waitUntil, interval: interval}
+	if hadPrevious && previous.interval > slot.interval {
+		slot.interval = previous.interval
+	}
+	c.waits[pathFirst] = slot
 	c.enforceMaxWaitBucketsLocked()
 	c.mu.Unlock()
 
@@ -350,10 +403,36 @@ func (c *AlistClient) checkWaitContextN(ctx context.Context, path string, scanIn
 		select {
 		case <-timer.C:
 		case <-ctx.Done():
+			c.releaseWaitSlot(pathFirst, slot, previous, hadPrevious)
 			return ctx.Err()
 		}
 	}
 	return nil
+}
+
+// alistWaitSlot is one rate-limit reservation: the time the request may run
+// and the spacing it was reserved with (used to decide when it is stale).
+type alistWaitSlot struct {
+	at       time.Time
+	interval time.Duration
+}
+
+// releaseWaitSlot rolls back a reservation whose caller gave up waiting, so a
+// cancelled request does not push every later caller further out. It only
+// rolls back when nobody reserved after it; otherwise the later reservation
+// already accounts for the spacing and must stay.
+func (c *AlistClient) releaseWaitSlot(pathFirst string, slot, previous alistWaitSlot, hadPrevious bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	current, ok := c.waits[pathFirst]
+	if !ok || current != slot {
+		return
+	}
+	if hadPrevious {
+		c.waits[pathFirst] = previous
+	} else {
+		delete(c.waits, pathFirst)
+	}
 }
 
 // firstAlistPathSegment preserves the historical SplitN(path, "/", 3)[1]
@@ -372,9 +451,11 @@ func firstAlistPathSegment(path string) string {
 	return rest
 }
 
-func (c *AlistClient) pruneWaitsLocked(cutoff time.Time) {
-	for pathFirst, lastTime := range c.waits {
-		if !lastTime.After(cutoff) {
+// pruneWaitsLocked drops reservations that no longer constrain anyone: a slot
+// is stale once its own interval has elapsed since its reserved time.
+func (c *AlistClient) pruneWaitsLocked(now time.Time) {
+	for pathFirst, slot := range c.waits {
+		if !slot.at.Add(slot.interval).After(now) {
 			delete(c.waits, pathFirst)
 		}
 	}
@@ -385,10 +466,10 @@ func (c *AlistClient) enforceMaxWaitBucketsLocked() {
 		var oldestPath string
 		var oldestTime time.Time
 		first := true
-		for pathFirst, lastTime := range c.waits {
-			if first || lastTime.Before(oldestTime) {
+		for pathFirst, slot := range c.waits {
+			if first || slot.at.Before(oldestTime) {
 				oldestPath = pathFirst
-				oldestTime = lastTime
+				oldestTime = slot.at
 				first = false
 			}
 		}
@@ -610,12 +691,16 @@ func (c *AlistClient) FileStatContext(ctx context.Context, dir, name string) (Fi
 			Size     *int64          `json:"size"`
 			Modified json.RawMessage `json:"modified"`
 		}
-		if err := json.Unmarshal(data, &raw); err == nil {
-			stat.IsDir = raw.IsDir
-			stat.Modified = parseModified(raw.Modified)
-			if raw.Size != nil {
-				stat.SizeKnown, stat.Size = true, *raw.Size
-			}
+		// An undecodable payload must be an error, not "exists with unknown
+		// size": verifyDstComplete treats SizeKnown=false as complete, so a
+		// garbled response would otherwise turn a failed transfer into success.
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return FileStat{}, fmt.Errorf("/api/fs/get response decode failed: %w", err)
+		}
+		stat.IsDir = raw.IsDir
+		stat.Modified = parseModified(raw.Modified)
+		if raw.Size != nil {
+			stat.SizeKnown, stat.Size = true, *raw.Size
 		}
 	}
 	return stat, nil
@@ -658,6 +743,14 @@ func (c *AlistClient) DeleteFileContext(ctx context.Context, path string, names 
 		return err
 	}
 	_, err := c.PostContext(ctx, "/api/fs/remove", alistRemoveRequest{Names: names, Dir: path}, nil)
+	// Removing an object that is already gone is success. Without this a
+	// delete whose response was lost is retried, the retry hits "object not
+	// found", and a delete that actually happened is reported as failed. The
+	// mirror phase also asks to remove entries the destination listing showed,
+	// which another actor may have removed already.
+	if err != nil && isAlistObjectNotFound(err) {
+		return nil
+	}
 	return err
 }
 
@@ -708,9 +801,16 @@ func (c *AlistClient) taskActionContext(ctx context.Context, taskID string, copy
 	return c.PostContext(ctx, apiPath, nil, map[string]string{"tid": taskID})
 }
 
+// TaskUndoneListContext lists the copy/move tasks AList has not finished yet.
+//
+// This endpoint is GET: AList (and OpenList) register
+// /api/admin/task/{copy,move}/undone as GET only, so a POST falls through to the
+// SPA NoRoute handler and answers HTTP 200 with HTML. The JSON decode then
+// failed and both callers swallowed the error, which silently disabled task
+// adoption in reconcileAmbiguousTransfer and the monitor's undone fast path.
 func (c *AlistClient) TaskUndoneListContext(ctx context.Context, copyType taskItemType) ([]map[string]interface{}, error) {
 	apiPath := fmt.Sprintf("/api/admin/task/%s/undone", alistTaskGroup(copyType))
-	data, err := c.PostContext(ctx, apiPath, map[string]interface{}{}, nil)
+	data, err := c.GetContext(ctx, apiPath, nil)
 	if err != nil {
 		return nil, err
 	}

@@ -431,3 +431,121 @@ func TestFullSyncWriteIndexCollision(t *testing.T) {
 		t.Fatal("NFD and NFC forms fold differently")
 	}
 }
+
+// A matched directory whose source listing came back empty while its destination
+// subtree is large is the signature of a listing anomaly (unmounted share, driver
+// returning an empty page). Its deletes must be skipped with a visible record
+// instead of trusting the empty list and emptying the directory.
+func TestFullSyncSkipsDeletesUnderEmptySourceSubtree(t *testing.T) {
+	t.Run("large subtree is protected", func(t *testing.T) {
+		var persisted []map[string]interface{}
+		restorePersist := stubPersistJobTaskItems(t, &persisted, nil)
+		defer restorePersist()
+
+		rec := &removeRecorder{}
+		server := rec.server(t)
+		defer server.Close()
+
+		// 500 matched files keep the global valve under its ratio; only the
+		// 150 destinations below the anomalous directory are at risk.
+		srcRoot := filesUnder("keep", 500)
+		dstRoot := filesUnder("keep", 500)
+		srcRoot["media/"] = FileMetadata{}
+		dstRoot["media/"] = FileMetadata{}
+		src := &fullSyncSnapshot{root: "/src/", dirs: map[string]FileListResult{
+			"":       srcRoot,
+			"media/": {},
+		}}
+		dst := &fullSyncSnapshot{root: "/dst/", dirs: map[string]FileListResult{
+			"":       dstRoot,
+			"media/": filesUnder("m", 150),
+		}}
+		plan := newFullSyncPlan(src, dst, nil)
+		plan.build(map[string]interface{}{"method": 1})
+		if len(plan.extraDeletes) != 150 {
+			t.Fatalf("extraDeletes = %d, want 150 candidates below media/", len(plan.extraDeletes))
+		}
+
+		jt := deleteSafetyTask(t, server.URL, server.Client())
+		jt.executeFullSyncPlan(plan)
+		if calls := rec.calls(); len(calls) != 0 {
+			t.Fatalf("remove calls = %#v, want none under a suspicious empty source directory", calls)
+		}
+		if err := jt.flushPersistBuffer(); err != nil {
+			t.Fatalf("flushPersistBuffer() error: %v", err)
+		}
+		if len(persisted) != 1 {
+			t.Fatalf("persisted = %#v, want exactly the guard record", persisted)
+		}
+		guard := persisted[0]
+		if guard["type"] != taskItemTypeDelete.Int() || guard["status"] != taskStatusFailed.Int() || guard["fileName"] != "" {
+			t.Fatalf("guard record = %#v, want a failed delete with an empty name", guard)
+		}
+	})
+
+	t.Run("small subtree still mirrors", func(t *testing.T) {
+		var persisted []map[string]interface{}
+		restorePersist := stubPersistJobTaskItems(t, &persisted, nil)
+		defer restorePersist()
+
+		rec := &removeRecorder{}
+		server := rec.server(t)
+		defer server.Close()
+
+		srcRoot := filesUnder("keep", 500)
+		dstRoot := filesUnder("keep", 500)
+		srcRoot["media/"] = FileMetadata{}
+		dstRoot["media/"] = FileMetadata{}
+		src := &fullSyncSnapshot{root: "/src/", dirs: map[string]FileListResult{
+			"":       srcRoot,
+			"media/": {},
+		}}
+		dst := &fullSyncSnapshot{root: "/dst/", dirs: map[string]FileListResult{
+			"":       dstRoot,
+			"media/": filesUnder("m", 99),
+		}}
+		plan := newFullSyncPlan(src, dst, nil)
+		plan.build(map[string]interface{}{"method": 1})
+
+		jt := deleteSafetyTask(t, server.URL, server.Client())
+		jt.executeFullSyncPlan(plan)
+		if calls := rec.calls(); len(calls) != 99 {
+			t.Fatalf("remove calls = %d, want 99: a small directory is ordinary mirror cleanup", len(calls))
+		}
+	})
+}
+
+// The reverse type conflict (source directory, destination file) must remove the
+// file, create the directory and queue the files inside it.
+func TestFullSyncReplacesDestinationFileWithSourceDirectory(t *testing.T) {
+	var persisted []map[string]interface{}
+	restorePersist := stubPersistJobTaskItems(t, &persisted, nil)
+	defer restorePersist()
+
+	rec := &removeRecorder{}
+	server := rec.server(t)
+	defer server.Close()
+
+	src := &fullSyncSnapshot{root: "/src/", dirs: map[string]FileListResult{
+		"":       {"media/": {}},
+		"media/": {"f.txt": {Size: 1}},
+	}}
+	dst := &fullSyncSnapshot{root: "/dst/", dirs: map[string]FileListResult{
+		"": {"media": {Size: 5}},
+	}}
+	plan := newFullSyncPlan(src, dst, nil)
+	plan.build(map[string]interface{}{"method": 1})
+	if len(plan.blockers) != 1 {
+		t.Fatalf("blockers = %d, want the destination file removed for the directory", len(plan.blockers))
+	}
+
+	jt := deleteSafetyTask(t, server.URL, server.Client())
+	jt.executeFullSyncPlan(plan)
+	if calls := rec.calls(); len(calls) != 1 || calls[0] != "/dst/media" {
+		t.Fatalf("remove calls = %#v, want only /dst/media", calls)
+	}
+	waiting := jt.Waiting.snapshot()
+	if len(waiting) != 1 || waiting[0].DstPath != "/dst/media/" || waiting[0].FileName != "f.txt" {
+		t.Fatalf("queued copies = %#v, want the file copied into the new directory", waiting)
+	}
+}

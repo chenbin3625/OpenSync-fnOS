@@ -51,9 +51,12 @@ func (jt *JobTask) persistWithBusyRetry(items []map[string]interface{}) error {
 }
 
 func (jt *JobTask) persistRemainingTaskItems() error {
-	// Cancel first: a timer that fires during/after the final flush would write
-	// again behind the task's back.
-	jt.cancelPersistFlush()
+	// Seal first: from here on no debounced flush may ever be armed for this
+	// task. Cancelling alone was not enough - a writer that outlived the
+	// executor (a scan goroutine recording one last item, a panic path) called
+	// schedulePersistFlush again and wrote to the database after the task had
+	// reached its terminal status, possibly after ShutdownDB closed the handle.
+	jt.sealPersistFlush()
 	if err := jt.flushPersistBuffer(); err != nil {
 		return err
 	}
@@ -85,7 +88,11 @@ func (jt *JobTask) appendFinishMany(items []JobTaskItem) {
 	needFlush := len(jt.persistBuffer) >= persistBatchSize
 	jt.persistBufMu.Unlock()
 
-	if needFlush {
+	if needFlush || jt.persistFlushSealed() {
+		// A sealed task already performed its final flush, so this record
+		// arrived late (it should not happen: the executor waits for the scan
+		// worker and every copy before sealing). Write it synchronously instead
+		// of arming a timer that would outlive the task.
 		if err := jt.flushPersistBuffer(); err != nil {
 			jt.recordTaskPersistenceError(err)
 			jt.requestBreak()
@@ -96,10 +103,41 @@ func (jt *JobTask) appendFinishMany(items []JobTaskItem) {
 	jt.notifyProgressChange()
 }
 
+// Persist-flush lifecycle. persistFlushMu guards two fields that encode three
+// states:
+//
+//	idle   (scheduled=false, timer=nil): nothing pending, a timer may be armed
+//	armed  (scheduled=true,  timer!=nil): one debounced flush is pending
+//	sealed (scheduled=true,  timer=nil): the final flush already ran; no timer
+//	                                     may ever be armed again
+//
+// Sealing is what makes "the final flush is the last write" enforceable: a
+// writer that outlives the executor used to re-arm the debounce and write after
+// the task finished (and after ShutdownDB at shutdown). Sealed tasks write any
+// late record synchronously instead, so nothing buffered is lost and no timer
+// outlives the task.
+func (jt *JobTask) sealPersistFlush() {
+	jt.persistFlushMu.Lock()
+	timer := jt.persistFlushTimer
+	jt.persistFlushTimer = nil
+	jt.persistFlushScheduled = true
+	jt.persistFlushMu.Unlock()
+	if timer != nil {
+		timer.Stop()
+	}
+}
+
+func (jt *JobTask) persistFlushSealed() bool {
+	jt.persistFlushMu.Lock()
+	defer jt.persistFlushMu.Unlock()
+	return jt.persistFlushScheduled && jt.persistFlushTimer == nil
+}
+
 func (jt *JobTask) schedulePersistFlush() {
 	jt.persistFlushMu.Lock()
 	defer jt.persistFlushMu.Unlock()
 	if jt.persistFlushScheduled {
+		// Armed, or sealed: either way no second timer may be created.
 		return
 	}
 	jt.persistFlushScheduled = true
@@ -116,9 +154,22 @@ func (jt *JobTask) schedulePersistFlush() {
 			}
 		}()
 		jt.persistFlushMu.Lock()
-		jt.persistFlushScheduled = false
-		jt.persistFlushTimer = nil
+		// Only the timer still registered here may clear the state: if the task
+		// sealed (or cancelled) while this callback was already running, the
+		// seal must survive or a later append could arm a new timer after the
+		// final flush.
+		ownsTimer := jt.persistFlushTimer != nil
+		if ownsTimer {
+			jt.persistFlushScheduled = false
+			jt.persistFlushTimer = nil
+		}
+		sealed := jt.persistFlushScheduled && jt.persistFlushTimer == nil
 		jt.persistFlushMu.Unlock()
+		if !ownsTimer && !sealed {
+			// Cancelled before this callback took the lock; the final flush that
+			// cancelled it writes the buffer itself.
+			return
+		}
 		if err := jt.flushPersistBuffer(); err != nil {
 			jt.recordTaskPersistenceError(err)
 			jt.requestBreak()
@@ -130,12 +181,16 @@ func (jt *JobTask) schedulePersistFlush() {
 // outlives the task and fires a write after the run is finished — reaching
 // GetDB even after CloseDB has torn the handle down at shutdown. The final
 // flush is performed synchronously by persistRemainingTaskItems, so nothing
-// buffered is lost by cancelling here.
+// buffered is lost by cancelling here. A sealed task keeps its sealed state:
+// cancelling must never re-open the door for another timer.
 func (jt *JobTask) cancelPersistFlush() {
 	jt.persistFlushMu.Lock()
+	sealed := jt.persistFlushScheduled && jt.persistFlushTimer == nil
 	timer := jt.persistFlushTimer
 	jt.persistFlushTimer = nil
-	jt.persistFlushScheduled = false
+	if !sealed {
+		jt.persistFlushScheduled = false
+	}
 	jt.persistFlushMu.Unlock()
 	if timer != nil {
 		timer.Stop()

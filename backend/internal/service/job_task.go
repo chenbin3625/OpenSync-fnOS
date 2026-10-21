@@ -44,6 +44,24 @@ type JobTask struct {
 	cancel        context.CancelFunc
 	runtimeMu     sync.Mutex
 	copyWG        sync.WaitGroup
+	// copySlotMu guards copyInFlight, the number of admitted copies. Admission
+	// happens under runtimeMu; the counter is what keeps the submit executor and
+	// full-sync relocations from overshooting CopyConcurrency when both pass
+	// their own "is there room" check at the same time.
+	copySlotMu   sync.Mutex
+	copyInFlight int
+	// copyAdmissionClosed is set (under runtimeMu) once the submit executor
+	// has begun its final copyWG.Wait. Later copyWG.Add calls would race that
+	// Wait and start AList transfers after the task was reported finished.
+	copyAdmissionClosed bool
+	// scanDone is closed when the scan worker started by Start has returned.
+	// The executor waits for it before the final flush: a scan goroutine still
+	// running would append task items and re-arm the flush timer after the
+	// task was finished. Nil for tasks not started through Start (tests).
+	scanDone chan struct{}
+	// drained records that the executor exited because every queued item
+	// finished — not because the task was stopped or its deadline hit.
+	drained atomic.Bool
 	ScanTotalDirs atomic.Int64
 	ScanDoneDirs  atomic.Int64
 
@@ -117,8 +135,34 @@ func newTaskContext(timeoutHours int) (context.Context, context.CancelFunc) {
 }
 
 func (jt *JobTask) Start() {
-	jt.startWorker("scan", jt.sync)
+	scanDone := make(chan struct{})
+	jt.runtimeMu.Lock()
+	jt.scanDone = scanDone
+	jt.runtimeMu.Unlock()
+	go func() {
+		// Closed last, after the panic handler below has run, so the executor
+		// never proceeds while the scan side is still recording items.
+		defer close(scanDone)
+		defer func() {
+			if r := recover(); r != nil {
+				jt.handleWorkerPanic("scan", r)
+			}
+		}()
+		jt.sync()
+	}()
 	jt.startWorker("submit", jt.taskSubmit)
+}
+
+// waitForScanExit blocks until the scan worker has returned. Stop and timeout
+// both cancel the task context, which every scan path observes, so this wait
+// is bounded by the scan's own reaction to cancellation.
+func (jt *JobTask) waitForScanExit() {
+	jt.runtimeMu.Lock()
+	done := jt.scanDone
+	jt.runtimeMu.Unlock()
+	if done != nil {
+		<-done
+	}
 }
 
 func (jt *JobTask) startWorker(name string, fn func()) {
@@ -139,6 +183,12 @@ func (jt *JobTask) handleWorkerPanic(name string, recovered interface{}) {
 	jt.ScanFinish.Store(true)
 	jt.requestBreak()
 	if name == "submit" {
+		// A panic here means the submit worker unwound past its normal shutdown
+		// (the executor loop has its own recovery). In-flight copies must still be
+		// awaited before the task is reported finished, otherwise their item
+		// records are written after the final status/counters and can even re-arm
+		// the flush timer after the run ended.
+		jt.copyWG.Wait()
 		jt.finishFailedTask(errMsg)
 	}
 }
@@ -301,14 +351,18 @@ func (jt *JobTask) finishCopyItem(item *CopyItem) {
 	createTime := item.CreateTime
 	item.mu.RUnlock()
 
+	// Remove the item from Doing before recording its final state: the hook
+	// takes the progress snapshot, and an item that is still in Doing while its
+	// terminal record is appended is counted twice (running + success) for one
+	// snapshot.
+	jt.DoingMu.Lock()
+	delete(jt.Doing, item.DoingKey)
+	jt.DoingMu.Unlock()
+
 	if copyType == taskItemTypeDelete {
 		jt.DelHook(dstPath, fileName, fileSize, status, errMsg, isPath, createTime)
 	} else {
 		jt.CopyHook(srcPath, dstPath, fileName, fileSize, alistTaskID,
 			status, errMsg, isPath, copyType, createTime)
 	}
-
-	jt.DoingMu.Lock()
-	delete(jt.Doing, item.DoingKey)
-	jt.DoingMu.Unlock()
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Highlight from "@douyinfe/semi-ui/lib/es/highlight";
 import TreeSelect, {
@@ -45,13 +45,20 @@ export function RemotePaths({
   engineId,
   value,
   onChange,
-  multiple = true,
+  // 目录选择器当前都是单选；保留 multiple 以便将来多选，但不再有"选父自动选子"
+  // 的隐藏级联（没有任何调用方使用，曾经是死代码）。
+  multiple = false,
+  ariaLabel = "选择引擎目录",
+  "aria-labelledby": ariaLabelledBy,
 }: {
   id?: string;
   engineId?: number;
   value: string[];
   onChange: (paths: string[]) => void;
   multiple?: boolean;
+  /** 同一表单中有多个目录选择框时，用不同名称让读屏用户区分 */
+  ariaLabel?: string;
+  "aria-labelledby"?: string;
 }) {
   const [loadFailed, setLoadFailed] = useState(false);
 
@@ -77,48 +84,12 @@ export function RemotePaths({
     resetTree,
   } = useAsyncTree({ engineId, onLoaded, onError, errorFallback: "目录加载失败" });
 
-  const nodesRef = useRef(treeData);
-  nodesRef.current = treeData;
-
-  // 在树中查找节点
-  const findNode = useCallback(
-    (key: string, tree: TreeNodeData[]): TreeNodeData | undefined => {
-      for (const n of tree) {
-        if (n.key === key) return n;
-        if (n.children) {
-          const found = findNode(key, n.children);
-          if (found) return found;
-        }
-      }
-    },
-    [],
-  );
-
-  // 选中二级节点时，自动选中其已加载的三级子节点
   const handleChange = useCallback(
     (next: unknown) => {
       const selected = (Array.isArray(next) ? next : next ? [next] : []).map(String);
-      if (!multiple) {
-        onChange(selected);
-        return;
-      }
-      // 找出新增的选中项
-      const added = selected.filter((v) => !value.includes(v));
-      const extra: string[] = [];
-      for (const key of added) {
-        const node = findNode(key, nodesRef.current);
-        if (node?.children) {
-          for (const child of node.children) {
-            const childKey = String(child.key);
-            if (!selected.includes(childKey) && !extra.includes(childKey)) {
-              extra.push(childKey);
-            }
-          }
-        }
-      }
-      onChange([...selected, ...extra]);
+      onChange(selected);
     },
-    [value, multiple, onChange, findNode],
+    [onChange],
   );
 
   useEffect(() => {
@@ -173,7 +144,8 @@ export function RemotePaths({
   return (
     <div id={id} className="remote-paths">
       <TreeSelect
-        aria-label="选择引擎目录"
+        aria-label={ariaLabel}
+        aria-labelledby={ariaLabelledBy}
         treeData={treeData}
         value={multiple ? value : value[0]}
         multiple={multiple}
@@ -196,7 +168,7 @@ export function RemotePaths({
         outerBottomSlot={refreshButton}
         dropdownClassName="remote-paths-dropdown"
         dropdownStyle={{ maxWidth: "calc(100vw - 32px)" }}
-        maxTagCount={2}
+        maxTagCount={multiple ? 2 : undefined}
         showClear
       />
       {loadFailed && (

@@ -24,3 +24,8 @@ frontend/.tmp-*
 
 # Claude Code 本机设置
 .claude/settings.local.json
+
+# 本次代码审查的过程文档（非用户文档，仅本地留存）
+/CODE_REVIEW.md
+/FIXES.md
+/review/

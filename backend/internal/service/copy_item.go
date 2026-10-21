@@ -262,30 +262,47 @@ func (ci *CopyItem) DoIt() {
 
 		ci.setTaskID(taskID)
 		// Delete operations are synchronous API calls — success means done.
+		// DeleteFileContext treats "object not found" as success, so a retried
+		// delete of an already-removed object no longer fails here.
 		if ci.CopyType == taskItemTypeDelete {
 			ci.setProgress(taskStatusSuccess, 100, nil)
 			break
 		}
-		if taskID == "" && !ci.confirmSynchronousCopy(runtime, client) {
-			// AList accepted the request but returned no task id, and the file
-			// never arrived at the destination. Treat the attempt as failed so
-			// the bounded retry loop can resubmit it.
-			emptyTaskErr := errors.New(msg.T(msg.AlistNoCopyTask))
-			if attempt < maxRetries {
-				ci.setRetrying(emptyTaskErr)
-				if completed := runtime.waitForBreak(jobDeps.CopyRetryDelay(attempt)); !completed {
-					ci.setStatus(taskStatusStopped)
-					break
-				}
-				continue
-			}
-			ci.setFailure(emptyTaskErr)
-			break
-		}
 		if taskID == "" {
+			// AList accepted the request but returned no task id. Only report
+			// success when the destination verifies: a probe that keeps erroring
+			// is a failure, not an assumed success. Assuming the copy happened
+			// marked never-transferred files as 100% successes, and success is
+			// terminal so they were never retried.
+			confirmed, probeErr := ci.confirmSynchronousCopy(runtime, client)
+			if !confirmed {
+				emptyTaskErr := errors.New(msg.T(msg.AlistNoCopyTask))
+				if probeErr != nil {
+					emptyTaskErr = fmt.Errorf("%s: %w", msg.T(msg.AlistNoCopyTask), probeErr)
+				}
+				if attempt < maxRetries {
+					ci.setRetrying(emptyTaskErr)
+					if completed := runtime.waitForBreak(jobDeps.CopyRetryDelay(attempt)); !completed {
+						ci.setStatus(taskStatusStopped)
+						break
+					}
+					continue
+				}
+				ci.setFailure(emptyTaskErr)
+				break
+			}
 			ci.setProgress(taskStatusSuccess, 100, nil)
 		} else if ci.status() != taskStatusStopped {
 			runtime.waitForRemoteCopyCompletion(ci)
+			// The monitor normally delivers a terminal state, but when it is
+			// aborted between removing the watch and applying the stopped
+			// status this wait can return while the item is still
+			// Running/Waiting. Never finish a copy item in a non-terminal state:
+			// a persisted Running row counts neither as success nor as failure.
+			switch ci.status() {
+			case taskStatusRunning, taskStatusWaiting:
+				ci.setStatus(taskStatusStopped)
+			}
 		}
 		if ci.status() == taskStatusFailed && attempt < maxRetries {
 			ci.setRetrying(errors.New(ci.errorMessage()))
@@ -321,23 +338,26 @@ func (ci *CopyItem) startTransfer(ctx context.Context, client copyItemClient) (s
 //
 // A definitive "absent" answer fails the attempt. An erroring check is retried a
 // few times so a network blip does not decide the outcome; if it keeps failing
-// the legacy assume-success behavior is kept, because some drivers do not
-// support the existence probe at all and every such copy would otherwise be
-// reported as failed.
-func (ci *CopyItem) confirmSynchronousCopy(runtime copyItemRuntime, client copyItemClient) bool {
+// the attempt fails with the probe error. The previous behavior assumed success
+// in that case "because some drivers do not support the probe" — but the probe
+// is /api/fs/get, which every AList driver supports, so the fallback only turned
+// infrastructure failures into unrecoverable false successes.
+func (ci *CopyItem) confirmSynchronousCopy(runtime copyItemRuntime, client copyItemClient) (bool, error) {
+	var lastErr error
 	for attempt := 0; attempt < maxTransientPollErrors; attempt++ {
 		exists, err := ci.verifyDstComplete(runtime, client)
 		if err == nil {
-			return exists
+			return exists, nil
 		}
+		lastErr = err
 		if runtime.isBreak() {
-			return false
+			return false, err
 		}
 		if attempt < maxTransientPollErrors-1 && !runtime.waitForBreak(jobDeps.CopyRetryDelay(attempt)) {
-			return false
+			return false, err
 		}
 	}
-	return true
+	return false, lastErr
 }
 
 // isAmbiguousTransferError reports whether a copy/move error leaves it unknown
@@ -400,9 +420,20 @@ func (ci *CopyItem) reconcileAmbiguousTransfer(runtime copyItemRuntime, client c
 	return "", err == nil && done
 }
 
-// verifyDstWrittenSince is verifyDstComplete plus a freshness check: the
-// destination's modification time must not predate since. Storage clocks can
-// round to the second, hence the one-second allowance.
+// verifyDstWrittenSince is verifyDstComplete plus an attempt to prove the
+// destination was produced by this submission rather than left over from an
+// earlier run.
+//
+// Two independent signals count as proof, because the mtime alone is not
+// reliable: a same-storage AList copy calls the driver's Copy, and server-side
+// copies commonly preserve the source mtime, so "dst mtime >= submittedAt" is
+// false for a copy that did run. The destination is therefore also accepted
+// when it mirrors the source's modification time and size — that combination
+// only appears after a copy (including a metadata-preserving one), while the
+// stale same-size destination the freshness check guards against keeps its old
+// mtime, which differs from the changed source's mtime.
+//
+// Storage clocks can round to the second, hence the one-second allowances.
 func (ci *CopyItem) verifyDstWrittenSince(runtime copyItemRuntime, client copyItemClient, since int64) (bool, error) {
 	statClient, canStat := client.(copyItemStatClient)
 	if !canStat {
@@ -418,12 +449,50 @@ func (ci *CopyItem) verifyDstWrittenSince(runtime copyItemRuntime, client copyIt
 	if err != nil {
 		return false, err
 	}
-	modified := stat.Modified
+	dstModified := normalizeStatModified(stat.Modified)
+	if dstModified > 0 && dstModified >= since-1 {
+		return true, nil
+	}
+	// The mtime is not fresh (0=unknown, or the source mtime preserved by a
+	// driver). Fall back to the metadata-mirror criterion.
+	srcCtx, srcCancel := runtime.cleanupContext()
+	defer srcCancel()
+	srcStat, err := statClient.FileStatContext(srcCtx, ci.SrcPath, ci.FileName)
+	if err != nil {
+		return false, err
+	}
+	if !srcStat.Exists || srcStat.IsDir {
+		return false, nil
+	}
+	srcModified := normalizeStatModified(srcStat.Modified)
+	if srcModified <= 0 || dstModified <= 0 {
+		// Without mtimes on both sides there is no combined evidence; the
+		// caller retries rather than assuming success.
+		return false, nil
+	}
+	if absInt64(srcModified-dstModified) > 1 {
+		return false, nil
+	}
+	if !srcStat.SizeKnown || !stat.SizeKnown || srcStat.Size != stat.Size {
+		return false, nil
+	}
+	return true, nil
+}
+
+// normalizeStatModified turns driver-specific mtime units into Unix seconds.
+func normalizeStatModified(modified int64) int64 {
 	if modified > 1e12 {
 		// Some drivers report milliseconds.
-		modified /= 1000
+		return modified / 1000
 	}
-	return modified > 0 && modified >= since-1, nil
+	return modified
+}
+
+func absInt64(value int64) int64 {
+	if value < 0 {
+		return -value
+	}
+	return value
 }
 
 // alistTaskNamePattern matches AList's copy/move task names:

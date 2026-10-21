@@ -15,6 +15,11 @@ describe("page clamping", () => {
     expect(clampPage(4, 0, 10)).toBe(1);
     expect(maxPage(0, 10)).toBe(1);
   });
+  it("clamps a fractional total to the smallest valid page", () => {
+    expect(clampPage(3, 12.5, 10)).toBe(2);
+    expect(maxPage(0.5, 10)).toBe(1);
+    expect(maxPage(Number.NaN, 10)).toBe(1);
+  });
   it("normalises invalid input", () => {
     expect(clampPage(0, 50, 10)).toBe(1);
     expect(clampPage(-3, 50, 10)).toBe(1);

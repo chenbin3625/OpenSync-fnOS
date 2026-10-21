@@ -82,6 +82,71 @@ describe("notification compatibility", () => {
       }),
     ).toContain("URL");
   });
+  it("requires HTTPS for DingTalk / Lark but allows HTTP for the custom webhook", () => {
+    // The backend validates method 2/4 with validateNotifyHTTPSURL; the form
+    // previously accepted http:// and only failed after submitting.
+    expect(
+      validateNotifyForm({
+        method: 2,
+        enable: true,
+        url: "http://oapi.dingtalk.com/robot/send?access_token=x",
+      }),
+    ).toContain("HTTPS");
+    expect(
+      validateNotifyForm({
+        method: 4,
+        enable: true,
+        url: "http://open.feishu.cn/open-apis/bot/v2/hook/x",
+      }),
+    ).toContain("HTTPS");
+    expect(
+      validateNotifyForm({
+        method: 2,
+        enable: true,
+        url: "https://oapi.dingtalk.com/robot/send?access_token=x",
+      }),
+    ).toBe("");
+    expect(
+      validateNotifyForm({
+        method: 4,
+        enable: true,
+        url: "https://open.feishu.cn/open-apis/bot/v2/hook/x",
+      }),
+    ).toBe("");
+    // Custom webhook and Bark server may be plain HTTP on the LAN.
+    expect(
+      validateNotifyForm({
+        method: 0,
+        enable: true,
+        url: "http://192.168.1.2:8080/hook",
+      }),
+    ).toBe("");
+    expect(
+      validateNotifyForm({
+        method: 5,
+        enable: true,
+        deviceKey: "k",
+        server: "http://192.168.1.2:8080",
+      }),
+    ).toBe("");
+  });
+  it("trims the webhook URL and secret before submitting", () => {
+    expect(
+      buildNotifyParams({
+        method: 4,
+        enable: true,
+        url: "  https://open.feishu.cn/hook/x  ",
+        secret: "  SECabc  ",
+      }),
+    ).toMatchObject({ url: "https://open.feishu.cn/hook/x", secret: "SECabc" });
+    expect(
+      buildNotifyParams({
+        method: 0,
+        enable: true,
+        url: "  http://hook.test/notify  ",
+      }),
+    ).toMatchObject({ url: "http://hook.test/notify" });
+  });
   it("passes the untouched redaction marker straight through", () => {
     // The backend replaces a redacted headers value with exactly "****" and a
     // body template with exactly "******"; both must round-trip unchanged so

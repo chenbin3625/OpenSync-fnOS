@@ -79,6 +79,14 @@ export const readVersion = () =>
 /** 组装单个架构的 fpk，返回产物路径。 */
 export const buildPackage = (arch, { nodeDir } = {}) => {
   if (!ARCHES.includes(arch)) throw new Error("架构必须是 amd64 或 arm64");
+  // The version is injected into the binary. Building without it used to ship
+  // appVersion="undefined" from a manifest typo, and a release that reports the
+  // wrong version cannot be matched to its source.
+  const version = readVersion();
+  if (!version || !/^\d+\.\d+\.\d+$/.test(version))
+    throw new Error(
+      `fnos/manifest 缺少有效的 version=（当前：${version || "空"}），无法注入应用版本`,
+    );
   const pack = join(root, "dist", `opensync-${arch}`);
   // 先清空，避免上一次构建的残留文件被打进包。
   rmSync(pack, { recursive: true, force: true });
@@ -97,7 +105,11 @@ export const buildPackage = (arch, { nodeDir } = {}) => {
     [
       "build",
       "-trimpath",
-      `-ldflags=-s -w -X main.appVersion=${readVersion()}`,
+      // VCS stamping embeds the commit and a dirty flag, so the same source
+      // produced different binaries from different checkouts. -trimpath alone
+      // does not remove it.
+      "-buildvcs=false",
+      `-ldflags=-s -w -X main.appVersion=${version}`,
       "-o",
       join(pack, "app", "server", "opensync"),
       "./cmd/server",

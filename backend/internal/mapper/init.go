@@ -123,6 +123,9 @@ func InitSQL() {
 			log.Fatalf("Failed to commit database initialization: %v", err)
 		}
 		ensureIndexes(db)
+		if err := ensureJobTaskItemFTSHealth(db); err != nil {
+			log.Fatalf("Failed to verify the task item search index: %v", err)
+		}
 		if err := migrateStoredCredentials(db); err != nil {
 			log.Fatalf("Failed to initialize credential encryption: %v", err)
 		}
@@ -139,9 +142,10 @@ func InitSQL() {
 	sqlVersion, err := schemaVersion(db)
 	if err != nil {
 		// Guessing 0 here would replay every migration on top of a current
-		// schema. Most are guarded, but not all (UPDATE job SET scanIntervalT…,
-		// the FTS rebuild), and a transient "database is locked" is exactly the
-		// kind of error that must not be mistaken for an old database.
+		// schema. The guards make replaying safe except for the legacy
+		// scanInterval data update, which migrationStatements only emits when
+		// the old speed column existed (see shouldSkipMigrationStatement), so a
+		// transient error must not be mistaken for an old database.
 		log.Fatalf("Failed to read database schema version: %v", err)
 	}
 
@@ -151,20 +155,30 @@ func InitSQL() {
 		}
 	}
 	ensureIndexes(db)
+	// A previous migration may have skipped the FTS table or its triggers (the
+	// guards used to swallow query errors), which silently stops keyword search
+	// from seeing new rows. Repair it instead of serving a stale index.
+	if err := ensureJobTaskItemFTSHealth(db); err != nil {
+		log.Fatalf("Failed to verify the task item search index: %v", err)
+	}
 	if err := migrateStoredCredentials(db); err != nil {
 		log.Fatalf("Failed to migrate stored credentials: %v", err)
 	}
 }
 
-// schemaVersion reads the recorded schema version. Only a missing table or a
-// missing row means "version 0" (a pre-schema_version database, or one stopped
-// before its first write); every other failure is returned so InitSQL stops
-// instead of re-running migrations against a schema it could not read.
+// schemaVersion reads the recorded schema version. Only a missing table, a
+// missing row, or a row whose version is NULL means "version 0" (a
+// pre-schema_version database, or one stopped before its first write); every
+// other failure is returned so InitSQL stops instead of re-running migrations
+// against a schema it could not read.
 func schemaVersion(db *sql.DB) (int64, error) {
-	var version int64
+	var version sql.NullInt64
 	err := db.QueryRow("SELECT version FROM schema_version LIMIT 1").Scan(&version)
 	if err == nil {
-		return version, nil
+		if !version.Valid {
+			return 0, nil
+		}
+		return version.Int64, nil
 	}
 	if !isNoSuchTableOrNoRows(err) {
 		return 0, err
@@ -177,9 +191,14 @@ func schemaVersion(db *sql.DB) (int64, error) {
 	if !legacy {
 		return 0, nil
 	}
+	// sqlVersion is nullable on legacy tables: a NULL (or non-integer) value
+	// means "unknown/old" and must not abort startup with a raw driver error.
 	err = db.QueryRow("SELECT sqlVersion FROM user_list LIMIT 1").Scan(&version)
 	if err == nil {
-		return version, nil
+		if !version.Valid {
+			return 0, nil
+		}
+		return version.Int64, nil
 	}
 	if isNoSuchTableOrNoRows(err) {
 		return 0, nil
@@ -218,6 +237,90 @@ func ensureIndexes(db *sql.DB) {
 		}
 	}
 }
+
+// rowQuerier is satisfied by *sql.DB and *sql.Tx and is used for single-row
+// schema introspection.
+type rowQuerier interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+// sqliteObjectExists reports whether sqlite_master has an object of the given
+// type and name. Any query failure is returned, never folded into "missing".
+func sqliteObjectExists(q rowQuerier, objectType, name string) (bool, error) {
+	var found string
+	err := q.QueryRow("SELECT name FROM sqlite_master WHERE type=? AND name=?", objectType, name).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return found == name, nil
+}
+
+func dbTableExists(db *sql.DB, table string) (bool, error) {
+	return sqliteObjectExists(db, "table", table)
+}
+
+// jobTaskItemFTSTriggers are the three triggers that keep the external-content
+// FTS index in sync with job_task_item. A virtual table without them accepts
+// queries but silently stops indexing new rows.
+var jobTaskItemFTSTriggers = []string{"job_task_item_ai", "job_task_item_ad", "job_task_item_au"}
+
+// ftsObjectsHealthy reports whether the FTS table and all sync triggers exist.
+func ftsObjectsHealthy(q rowQuerier) (bool, error) {
+	exists, err := sqliteObjectExists(q, "table", "job_task_item_fts")
+	if err != nil || !exists {
+		return false, err
+	}
+	for _, trigger := range jobTaskItemFTSTriggers {
+		exists, err := sqliteObjectExists(q, "trigger", trigger)
+		if err != nil || !exists {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+// ensureJobTaskItemFTSHealth repairs an incomplete full-text index. Older
+// builds could skip the FTS migration statements when a guard query failed
+// (a missing table, or a missing trigger, does not break anything else, so the
+// omission went unnoticed and keyword search silently missed rows forever).
+// Repairing is a one-off full rebuild; on a healthy database it is a few
+// sqlite_master lookups.
+func ensureJobTaskItemFTSHealth(db *sql.DB) error {
+	itemExists, err := dbTableExists(db, "job_task_item")
+	if err != nil {
+		return err
+	}
+	if !itemExists {
+		return nil
+	}
+	healthy, err := ftsObjectsHealthy(db)
+	if err != nil {
+		return err
+	}
+	if healthy {
+		return nil
+	}
+	log.Printf("WARNING: the task item search index is incomplete; rebuilding job_task_item_fts")
+	return retryOnBusy(func() error {
+		return runTxOn(db, nil, func(tx *sql.Tx) error {
+			for _, stmt := range rebuildJobTaskItemFTSStatements() {
+				if _, err := tx.Exec(stmt); err != nil {
+					return fmt.Errorf("rebuild task item search index: %w\nSQL: %s", err, stmt)
+				}
+			}
+			return nil
+		})
+	})
+}
+
+// legacyScanIntervalUpdate is the only data migration whose meaning depends on
+// the legacy schema: value 2 in the old `speed` column meant "use cache". It is
+// a named constant so shouldSkipMigrationStatement can match it exactly and
+// skip it outside a genuine legacy migration.
+const legacyScanIntervalUpdate = "UPDATE job SET scanIntervalT = 10, useCacheT = 0 WHERE useCacheT = 2"
 
 func migrationStatements(fromVersion int64) []string {
 	var stmts []string
@@ -265,7 +368,7 @@ func migrationStatements(fromVersion int64) []string {
 			"ALTER TABLE job ADD COLUMN scanIntervalT integer DEFAULT 0",
 			"ALTER TABLE job ADD COLUMN useCacheS integer DEFAULT 0",
 			"ALTER TABLE job ADD COLUMN scanIntervalS integer DEFAULT 0",
-			"UPDATE job SET scanIntervalT = 10, useCacheT = 0 WHERE useCacheT = 2",
+			legacyScanIntervalUpdate,
 		)
 	}
 	if fromVersion < 260605 {
@@ -386,6 +489,26 @@ func migrateDB(fromVersion int64) error {
 	return nil
 }
 
+// schemaInspector answers the existence questions the migration guards need.
+// It is an interface so the guard error path (a schema that cannot be read)
+// can be tested without corrupting a real database.
+type schemaInspector interface {
+	tableExists(table string) (bool, error)
+	tableHasColumn(table, column string) (bool, error)
+}
+
+type txSchemaInspector struct {
+	tx *sql.Tx
+}
+
+func (i txSchemaInspector) tableExists(table string) (bool, error) {
+	return txTableExists(i.tx, table)
+}
+
+func (i txSchemaInspector) tableHasColumn(table, column string) (bool, error) {
+	return hasColumnErr(i.tx, table, column)
+}
+
 func migrateDBTx(db *sql.DB, fromVersion int64) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -398,13 +521,8 @@ func migrateDBTx(db *sql.DB, fromVersion int64) error {
 		}
 	}()
 
-	for _, stmt := range migrationStatements(fromVersion) {
-		if shouldSkipMigrationStatement(tx, stmt) {
-			continue
-		}
-		if _, err := tx.Exec(stmt); err != nil {
-			return fmt.Errorf("migration SQL failed: %w\nSQL: %s", err, stmt)
-		}
+	if err := migrateInTx(tx, fromVersion); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return err
@@ -413,26 +531,87 @@ func migrateDBTx(db *sql.DB, fromVersion int64) error {
 	return nil
 }
 
-func shouldSkipMigrationStatement(tx *sql.Tx, stmt string) bool {
+// migrateInTx runs the migrations for fromVersion inside an open transaction.
+// The version row is only advanced by the trailing UPDATE statement in the
+// statement list, so any error aborts (and rolls back) the whole migration and
+// leaves the old version in place for the next startup to retry.
+func migrateInTx(tx *sql.Tx, fromVersion int64) error {
+	insp := txSchemaInspector{tx: tx}
+	legacySpeed, err := insp.tableHasColumn("job", "speed")
+	if err != nil {
+		return fmt.Errorf("migration: inspect job.speed: %w", err)
+	}
+	return migrateStatementsInTx(tx, migrationStatements(fromVersion), insp, legacySpeed)
+}
+
+// migrateStatementsInTx executes stmts, consulting the guards first. It is
+// separated from migrateDBTx so tests can feed it a failing inspector.
+func migrateStatementsInTx(tx *sql.Tx, stmts []string, insp schemaInspector, legacySpeed bool) error {
+	for _, stmt := range stmts {
+		skip, err := shouldSkipMigrationStatement(insp, stmt, legacySpeed)
+		if err != nil {
+			// A guard that could not read the schema must abort the migration.
+			// Skipping the statement instead would commit the transaction
+			// (including the version bump) and the schema gap would never be
+			// repaired on a later start.
+			return fmt.Errorf("migration guard failed for %q: %w", stmt, err)
+		}
+		if skip {
+			continue
+		}
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("migration SQL failed: %w\nSQL: %s", err, stmt)
+		}
+	}
+	return nil
+}
+
+func shouldSkipMigrationStatement(insp schemaInspector, stmt string, legacySpeed bool) (bool, error) {
 	if tableName, columnName, ok := parseAlterTableAddColumn(stmt); ok {
 		// Skip if the target table does not exist (e.g. user_list after migration to schema_version)
 		// or if the column is already present.
-		return !txTableExists(tx, tableName) || txTableHasColumn(tx, tableName, columnName)
+		exists, err := insp.tableExists(tableName)
+		if err != nil {
+			return false, err
+		}
+		if !exists {
+			return true, nil
+		}
+		return insp.tableHasColumn(tableName, columnName)
 	}
 
 	switch stmt {
 	case "ALTER TABLE job RENAME COLUMN speed TO useCacheT":
-		return !txTableHasColumn(tx, "job", "speed") && txTableHasColumn(tx, "job", "useCacheT")
+		hasSpeed, err := insp.tableHasColumn("job", "speed")
+		if err != nil {
+			return false, err
+		}
+		if hasSpeed {
+			return false, nil
+		}
+		return insp.tableHasColumn("job", "useCacheT")
+	case legacyScanIntervalUpdate:
+		// This is the only data migration whose meaning depends on the old
+		// schema: value 2 in the legacy `speed` column meant "use cache". On a
+		// database that never had that column (e.g. a current schema whose
+		// version row was lost and reads as 0) replaying it would silently
+		// disable caching and reset the scan interval of real jobs.
+		return !legacySpeed, nil
 	case "ALTER TABLE job DROP COLUMN cron":
-		return !txTableHasColumn(tx, "job", "cron")
+		has, err := insp.tableHasColumn("job", "cron")
+		return !has, err
 	case "ALTER TABLE job DROP COLUMN year":
-		return !txTableHasColumn(tx, "job", "year")
+		has, err := insp.tableHasColumn("job", "year")
+		return !has, err
 	case "ALTER TABLE job DROP COLUMN week":
-		return !txTableHasColumn(tx, "job", "week")
+		has, err := insp.tableHasColumn("job", "week")
+		return !has, err
 	case "ALTER TABLE job DROP COLUMN start_date":
-		return !txTableHasColumn(tx, "job", "start_date")
+		has, err := insp.tableHasColumn("job", "start_date")
+		return !has, err
 	case "ALTER TABLE job DROP COLUMN end_date":
-		return !txTableHasColumn(tx, "job", "end_date")
+		has, err := insp.tableHasColumn("job", "end_date")
+		return !has, err
 	case `CREATE VIRTUAL TABLE IF NOT EXISTS job_task_item_fts USING fts5(
 			fileName,
 			srcPath,
@@ -441,29 +620,48 @@ func shouldSkipMigrationStatement(tx *sql.Tx, stmt string) bool {
 			content_rowid='id',
 			tokenize='trigram'
 		)`:
-		return !txTableExists(tx, "job_task_item")
+		exists, err := insp.tableExists("job_task_item")
+		return !exists, err
 	case "INSERT INTO job_task_item_fts(job_task_item_fts) VALUES('rebuild')":
-		return !txTableExists(tx, "job_task_item_fts")
+		exists, err := insp.tableExists("job_task_item_fts")
+		return !exists, err
 	case `CREATE TRIGGER IF NOT EXISTS job_task_item_ai AFTER INSERT ON job_task_item BEGIN
 			INSERT INTO job_task_item_fts(rowid, fileName, srcPath, dstPath)
 			VALUES (new.id, new.fileName, new.srcPath, new.dstPath);
 		END`:
-		return !txTableExists(tx, "job_task_item") || !txTableExists(tx, "job_task_item_fts")
+		return skipTriggerWithoutTables(insp)
 	case `CREATE TRIGGER IF NOT EXISTS job_task_item_ad AFTER DELETE ON job_task_item BEGIN
 			INSERT INTO job_task_item_fts(job_task_item_fts, rowid, fileName, srcPath, dstPath)
 			VALUES ('delete', old.id, old.fileName, old.srcPath, old.dstPath);
 		END`:
-		return !txTableExists(tx, "job_task_item") || !txTableExists(tx, "job_task_item_fts")
+		return skipTriggerWithoutTables(insp)
 	case `CREATE TRIGGER IF NOT EXISTS job_task_item_au AFTER UPDATE ON job_task_item BEGIN
 			INSERT INTO job_task_item_fts(job_task_item_fts, rowid, fileName, srcPath, dstPath)
 			VALUES ('delete', old.id, old.fileName, old.srcPath, old.dstPath);
 			INSERT INTO job_task_item_fts(rowid, fileName, srcPath, dstPath)
 			VALUES (new.id, new.fileName, new.srcPath, new.dstPath);
 		END`:
-		return !txTableExists(tx, "job_task_item") || !txTableExists(tx, "job_task_item_fts")
+		return skipTriggerWithoutTables(insp)
 	default:
-		return false
+		return false, nil
 	}
+}
+
+// skipTriggerWithoutTables skips an FTS trigger when either table it needs is
+// absent (legacy databases that do not have the item table yet).
+func skipTriggerWithoutTables(insp schemaInspector) (bool, error) {
+	itemExists, err := insp.tableExists("job_task_item")
+	if err != nil {
+		return false, err
+	}
+	if !itemExists {
+		return true, nil
+	}
+	ftsExists, err := insp.tableExists("job_task_item_fts")
+	if err != nil {
+		return false, err
+	}
+	return !ftsExists, nil
 }
 
 func parseAlterTableAddColumn(stmt string) (string, string, bool) {
@@ -485,20 +683,13 @@ func parseAlterTableAddColumn(stmt string) (string, string, bool) {
 	return tableName, columnName, true
 }
 
-func txTableExists(tx *sql.Tx, tableName string) bool {
-	var name string
-	err := tx.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name=?", tableName).Scan(&name)
-	return err == nil && name == tableName
+func txTableExists(tx *sql.Tx, tableName string) (bool, error) {
+	return sqliteObjectExists(tx, "table", tableName)
 }
 
 // querier is satisfied by both *sql.Tx and *sql.DB.
 type querier interface {
 	Query(query string, args ...any) (*sql.Rows, error)
-}
-
-func hasColumn(q querier, tableName, columnName string) bool {
-	ok, err := hasColumnErr(q, tableName, columnName)
-	return err == nil && ok
 }
 
 // hasColumnErr is hasColumn with the query error surfaced, for callers that must
@@ -527,10 +718,6 @@ func hasColumnErr(q querier, tableName, columnName string) (bool, error) {
 		}
 	}
 	return false, rows.Err()
-}
-
-func txTableHasColumn(tx *sql.Tx, tableName, columnName string) bool {
-	return hasColumn(tx, tableName, columnName)
 }
 
 func tableHasColumnDBErr(db *sql.DB, tableName, columnName string) (bool, error) {

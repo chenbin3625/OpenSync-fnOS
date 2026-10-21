@@ -179,3 +179,23 @@ func TestExcludeMatcherMatchesWildcardDirectoryName(t *testing.T) {
 		}
 	}
 }
+
+// "build/" names a directory. A plain file called "build" must still sync: the
+// directory branch of matches used to ignore isDirectory and silently excluded
+// files whose name equals an excluded directory (the defaults include
+// lost+found/, @eaDir/, System Volume Information/).
+func TestExcludeMatcherDirectoryRuleDoesNotMatchPlainFile(t *testing.T) {
+	matcher := newExcludeMatcher("cache/\nlost+found/\n@eaDir/")
+	if matcher.matches("backup/cache", false) {
+		t.Error("directory rule excluded a plain file with the same name")
+	}
+	if matcher.matches("backup/lost+found", false) {
+		t.Error("directory rule excluded a plain file with the same name")
+	}
+	if !matcher.matches("backup/cache/", true) {
+		t.Error("directory rule no longer matches the directory")
+	}
+	if !matcher.matches("backup/cache/", false) {
+		t.Error("directory rule must match when the call site only signals the trailing slash")
+	}
+}

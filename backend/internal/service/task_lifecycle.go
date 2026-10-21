@@ -98,11 +98,14 @@ func finalTaskStatus(isBreak bool, ctxErr error, allNum, failOrOtherNum int) tas
 }
 
 func finishJobTaskStatus(taskID int64, status taskStatus, errMsg *string, taskNum map[string]interface{}) error {
-	taskNumJSON, _ := json.Marshal(taskNum)
-	if err := mapper.UpdateJobTaskStatusAndNum(taskID, status.Int(), errMsg, string(taskNumJSON)); err != nil {
-		return err
+	taskNumJSON, err := json.Marshal(taskNum)
+	if err != nil {
+		// Writing an empty counters blob would silently replace the task's
+		// numbers with "no data"; fail the status update instead so the caller
+		// reports the task as failed rather than half-recorded.
+		return fmt.Errorf("marshal task counters: %w", err)
 	}
-	return nil
+	return mapper.UpdateJobTaskStatusAndNum(taskID, status.Int(), errMsg, string(taskNumJSON))
 }
 
 func taskDuration(createTime float64) int {
@@ -125,7 +128,13 @@ func UpdateJobTaskStatusSimple(taskID int64, status taskStatus, errMsg *string) 
 		log.Printf("Failed to count items of task %d, saving status without counters: %v", taskID, err)
 		return mapper.UpdateJobTaskStatusClearNum(taskID, status.Int(), errMsg)
 	}
-	taskNumJSON, _ := json.Marshal(taskNum)
+	taskNumJSON, err := json.Marshal(taskNum)
+	if err != nil {
+		// The status still has to be recorded, but the counters must not be
+		// persisted as an empty blob: leave them for the task list to recompute.
+		log.Printf("Failed to marshal counters of task %d, saving status without counters: %v", taskID, err)
+		return mapper.UpdateJobTaskStatusClearNum(taskID, status.Int(), errMsg)
+	}
 	return mapper.UpdateJobTaskStatusAndNum(taskID, status.Int(), errMsg, string(taskNumJSON))
 }
 

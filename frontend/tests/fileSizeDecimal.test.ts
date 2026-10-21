@@ -51,3 +51,34 @@ describe("fractional file size thresholds", () => {
     expect(fileSizeToBytes("1.2", "MB")).toBe(Math.round(1.2 * 1024 ** 2));
   });
 });
+
+describe("byte-exact round trips", () => {
+  // Opening a task and saving it unchanged must never rewrite min/maxFileSize.
+  // splitBytesToFileSize therefore picks the largest unit that can represent
+  // the byte count within two decimals, down to plain bytes.
+  for (const bytes of [1500, 123456789, 1320702444, 1023]) {
+    it(`round-trips ${bytes} bytes exactly`, () => {
+      const split = splitBytesToFileSize(bytes);
+      expect(fileSizeToBytes(split.value, split.unit)).toBe(bytes);
+    });
+  }
+
+  it("degrades to bytes when no larger unit is exact", () => {
+    expect(splitBytesToFileSize(1500)).toEqual({ value: 1500, unit: "B" });
+  });
+
+  it("keeps familiar unit choices when they are exact", () => {
+    expect(splitBytesToFileSize(1.2 * 1024 ** 2)).toEqual({
+      value: 1.2,
+      unit: "MB",
+    });
+    expect(splitBytesToFileSize(512 * 1024)).toEqual({
+      value: 512,
+      unit: "KB",
+    });
+  });
+
+  it("falls back to MB for an unknown unit", () => {
+    expect(fileSizeToBytes(1, "XB")).toBe(1024 ** 2);
+  });
+});

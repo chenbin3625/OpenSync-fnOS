@@ -79,7 +79,37 @@ type fullSyncPlan struct {
 	extraFiles   map[string]*fullSyncExtraFile
 	extraDeletes map[string]fullSyncDelete
 	blockers     map[string]fullSyncDelete
+	// emptySrcDirs are destination-relative keys of matched directories whose
+	// source listing was empty while the destination one was not.
+	emptySrcDirs []string
+	// planErr is the first panic captured from a concurrent compareDir branch.
+	// A partially built plan is never executed: it could not have weighed its
+	// own deletions and may treat unmatched entries as extra.
+	planErr error
 }
+
+// fail records the first plan-branch panic; later panics are ignored.
+func (plan *fullSyncPlan) fail(err error) {
+	if err == nil {
+		return
+	}
+	plan.mu.Lock()
+	if plan.planErr == nil {
+		plan.planErr = err
+	}
+	plan.mu.Unlock()
+}
+
+// error reports whether a plan branch panicked while building the plan.
+func (plan *fullSyncPlan) error() error {
+	plan.mu.Lock()
+	defer plan.mu.Unlock()
+	return plan.planErr
+}
+
+// fullSyncPlanBranchHook runs at the start of every concurrent compareDir
+// branch. Tests swap it to exercise the panic recovery; production leaves it nil.
+var fullSyncPlanBranchHook func()
 
 func (jt *JobTask) syncFull(work scanWork, spec *excludeMatcher) {
 	// Full sync needs both complete trees before it mutates the destination;
@@ -117,7 +147,25 @@ func (jt *JobTask) syncFull(work scanWork, spec *excludeMatcher) {
 	}
 
 	plan := newFullSyncPlan(srcSnapshot, dstSnapshot, jt.scanBranchSem)
-	plan.build(jt.Job)
+	func() {
+		// A panic in the inline recursion path must abort the plan, not just the
+		// goroutine that happened to run it.
+		defer func() {
+			if r := recover(); r != nil {
+				plan.fail(fmt.Errorf("full-sync plan panic: %v", r))
+			}
+		}()
+		plan.build(jt.Job)
+	}()
+	if err := plan.error(); err != nil {
+		// Never execute a partially built plan: the safety valve was computed
+		// from it, so executing it could delete destination entries that were
+		// never compared against the source.
+		log.Printf("Task %d aborted full-sync plan: %v", jt.TaskID, err)
+		jt.setFatalError(err.Error())
+		jt.requestBreak()
+		return
+	}
 	jt.executeFullSyncPlan(plan)
 }
 
@@ -221,6 +269,16 @@ func (plan *fullSyncPlan) compareDir(job map[string]interface{}, srcRelDir, dstR
 	srcDir := plan.src.root + srcRelDir
 	dstDir := plan.dst.root + dstRelDir
 
+	// A directory present on both sides whose source listing came back empty
+	// while the destination still holds entries is the signature of a listing
+	// anomaly (a driver returning an empty page, an unmounted share). The
+	// executor weighs these against the subtree floor before deleting.
+	if dstRelDir != "" && len(srcItems) == 0 && len(dstItems) > 0 {
+		plan.mu.Lock()
+		plan.emptySrcDirs = append(plan.emptySrcDirs, dstRelDir)
+		plan.mu.Unlock()
+	}
+
 	// Collect child directory pairs for concurrent comparison.
 	type childPair struct{ srcRel, dstRel string }
 	var children []childPair
@@ -235,6 +293,13 @@ func (plan *fullSyncPlan) compareDir(job map[string]interface{}, srcRelDir, dstR
 			allowed := jobAllowsFileSize(job, metadata.Size)
 			if !allowed {
 				if dstName, _, exists := dstIndex.find(name, srcIndex); exists {
+					matchedDst[dstName] = struct{}{}
+				}
+				// A destination directory of the same name would otherwise be a
+				// type conflict removed only so this file could be written. The
+				// file is filtered out and never written, so that delete would
+				// destroy the directory for nothing.
+				if dstName, _, exists := dstIndex.find(name+"/", srcIndex); exists {
 					matchedDst[dstName] = struct{}{}
 				}
 				continue
@@ -301,6 +366,17 @@ func (plan *fullSyncPlan) compareDir(job map[string]interface{}, srcRelDir, dstR
 		go func() {
 			defer wg.Done()
 			defer plan.releaseBranchSlot()
+			// A panic in a plan branch must not take the whole process down (an
+			// unrecovered goroutine panic is fatal) and must not let an
+			// incomplete plan be executed; record it and let the caller abort.
+			defer func() {
+				if r := recover(); r != nil {
+					plan.fail(fmt.Errorf("full-sync plan branch panic: %v", r))
+				}
+			}()
+			if fullSyncPlanBranchHook != nil {
+				fullSyncPlanBranchHook()
+			}
 			plan.compareDir(job, child.srcRel, child.dstRel)
 		}()
 	}
@@ -510,6 +586,11 @@ func (jt *JobTask) executeFullSyncPlan(plan *fullSyncPlan) {
 		jt.queueCopyFile(file.srcDir, file.dstDir, file.name, file.metadata.Size, taskItemTypeCopy)
 	}
 
+	suspiciousCounts := plan.suspiciousEmptySourceDirs()
+	suspicious := make(map[string]struct{}, len(suspiciousCounts))
+	for dir := range suspiciousCounts {
+		suspicious[dir] = struct{}{}
+	}
 	deleteKeys := make([]string, 0, len(plan.extraDeletes))
 	for _, key := range sortedDeleteKeys(plan.extraDeletes, true) {
 		if _, protected := protectedDeletes[key]; protected {
@@ -518,7 +599,21 @@ func (jt *JobTask) executeFullSyncPlan(plan *fullSyncPlan) {
 		if _, consumed := consumedFileDeletes[key]; consumed {
 			continue
 		}
+		if fullSyncPathBlocked(key, suspicious) {
+			continue
+		}
 		deleteKeys = append(deleteKeys, key)
+	}
+	if !deletesUnsafe {
+		for _, dir := range sortedBlockedKeys(suspicious) {
+			reason := fmt.Sprintf("source directory for %s listed empty while the destination holds %d entries below it; deletes under it were skipped",
+				dir, suspiciousCounts[dir])
+			log.Printf("Task %d %s", jt.TaskID, reason)
+			errMsg := msg.MirrorDeleteGuard(reason)
+			// Empty file name: like the global guard record, it can never be
+			// replayed as a delete.
+			jt.CopyHook("", normalizeDirPath(dir), "", nil, "", taskStatusFailed, &errMsg, taskItemPath, taskItemTypeDelete, time.Now().Unix())
+		}
 	}
 
 	// Safety valve. Deletions are derived purely from "destination entries the
@@ -734,6 +829,37 @@ func (plan *fullSyncPlan) unsafeDeleteVolume(deleteCount int) (string, bool) {
 		deleteCount, total, ratio*100, mirrorDeleteRatioThreshold*100), true
 }
 
+// suspiciousEmptySourceDirs returns, keyed by normalized absolute destination
+// path, the matched directories whose source listing was empty while the
+// destination subtree below them holds at least mirrorDeleteFloor entries.
+//
+// The global valve weighs deletes against the whole destination, so one
+// subdirectory whose source listing came back empty (an unmounted share, a
+// driver returning an empty page) is deleted outright when it is a minority of
+// a large tree. Emptying a directory that large in one go is rare enough that
+// keeping it for a run, with a visible record, is the conservative choice; a
+// directory removed from the source entirely is not affected.
+func (plan *fullSyncPlan) suspiciousEmptySourceDirs() map[string]int {
+	result := make(map[string]int)
+	for _, rel := range plan.emptySrcDirs {
+		count := plan.dst.subtreeEntryCount(rel)
+		if count < mirrorDeleteFloor {
+			continue
+		}
+		result[normalizeBlockedPath(plan.dst.root+rel)] = count
+	}
+	return result
+}
+
+func sortedBlockedKeys(items map[string]struct{}) []string {
+	keys := make([]string, 0, len(items))
+	for key := range items {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 // entryCount totals the entries recorded across the scanned tree.
 func (snapshot *fullSyncSnapshot) entryCount() int {
 	snapshot.mu.Lock()
@@ -842,10 +968,13 @@ func (jt *JobTask) runFullSyncRelocations(relocations []fullSyncRelocation) {
 		if jt.isBreak() {
 			break
 		}
+		// waitForCopySlot reserves the slot atomically (same accounting as the
+		// submit executor), so two starters can no longer overshoot
+		// CopyConcurrency; launch the admitted item without re-checking.
 		if !jt.waitForCopySlot(limit) {
 			break
 		}
-		jt.startCopyItemTracked(relocations[i].item, &batch)
+		jt.launchAdmittedCopy(relocations[i].item, &batch)
 	}
 	batch.Wait()
 }

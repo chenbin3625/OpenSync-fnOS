@@ -1,5 +1,6 @@
 import { createContext, useContext } from "react";
 import {
+  IconAlertCircle,
   IconArrowUp,
   IconGithubLogo,
   IconRefresh,
@@ -7,6 +8,7 @@ import {
 import Tag from "@douyinfe/semi-ui/lib/es/tag";
 import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
 import type { LatestVersion } from "../api/client";
+import { openExternalURL } from "../lib/host";
 
 export const repositoryURL = "https://github.com/chenbin3625/OpenSync-fnOS";
 export const latestReleaseURL =
@@ -20,28 +22,41 @@ export function formatVersion(version: string) {
 export const VersionContext = createContext<{
   currentVersion: string;
   latest: LatestVersion | null;
+  /** Failure of the automatic version check (the manual button still toasts). */
+  latestError: string;
   checking: boolean;
   checkUpdate: () => Promise<void>;
 }>({
   currentVersion: "dev",
   latest: null,
+  latestError: "",
   checking: false,
   checkUpdate: async () => {},
 });
 
 export function VersionLink() {
-  const { currentVersion, latest, checking, checkUpdate } =
+  const { currentVersion, latest, latestError, checking, checkUpdate } =
     useContext(VersionContext);
   const version = formatVersion(currentVersion);
   const hasUpdate = latest?.hasUpdate === true;
+  const targetURL = hasUpdate
+    ? latest.releaseURL || latestReleaseURL
+    : repositoryURL;
+  const label = `GitHub 当前版本 ${version}${hasUpdate ? `，有新版本 ${latest.latestVersion}` : ""}${latestError ? `，版本检查失败：${latestError}` : ""}`;
   return (
     <div className="version-entry">
       <a
         className="nav-link version-link"
-        href={hasUpdate ? latest.releaseURL || latestReleaseURL : repositoryURL}
+        href={targetURL}
         target="_blank"
         rel="noopener noreferrer"
-        aria-label={`GitHub 当前版本 ${version}${hasUpdate ? `，有新版本 ${latest.latestVersion}` : ""}`}
+        aria-label={label}
+        onClick={(event) => {
+          // In the fnOS shell window.open/target=_blank may be blocked; let the
+          // host decide how to open the release page.
+          event.preventDefault();
+          void openExternalURL(targetURL);
+        }}
       >
         <IconGithubLogo aria-hidden="true" />
         <span className="nav-label">GitHub</span>
@@ -55,6 +70,11 @@ export function VersionLink() {
             title={`有新版本 ${latest.latestVersion}`}
           >
             <IconArrowUp aria-hidden="true" />
+          </span>
+        )}
+        {!hasUpdate && latestError && (
+          <span className="version-error" title={`版本检查失败：${latestError}`}>
+            <IconAlertCircle aria-hidden="true" />
           </span>
         )}
       </a>

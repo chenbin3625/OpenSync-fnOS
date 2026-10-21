@@ -1,6 +1,7 @@
 package mapper
 
 import (
+	"context"
 	"errors"
 	"log"
 	"strings"
@@ -47,11 +48,39 @@ func IsBusyError(err error) bool {
 // fn must be safe to repeat: a single statement, or a whole transaction that
 // was rolled back.
 func retryOnBusy(fn func() error) error {
+	return retryOnBusyContext(context.Background(), fn)
+}
+
+// retryOnBusyContext is retryOnBusy for callers that hold a cancellation
+// context (a shutdown or a cancelled cleanup): the wait between attempts ends
+// as soon as ctx is done instead of always sleeping the full delay, and the
+// caller's context error is returned rather than a stale SQLITE_BUSY.
+func retryOnBusyContext(ctx context.Context, fn func() error) error {
+	if ctx == nil {
+		return retryOnBusy(fn)
+	}
 	err := fn()
 	for attempt := 0; attempt < len(writeBusyRetryDelays) && IsBusyError(err); attempt++ {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		log.Printf("Database busy, retrying write (%d/%d): %v", attempt+1, len(writeBusyRetryDelays), err)
-		time.Sleep(writeBusyRetryDelays[attempt])
+		if !sleepWithContext(ctx, writeBusyRetryDelays[attempt]) {
+			return ctx.Err()
+		}
 		err = fn()
 	}
 	return err
+}
+
+// sleepWithContext waits for d, reporting false if ctx was cancelled first.
+func sleepWithContext(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }

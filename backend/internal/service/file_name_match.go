@@ -4,6 +4,8 @@ import (
 	"html"
 	"net/url"
 	"strings"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 type dstNameMatchEntry struct {
@@ -104,6 +106,10 @@ func canonicalFileName(name string) string {
 			next = decoded
 		}
 		next = foldCompatibleFullwidthPunctuation(next)
+		// Sources on macOS/SMB report names in NFD while most destinations
+		// store NFC; without this the same name never matches, is copied again
+		// on every run, and in mirror mode the destination spelling is deleted.
+		next = norm.NFC.String(next)
 		if next == current {
 			return current
 		}

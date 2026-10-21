@@ -46,6 +46,15 @@ type versionChecker struct {
 	// lastForcedRefresh gates repeated manual refreshes without preventing the
 	// first button click from bypassing a fresh automatic-check cache.
 	lastForcedRefresh time.Time
+	// inflight is non-nil while an upstream request is running. Concurrent
+	// callers wait for it instead of issuing their own request; it is closed
+	// only after the shared cache has been updated, so a waiter that wakes up
+	// sees the refreshed answer.
+	inflight chan struct{}
+	// inflightStale records whether the shared cache was already stale when
+	// that request started; a failed forced refresh must not replace an answer
+	// that was still fresh for everyone else.
+	inflightStale bool
 }
 
 func newVersionChecker(endpoint string, client *http.Client) *versionChecker {
@@ -100,30 +109,70 @@ func (c *versionChecker) check(ctx context.Context, local string) (versionResult
 // for a real upstream answer even while the cached one is still fresh, but a
 // forced check is itself rate limited by forcedRefreshInterval so a button (or
 // a script) cannot turn into an unauthenticated request flood against GitHub.
+//
+// The upstream request deliberately runs outside the lock: holding it for the
+// whole fetch made every page load wait behind a slow GitHub. Concurrent
+// callers share one in-flight request instead, so the "one upstream call"
+// guarantee is preserved without blocking the cache hits.
 func (c *versionChecker) checkWithRefresh(ctx context.Context, local string, force bool) (versionResult, error) {
+	for {
+		c.mu.Lock()
+		now := time.Now()
+		stale := now.After(c.expiresAt)
+		forced := force && now.Sub(c.lastForcedRefresh) >= forcedRefreshInterval
+		if (stale || forced) && c.inflight != nil {
+			// Someone is already refreshing. Wait for the shared request, then
+			// answer from the cache it populated; a waiter must not trigger a
+			// second upstream call (this is also what throttles a double click).
+			wait := c.inflight
+			c.mu.Unlock()
+			<-wait
+			force = false
+			continue
+		}
+		if stale || forced {
+			c.inflight = make(chan struct{})
+			c.inflightStale = stale
+			if force {
+				c.lastForcedRefresh = now
+			}
+			c.mu.Unlock()
+
+			latest, err := c.fetch(ctx)
+
+			c.mu.Lock()
+			// A failed manual check reports its error to the user who clicked,
+			// but must not replace a still-valid answer: otherwise one GitHub
+			// hiccup would hide the update badge from every automatic check for
+			// failureTTL.
+			replaced := err == nil || c.inflightStale || c.err != nil
+			if replaced {
+				c.latest, c.err = latest, err
+				ttl := successTTL
+				if err != nil {
+					ttl = failureTTL
+				}
+				c.expiresAt = time.Now().Add(ttl)
+			}
+			done := c.inflight
+			c.inflight = nil
+			c.mu.Unlock()
+			close(done)
+			if !replaced {
+				return versionResult{}, err
+			}
+			force = false
+			continue
+		}
+		c.mu.Unlock()
+		return c.snapshot(local)
+	}
+}
+
+// snapshot renders the shared cache. The caller must not hold c.mu.
+func (c *versionChecker) snapshot(local string) (versionResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	now := time.Now()
-	stale := now.After(c.expiresAt)
-	forced := force && now.Sub(c.lastForcedRefresh) >= forcedRefreshInterval
-	if stale || forced {
-		latest, err := c.fetch(ctx)
-		if force {
-			c.lastForcedRefresh = now
-		}
-		// A failed manual check reports its error to the user who clicked, but
-		// must not replace a still-valid answer: otherwise one GitHub hiccup
-		// would hide the update badge from every automatic check for failureTTL.
-		if err != nil && !stale && c.err == nil {
-			return versionResult{}, err
-		}
-		c.latest, c.err = latest, err
-		ttl := successTTL
-		if err != nil {
-			ttl = failureTTL
-		}
-		c.expiresAt = now.Add(ttl)
-	}
 	if c.err != nil {
 		return versionResult{}, c.err
 	}
@@ -145,7 +194,16 @@ func (c *versionChecker) fetch(ctx context.Context) (string, error) {
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "OpenSync-fnOS")
-	resp, err := c.client.Do(req)
+	// Same redirect policy as the rate-limit fallback: the response is parsed
+	// as the release document, so it must come from the endpoint we asked for,
+	// not from wherever a redirect points (which could also downgrade https).
+	client := *c.client
+	if client.CheckRedirect == nil {
+		client.CheckRedirect = func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}

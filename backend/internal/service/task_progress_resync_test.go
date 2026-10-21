@@ -177,3 +177,88 @@ func patchFramesFixture(t *testing.T) *progressFrames {
 		doingTask: doingTask,
 	}
 }
+
+// A new SSE connection builds its own initial snapshot. It must not advance the
+// diff baseline the existing subscribers are patched against: doing so silently
+// skipped every file-set change that happened between the last published frame
+// and the new connection for every other viewer.
+func TestNewSubscriberSnapshotDoesNotAdvanceSharedBaseline(t *testing.T) {
+	hub := newProgressHub()
+	chA := make(chan []byte, 1)
+	if !hub.subscribe(7, chA) {
+		t.Fatal("subscribe() = false")
+	}
+
+	first := sampleCurrent(10)
+	if hub.prepareStreamPayload(7, &first, true) {
+		t.Fatal("the first frame must be a full snapshot")
+	}
+
+	// The handler's path for a new connection: one locked step that builds the
+	// initial frame and registers the subscriber.
+	updates, initial, ok, err := hub.subscribeWithSnapshot(7, func() ([]byte, error) {
+		return []byte(`{"data":{"taskId":9}}`), nil
+	})
+	if err != nil || !ok || updates == nil || initial == nil {
+		t.Fatalf("subscribeWithSnapshot() = (%v, %v, %v, %v)", updates, initial, ok, err)
+	}
+
+	// The existing subscriber must still be eligible for a diff. If the snapshot
+	// had moved the shared baseline, the unchanged file set would be seen as a
+	// change and force a full frame instead.
+	second := sampleCurrent(55)
+	second.Duration = 5
+	if !hub.prepareStreamPayload(7, &second, false) {
+		t.Fatal("the new subscriber's snapshot advanced the shared diff baseline")
+	}
+
+	// Only the new subscriber needs the forced snapshot (its initial frame was
+	// not recorded as the baseline).
+	hub.mu.Lock()
+	needing := 0
+	for _, sub := range hub.subscribers[7] {
+		if sub.needsSnapshot {
+			needing++
+		}
+	}
+	total := len(hub.subscribers[7])
+	hub.mu.Unlock()
+	if total != 2 || needing != 1 {
+		t.Fatalf("subscribers = %d, needing a snapshot = %d, want 2 and 1", total, needing)
+	}
+
+	hub.unsubscribe(7, chA)
+	hub.unsubscribe(7, updates)
+	if subs := hub.subscriberSnapshot(7); len(subs) != 0 {
+		t.Fatalf("subscribers after unsubscribe = %d, want 0", len(subs))
+	}
+}
+
+// The debounced publish timer must not outlive its last subscriber: at shutdown
+// it would otherwise reach the database after ShutdownDB closed the handle.
+func TestLastUnsubscribeStopsDebounceTimer(t *testing.T) {
+	hub := newProgressHub()
+	ch := make(chan []byte, 1)
+	if !hub.subscribe(7, ch) {
+		t.Fatal("subscribe() = false")
+	}
+	hub.schedule(7)
+
+	hub.mu.Lock()
+	timer := hub.timers[7]
+	_, pending := hub.pending[7]
+	hub.mu.Unlock()
+	if timer == nil || !pending {
+		t.Fatalf("debounce timer = %v, pending = %v, want a scheduled publish", timer, pending)
+	}
+
+	hub.unsubscribe(7, ch)
+
+	hub.mu.Lock()
+	_, hasTimer := hub.timers[7]
+	_, hasPending := hub.pending[7]
+	hub.mu.Unlock()
+	if hasTimer || hasPending {
+		t.Fatalf("debounce timer survived its last subscriber (timer=%v pending=%v)", hasTimer, hasPending)
+	}
+}

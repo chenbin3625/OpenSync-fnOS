@@ -13,6 +13,8 @@ import {
   readdirSync,
   utimesSync,
   truncateSync,
+  appendFileSync,
+  statSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -269,6 +271,39 @@ test("start rotates an oversized log and keeps at most five old logs", {
     assert.equal(run("stop").status, 0);
     assert.equal(run("start").status, 0);
     assert.equal(readFileSync(`${log}.2`, "utf8"), "old-1\n");
+  } finally {
+    run("stop");
+    rmSync(fixture, { recursive: true });
+  }
+});
+
+test("rotates app.log while the service is still running", {
+  timeout: 60000,
+}, async () => {
+  const { fixture, run } = setupLifecycleFixture();
+  const log = join(fixture, "var/app.log");
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  try {
+    // start 的启动期轮转只在启动时判断大小；运行期由看护进程按同一阈值
+    // copy-truncate。测试把检查间隔缩到 1s，服务已持有 app.log 的 fd，
+    // 用 >> 追加模拟持续写入。
+    const start = run("start", { OPENSYNC_LOG_CHECK_INTERVAL: "1" });
+    assert.equal(start.status, 0, start.stderr);
+    appendFileSync(log, "x".repeat(10 * 1024 * 1024 + 1024));
+    const deadline = Date.now() + 20000;
+    while (Date.now() < deadline) {
+      if (existsSync(`${log}.1`) && statSync(log).size < 1024 * 1024) break;
+      await sleep(200);
+    }
+    assert.ok(existsSync(`${log}.1`), "运行期间未生成 app.log.1");
+    assert.ok(statSync(`${log}.1`).size >= 10 * 1024 * 1024);
+    assert.ok(
+      statSync(log).size < 1024 * 1024,
+      "轮转后 app.log 未被截断（服务会继续写进旧 inode）",
+    );
+    // 看护进程不能持有生命周期锁：start 之后 stop 必须能立即拿到锁。
+    assert.equal(run("stop").status, 0);
+    assert.equal(run("status").status, 3);
   } finally {
     run("stop");
     rmSync(fixture, { recursive: true });

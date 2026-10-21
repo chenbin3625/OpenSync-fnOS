@@ -1,12 +1,24 @@
 package handler
 
 import (
+	"log"
 	"opensync/internal/msg"
 	"opensync/internal/service"
 	"opensync/pkg/util"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
+
+// notifyTestTimeout bounds the synchronous test send so a slow or wedged
+// provider cannot hold the HTTP request (and the admin UI's 90s timeout) for
+// the worst case of two WeCom round-trips. The outbound requests keep their own
+// client timeout and stay bounded by the notification dispatcher's context.
+var notifyTestTimeout = 45 * time.Second
+
+// testNotifyService is swapped in tests to exercise the timeout/error mapping
+// without a real provider.
+var testNotifyService = service.TestNotify
 
 // GetNotify handles GET /svr/notify
 func GetNotify(c *gin.Context) {
@@ -58,9 +70,28 @@ func TestNotify(c *gin.Context) {
 		respondError(c, msg.T(msg.LostPart))
 		return
 	}
-	handleServiceVoid(c, func() error {
-		return service.TestNotify(*req.Notify)
-	})
+	// Capture the seam before starting the goroutine: tests swap it and restore
+	// it in a cleanup, and the goroutine may outlive the handler on timeout.
+	testService := testNotifyService
+	done := make(chan error, 1)
+	go func() { done <- testService(*req.Notify) }()
+	timer := time.NewTimer(notifyTestTimeout)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		if err != nil {
+			respondServiceError(c, err)
+			return
+		}
+		respondOK(c, nil)
+	case <-c.Request.Context().Done():
+		// The client disconnected; the send keeps its own bounded lifetime but
+		// there is nobody left to write a response to.
+		log.Printf("notify test abandoned by client: %v", c.Request.Context().Err())
+	case <-timer.C:
+		log.Printf("notify test timed out after %s", notifyTestTimeout)
+		respondError(c, msg.T(msg.NotifySendFail))
+	}
 }
 
 // UpdateNotify handles PUT /svr/notify

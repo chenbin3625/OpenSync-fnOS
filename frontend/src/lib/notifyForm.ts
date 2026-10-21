@@ -106,7 +106,7 @@ export function buildNotifyParams(form: NotifyForm) {
       parseObject(form.body);
       return {
         ...common,
-        url: form.url,
+        url: form.url?.trim(),
         httpMethod: form.httpMethod || "POST",
         contentType: form.contentType || "application/json",
         needContent: form.needContent ?? true,
@@ -125,7 +125,11 @@ export function buildNotifyParams(form: NotifyForm) {
     case 2:
     case 4:
       // 空字符串也要提交：后端据此关闭签名，而不是回填已保存的 secret。
-      return { ...common, url: form.url, secret: form.secret?.trim() || "" };
+      return {
+        ...common,
+        url: form.url?.trim(),
+        secret: form.secret?.trim() || "",
+      };
     case 3:
       return {
         ...common,
@@ -180,15 +184,28 @@ export function notifyToForm(
         : params.headers || "",
   };
 }
+/** Methods whose webhook URL is allowed to be plain HTTP (custom webhook). */
+const httpWebhookMethods = new Set([0]);
+/** Methods whose URL carries a credential and therefore requires TLS. */
+const httpsOnlyWebhookMethods = new Set([2, 4]);
+
 export function validateNotifyForm(form: NotifyForm) {
   if (form.method < 0) return "请选择通知渠道";
-  if ([0, 2, 4].includes(form.method)) {
+  if (httpWebhookMethods.has(form.method) || httpsOnlyWebhookMethods.has(form.method)) {
+    let url: URL;
     try {
-      const url = new URL(form.url || "");
-      if (!["http:", "https:"].includes(url.protocol))
-        return "请输入有效的 HTTP / HTTPS Webhook URL";
+      url = new URL((form.url || "").trim());
     } catch {
       return "请输入有效的 Webhook URL";
+    }
+    if (httpsOnlyWebhookMethods.has(form.method)) {
+      // DingTalk / Lark put the access token in the URL, so the backend rejects
+      // plain HTTP for them (validateNotifyHTTPSURL); accepting it here only
+      // produced a server error after the form said it was fine.
+      if (url.protocol !== "https:")
+        return "钉钉 / 飞书 Webhook 必须使用 HTTPS 地址";
+    } else if (!["http:", "https:"].includes(url.protocol)) {
+      return "请输入有效的 HTTP / HTTPS Webhook URL";
     }
   }
   if (

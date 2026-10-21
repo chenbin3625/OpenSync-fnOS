@@ -115,6 +115,12 @@ type jobCurrentPayload struct {
 type transferMeter struct {
 	duration int
 	doneSize int64
+	// speed is the last rate measured across a whole-second boundary. Readers
+	// that land in the same second (GET ?current=1, an SSE snapshot, the
+	// debounced publisher) reuse it instead of reporting 0, and only a sample
+	// with a newer duration advances the window — so concurrent observers can
+	// neither zero the rate nor shrink its window to one caller's interval.
+	speed float64
 }
 
 func (item streamDoingItem) countableSize() int64 {
@@ -188,18 +194,34 @@ func (jt *JobTask) getCurrentPayload() jobCurrentPayload {
 		}
 	}
 
-	jt.CurrentMu.Lock()
-	prev := jt.lastMeter
-	if prev.duration > 0 && duration != prev.duration {
-		payload.Speed = float64(doneSize-prev.doneSize) / float64(duration-prev.duration)
-	}
-	jt.lastMeter = transferMeter{duration: duration, doneSize: doneSize}
-	jt.CurrentMu.Unlock()
+	payload.Speed = jt.sampleSpeed(duration, doneSize)
 
 	if payload.SpeedAvg > 0 && remainSize > 0 {
 		payload.RemainTime = int(math.Ceil(float64(remainSize) / payload.SpeedAvg))
 	}
 	return payload
+}
+
+// sampleSpeed returns the instantaneous transfer rate. The window only moves
+// forward: a sample from the same (or an earlier) second returns the cached
+// rate unchanged, so many observers interleaving within one second behave
+// exactly like a single periodic sampler.
+func (jt *JobTask) sampleSpeed(duration int, doneSize int64) float64 {
+	jt.CurrentMu.Lock()
+	defer jt.CurrentMu.Unlock()
+	prev := jt.lastMeter
+	if prev.duration > 0 && duration <= prev.duration {
+		return prev.speed
+	}
+	speed := 0.0
+	if prev.duration > 0 {
+		speed = float64(doneSize-prev.doneSize) / float64(duration-prev.duration)
+		if speed < 0 {
+			speed = 0
+		}
+	}
+	jt.lastMeter = transferMeter{duration: duration, doneSize: doneSize, speed: speed}
+	return speed
 }
 
 // GetCurrent keeps the legacy in-process map contract for callers outside the
@@ -326,9 +348,12 @@ func (jt *JobTask) finishedTaskPageFromDB(status, pageSize, pageNum int) map[str
 	result, err := mapper.GetJobTaskItemList(params)
 	if err != nil {
 		log.Printf("Failed to load task items for task %d status %d: %v", jt.TaskID, status, err)
+		// An empty page and "the query failed" must not look the same to the
+		// caller: a DB hiccup used to render as "this task has no items".
 		return map[string]interface{}{
-			"dataList": []map[string]interface{}{},
-			"count":    int64(0),
+			"dataList":  []map[string]interface{}{},
+			"count":     int64(0),
+			"loadError": err.Error(),
 		}
 	}
 	return result

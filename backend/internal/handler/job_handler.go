@@ -112,13 +112,47 @@ func validateJobFields(req map[string]interface{}) error {
 	}
 	for _, field := range []string{"srcPath", "dstPath"} {
 		if v, ok := req[field]; ok {
-			s := util.StringValue(v)
-			if strings.Contains(s, "..") {
+			if hasParentPathSegment(v) {
 				return errors.New(msg.T(msg.LostPart))
 			}
 		}
 	}
 	return nil
+}
+
+// hasParentPathSegment reports whether one of the selected paths contains a
+// ".." path segment, the only form that can traverse out of the share. A raw
+// strings.Contains(s, "..") rejected legal directory names such as
+// "backup..2024"; delegation to the service layer cleans paths but keeps a
+// leading "..", so the guard stays here as a segment comparison.
+func hasParentPathSegment(value interface{}) bool {
+	switch v := value.(type) {
+	case []string:
+		for _, item := range v {
+			if pathHasParentSegment(item) {
+				return true
+			}
+		}
+		return false
+	case []interface{}:
+		for _, item := range v {
+			if pathHasParentSegment(util.StringValue(item)) {
+				return true
+			}
+		}
+		return false
+	default:
+		return pathHasParentSegment(util.StringValue(value))
+	}
+}
+
+func pathHasParentSegment(value string) bool {
+	for _, segment := range strings.FieldsFunc(value, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if segment == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 // AddJob handles POST /svr/job

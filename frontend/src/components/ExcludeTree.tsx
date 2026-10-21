@@ -1,6 +1,8 @@
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
+import Button from "@douyinfe/semi-ui/lib/es/button";
 import Tree from "@douyinfe/semi-ui/lib/es/tree";
 import type { TreeNodeData } from "@douyinfe/semi-ui/lib/es/tree/interface";
+import { IconRefresh } from "@douyinfe/semi-icons";
 import {
   initialExcludeExpandedKeys,
   normalizeExcludeRootPath,
@@ -26,24 +28,38 @@ function toRelative(srcPath: string, abs: string): string {
 }
 
 export function ExcludeTree({
+  id,
   engineId,
   srcPaths,
   excludedPaths,
   onChange,
+  "aria-label": ariaLabel,
+  "aria-labelledby": ariaLabelledBy,
 }: {
+  id?: string;
   engineId?: number;
   srcPaths: string[];
   excludedPaths: string[];
   onChange: (paths: string[]) => void;
+  "aria-label"?: string;
+  "aria-labelledby"?: string;
 }) {
+  const [loadFailed, setLoadFailed] = useState(false);
+  const onLoaded = useCallback(() => setLoadFailed(false), []);
+  const onError = useCallback(() => setLoadFailed(true), []);
   const {
     treeData,
     expandedKeys,
     setExpandedKeys,
+    // Controlled loaded keys: Semi marks a node loaded even when loadData
+    // fails, so without this a failed directory can never be retried.
+    loadedKeys,
+    refreshing,
     loadChildren,
     loadData,
+    refresh,
     resetTree,
-  } = useAsyncTree({ engineId, errorFallback: "目录加载失败" });
+  } = useAsyncTree({ engineId, onLoaded, onError, errorFallback: "目录加载失败" });
 
   // 根据 srcPaths 初始化根节点
   useEffect(() => {
@@ -112,27 +128,68 @@ export function ExcludeTree({
 
   if (!engineId || !srcPaths.length) {
     return (
-      <div className="exclude-tree-empty muted">
+      <div
+        id={id}
+        className="exclude-tree-empty muted"
+        role="group"
+        aria-label={ariaLabel}
+        aria-labelledby={ariaLabelledBy}
+      >
         请先选择引擎和源目录
       </div>
     );
   }
 
   return (
-    <div className="exclude-tree">
-      <Tree
-        treeData={treeData}
-        multiple
-        checkRelation="related"
-        value={checkedKeys}
-        onChange={handleCheck}
-        loadData={loadData}
-        expandedKeys={expandedKeys}
-        onExpand={(keys) => setExpandedKeys(keys as string[])}
-        filterTreeNode
-        searchPlaceholder="搜索已加载目录"
-        emptyContent="暂无子目录"
-      />
+    <div
+      id={id}
+      className="exclude-tree-field"
+      role="group"
+      aria-label={ariaLabel}
+      aria-labelledby={ariaLabelledBy}
+    >
+      <div className="exclude-tree">
+        <Tree
+          treeData={treeData}
+          multiple
+          checkRelation="related"
+          value={checkedKeys}
+          onChange={handleCheck}
+          loadData={loadData}
+          // 受控 loadedKeys，让加载失败的节点可以重新请求；与 RemotePaths 一致
+          loadedKeys={loadedKeys}
+          // 异步返回的子目录在展开动画期间可能不渲染（见 RemotePaths 的注释）
+          motion={false}
+          expandedKeys={expandedKeys}
+          onExpand={(keys) => setExpandedKeys(keys as string[])}
+          filterTreeNode
+          searchPlaceholder="搜索已加载目录"
+          emptyContent="暂无子目录"
+        />
+      </div>
+      <div className="exclude-tree-toolbar">
+        <Button
+          size="small"
+          theme="borderless"
+          icon={<IconRefresh aria-hidden="true" />}
+          loading={refreshing}
+          disabled={!engineId}
+          onClick={() => void refresh()}
+        >
+          刷新目录
+        </Button>
+        {loadFailed && (
+          <Button
+            size="small"
+            theme="borderless"
+            icon={<IconRefresh aria-hidden="true" />}
+            loading={refreshing}
+            onClick={() => void refresh()}
+          >
+            重试加载
+          </Button>
+        )}
+      </div>
     </div>
   );
 }

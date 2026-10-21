@@ -1,7 +1,6 @@
 package mapper
 
 import (
-	"errors"
 	"opensync/internal/msg"
 	"opensync/pkg/util"
 )
@@ -26,7 +25,7 @@ func GetAlistByID(alistID int64) (map[string]interface{}, error) {
 		return nil, err
 	}
 	if len(rst) == 0 {
-		return nil, errors.New(msg.T(msg.AlistNotFound))
+		return nil, notFound(ErrAlistNotFound, msg.AlistNotFound)
 	}
 	if err := decryptCredentialColumn(rst, "token"); err != nil {
 		return nil, err
@@ -67,7 +66,16 @@ func UpdateAlist(id int64, remark, url string, token *string) error {
 	return ExecuteUpdate("UPDATE alist_list SET remark=?, url=? WHERE id=?", remark, url, id)
 }
 
-// RemoveAlist deletes an alist entry
+// RemoveAlist deletes an alist entry. Deleting a row that does not exist is
+// reported as not-found instead of a silent success, so a caller can tell a
+// double delete (or a concurrently removed engine) from a real one.
 func RemoveAlist(alistID int64) error {
-	return ExecuteUpdate("DELETE FROM alist_list WHERE id=?", alistID)
+	affected, err := executeUpdateAffected("DELETE FROM alist_list WHERE id=?", alistID)
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return notFound(ErrAlistNotFound, msg.AlistNotFound)
+	}
+	return nil
 }

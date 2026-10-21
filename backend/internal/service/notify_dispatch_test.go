@@ -196,3 +196,44 @@ func TestQueuedTaskNumIsDetachedFromCaller(t *testing.T) {
 		t.Fatalf("copyTaskNum(nil) != nil")
 	}
 }
+
+// When shutdown gives up waiting, it must cancel the dispatcher context so
+// in-flight HTTP sends abort instead of outliving the database they report to.
+func TestShutdownCancelsInFlightRequestsOnDeadline(t *testing.T) {
+	started := make(chan struct{}, 1)
+	dispatcher := newNotifyDispatcher(nil)
+	dispatcher.handle = func(notifyJob) {
+		started <- struct{}{}
+		<-dispatcher.context().Done()
+	}
+	defer func() {
+		if dispatcher.cancel != nil {
+			dispatcher.cancel()
+		}
+	}()
+
+	if !dispatcher.enqueue(notifyJob{taskID: 1}) {
+		t.Fatal("enqueue() = false, want the job queued")
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker never started the delivery")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		dispatcher.shutdown(ctx)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("shutdown() did not return after its deadline")
+	}
+	if err := dispatcher.context().Err(); err == nil {
+		t.Fatal("dispatcher context was not cancelled after the shutdown deadline")
+	}
+}

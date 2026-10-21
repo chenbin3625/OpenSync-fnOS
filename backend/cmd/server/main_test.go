@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -157,8 +159,14 @@ func TestOpenListenerDiscardBeforeCommitLeavesNoSocket(t *testing.T) {
 	listener.Close()
 	publish.discard()
 	entries, _ := os.ReadDir(dir)
-	if len(entries) != 0 {
-		t.Fatalf("files left after discard: %v", entries)
+	for _, entry := range entries {
+		// The lock marker is intentionally persistent; the kernel releases the
+		// flock when the process exits, and unlinking it would race a waiting
+		// start.
+		if entry.Name() == startupLockName {
+			continue
+		}
+		t.Fatalf("file left after discard: %v", entry.Name())
 	}
 }
 
@@ -308,5 +316,62 @@ func TestNativeRoutesDoNotExposeLegacyLogin(t *testing.T) {
 	r.ServeHTTP(w, req)
 	if w.Code != 200 {
 		t.Fatalf("gateway session status=%d", w.Code)
+	}
+}
+
+// The lock marker serializes starts before either one probes or binds: probing
+// alone was racy, and two starts could migrate the database concurrently.
+func TestStartupLockExcludesSecondOwner(t *testing.T) {
+	dir := shortSocketDir(t)
+	first, err := acquireStartupLock(dir)
+	if err != nil {
+		t.Fatalf("acquireStartupLock() error: %v", err)
+	}
+	if _, err := acquireStartupLock(dir); !errors.Is(err, errServiceAlreadyRunning) {
+		t.Fatalf("second acquireStartupLock() error = %v, want errServiceAlreadyRunning", err)
+	}
+	first.Close()
+	third, err := acquireStartupLock(dir)
+	if err != nil {
+		t.Fatalf("acquireStartupLock() after release error: %v", err)
+	}
+	third.Close()
+}
+
+// A start that has taken the lock must win even before it publishes a socket or
+// a pending name, which is exactly the window the probe-based check missed.
+func TestOpenListenerRefusesWhileLockIsHeld(t *testing.T) {
+	dir := shortSocketDir(t)
+	lock, err := acquireStartupLock(dir)
+	if err != nil {
+		t.Fatalf("acquireStartupLock() error: %v", err)
+	}
+	defer lock.Close()
+
+	listener, _, err := openListener(false, "", dir)
+	if !errors.Is(err, errServiceAlreadyRunning) {
+		if listener != nil {
+			listener.Close()
+		}
+		t.Fatalf("openListener() error = %v, want errServiceAlreadyRunning", err)
+	}
+}
+
+// A chunked request has no Content-Length for the middleware pre-check; the
+// MaxBytesReader path must answer 413, not a 200 "missing parameters" envelope.
+func TestBodyLimitMiddlewareAnswers413ForChunkedBody(t *testing.T) {
+	router := newRouter(true, nil)
+	body := `{"name":"` + strings.Repeat("x", (1<<20)+1024) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/app/opensync/svr/alist", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.ContentLength = -1
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d body=%s, want 413", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":413`) {
+		t.Fatalf("body = %s, want the 413 envelope", w.Body.String())
 	}
 }

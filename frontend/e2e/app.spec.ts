@@ -1,5 +1,25 @@
 import { test, expect } from "@playwright/test";
 
+test.beforeEach(async ({ page }) => {
+  // The app shell checks the latest release on mount, and the real backend
+  // answers that by calling GitHub. Stub it so this smoke suite passes offline
+  // and cannot be slowed down by an unreachable upstream.
+  await page.route("**/app/opensync/svr/version/latest*", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        code: 200,
+        data: {
+          latestVersion: "v0.0.0",
+          releaseURL: "https://github.com/chenbin3625/OpenSync-fnOS/releases/latest",
+          hasUpdate: false,
+        },
+        msg: "success",
+      }),
+    }),
+  );
+});
+
 test("opens usable task workspace without a second login", async ({ page }) => {
   await page.goto("/app/opensync/tasks");
   await expect(page.getByRole("main")).toBeVisible();

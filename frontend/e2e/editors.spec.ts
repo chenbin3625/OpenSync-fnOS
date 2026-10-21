@@ -110,7 +110,7 @@ test("task editor keeps size filters disabled until selected", async ({
   );
   const minInput = minRow.getByRole("textbox", { name: "排除小于文件大小" });
   await minInput.fill("not-a-size");
-  await minRow.getByText("排除小于").click();
+  await minRow.getByText("排除小于", { exact: true }).click();
   await expect(minInput).toHaveValue("not-a-size");
   await dialog.getByRole("button", { name: "保存" }).click();
   await expect(page.getByText("文件大小必须是有效的非负数")).toBeVisible();
@@ -367,14 +367,28 @@ test("notification channels switch without retaining unrelated fields", async ({
   await expect(
     page.getByRole("alert").filter({ hasText: "请选择通知渠道" }),
   ).toBeVisible();
-  await page.getByRole("combobox", { name: "通知渠道", exact: true }).click();
-  await page.getByRole("option").filter({ hasText: "自定义 Webhook" }).click();
+  const channelSelect = page.getByRole("combobox", {
+    name: "通知渠道",
+    exact: true,
+  });
+  await channelSelect.click();
+  const webhookOption = page
+    .getByRole("option")
+    .filter({ hasText: "自定义 Webhook" });
+  await webhookOption.click();
+  // On the mobile project the select popover can stay mounted one tick longer
+  // than the click; saving immediately afterwards hit the overlay instead of
+  // the button and no validation toast was produced.
+  await expect(webhookOption).toBeHidden();
+  await expect(channelSelect).toContainText("自定义 Webhook");
   await page.getByRole("button", { name: "保存", exact: true }).click();
   await expect(
     page.getByText("请输入有效的 Webhook URL", { exact: true }),
   ).toBeVisible();
-  await page.getByRole("combobox", { name: "通知渠道", exact: true }).click();
-  await page.getByText("企业微信", { exact: true }).click();
+  await channelSelect.click();
+  const wecomOption = page.getByRole("option").filter({ hasText: "企业微信" });
+  await wecomOption.click();
+  await expect(wecomOption).toBeHidden();
   await expect(
     page.getByRole("textbox", { name: "企业 ID", exact: true }),
   ).toBeVisible();
@@ -432,7 +446,8 @@ test("settings uses plain inputs, validates limits and keeps backend units", asy
     page.getByText("任务超时请输入 0–8760 的整数", { exact: true }),
   ).toBeVisible();
   await timeout.fill("8761");
-  await save.click();
+  // 前一次校验错误 Toast 仍覆盖在保存按钮上，强制点击以继续验证第二条提示。
+  await save.click({ force: true });
   await expect(
     page.getByText("任务超时请输入 0–8760 的整数", { exact: true }).first(),
   ).toBeVisible();
@@ -498,7 +513,7 @@ test("directory picker scrolls when there are many folders", async ({ page }) =>
     .click();
   await page.locator(".semi-dropdown-menu").getByText("设置", { exact: true }).click();
   const dialog = page.getByRole("dialog");
-  await dialog.getByRole("combobox", { name: "选择引擎目录" }).first().click();
+  await dialog.getByRole("combobox", { name: "选择源目录" }).first().click();
 
   const list = page.locator(".remote-paths-dropdown .semi-tree-option-list");
   const last = list.locator('[role="treeitem"][data-key="/dir-119"]');
@@ -584,7 +599,7 @@ async function openPickerForEditedTask(
   await page.locator(".semi-dropdown-menu").getByText("设置", { exact: true }).click();
   const dialog = page.getByRole("dialog");
   const source = dialog.locator(".remote-paths").first();
-  await source.getByRole("combobox", { name: "选择引擎目录" }).click();
+  await source.getByRole("combobox", { name: "选择源目录" }).click();
   const popover = page.locator(".remote-paths-dropdown");
   const option = (key: string) =>
     popover.locator(`[role="treeitem"][data-key="${key}"]`);

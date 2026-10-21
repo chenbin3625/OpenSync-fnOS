@@ -2,4 +2,13 @@
 
 ### This script is called after the user upgrades the application.
 
+# 升级本身不在这里回滚：新版本可能已迁移数据库，自动覆盖比保留现场风险更大。
+# 只把升级前备份的位置写进输出，便于用户在新版本异常时手动恢复；新版本首次启动
+# 失败时 main 也会在错误信息里给出同一位置。
+if [ -n "${TRIM_PKGVAR:-}" ] && [ -f "${TRIM_PKGVAR}/last-upgrade-backup" ]; then
+    IFS= read -r backup < "${TRIM_PKGVAR}/last-upgrade-backup" || true
+    if [ -n "${backup:-}" ]; then
+        printf '%s\n' "升级前的数据备份位于 ${backup}；如新版本无法使用，可停止应用后手动恢复。"
+    fi
+fi
 exit 0

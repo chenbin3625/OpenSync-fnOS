@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"opensync/internal/config"
+	"opensync/internal/model"
 	"opensync/internal/msg"
 	"os"
 	"path/filepath"
@@ -208,5 +209,229 @@ func TestSSEDeadlineReachesConnectionThroughGinWriter(t *testing.T) {
 	resp.Body.Close()
 	if err := <-deadlineErr; err != nil {
 		t.Fatalf("SetWriteDeadline through gin writer = %v, want nil", err)
+	}
+}
+
+// --- round 2 fixes: oversized body, path segments, notify test timeout, SSE ---
+
+// A chunked body has no Content-Length, so the middleware pre-check cannot
+// reject it; the MaxBytesReader error must still answer 413 rather than look
+// like a malformed parameter.
+func TestBindJSONAnswers413ForOversizedBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.POST("/svr/x", func(c *gin.Context) {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 32)
+		var req map[string]interface{}
+		bindJSON(c, &req)
+	})
+	body := `{"key":"` + strings.Repeat("x", 256) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/svr/x", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.ContentLength = -1
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", w.Code)
+	}
+	code, message := decodeEnvelope(t, w.Body.Bytes())
+	if code != http.StatusRequestEntityTooLarge || message != msg.T(msg.RequestTooLarge) {
+		t.Fatalf("response = %s, want the request-too-large envelope", w.Body.String())
+	}
+}
+
+func TestUpdateSystemConfigAnswers413ForOversizedBody(t *testing.T) {
+	useSystemConfig(t, t.TempDir())
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.PUT("/svr/system/config", func(c *gin.Context) {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 32)
+		UpdateSystemConfig(c)
+	})
+	body := `{"taskTimeout":48,"pad":"` + strings.Repeat("x", 256) + `"}`
+	req := httptest.NewRequest(http.MethodPut, "/svr/system/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.ContentLength = -1
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d body=%s, want 413", w.Code, w.Body.String())
+	}
+}
+
+// Legal directory names may contain two dots; only a ".." segment traverses.
+func TestValidateJobFieldsAcceptsDotsInDirectoryNames(t *testing.T) {
+	for _, paths := range []interface{}{
+		"/Photos/backup..2024",
+		[]interface{}{"/Photos/backup..2024", "/Photos/监控..2024"},
+		[]string{"/Photos/a..b"},
+	} {
+		req := map[string]interface{}{"srcPath": paths, "dstPath": paths}
+		if err := validateJobFields(req); err != nil {
+			t.Fatalf("validateJobFields(%#v) = %v, want the names accepted", paths, err)
+		}
+	}
+}
+
+func TestValidateJobFieldsRejectsParentPathSegments(t *testing.T) {
+	for _, paths := range []interface{}{
+		"/Photos/../etc",
+		"../etc",
+		"/Photos/..",
+		`..\windows`,
+		[]interface{}{"/Photos", ".."},
+		[]interface{}{"/Photos", "../etc"},
+	} {
+		req := map[string]interface{}{"srcPath": paths}
+		if err := validateJobFields(req); err == nil {
+			t.Fatalf("validateJobFields(%#v) = nil, want a traversal rejection", paths)
+		}
+	}
+}
+
+// A slow provider must not hold the HTTP request indefinitely.
+func TestTestNotifyTimesOutAndAnswersWithGenericFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	release := make(chan struct{})
+	defer close(release)
+	oldTimeout, oldService := notifyTestTimeout, testNotifyService
+	notifyTestTimeout = 50 * time.Millisecond
+	testNotifyService = func(map[string]interface{}) error {
+		<-release
+		return nil
+	}
+	t.Cleanup(func() {
+		notifyTestTimeout = oldTimeout
+		testNotifyService = oldService
+	})
+
+	router := gin.New()
+	router.POST("/svr/notify/test", TestNotify)
+	body := `{"notify":{"method":1,"params":{"sendKey":"k"}}}`
+	req := httptest.NewRequest(http.MethodPost, "/svr/notify/test", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	code, message := decodeEnvelope(t, w.Body.Bytes())
+	if code != 500 || message != msg.T(msg.NotifySendFail) {
+		t.Fatalf("response = %s, want the generic send-failure envelope", w.Body.String())
+	}
+}
+
+func TestTestNotifyMapsPublicServiceError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	old := testNotifyService
+	// A public error is actionable and must be shown verbatim.
+	testNotifyService = func(map[string]interface{}) error {
+		return model.PublicError("配置无效")
+	}
+	t.Cleanup(func() { testNotifyService = old })
+
+	router := gin.New()
+	router.POST("/svr/notify/test", TestNotify)
+	req := httptest.NewRequest(http.MethodPost, "/svr/notify/test", strings.NewReader(`{"notify":{"method":1}}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	code, message := decodeEnvelope(t, w.Body.Bytes())
+	if code != 500 || message != "配置无效" {
+		t.Fatalf("response = %s, want the public message", w.Body.String())
+	}
+}
+
+func TestTestNotifyAnswersOKOnSuccess(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	old := testNotifyService
+	testNotifyService = func(map[string]interface{}) error { return nil }
+	t.Cleanup(func() { testNotifyService = old })
+
+	router := gin.New()
+	router.POST("/svr/notify/test", TestNotify)
+	req := httptest.NewRequest(http.MethodPost, "/svr/notify/test", strings.NewReader(`{"notify":{"method":1}}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	code, _ := decodeEnvelope(t, w.Body.Bytes())
+	if code != 200 {
+		t.Fatalf("response = %s, want success", w.Body.String())
+	}
+}
+
+func stubSubscribeJobProgress(t *testing.T, fn func(int64) (<-chan []byte, []byte, bool, error)) {
+	t.Helper()
+	old := subscribeJobProgress
+	subscribeJobProgress = fn
+	t.Cleanup(func() {
+		subscribeJobProgress = old
+		globalSSEConns.Store(0)
+	})
+}
+
+func TestStreamJobCurrentWritesInitialSnapshotThenStops(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	var gotID int64
+	stubSubscribeJobProgress(t, func(jobID int64) (<-chan []byte, []byte, bool, error) {
+		gotID = jobID
+		ch := make(chan []byte)
+		close(ch) // no further frames: the handler must write the snapshot and return
+		return ch, []byte(`{"code":200,"data":{"taskId":1}}`), true, nil
+	})
+	router := gin.New()
+	router.GET("/svr/job/stream", StreamJobCurrent)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/svr/job/stream?id=7", nil))
+
+	if gotID != 7 {
+		t.Fatalf("subscribe jobID = %d, want 7", gotID)
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+		t.Fatalf("Content-Type = %q, want text/event-stream", ct)
+	}
+	if !strings.Contains(w.Body.String(), `data: {"code":200`) {
+		t.Fatalf("body = %q, want the initial snapshot frame", w.Body.String())
+	}
+	if active := globalSSEConns.Load(); active != 0 {
+		t.Fatalf("globalSSEConns = %d after the stream ended, want 0", active)
+	}
+}
+
+func TestStreamJobCurrentReportsBuildFailureAsJSON(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	stubSubscribeJobProgress(t, func(int64) (<-chan []byte, []byte, bool, error) {
+		return nil, nil, true, errors.New("database is locked")
+	})
+	router := gin.New()
+	router.GET("/svr/job/stream", StreamJobCurrent)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/svr/job/stream?id=7", nil))
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), msg.T(msg.InternalError)) {
+		t.Fatalf("body = %q, want the localized internal error", w.Body.String())
+	}
+}
+
+func TestStreamJobCurrentReportsSubscriptionLimit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	stubSubscribeJobProgress(t, func(int64) (<-chan []byte, []byte, bool, error) {
+		return nil, nil, false, nil
+	})
+	router := gin.New()
+	router.GET("/svr/job/stream", StreamJobCurrent)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/svr/job/stream?id=7", nil))
+
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", w.Code)
 	}
 }

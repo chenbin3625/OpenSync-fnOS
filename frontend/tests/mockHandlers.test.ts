@@ -69,6 +69,46 @@ describe("mock HTTP handlers", () => {
     });
   });
 
+  it("mirrors the backend notification contract", async () => {
+    resetMockStore({ notifications: [] });
+
+    // The real handler answers HTTP 200 with code 500 for missing `enable`.
+    const missingEnable = await fetch(`${apiUrl}/notify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ notify: { method: 1, params: {} } }),
+    });
+    expect(missingEnable.status).toBe(200);
+    expect(await json<{ code: number; msg: string }>(missingEnable)).toMatchObject({
+      code: 500,
+      msg: "缺少必要参数",
+    });
+
+    const created = await fetch(`${apiUrl}/notify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ notify: { method: 1, enable: 1, params: {} } }),
+    });
+    const createdBody = await json<{ code: number; data: { id: number } }>(created);
+    expect(createdBody.code).toBe(200);
+    expect(createdBody.data.id).toBeGreaterThan(0);
+
+    const list = await json<{ data: { id: number; enable: number }[] }>(
+      await fetch(`${apiUrl}/notify`),
+    );
+    expect(list.data).toHaveLength(1);
+
+    await fetch(`${apiUrl}/notify`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ notifyId: createdBody.data.id, enable: 0 }),
+    });
+    const disabled = await json<{ data: { enable: number }[] }>(
+      await fetch(`${apiUrl}/notify`),
+    );
+    expect(disabled.data[0].enable).toBe(0);
+  });
+
   it("returns a task snapshot and status page through the same job endpoint", async () => {
     resetMockStore({ jobs: [{ id: 7, remark: "实时任务", enable: 1 }] });
 

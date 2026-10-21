@@ -60,7 +60,9 @@ func InitJobs() {
 func ShutdownJobs(ctx context.Context) {
 	// Stop the retention cleanup first and wait for it within ctx: it may be
 	// mid-VACUUM, and the caller closes the database right after this returns.
-	stopTaskRetentionCleanup(ctx)
+	if !stopTaskRetentionCleanup(ctx) {
+		log.Printf("Warning: task history cleanup did not stop before the jobs shutdown deadline")
+	}
 
 	jobClientListMu.RLock()
 	clients := make([]*JobClient, 0, len(jobClientList))
@@ -92,6 +94,10 @@ func ShutdownJobs(ctx context.Context) {
 	case <-done:
 	case <-ctx.Done():
 	}
+	// Pending debounced progress publishes read the database; the caller closes
+	// it right after ShutdownJobs returns, so their timers must be cancelled
+	// here (same reason as the persist flush timers).
+	StopJobProgressHub()
 }
 
 func waitJobClientIdleContext(ctx context.Context, client *JobClient) {
@@ -358,6 +364,16 @@ func EditJobClient(job map[string]interface{}) error {
 	if err != nil {
 		return err
 	}
+	// Serialize the whole configuration swap with delete/pause/resume: two
+	// concurrent edits used to leave the active scheduler and the database
+	// holding different configurations, and an edit racing a delete could arm a
+	// scheduler for a job whose row was already gone.
+	if !client.lockOp() {
+		client.opMu.Unlock()
+		return publicError(msg.T(msg.JobNotFound))
+	}
+	defer client.opMu.Unlock()
+
 	nextScheduler := newSchedulerStopped()
 	if err := nextScheduler.AddJob(util.ToInt(job["isCron"]), job, func() {
 		client.DoScheduled()
@@ -365,9 +381,24 @@ func EditJobClient(job map[string]interface{}) error {
 		nextScheduler.Stop()
 		return fmt.Errorf("schedule job: %w", err)
 	}
-	if err := mapper.UpdateJob(job); err != nil {
+	// The engine reference check and the row update commit under the same lock
+	// RemoveClient uses: otherwise an edit could point the job at an engine that
+	// is being deleted right now, leaving a dangling reference that only fails
+	// when the next task starts.
+	alistRefMu.Lock()
+	_, alistErr := alistDeps.GetAlistByID(util.ToInt64(job["alistId"]))
+	var updateErr error
+	if alistErr == nil {
+		updateErr = mapper.UpdateJob(job)
+	}
+	alistRefMu.Unlock()
+	if alistErr != nil {
 		nextScheduler.Stop()
-		return fmt.Errorf("update job: %w", err)
+		return publicErrorIf(alistErr, msg.T(msg.AlistNotFound))
+	}
+	if updateErr != nil {
+		nextScheduler.Stop()
+		return fmt.Errorf("update job: %w", updateErr)
 	}
 	nextScheduler.Start()
 	oldScheduler := client.replaceJobConfig(job, nextScheduler)
@@ -419,17 +450,68 @@ func RemoveJobClient(jobID int64) error {
 	if err != nil {
 		return err
 	}
-	client.StopJob(true)
+	// Stop accepting new configuration changes and new tasks for this job, then
+	// release the lock while waiting: holding it across the idle wait would
+	// block an unrelated shutdown for minutes.
+	if !client.lockOp() {
+		client.opMu.Unlock()
+		if client.isClosing() {
+			// A concurrent delete is already tearing this job down; report
+			// success so a duplicated request is idempotent.
+			return nil
+		}
+		return publicError(msg.T(msg.JobNotFound))
+	}
+	if !client.beginCloseLocked() {
+		client.opMu.Unlock()
+		return nil
+	}
+	client.stopJobLocked(true) // remove=true never fails
+	client.opMu.Unlock()
+
 	if !client.waitUntilIdle(2 * time.Minute) {
+		// The task is still draining. stopJobLocked already took the scheduler
+		// down, so persist the same "disabled" state instead of leaving the row
+		// enabled: otherwise a restart would resurrect the job the user tried to
+		// delete, while in this process it never runs again.
+		disableJobAfterFailedDelete(jobID)
+		client.opMu.Lock()
+		client.closing.Store(false)
+		client.opMu.Unlock()
 		return publicError(msg.T(msg.JobDeleteWaitTimeout))
 	}
-	if err := mapper.DeleteJob(jobID); err != nil {
-		return fmt.Errorf("delete job: %w", err)
+
+	client.opMu.Lock()
+	if client.deleted {
+		client.opMu.Unlock()
+		return nil
+	}
+	deleteErr := mapper.DeleteJob(jobID)
+	if deleteErr == nil {
+		client.deleted = true
+	}
+	client.opMu.Unlock()
+	if deleteErr != nil {
+		// Row still exists: keep the database consistent with the stopped
+		// in-memory state and allow a later retry.
+		disableJobAfterFailedDelete(jobID)
+		client.opMu.Lock()
+		client.closing.Store(false)
+		client.opMu.Unlock()
+		return fmt.Errorf("delete job: %w", deleteErr)
 	}
 	jobClientListMu.Lock()
 	delete(jobClientList, jobID)
 	jobClientListMu.Unlock()
 	return nil
+}
+
+// disableJobAfterFailedDelete keeps the stored enable flag in sync with the
+// already-stopped client after a failed delete.
+func disableJobAfterFailedDelete(jobID int64) {
+	if err := mapper.UpdateJobEnable(jobID, 0); err != nil {
+		log.Printf("Failed to disable job %d after a failed delete: %v", jobID, err)
+	}
 }
 
 // ContinueJob enables a job
@@ -577,12 +659,14 @@ func GetTaskList(req map[string]interface{}) (map[string]interface{}, error) {
 		taskNumStr, hasTaskNum := item["taskNum"]
 		if hasTaskNum && taskNumStr != nil {
 			taskNum = parseTaskNumJSON(taskNumStr)
-			if taskNum == nil {
-				taskID := util.ToInt64(item["id"])
-				missingTaskIDs = append(missingTaskIDs, taskID)
-				missingTaskItems = append(missingTaskItems, item)
+			// A parsed-but-incomplete cache entry (old schema, partial write) is
+			// as useless as a missing one: a cached value is never recomputed, so
+			// the task would show missing counters forever.
+			if taskNum != nil && !taskNumCountsComplete(taskNum) {
+				taskNum = nil
 			}
-		} else {
+		}
+		if taskNum == nil {
 			taskID := util.ToInt64(item["id"])
 			missingTaskIDs = append(missingTaskIDs, taskID)
 			missingTaskItems = append(missingTaskItems, item)
@@ -655,6 +739,19 @@ func parseTaskNumJSON(value interface{}) map[string]interface{} {
 	return taskNum
 }
 
+// taskNumCounterKeys are the counters a cached job_task.taskNum must carry to
+// be usable by the task list. A cache entry missing any of them is recomputed.
+var taskNumCounterKeys = []string{"waitNum", "runningNum", "successNum", "failNum", "otherNum", "allNum", "sumSize"}
+
+func taskNumCountsComplete(taskNum map[string]interface{}) bool {
+	for _, key := range taskNumCounterKeys {
+		if _, ok := taskNum[key]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 func scheduleTaskNumUpdate(taskNums []map[string]interface{}) {
 	taskNums = cloneTaskRows(taskNums)
 	taskNumUpdateMu.Lock()
@@ -717,6 +814,12 @@ func RemoveTask(taskID int64) error {
 	jobClientListMu.RUnlock()
 	if client != nil {
 		if current := client.currentTask(); current != nil && current.TaskID == taskID {
+			return publicError(msg.T(msg.JobRunningCannotDelete))
+		}
+		// A "retry failed items" run replays this task's items in id-ordered
+		// batches. Deleting the source task mid-run silently drops the remainder
+		// of the replay, so it is locked while that run is active.
+		if client.retrySource() == taskID {
 			return publicError(msg.T(msg.JobRunningCannotDelete))
 		}
 	}

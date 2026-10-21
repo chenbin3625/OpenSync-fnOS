@@ -173,3 +173,39 @@ func TestSchedulerCronHonorsExplicitTZ(t *testing.T) {
 		t.Fatalf("next run location = %q, want UTC", got)
 	}
 }
+
+// An API caller that omits the seconds field means "on the minute", not "every
+// second": the empty field must default to 0 instead of "*".
+func TestBuildCronSpecDefaultsMissingSecondToZero(t *testing.T) {
+	spec, err := buildCronSpec(map[string]interface{}{
+		"minute": "30",
+		"hour":   "4",
+	})
+	if err != nil {
+		t.Fatalf("buildCronSpec() error: %v", err)
+	}
+	if spec != "0 30 4 * * *" {
+		t.Fatalf("buildCronSpec() = %q, want %q", spec, "0 30 4 * * *")
+	}
+}
+
+// Values that pass the character allow-list but are out of range must still be
+// rejected by the cron parser inside AddJob, not silently scheduled.
+func TestSchedulerRejectsOutOfRangeCronField(t *testing.T) {
+	s := NewScheduler()
+	defer s.Stop()
+
+	err := s.AddJob(1, map[string]interface{}{
+		"enable":      1,
+		"isCron":      1,
+		"second":      "99",
+		"minute":      "0",
+		"hour":        "2",
+		"day":         "*",
+		"month":       "*",
+		"day_of_week": "*",
+	}, func() {})
+	if err == nil {
+		t.Fatal("AddJob() accepted an out-of-range cron field")
+	}
+}

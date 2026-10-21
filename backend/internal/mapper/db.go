@@ -1,14 +1,13 @@
 package mapper
 
 import (
+	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"log"
 	"math"
 	"net/url"
 	"opensync/internal/config"
-	"opensync/internal/msg"
 	"opensync/pkg/util"
 	"os"
 	"path/filepath"
@@ -31,7 +30,19 @@ var (
 	// tick, an in-flight request — silently re-opened the database, recreating
 	// the file and its WAL after shutdown had deliberately released them.
 	shutdown bool
+	// closedPlaceholderDB is a process-wide, already-closed handle returned by
+	// GetDB when ShutdownDB ran before any database was ever opened. Without it
+	// GetDB could return nil (its contract says it never does) and callers that
+	// do GetDB().QueryRow(...) would panic instead of seeing "database is
+	// closed".
+	closedPlaceholderDB   *sql.DB
+	closedPlaceholderOnce sync.Once
 )
+
+// initDBPauseForTest is nil in production. Tests set it to run code while
+// InitDB has opened a handle but not published it yet, so the CloseDB race has
+// a deterministic seam.
+var initDBPauseForTest func()
 
 // currentOnce reads the once guard under dbMu. CloseDB replaces it, so reading
 // the package variable unsynchronized would race with shutdown.
@@ -42,49 +53,165 @@ func currentOnce() *sync.Once {
 }
 
 // MaxPageSize is the largest page a caller can request, and also the cap applied
-// to a request that omits pagination entirely.
+// to a request that omits pagination entirely. A request larger than this is
+// capped, and the paginated response reports the effective pageSize so a client
+// can tell that its requested window was narrowed.
 const MaxPageSize = 500
 
 const maxPageSize = MaxPageSize
 const defaultUnpagedLimit = MaxPageSize
 const sqliteMaxOpenConns = 12
+const initDBMaxAttempts = 5
 
-// InitDB initializes the database connection
+// InitDB initializes the database connection.
+//
+// Initialization runs through a sync.Once, but the once guard is replaced by
+// CloseDB/ShutdownDB, so a close that lands while a handle is being opened must
+// not let that handle get published afterwards (it would recreate the file and
+// WAL the close just released). The opened handle is therefore only published
+// under dbMu if the once guard is still the one this attempt started with and
+// the process is not shutting down; otherwise it is closed and a fresh attempt
+// is made (or the closed handle is returned during shutdown).
 func InitDB() *sql.DB {
-	currentOnce().Do(func() {
-		cfg := config.GetConfig()
-		ensureSQLiteFileMode(cfg.DB.DBName)
-		// The handle is configured through a local variable and only published
-		// to the package-level db under dbMu. Assigning db first would race with
-		// the lock-protected readers in GetDB (and with CloseDB during shutdown),
-		// because sync.Once only orders the initialization against other
-		// once.Do callers, not against readers that never enter it.
-		handle, err := sql.Open("sqlite", sqliteDSN(cfg.DB.DBName))
-		if err != nil {
-			log.Fatalf("Failed to open database: %v", err)
+	for attempt := 0; attempt < initDBMaxAttempts; attempt++ {
+		self := currentOnce()
+		self.Do(func() { initDBOnce(self) })
+
+		dbMu.RLock()
+		handle := db
+		down := shutdown
+		closed := closedDB
+		dbMu.RUnlock()
+		if handle != nil {
+			return handle
 		}
+		if down {
+			if closed != nil {
+				return closed
+			}
+			return closedPlaceholder()
+		}
+		// The initialization was discarded because CloseDB raced it. Try again
+		// with the fresh once guard.
+	}
+	// CloseDB kept winning the race; hand back a closed handle so callers see
+	// an error instead of a nil dereference.
+	log.Printf("WARNING: database initialization kept racing CloseDB; returning a closed handle")
+	return closedPlaceholder()
+}
+
+func initDBOnce(self *sync.Once) {
+	cfg := config.GetConfig()
+	dbName := cfg.DB.DBName
+	ensureSQLiteFileMode(dbName)
+	// The handle is configured through a local variable and only published to
+	// the package-level db under dbMu. Assigning db first would race with the
+	// lock-protected readers in GetDB (and with CloseDB during shutdown),
+	// because sync.Once only orders the initialization against other once.Do
+	// callers, not against readers that never enter it.
+	handle, err := sql.Open("sqlite", sqliteDSN(dbName))
+	if err != nil {
+		log.Fatalf("Failed to open database: %v", err)
+	}
+	memory := isMemoryDBName(dbName)
+	if memory {
+		// Every connection to a :memory: database gets its own private database,
+		// so a pool with more than one connection would hand out connections that
+		// do not see the schema the first one created.
+		handle.SetMaxOpenConns(1)
+		handle.SetMaxIdleConns(1)
+	} else {
 		handle.SetMaxOpenConns(sqliteMaxOpenConns)
 		handle.SetMaxIdleConns(sqliteMaxOpenConns)
-		// Keep explicit PRAGMAs as a startup sanity pass; sqliteDSN applies
-		// them to each new pooled connection.
-		if _, err := handle.Exec("PRAGMA journal_mode=WAL"); err != nil {
-			log.Printf("Failed to set sqlite journal_mode: %v", err)
+	}
+	if err := configureDBHandle(handle, memory); err != nil {
+		_ = handle.Close()
+		log.Fatalf("Failed to configure sqlite database %q: %v", dbName, err)
+	}
+	if initDBPauseForTest != nil {
+		initDBPauseForTest()
+	}
+	dbMu.Lock()
+	if once != self || shutdown {
+		if shutdown && closedDB == nil {
+			// The very handle that was being opened is already closed, which is
+			// exactly what post-shutdown callers must observe.
+			closedDB = handle
 		}
-		if _, err := handle.Exec(fmt.Sprintf("PRAGMA busy_timeout=%d", sqliteBusyTimeoutMS)); err != nil {
-			log.Printf("Failed to set sqlite busy_timeout: %v", err)
-		}
-		for _, pragma := range []string{"PRAGMA foreign_keys=ON", "PRAGMA temp_store=MEMORY", "PRAGMA cache_size=-16384", "PRAGMA mmap_size=67108864"} {
-			if _, err := handle.Exec(pragma); err != nil {
-				log.Printf("Failed to set sqlite %s: %v", pragma, err)
-			}
-		}
-		dbMu.Lock()
-		db = handle
 		dbMu.Unlock()
+		_ = handle.Close()
+		return
+	}
+	db = handle
+	dbMu.Unlock()
+}
+
+// configureDBHandle validates the settings that the whole concurrency/retry
+// design depends on instead of only logging a warning and running degraded:
+// WAL (file databases), busy_timeout and foreign_keys are read back from the
+// connection that will serve queries and a mismatch aborts startup loudly.
+func configureDBHandle(handle *sql.DB, memory bool) error {
+	ctx := context.Background()
+	conn, err := handle.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("get connection: %w", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout=%d", sqliteBusyTimeoutMS)); err != nil {
+		return fmt.Errorf("set busy_timeout: %w", err)
+	}
+	var busyTimeout int
+	if err := conn.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&busyTimeout); err != nil {
+		return fmt.Errorf("read busy_timeout: %w", err)
+	}
+	if busyTimeout != sqliteBusyTimeoutMS {
+		return fmt.Errorf("busy_timeout = %d, want %d", busyTimeout, sqliteBusyTimeoutMS)
+	}
+
+	var journalMode string
+	if err := conn.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&journalMode); err != nil {
+		return fmt.Errorf("read journal_mode: %w", err)
+	}
+	if !memory && !strings.EqualFold(journalMode, "wal") {
+		return fmt.Errorf("journal_mode = %q, want WAL (is the database on a filesystem that supports it?)", journalMode)
+	}
+
+	var foreignKeys int
+	if err := conn.QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&foreignKeys); err != nil {
+		return fmt.Errorf("read foreign_keys: %w", err)
+	}
+	if foreignKeys != 1 {
+		return fmt.Errorf("foreign_keys = %d, want 1", foreignKeys)
+	}
+
+	pragmas := []string{"PRAGMA temp_store=MEMORY", "PRAGMA cache_size=-16384"}
+	if !memory {
+		pragmas = append(pragmas, "PRAGMA mmap_size=67108864")
+	}
+	for _, pragma := range pragmas {
+		if _, err := conn.ExecContext(ctx, pragma); err != nil {
+			return fmt.Errorf("set %q: %w", pragma, err)
+		}
+	}
+	return nil
+}
+
+// closedPlaceholder returns a process-wide handle that is already closed, so
+// GetDB never returns nil and every query on it fails with "sql: database is
+// closed".
+func closedPlaceholder() *sql.DB {
+	closedPlaceholderOnce.Do(func() {
+		handle, err := sql.Open("sqlite", "file::memory:")
+		if err != nil {
+			// Only a missing driver can fail here, and that is a programming
+			// error rather than a runtime condition.
+			log.Fatalf("Failed to create closed database placeholder: %v", err)
+		}
+		_ = handle.Close()
+		closedPlaceholderDB = handle
 	})
-	dbMu.RLock()
-	defer dbMu.RUnlock()
-	return db
+	return closedPlaceholderDB
 }
 
 func ensureSQLiteFileMode(dbName string) {
@@ -104,6 +231,18 @@ func ensureSQLiteFileMode(dbName string) {
 	if err := os.Chmod(path, 0600); err != nil {
 		log.Printf("Failed to set sqlite database file permissions: %v", err)
 	}
+}
+
+// isMemoryDBName reports whether the configured database is an in-memory one.
+// A :memory: database must not be given WAL or a multi-connection pool.
+func isMemoryDBName(dbName string) bool {
+	if dbName == "" || dbName == ":memory:" {
+		return true
+	}
+	if strings.HasPrefix(dbName, "file:") {
+		return strings.Contains(dbName, "mode=memory") || strings.Contains(dbName, ":memory:")
+	}
+	return false
 }
 
 func sqliteDBPath(dbName string) (string, bool) {
@@ -127,25 +266,37 @@ func sqliteDBPath(dbName string) (string, bool) {
 }
 
 func sqliteDSN(dbName string) string {
-	if dbName == ":memory:" {
-		return dbName
-	}
 	// Every PRAGMA here applies to each pooled connection. Executing them via
 	// db.Exec instead would configure whichever single connection served that
 	// call, leaving the other 11 in the pool on defaults.
 	pragmas := url.Values{}
 	pragmas.Add("_pragma", fmt.Sprintf("busy_timeout(%d)", sqliteBusyTimeoutMS))
-	pragmas.Add("_pragma", "journal_mode(WAL)")
 	pragmas.Add("_pragma", "foreign_keys(ON)")
-	pragmas.Add("_pragma", "temp_store(MEMORY)")
-	pragmas.Add("_pragma", "cache_size(-16384)")
-	pragmas.Add("_pragma", "mmap_size(67108864)")
 	// Write transactions start with BEGIN IMMEDIATE so they take the write
 	// lock up front and wait busy_timeout for it. A deferred transaction that
 	// reads first and then writes is handed SQLITE_BUSY at once (no waiting)
 	// when another writer committed in between. Read-only transactions
 	// (sql.TxOptions{ReadOnly: true}) still begin deferred.
 	pragmas.Add("_txlock", "immediate")
+	if isMemoryDBName(dbName) {
+		// A memory database cannot use WAL and does not benefit from the page
+		// cache/mmap tuning, but it still needs busy_timeout, foreign_keys and
+		// (most importantly) immediate transactions.
+		pragmas.Add("_pragma", "temp_store(MEMORY)")
+		target := dbName
+		if target == "" || target == ":memory:" || strings.Contains(target, ":memory:") {
+			target = "file::memory:"
+		}
+		sep := "?"
+		if strings.Contains(target, "?") {
+			sep = "&"
+		}
+		return target + sep + pragmas.Encode()
+	}
+	pragmas.Add("_pragma", "journal_mode(WAL)")
+	pragmas.Add("_pragma", "temp_store(MEMORY)")
+	pragmas.Add("_pragma", "cache_size(-16384)")
+	pragmas.Add("_pragma", "mmap_size(67108864)")
 	query := pragmas.Encode()
 	if strings.HasPrefix(dbName, "file:") {
 		sep := "?"
@@ -159,9 +310,9 @@ func sqliteDSN(dbName string) string {
 
 // GetDB returns the database connection.
 //
-// After ShutdownDB it returns the closed handle instead of opening a new one:
+// After ShutdownDB it returns a closed handle instead of opening a new one:
 // every query then fails with "sql: database is closed", which is what a caller
-// running past shutdown should see.
+// running past shutdown should see. It never returns nil.
 func GetDB() *sql.DB {
 	dbMu.RLock()
 	if db != nil {
@@ -172,7 +323,10 @@ func GetDB() *sql.DB {
 	if shutdown {
 		handle := closedDB
 		dbMu.RUnlock()
-		return handle
+		if handle != nil {
+			return handle
+		}
+		return closedPlaceholder()
 	}
 	dbMu.RUnlock()
 	return InitDB()
@@ -203,13 +357,16 @@ func closeDBLocked(forGood bool) error {
 	if forGood {
 		shutdown = true
 	}
-	if db == nil {
+	handle := db
+	db = nil
+	// Reset the guard even when no handle is published yet: an initialization
+	// in flight holds the old guard and will notice the swap and discard its
+	// freshly opened handle instead of publishing it after this close returned.
+	once = &sync.Once{}
+	if handle == nil {
 		return nil
 	}
-	handle := db
 	err := handle.Close()
-	db = nil
-	once = &sync.Once{}
 	if forGood {
 		closedDB = handle
 	}
@@ -311,6 +468,22 @@ func ExecuteUpdate(query string, args ...interface{}) error {
 	})
 }
 
+// executeUpdateAffected is ExecuteUpdate plus the number of rows it changed, so
+// callers can turn "nothing matched" into a not-found error instead of silently
+// reporting success.
+func executeUpdateAffected(query string, args ...interface{}) (int64, error) {
+	var affected int64
+	err := retryOnBusy(func() error {
+		result, err := GetDB().Exec(query, args...)
+		if err != nil {
+			return err
+		}
+		affected, err = result.RowsAffected()
+		return err
+	})
+	return affected, err
+}
+
 // ExecuteMany executes batch operations
 func ExecuteMany(query string, argsList [][]interface{}) error {
 	if len(argsList) == 0 {
@@ -337,34 +510,36 @@ func ExecuteMany(query string, argsList [][]interface{}) error {
 	})
 }
 
-// FetchAllToPage executes a paginated query with a window count when SQLite
-// can keep the list and total in one round-trip. A request that omits pagination
-// is capped at defaultUnpagedLimit rows and fails when the result would not fit,
-// rather than returning a short list next to the full count.
+// FetchAllToPage executes a paginated query. The total comes from a separate
+// COUNT(*) wrapped around baseSQL; both statements run in one read-only
+// transaction so the page and the total are taken from the same snapshot.
+//
+// The previous implementation injected a COUNT(*) OVER() window column by
+// rewriting the SQL text. That made every page materialise and sort the whole
+// match set, and it broke on perfectly legal statements: `SELECT DISTINCT`
+// became a syntax error and a UNION separated by newlines lost the total.
+// Wrapping the statement is shape agnostic and cannot corrupt its syntax.
+//
+// A request that omits pagination is capped at defaultUnpagedLimit rows and
+// fails when the result would not fit, rather than returning a short list next
+// to the full count. A request whose pageSize exceeds MaxPageSize is capped;
+// the paginated response reports the effective pageSize.
 func FetchAllToPage(baseSQL string, params map[string]interface{}, sqlArgs ...interface{}) (map[string]interface{}, error) {
-	ps, pn, paginated, err := parsePageParams(params)
-	if err != nil {
-		return nil, err
-	}
-	if !paginated {
-		return fetchPage(baseSQL, defaultUnpagedLimit, 0, false, sqlArgs)
-	}
-	offset, err := pageOffset(ps, pn)
-	if err != nil {
-		return nil, err
-	}
-	return fetchPage(baseSQL, ps, offset, true, sqlArgs)
+	return FetchAllToPageWithCount(baseSQL, wrappedCountSQL(baseSQL), params, sqlArgs...)
+}
+
+// wrappedCountSQL builds a shape-agnostic COUNT(*) for a single complete
+// statement (SELECT/UNION/WITH). baseSQL is always built internally; a trailing
+// semicolon is stripped so the statement can be nested in a subquery.
+func wrappedCountSQL(baseSQL string) string {
+	return "SELECT COUNT(*) FROM (" + strings.TrimSuffix(strings.TrimSpace(baseSQL), ";") + ")"
 }
 
 // FetchAllToPageWithCount pages baseSQL like FetchAllToPage, but takes the total
-// from countSQL instead of a COUNT(*) OVER() window column.
-//
-// The window count makes SQLite materialize and sort the entire match set on
-// every page request just to attach the total to each row; for job_task_item,
-// which holds millions of rows for one large task, that turned each page of the
-// detail view into a full scan plus sort. A plain COUNT(*) over the same WHERE
-// clause is answered from an index, and the page itself can then stop after
-// LIMIT rows. countSQL must take exactly sqlArgs.
+// from countSQL instead of wrapping baseSQL, so a caller can hand it an
+// index-friendly COUNT (for job_task_item, a plain COUNT(*) over the same WHERE
+// clause is answered from an index while the page itself stops after LIMIT
+// rows). countSQL must take exactly sqlArgs.
 //
 // Both statements run in one read transaction so the page and the total come
 // from the same snapshot even while a running task keeps inserting items.
@@ -393,7 +568,7 @@ func fetchPageSeparateCount(baseSQL, countSQL string, limit int, offset int64, p
 		if !paginated && total > int64(limit) {
 			// Same contract as fetchPage: an unpaginated request that does not
 			// fit is refused rather than answered with a silently short list.
-			return errors.New(msg.T(msg.ListTooLarge))
+			return listTooLargeError()
 		}
 		dataList := make([]map[string]interface{}, 0)
 		if total > 0 && offset < total {
@@ -411,6 +586,12 @@ func fetchPageSeparateCount(baseSQL, countSQL string, limit int, offset int64, p
 			dataList = rows
 		}
 		result = map[string]interface{}{"dataList": dataList, "count": total}
+		if paginated {
+			// Report the effective page size: a caller that asked for more than
+			// MaxPageSize silently got a narrower window, and without this it
+			// cannot tell that its page offsets no longer match its request.
+			result["pageSize"] = limit
+		}
 		return nil
 	})
 	if err != nil {
@@ -419,55 +600,15 @@ func fetchPageSeparateCount(baseSQL, countSQL string, limit int, offset int64, p
 	return result, nil
 }
 
+// fetchPage is the entry point kept for callers/tests that page by explicit
+// limit/offset; it derives the total the same way FetchAllToPage does.
+func fetchPage(baseSQL string, limit int, offset int64, paginated bool, sqlArgs []interface{}) (map[string]interface{}, error) {
+	return fetchPageSeparateCount(baseSQL, wrappedCountSQL(baseSQL), limit, offset, paginated, sqlArgs)
+}
+
 // pageQueryTrace observes the data query of a separate-count page; tests use it
 // to assert which SQL a list endpoint actually runs.
 var pageQueryTrace = func(string) {}
-
-const pageTotalColumn = "__opensync_page_total"
-
-func fetchPage(baseSQL string, limit int, offset int64, paginated bool, sqlArgs []interface{}) (map[string]interface{}, error) {
-	query, args, _ := pageQuery(baseSQL, limit, offset, paginated, sqlArgs)
-	dataList, err := FetchAllToTable(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	total, hasTotal := takePageTotal(dataList)
-	if !hasTotal {
-		if len(dataList) == 0 && offset == 0 {
-			total = 0
-		} else {
-			count, err := FetchFirstVal("SELECT COUNT(*) FROM ("+stripOrderBy(baseSQL)+")", sqlArgs...)
-			if err != nil {
-				return nil, err
-			}
-			total = util.ToInt64(count)
-		}
-	}
-	if !paginated && total > int64(len(dataList)) {
-		// An unpaginated request that hits the cap used to answer with the first
-		// `limit` rows and the real total, plus a "truncated" flag no caller ever
-		// read: the response looked complete while rows were missing. Refusing it
-		// puts the choice back with the caller, which can page or narrow the
-		// filter.
-		return nil, errors.New(msg.T(msg.ListTooLarge))
-	}
-	return map[string]interface{}{"dataList": dataList, "count": total}, nil
-}
-
-func pageQuery(baseSQL string, limit int, offset int64, paginated bool, sqlArgs []interface{}) (string, []interface{}, bool) {
-	if !strings.Contains(strings.ToUpper(baseSQL), " UNION ") {
-		query := withPageTotal(baseSQL)
-		if paginated {
-			return query + " LIMIT ? OFFSET ?", appendSQLArgs(sqlArgs, limit, offset), true
-		}
-		return query + " LIMIT ?", appendSQLArgs(sqlArgs, limit), true
-	}
-	wrapped := "SELECT * FROM (" + baseSQL + ")"
-	if paginated {
-		return wrapped + " LIMIT ? OFFSET ?", appendSQLArgs(sqlArgs, limit, offset), false
-	}
-	return wrapped + " LIMIT ?", appendSQLArgs(sqlArgs, limit), false
-}
 
 func appendSQLArgs(args []interface{}, extra ...interface{}) []interface{} {
 	result := make([]interface{}, 0, len(args)+len(extra))
@@ -475,39 +616,15 @@ func appendSQLArgs(args []interface{}, extra ...interface{}) []interface{} {
 	return append(result, extra...)
 }
 
-func withPageTotal(baseSQL string) string {
-	trimmed := strings.TrimSpace(baseSQL)
-	if len(trimmed) < 7 || !strings.EqualFold(trimmed[:6], "SELECT") || (trimmed[6] != ' ' && trimmed[6] != '\t' && trimmed[6] != '\n') {
-		return trimmed
-	}
-	return "SELECT COUNT(*) OVER() AS " + pageTotalColumn + "," + trimmed[6:]
-}
-
-func takePageTotal(rows []map[string]interface{}) (int64, bool) {
-	if len(rows) == 0 {
-		return 0, false
-	}
-	var total int64
-	found := false
-	for _, row := range rows {
-		if value, ok := row[pageTotalColumn]; ok {
-			total = util.ToInt64(value)
-			delete(row, pageTotalColumn)
-			found = true
-		}
-	}
-	return total, found
-}
-
 func pageOffset(pageSize, pageNum int) (int64, error) {
 	if pageSize <= 0 || pageNum <= 0 {
-		return 0, errors.New(msg.T(msg.LostPart))
+		return 0, invalidPaginationError()
 	}
 	index := int64(pageNum) - 1
 	size := int64(pageSize)
 	maxInt64 := int64(^uint64(0) >> 1)
 	if index > maxInt64/size {
-		return 0, errors.New(msg.T(msg.LostPart))
+		return 0, invalidPaginationError()
 	}
 	return index * size, nil
 }
@@ -519,16 +636,16 @@ func parsePageParams(params map[string]interface{}) (pageSize, pageNum int, pagi
 		return 0, 0, false, nil
 	}
 	if !hasPageSize || !hasPageNum {
-		return 0, 0, false, errors.New(msg.T(msg.LostPart))
+		return 0, 0, false, invalidPaginationError()
 	}
 
 	pageSize, err = positiveInt(pageSizeVal)
 	if err != nil {
-		return 0, 0, false, errors.New(msg.T(msg.LostPart))
+		return 0, 0, false, invalidPaginationError()
 	}
 	pageNum, err = positiveInt(pageNumVal)
 	if err != nil {
-		return 0, 0, false, errors.New(msg.T(msg.LostPart))
+		return 0, 0, false, invalidPaginationError()
 	}
 	if pageSize > maxPageSize {
 		pageSize = maxPageSize
@@ -538,11 +655,11 @@ func parsePageParams(params map[string]interface{}) (pageSize, pageNum int, pagi
 
 func positiveInt(v interface{}) (int, error) {
 	if value, ok := v.(float64); ok && math.Trunc(value) != value {
-		return 0, errors.New(msg.T(msg.LostPart))
+		return 0, invalidPaginationError()
 	}
 	n := util.ToInt64(v)
 	if n <= 0 || n > int64(math.MaxInt) {
-		return 0, errors.New(msg.T(msg.LostPart))
+		return 0, invalidPaginationError()
 	}
 	return int(n), nil
 }
@@ -561,57 +678,4 @@ func isSafeSQLIdentifier(name string) bool {
 		return false
 	}
 	return true
-}
-
-// stripOrderBy removes a trailing top-level ORDER BY so the statement can be
-// wrapped in SELECT COUNT(*) FROM (...). Only depth-zero clauses outside string
-// literals are considered: a plain LastIndex search would cut at an ORDER BY
-// belonging to a subquery (or sitting inside a quoted value) and produce
-// unbalanced SQL.
-func stripOrderBy(sql string) string {
-	const clause = " ORDER BY "
-	depth := 0
-	idx := -1
-	var quote byte
-	for i := 0; i < len(sql); i++ {
-		c := sql[i]
-		if quote != 0 {
-			// Doubled quotes are an escaped quote inside the literal, not its end.
-			if c == quote {
-				if i+1 < len(sql) && sql[i+1] == quote {
-					i++
-					continue
-				}
-				quote = 0
-			}
-			continue
-		}
-		switch c {
-		case '\'', '"', '`':
-			quote = c
-		case '(':
-			depth++
-		case ')':
-			if depth > 0 {
-				depth--
-			}
-		default:
-			if depth == 0 && c == ' ' && strings.EqualFold(sqlSlice(sql, i, len(clause)), clause) {
-				idx = i
-			}
-		}
-	}
-	if idx == -1 {
-		return sql
-	}
-	return sql[:idx]
-}
-
-// sqlSlice returns the length-byte window of sql starting at i, or "" when the
-// statement is too short for one.
-func sqlSlice(sql string, i, length int) string {
-	if i+length > len(sql) {
-		return ""
-	}
-	return sql[i : i+length]
 }

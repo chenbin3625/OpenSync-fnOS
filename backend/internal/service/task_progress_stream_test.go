@@ -258,3 +258,57 @@ func BenchmarkPrepareStreamPayloadProgressPatch1000(b *testing.B) {
 		hub.prepareStreamPayload(7, &current, false)
 	}
 }
+
+// The instantaneous rate must come from a forward-moving window: concurrent
+// observers (SSE publish plus GET ?current=1 polling) landing in the same second
+// reuse the last measured rate instead of reporting 0 or shrinking the window.
+func TestSampleSpeedUsesMonotonicWindow(t *testing.T) {
+	jt := &JobTask{}
+
+	if got := jt.sampleSpeed(10, 100); got != 0 {
+		t.Fatalf("first sample = %v, want 0", got)
+	}
+	if got := jt.sampleSpeed(10, 200); got != 0 {
+		t.Fatalf("sample within the same second = %v, want the cached rate", got)
+	}
+	if got := jt.sampleSpeed(11, 300); got != 200 {
+		t.Fatalf("sample after one second = %v, want 200", got)
+	}
+	if got := jt.sampleSpeed(11, 900); got != 200 {
+		t.Fatalf("second observer in the same second = %v, want the cached rate", got)
+	}
+	// A clock that goes backwards (NTP step) must not produce a negative rate or
+	// a zero-length window.
+	if got := jt.sampleSpeed(9, 50); got != 200 {
+		t.Fatalf("sample with an older timestamp = %v, want the cached rate", got)
+	}
+}
+
+// Shutdown must be able to cancel every pending debounced publish before the
+// database is closed; a surviving timer would read the closed handle.
+func TestStopAllCancelsPendingPublishes(t *testing.T) {
+	hub := newProgressHub()
+	ch := make(chan []byte, 1)
+	if !hub.subscribe(7, ch) {
+		t.Fatal("subscribe() = false")
+	}
+	hub.schedule(7)
+	first := sampleCurrent(10)
+	hub.prepareStreamPayload(7, &first, true)
+
+	hub.stopAll()
+
+	hub.mu.Lock()
+	_, hasTimer := hub.timers[7]
+	_, hasPending := hub.pending[7]
+	hub.mu.Unlock()
+	if hasTimer || hasPending {
+		t.Fatalf("pending publish survived stopAll (timer=%v pending=%v)", hasTimer, hasPending)
+	}
+	hub.framesMu.Lock()
+	frames := len(hub.frames)
+	hub.framesMu.Unlock()
+	if frames != 0 {
+		t.Fatalf("diff frames retained after stopAll: %d", frames)
+	}
+}

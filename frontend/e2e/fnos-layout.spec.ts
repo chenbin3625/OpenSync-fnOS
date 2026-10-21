@@ -368,9 +368,10 @@ test("primary surface, cards and controls use consistent radii and full width", 
   page,
 }) => {
   await page.goto("/app/opensync/settings");
+  // Mobile deliberately goes edge-to-edge; the desktop shell keeps the radius.
   await expect(page.locator(".app-workspace")).toHaveCSS(
     "border-radius",
-    "8px",
+    page.viewportSize()!.width <= 640 ? "0px" : "8px",
   );
   const section = page.locator(".settings-card").first();
   const pageBox = await page.locator(".page").boundingBox();
@@ -486,9 +487,13 @@ test("data fixture renders inspectable engine, task and notification rows", asyn
     ).toBeVisible();
 
     await page.goto(`/app/opensync/tasks?jobId=${jobId}`);
-    await expect(
-      page.locator(".app-sidebar").getByRole("link", { name, exact: true }),
-    ).toBeVisible();
+    // Mobile replaces the sidebar with the bottom navigation, so the task name
+    // only appears there on desktop.
+    if ((page.viewportSize()?.width || 0) > 640) {
+      await expect(
+        page.locator(".app-sidebar").getByRole("link", { name, exact: true }),
+      ).toBeVisible();
+    }
     await expect(
       page.getByRole("heading", { name, exact: true }),
     ).toBeVisible();
@@ -508,10 +513,11 @@ test("data fixture renders inspectable engine, task and notification rows", asyn
     await expect(
       notifySwitch.locator("xpath=ancestor::*[contains(@class, 'semi-switch')][1]"),
     ).toHaveCSS("background-color", "rgb(0, 102, 255)");
-    await page.screenshot({
-      path: `test-results/data-${testInfo.project.name}.png`,
-      fullPage: true,
-    });
+    if (process.env.PLAYWRIGHT_SCREENSHOTS === "1")
+      await page.screenshot({
+        path: `test-results/data-${testInfo.project.name}.png`,
+        fullPage: true,
+      });
   } finally {
     if (notifyId)
       await request.delete(`/app/opensync/svr/notify?notifyId=${notifyId}`, jsonWrite);
@@ -703,9 +709,10 @@ test("editor is 454px on desktop and remains within the viewport", async ({
   await expect(
     dialog.getByRole("button", { name: "保存", exact: true }),
   ).toBeVisible();
-  await page.screenshot({
-    path: `test-results/dialog-${test.info().project.name}.png`,
-  });
+  if (process.env.PLAYWRIGHT_SCREENSHOTS === "1")
+    await page.screenshot({
+      path: `test-results/dialog-${test.info().project.name}.png`,
+    });
 });
 
 test("dirty-confirm dialog is centered", async ({ page }) => {
@@ -753,9 +760,10 @@ test("settings save stays at the top right", async ({ page }) => {
     "border-bottom-width",
     "0px",
   );
-  await page.screenshot({
-    path: `test-results/settings-${test.info().project.name}.png`,
-  });
+  if (process.env.PLAYWRIGHT_SCREENSHOTS === "1")
+    await page.screenshot({
+      path: `test-results/settings-${test.info().project.name}.png`,
+    });
 });
 
 test("toolbar keeps its divider only when tabs are present", async ({

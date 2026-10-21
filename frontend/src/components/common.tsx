@@ -1,4 +1,5 @@
 import {
+  Children,
   cloneElement,
   isValidElement,
   useEffect,
@@ -166,11 +167,26 @@ export function Field({
   hint?: string;
 }) {
   const id = useId();
-  const controlLabel =
-    ariaLabel || (typeof label === "string" ? label : undefined);
+  const childArray = Children.toArray(children);
+  // A single labelable child can be pointed at the <label>; with several
+  // children (e.g. RemotePaths + a SettingRow) there is no single control to
+  // label, so the group itself gets the name. Without this, fields whose label
+  // wraps a custom component had no accessible name at all.
+  const single =
+    childArray.length === 1 &&
+    isValidElement<{
+      id?: string;
+      "aria-label"?: string;
+      "aria-labelledby"?: string;
+    }>(childArray[0])
+      ? childArray[0]
+      : null;
+  const groupName = ariaLabel
+    ? { "aria-label": ariaLabel }
+    : { "aria-labelledby": `${id}-label` };
   return (
     <div className="field">
-      <label id={id + "-label"} htmlFor={id}>
+      <label id={id + "-label"} htmlFor={single ? id : undefined}>
         {label}
         {required && (
           <span aria-hidden="true" className="required">
@@ -179,17 +195,20 @@ export function Field({
           </span>
         )}
       </label>
-      {isValidElement<{
-        id?: string;
-        "aria-label"?: string;
-        "aria-labelledby"?: string;
-      }>(children)
-        ? cloneElement(children, {
-            id: children.props.id || id,
-            "aria-label": controlLabel,
-            "aria-labelledby": id + "-label",
-          })
-        : children}
+      {single
+        ? cloneElement(
+            single,
+            ariaLabel
+              ? { id: single.props.id || id, "aria-label": ariaLabel }
+              : { id: single.props.id || id, "aria-labelledby": `${id}-label` },
+          )
+        : childArray.length > 1
+          ? (
+              <div className="field-controls" role="group" {...groupName}>
+                {children}
+              </div>
+            )
+          : children}
       {hint && <div className="field-hint">{hint}</div>}
     </div>
   );

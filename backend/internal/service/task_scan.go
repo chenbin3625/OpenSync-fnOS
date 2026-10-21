@@ -131,8 +131,30 @@ func (jt *JobTask) sync() {
 		}
 	}
 
-	// Run top-level pairs concurrently so independent source/destination
-	// trees overlap their network I/O instead of waiting in sequence.
+	// Two phases. The first destination of every source refreshes the source
+	// listing; the other destinations reuse it (listDir's useCache), so they
+	// may only start once those scans have returned. Starting every pair at
+	// once made "not the first destination ⇒ read the cache" a race against the
+	// refresh: a stale cached listing decides which destination entries are
+	// extra and, in mirror mode, gets them deleted.
+	var firstDstWorks, laterWorks []scanWork
+	for _, work := range works {
+		if work.FirstDst {
+			firstDstWorks = append(firstDstWorks, work)
+		} else {
+			laterWorks = append(laterWorks, work)
+		}
+	}
+	jt.runScanRoots(firstDstWorks, spec, fullSync)
+	if !jt.isBreak() {
+		jt.runScanRoots(laterWorks, spec, fullSync)
+	}
+	jt.markScanFinished()
+}
+
+// runScanRoots runs top-level pairs concurrently so independent source and
+// destination trees overlap their network I/O instead of waiting in sequence.
+func (jt *JobTask) runScanRoots(works []scanWork, spec *excludeMatcher, fullSync bool) {
 	var wg sync.WaitGroup
 	for _, work := range works {
 		work := work
@@ -148,7 +170,6 @@ func (jt *JobTask) sync() {
 		}()
 	}
 	wg.Wait()
-	jt.markScanFinished()
 }
 
 func (jt *JobTask) hasRetrySource() bool {
@@ -161,11 +182,20 @@ func (jt *JobTask) markScanFinished() {
 }
 
 func (jt *JobTask) syncRetryItems() {
-	err := jobDeps.ForEachJobTaskItemsByStatuses(jt.RetrySourceTaskID, taskStatusValues(jt.RetryStatuses...), retryTaskItemBatchSize, func(items []map[string]interface{}) error {
+	statuses := taskStatusValues(jt.RetryStatuses...)
+	// Snapshot how many items the source task advertises before replaying. A
+	// concurrent deletion of the source task's history makes
+	// ForEachJobTaskItemsByStatuses stop early, and the replayed prefix used to
+	// look exactly like "everything was retried" — no error, no log, and a task
+	// status that claimed the failures were fixed.
+	expected, countErr := jobDeps.CountJobTaskItemsByStatuses(jt.RetrySourceTaskID, statuses)
+	replayed := 0
+	err := jobDeps.ForEachJobTaskItemsByStatuses(jt.RetrySourceTaskID, statuses, retryTaskItemBatchSize, func(items []map[string]interface{}) error {
 		for _, item := range items {
 			if jt.isBreak() {
 				return errScanAborted
 			}
+			replayed++
 			func() {
 				defer func() {
 					if r := recover(); r != nil {
@@ -184,6 +214,14 @@ func (jt *JobTask) syncRetryItems() {
 	})
 	if err != nil && !errors.Is(err, errScanAborted) {
 		errMsg := err.Error()
+		jt.CopyHook("", "", "", nil, "", taskStatusFailed, &errMsg, taskItemPath, taskItemTypeCopy, time.Now().Unix())
+	}
+	if countErr != nil {
+		log.Printf("Task %d could not count the retry source items of task %d: %v", jt.TaskID, jt.RetrySourceTaskID, countErr)
+	} else if err == nil && int64(replayed) < expected {
+		errMsg := fmt.Sprintf("retry source task %d lost items while this retry was running: %d of %d replayed (its history was deleted concurrently)",
+			jt.RetrySourceTaskID, replayed, expected)
+		log.Printf("Task %d %s", jt.TaskID, errMsg)
 		jt.CopyHook("", "", "", nil, "", taskStatusFailed, &errMsg, taskItemPath, taskItemTypeCopy, time.Now().Unix())
 	}
 	jt.markScanFinished()
@@ -213,7 +251,14 @@ func (jt *JobTask) retryTaskItem(item map[string]interface{}) {
 			jt.DelHook(dstPath, fileName, nil, taskStatusFailed, &reason, boolToTaskItemObject(isPath), time.Now().Unix())
 			return
 		}
-		jt.queueDelFile(dstPath, fileName, fileSize, isPath)
+		// Even a well-formed delete record is not replayed. "This entry is extra"
+		// was decided by the mirror run that recorded it; if the source has since
+		// regained that file, replaying the stale record would delete a file the
+		// destination is supposed to have. The next mirror run re-decides
+		// deletions from a fresh source snapshot.
+		reason := "delete record is not replayed: the next mirror run re-decides deletions from a fresh source scan"
+		log.Printf("Task %d refused to replay delete of %q in %q", jt.TaskID, fileName, dstPath)
+		jt.DelHook(dstPath, fileName, nil, taskStatusFailed, &reason, boolToTaskItemObject(isPath), time.Now().Unix())
 	case taskItemTypeCopy, taskItemTypeMove:
 		if isPath {
 			jt.retryMkdir(srcPath, dstPath, copyType)
@@ -454,14 +499,21 @@ func (jt *JobTask) queueDelFile(path, fileName string, size interface{}, isPath 
 
 func (jt *JobTask) listDir(path string, firstDst bool, spec *excludeMatcher, rootPath string, isSrc bool) (FileListResult, error) {
 	var useCache int
-	if isSrc && !firstDst {
+	switch {
+	case isSrc && util.ToInt(jt.Job["method"]) == 1:
+		// A mirror run derives its deletes from this listing, so a stale
+		// server-side cache would delete newly added files or recreate removed
+		// ones. Never read the cache for the source of a full sync.
+		useCache = 0
+	case isSrc && !firstDst:
+		// Reuse the listing the first destination refreshed. sync() starts the
+		// first-destination scans first and waits for them, so the refresh is
+		// already done by the time a later destination runs.
 		useCache = 1
-	} else {
-		if isSrc {
-			useCache = util.ToInt(jt.Job["useCacheS"])
-		} else {
-			useCache = util.ToInt(jt.Job["useCacheT"])
-		}
+	case isSrc:
+		useCache = util.ToInt(jt.Job["useCacheS"])
+	default:
+		useCache = util.ToInt(jt.Job["useCacheT"])
 	}
 
 	var scanInterval int
@@ -485,21 +537,23 @@ func (jt *JobTask) listDir(path string, firstDst bool, spec *excludeMatcher, roo
 		}
 		log.Printf("Directory scan failed for %q; retrying (%d/%d): %v", path, attempt+1, maxScanListRetries, err)
 		if !jt.waitForBreak(jobDeps.ScanListRetryDelay(attempt)) {
-			return nil, context.Canceled
+			// Keep both causes: returning a bare context.Canceled hid the
+			// original failure and made a task timeout look like a user stop.
+			return nil, errors.Join(jt.context().Err(), err)
 		}
 	}
 	if err != nil {
 		if jt.isBreak() && errors.Is(err, context.Canceled) {
 			return nil, err
 		}
-		srcOrDst := msg.T(msg.Src)
-		if !isSrc {
-			srcOrDst = msg.T(msg.Dst)
+		// A missing destination root is not a failure yet: the caller creates it
+		// and retries (ensureDstDirAfterListError, which records the failure if
+		// that does not work). Recording it here made every first mirror run end
+		// as "partial failure" with a misleading scan error.
+		if !isSrc && isAlistObjectNotFound(err) && sameListedDir(path, rootPath) {
+			return nil, err
 		}
-		errMsg := msg.ScanError(srcOrDst, err.Error())
-		log.Printf("%s", errMsg)
-
-		jt.CopyHook(pathIfTrue(isSrc, path), pathIfTrue(!isSrc, path), "", nil, "", taskStatusFailed, &errMsg, taskItemPath, taskItemTypeCopy, time.Now().Unix())
+		jt.recordScanFailure(isSrc, path, err)
 		return nil, err
 	}
 
@@ -508,7 +562,7 @@ func (jt *JobTask) listDir(path string, firstDst bool, spec *excludeMatcher, roo
 		filtered := make(FileListResult, len(result))
 		for key, val := range result {
 			checkPath := excludeMatchPath(rootPath, path, key)
-			if !spec.matches(checkPath, strings.HasSuffix(key, "/")) {
+			if !spec.matchesListed(checkPath, strings.HasSuffix(key, "/")) {
 				filtered[key] = val
 			}
 		}
@@ -520,6 +574,12 @@ func (jt *JobTask) listDir(path string, firstDst bool, spec *excludeMatcher, roo
 
 func shouldRetryScanList(ctx context.Context, err error) bool {
 	if err == nil || ctx.Err() != nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	// "The object does not exist" is repaired by creating the destination
+	// directory, never by waiting: retrying only delayed the first sync by the
+	// whole backoff, and could not succeed.
+	if isAlistObjectNotFound(err) {
 		return false
 	}
 	errMsg := err.Error()
@@ -540,6 +600,24 @@ func excludeMatchPath(rootPath, currentPath, name string) string {
 		return name
 	}
 	return relDir + "/" + name
+}
+
+// recordScanFailure records one failed path item for a directory that could not
+// be listed (or created).
+func (jt *JobTask) recordScanFailure(isSrc bool, path string, err error) {
+	srcOrDst := msg.T(msg.Src)
+	if !isSrc {
+		srcOrDst = msg.T(msg.Dst)
+	}
+	errMsg := msg.ScanError(srcOrDst, err.Error())
+	log.Printf("%s", errMsg)
+	jt.CopyHook(pathIfTrue(isSrc, path), pathIfTrue(!isSrc, path), "", nil, "", taskStatusFailed, &errMsg, taskItemPath, taskItemTypeCopy, time.Now().Unix())
+}
+
+// sameListedDir reports whether path is the root the caller listed for, which is
+// the only listing whose "does not exist" error the caller can repair itself.
+func sameListedDir(path, rootPath string) bool {
+	return normalizeDirPath(path) == normalizeDirPath(rootPath)
 }
 
 func pathIfTrue(cond bool, path string) string {
@@ -601,6 +679,10 @@ func (jt *JobTask) ensureDstDirAfterListError(dstPath string, listErr error) boo
 	scanIntervalT := util.ToInt(jt.Job["scanIntervalT"])
 	if err := jt.AlistClient.MkdirContext(jt.context(), dstPath, scanIntervalT); err != nil {
 		log.Printf("Failed to create missing destination directory %q: %v", dstPath, err)
+		// listDir suppresses the "root does not exist" failure because this
+		// repair may succeed. Now that it did not, the failure has to be
+		// recorded here or the run would end as "nothing to sync" with no error.
+		jt.recordScanFailure(false, dstPath, fmt.Errorf("create missing destination directory: %w", err))
 		return false
 	}
 	return true
@@ -665,12 +747,30 @@ func (jt *JobTask) syncWithHave(work scanWork, spec *excludeMatcher) {
 			}
 			_, dstVal, exists := dstIndex.find(key, srcIndex)
 			if !exists || fileChanged(srcVal, dstVal) {
+				if dstKey, conflict := dstIndex.findDirForFile(key); conflict {
+					// The destination holds a directory under the file's name. A
+					// copy cannot replace it, so report the type conflict instead
+					// of queueing a transfer that is bound to fail.
+					jt.recordScanConflict(work.SrcPath+key, work.DstPath+dstKey, key, false,
+						fmt.Sprintf("destination %q is a directory but the source entry is a file", work.DstPath+dstKey))
+					continue
+				}
 				jt.copyFile(work.SrcPath, work.DstPath, key, srcSize)
 			}
 		} else {
 			// Directory
 			dstKey, _, exists := dstIndex.find(key, srcIndex)
 			if !exists {
+				if conflictKey, conflict := dstIndex.findFileForDir(key); conflict {
+					// The destination already holds a *file* under this directory
+					// name. Creating the directory fails, and the old code then
+					// skipped the whole subtree with only a mkdir error. Report the
+					// conflict explicitly; the next mirror run (which owns deletion
+					// authority) resolves it.
+					jt.recordScanConflict(work.SrcPath+key, work.DstPath+conflictKey, "", true,
+						fmt.Sprintf("destination %q is a file but the source entry is a directory", work.DstPath+conflictKey))
+					continue
+				}
 				jt.addChildScanWork(&children, scanWork{
 					SrcPath:     work.SrcPath + key,
 					DstPath:     work.DstPath + key,
@@ -700,6 +800,46 @@ func (jt *JobTask) syncWithHave(work scanWork, spec *excludeMatcher) {
 
 	jt.finishScanWork()
 	jt.runChildScanWorks(children, spec)
+}
+
+// recordScanConflict records one explicit failed item for a source/destination
+// type mismatch (a directory where a file is expected, or the other way round).
+// The incremental scanner has no delete authority — that belongs to the
+// full-sync plan — so the branch is reported and skipped instead of being failed
+// later with a misleading mkdir/copy error.
+func (jt *JobTask) recordScanConflict(srcPath, dstPath, fileName string, isPath bool, reason string) {
+	errMsg := fmt.Sprintf("scan conflict: %s", reason)
+	log.Printf("Task %d %s (src %q, dst %q)", jt.TaskID, errMsg, srcPath, dstPath)
+	jt.CopyHook(srcPath, dstPath, fileName, nil, "", taskStatusFailed, &errMsg, boolToTaskItemObject(isPath), taskItemTypeCopy, time.Now().Unix())
+}
+
+// findDirForFile reports the destination *directory* that occupies the path of a
+// source file ("a.txt/" for "a.txt"). canonicalFileKey keeps the trailing slash,
+// so find() never pairs a file with a directory.
+func (i dstNameMatchIndex) findDirForFile(fileKey string) (string, bool) {
+	name := strings.TrimSuffix(fileKey, "/")
+	if _, ok := i.items[name+"/"]; ok {
+		return name + "/", true
+	}
+	entry, ok := i.canonical[canonicalFileName(name)+"/"]
+	if !ok || entry.ambiguous || !strings.HasSuffix(entry.key, "/") {
+		return "", false
+	}
+	return entry.key, true
+}
+
+// findFileForDir reports the destination *file* that occupies the path of a
+// source directory ("foo" for "foo/").
+func (i dstNameMatchIndex) findFileForDir(dirKey string) (string, bool) {
+	name := strings.TrimSuffix(dirKey, "/")
+	if _, ok := i.items[name]; ok {
+		return name, true
+	}
+	entry, ok := i.canonical[canonicalFileName(name)]
+	if !ok || entry.ambiguous || strings.HasSuffix(entry.key, "/") {
+		return "", false
+	}
+	return entry.key, true
 }
 
 func (jt *JobTask) syncWithoutHave(work scanWork, spec *excludeMatcher) {

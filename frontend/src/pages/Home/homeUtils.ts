@@ -24,17 +24,19 @@ export const taskRecordStatusNames: Record<number, string> = {
   7: "失败",
   8: "无需同步",
 };
+// Mirrors backend/internal/service/job_task_item.go taskStatus* values. Keep in
+// sync with tests/homeUtils.test.ts: a wrong label here (e.g. showing a timeout
+// as "will retry") sends users chasing the wrong problem.
 export const taskItemStatusNames: Record<number, string> = {
   0: "等待中",
   1: "进行中",
   2: "成功",
-  3: "取消中",
-  4: "已取消",
-  5: "出错（将重试）",
-  6: "失败中",
+  3: "部分失败",
+  4: "已停止",
+  5: "超时",
+  6: "系统错误",
   7: "已失败",
-  10: "等待重试中",
-  11: "等待重试前",
+  10: "重试中",
 };
 export const taskTypeNames: Record<number, string> = {
   0: "复制",
@@ -54,6 +56,12 @@ export const methodOptions = [
   },
 ];
 export const methodNames = methodOptions.map((method) => method.name);
+/** Legacy backend method 2 is the old "move" mode (taskForm keeps it on save). */
+export const legacyMoveMethodLabel = "移动（旧版）";
+export const methodLabel = (method?: number | null) => {
+  if (method === 2) return legacyMoveMethodLabel;
+  return methodNames[Number(method)] ?? "—";
+};
 export const cronTypeNames = ["间隔(分钟)", "Cron", "仅手动"];
 export const cronFields = [
   { name: "second", label: "秒", placeholder: "0" },
@@ -120,6 +128,13 @@ const cronValue = (value?: string | null, fallback = "*") => {
   return normalized || fallback;
 };
 
+const isPlainCronNumber = (value: string) => /^\d+$/.test(value);
+
+/**
+ * Only plain numbers can be rendered as a clock. A step/range/list expression
+ * used to be glued in as e.g. "2:STAR-SLASH-5:0", which reads as a valid but
+ * wrong time; describeCronPlan falls back to the raw expression instead.
+ */
 const formatTime = (
   hour?: string | null,
   minute?: string | null,
@@ -128,7 +143,7 @@ const formatTime = (
   const h = cronValue(hour);
   const m = cronValue(minute);
   const s = cronValue(second, "0");
-  if (/^\d+$/.test(h) && /^\d+$/.test(m) && /^\d+$/.test(s)) {
+  if (isPlainCronNumber(h) && isPlainCronNumber(m) && isPlainCronNumber(s)) {
     return `${h.padStart(2, "0")}:${m.padStart(2, "0")}:${s.padStart(2, "0")}`;
   }
   return `${h}:${m}:${s}`;
@@ -162,8 +177,15 @@ const describeCronPlan = (values: ScheduleValues) => {
   const dayOfWeek = cronValue(values.day_of_week);
   const dayOfWeekLabel = formatCronDayOfWeek(dayOfWeek);
   const time = formatTime(hour, minute, second);
+  // "每天 02:00:00" is only truthful when 时/分/秒 are single numbers. For
+  // `*/5`, `1-5` … fall through to the raw expression below.
+  const renderableClock =
+    isPlainCronNumber(hour) &&
+    isPlainCronNumber(minute) &&
+    isPlainCronNumber(second);
 
   if (
+    renderableClock &&
     day === "*" &&
     month === "*" &&
     dayOfWeek === "*" &&
@@ -173,6 +195,7 @@ const describeCronPlan = (values: ScheduleValues) => {
     return `每天 ${time} 执行`;
   }
   if (
+    renderableClock &&
     day !== "*" &&
     month === "*" &&
     dayOfWeek === "*" &&
@@ -182,6 +205,7 @@ const describeCronPlan = (values: ScheduleValues) => {
     return `每月 ${day} 日 ${time} 执行`;
   }
   if (
+    renderableClock &&
     day === "*" &&
     month === "*" &&
     dayOfWeek !== "*" &&
@@ -254,51 +278,6 @@ export const buildPathTreeData = (paths: string[]): TreeNode[] => {
   });
 
   return [root];
-};
-
-const mergeTreeNode = (baseNode: TreeNode, extraNode: TreeNode): TreeNode => {
-  const mergedChildren = mergeTreeData(
-    baseNode.children || [],
-    extraNode.children || [],
-  );
-  const merged: TreeNode = {
-    ...extraNode,
-    ...baseNode,
-    title: baseNode.title || extraNode.title,
-    key: baseNode.key || extraNode.key,
-    value: baseNode.value || extraNode.value,
-  };
-  if (mergedChildren.length > 0) {
-    merged.children = mergedChildren;
-    merged.isLeaf = false;
-  } else {
-    delete merged.children;
-  }
-  return merged;
-};
-
-export const mergeTreeData = (
-  baseTree: TreeNode[],
-  extraTree: TreeNode[],
-): TreeNode[] => {
-  const merged: TreeNode[] = baseTree.map((node) => ({
-    ...node,
-    ...(node.children ? { children: mergeTreeData(node.children, []) } : {}),
-  }));
-  extraTree.forEach((extraNode) => {
-    const index = merged.findIndex((node) => node.value === extraNode.value);
-    if (index >= 0) {
-      merged[index] = mergeTreeNode(merged[index], extraNode);
-      return;
-    }
-    merged.push({
-      ...extraNode,
-      ...(extraNode.children
-        ? { children: mergeTreeData(extraNode.children, []) }
-        : {}),
-    });
-  });
-  return merged;
 };
 
 export const formatSize = (bytes: number) => {

@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 
+	"opensync/internal/msg"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -36,10 +38,18 @@ func GatewayRequired(development bool, allowedOrigins []string) gin.HandlerFunc 
 	if !development && len(allowedOrigins) == 0 {
 		log.Printf("Warning: allowed_origins is not configured; JSON write requests without browser fetch metadata are accepted without an Origin check")
 	}
+	if development {
+		// Identity headers are trusted from the gateway only because production
+		// listens on the fnOS app socket. Development mode binds loopback TCP and
+		// deliberately skips the identity check, so every local process can act
+		// as the administrator; keep it loud in the startup log.
+		log.Printf("Warning: development mode disables fnOS identity verification; any local process that reaches the loopback port can use the admin API")
+	}
+	warnInvalidAllowlistEntries(allowedOrigins)
 	return func(c *gin.Context) {
 		if !sameOriginWrite(c, allowedOrigins) {
 			logRejectedWrite(c, allowedOrigins)
-			c.AbortWithStatusJSON(403, gin.H{"code": 403, "msg": "不允许跨站操作"})
+			c.AbortWithStatusJSON(403, gin.H{"code": 403, "msg": msg.T(msg.CrossSiteWriteRejected)})
 			return
 		}
 		if development {
@@ -49,15 +59,30 @@ func GatewayRequired(development bool, allowedOrigins []string) gin.HandlerFunc 
 		}
 		uid, err := strconv.ParseInt(c.GetHeader("X-Trim-Userid"), 10, 64)
 		if err != nil || uid <= 0 {
-			c.AbortWithStatusJSON(401, gin.H{"code": 401, "msg": "请从飞牛桌面打开应用"})
+			c.AbortWithStatusJSON(401, gin.H{"code": 401, "msg": msg.T(msg.GatewayLoginRequired)})
 			return
 		}
 		if c.GetHeader("X-Trim-Isadmin") != "true" {
-			c.AbortWithStatusJSON(403, gin.H{"code": 403, "msg": "仅管理员可使用此应用"})
+			c.AbortWithStatusJSON(403, gin.H{"code": 403, "msg": msg.T(msg.AdminOnly)})
 			return
 		}
 		c.Set("uid", uid)
 		c.Next()
+	}
+}
+
+// warnInvalidAllowlistEntries reports allowed_origins entries that cannot match
+// any request origin. Silently ignoring them turns a deliberate strict policy
+// into an accidental one, so each unusable entry is named in the startup log.
+func warnInvalidAllowlistEntries(allowedOrigins []string) {
+	for _, value := range allowedOrigins {
+		if strings.TrimSpace(value) == "*" {
+			log.Printf("Warning: allowed_origins entry %q is not supported: a wildcard would disable the Origin check; list the actual origins instead", value)
+			continue
+		}
+		if _, ok := parseAllowlistEntry(value); !ok {
+			log.Printf("Warning: allowed_origins entry %q is invalid and will never match; expected a full origin (http://nas.example:5666) or a bare host (nas.example)", value)
+		}
 	}
 }
 
@@ -73,7 +98,13 @@ func LogOriginPolicy(allowedOrigins []string) {
 }
 
 // sameOriginWrite reports whether a request may perform a mutation. Reads are
-// always allowed; the gateway identity check still applies to them.
+// always allowed because they cannot change state; the gateway identity check
+// still applies to them.
+//
+// Contract for route owners: GET/HEAD handlers MUST be side-effect free. Any
+// state-changing action must be served by POST/PUT/DELETE so that the CSRF
+// checks below apply — a cross-site browser navigation can reach a GET handler
+// with the fnOS session cookie attached.
 func sameOriginWrite(c *gin.Context, allowedOrigins []string) bool {
 	if method := c.Request.Method; method == http.MethodGet || method == http.MethodHead {
 		return true
@@ -178,21 +209,44 @@ func parseOriginValue(value string) (callerOrigin, bool) {
 // origin ("http://nas.example:5666") or a bare authority ("nas.example",
 // "10.10.11.250:5666"); a bare authority has no scheme, so its port is compared
 // against the request's explicit or implicit default port.
+//
+// A full origin must be exactly an origin: paths (other than a lone "/"), query
+// strings, fragments, userinfo, non-numeric ports and the "*" wildcard are all
+// rejected instead of being silently reduced to a host match, which would make
+// the configured policy broader than the operator wrote.
 func parseAllowlistEntry(value string) (callerOrigin, bool) {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return callerOrigin{}, false
 	}
 	if strings.Contains(value, "://") {
-		return parseOriginValue(value)
+		origin, ok := parseOriginValue(value)
+		if !ok {
+			return callerOrigin{}, false
+		}
+		parsed, err := url.Parse(value)
+		if err != nil || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return callerOrigin{}, false
+		}
+		if parsed.Path != "" && parsed.Path != "/" {
+			return callerOrigin{}, false
+		}
+		return origin, true
 	}
 	// A bare authority must not smuggle a path or query past the host comparison.
 	if strings.ContainsAny(value, "/?#") {
 		return callerOrigin{}, false
 	}
 	host, port := splitHostPort(value)
-	if host == "" {
+	if host == "" || host == "*" {
 		return callerOrigin{}, false
+	}
+	// A non-numeric port can never equal a request's effective port; treat the
+	// entry as invalid (and warn at startup) rather than silently never matching.
+	if port != "" {
+		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+			return callerOrigin{}, false
+		}
 	}
 	return callerOrigin{host: host, port: port}, true
 }
@@ -245,12 +299,18 @@ func effectiveOriginPort(origin callerOrigin) string {
 	return defaultPort(origin.scheme)
 }
 
-// splitHostPort separates an optional port and strips IPv6 brackets.
+// splitHostPort separates an optional port, strips IPv6 brackets and normalizes
+// the host: DNS names are case-insensitive and the trailing root dot in an FQDN
+// ("nas.example.") denotes the same host as "nas.example".
 func splitHostPort(value string) (host, port string) {
 	if h, p, err := net.SplitHostPort(value); err == nil {
-		return strings.ToLower(h), p
+		return normalizeHost(h), p
 	}
-	return strings.ToLower(strings.Trim(value, "[]")), ""
+	return normalizeHost(strings.Trim(value, "[]")), ""
+}
+
+func normalizeHost(host string) string {
+	return strings.TrimSuffix(strings.ToLower(host), ".")
 }
 
 func defaultPort(scheme string) string {

@@ -1,11 +1,15 @@
 package platform
 
 import (
+	"bytes"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"opensync/internal/msg"
 
 	"github.com/gin-gonic/gin"
 )
@@ -337,5 +341,144 @@ func TestAllowlistEntryIgnoresInvalidValues(t *testing.T) {
 		if originAllowed(origin, []string{entry}) {
 			t.Fatalf("entry %q should not have matched", entry)
 		}
+	}
+}
+
+// The identity/origin rejections are user-facing: they must follow the active
+// msg locale instead of being hard-coded Chinese (review P3-3).
+func TestGatewayRejectionsUseLocalizedMessages(t *testing.T) {
+	t.Cleanup(func() { msg.SetLocale("zh") })
+	msg.SetLocale("en")
+
+	for name, tc := range map[string]struct {
+		headers map[string]string
+		status  int
+		want    string
+	}{
+		"cross-site write": {
+			headers: map[string]string{"Sec-Fetch-Site": "cross-site"},
+			status:  http.StatusForbidden,
+			want:    msg.T(msg.CrossSiteWriteRejected),
+		},
+		"missing identity": {
+			headers: map[string]string{},
+			status:  http.StatusUnauthorized,
+			want:    msg.T(msg.GatewayLoginRequired),
+		},
+		"non-admin": {
+			headers: map[string]string{"X-Trim-Userid": "1000", "X-Trim-Isadmin": "false"},
+			status:  http.StatusForbidden,
+			want:    msg.T(msg.AdminOnly),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := gatewayTestRouter(t, false, nil)
+			req := httptest.NewRequest(http.MethodGet, "http://app.sock/", nil)
+			req.Header.Set("Content-Type", "application/json")
+			if name == "cross-site write" {
+				req = httptest.NewRequest(http.MethodPost, "http://app.sock/", strings.NewReader(`{}`))
+				req.Header.Set("Content-Type", "application/json")
+			}
+			for key, value := range tc.headers {
+				req.Header.Set(key, value)
+			}
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+			if w.Code != tc.status {
+				t.Fatalf("status=%d, want %d", w.Code, tc.status)
+			}
+			if body := w.Body.String(); !strings.Contains(body, tc.want) {
+				t.Fatalf("body=%q, want localized message %q", body, tc.want)
+			}
+		})
+	}
+}
+
+// Entries that are not exactly an origin must be rejected instead of being
+// silently reduced to a wider host match (review P3-6).
+func TestParseAllowlistEntryIsStrictAboutNonOriginValues(t *testing.T) {
+	for name, entry := range map[string]string{
+		"path":             "http://nas.example:5666/app",
+		"query":            "http://nas.example:5666?x=1",
+		"fragment":         "http://nas.example:5666#frag",
+		"userinfo":         "http://user:pass@nas.example:5666",
+		"wildcard":         "*",
+		"non-numeric port": "nas.example:abc",
+		"empty":            "",
+		"spaces":           "  ",
+	} {
+		if _, ok := parseAllowlistEntry(entry); ok {
+			t.Fatalf("%s: entry %q should be rejected", name, entry)
+		}
+	}
+
+	for name, entry := range map[string]string{
+		"full origin":                "http://nas.example:5666",
+		"full origin trailing slash": "http://nas.example:5666/",
+		"bare host":                  "nas.example",
+		"bare host with port":        "nas.example:5666",
+		"uppercase full origin":      "HTTP://NAS.Example:5666",
+	} {
+		if _, ok := parseAllowlistEntry(entry); !ok {
+			t.Fatalf("%s: entry %q should be accepted", name, entry)
+		}
+	}
+	// A path on a full origin must not widen the match.
+	origin, _ := parseOriginValue("http://nas.example:5666")
+	if originAllowed(origin, []string{"http://nas.example:5666/app"}) {
+		t.Fatal("path-bearing entry must not match the bare origin")
+	}
+}
+
+// A trailing root dot in an FQDN is the same host; both directions must match
+// (review P3-6).
+func TestOriginAllowedNormalizesFQDNTrialingDot(t *testing.T) {
+	origin, ok := parseOriginValue("http://nas.example.:5666")
+	if !ok {
+		t.Fatal("parseOriginValue() rejected a dotted FQDN")
+	}
+	if origin.host != "nas.example" {
+		t.Fatalf("host = %q, want nas.example", origin.host)
+	}
+	if !originAllowed(origin, []string{"nas.example"}) {
+		t.Fatal("dotted FQDN origin did not match bare host entry")
+	}
+	if !originAllowed(origin, []string{"nas.example."}) {
+		t.Fatal("dotted FQDN origin did not match dotted entry")
+	}
+}
+
+// Invalid entries are logged at startup so a typo cannot silently disable the
+// strict Origin policy (review P3-6).
+func TestWarnInvalidAllowlistEntries(t *testing.T) {
+	var buf bytes.Buffer
+	oldWriter := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(oldWriter) })
+
+	warnInvalidAllowlistEntries([]string{"*", "http://nas.example:5666/app", "nas.example", "nas.example:abc"})
+	logs := buf.String()
+	if !strings.Contains(logs, "wildcard") {
+		t.Fatalf("logs = %q, want wildcard warning", logs)
+	}
+	if !strings.Contains(logs, "http://nas.example:5666/app") || !strings.Contains(logs, "nas.example:abc") {
+		t.Fatalf("logs = %q, want invalid-entry warnings naming the entries", logs)
+	}
+	if strings.Contains(logs, `entry "nas.example" is invalid`) {
+		t.Fatalf("logs = %q, valid entry must not be reported", logs)
+	}
+}
+
+// Dev mode deliberately disables identity verification; that must be loud at
+// startup (review P3-5).
+func TestGatewayDevelopmentModeLogsWarning(t *testing.T) {
+	var buf bytes.Buffer
+	oldWriter := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(oldWriter) })
+
+	_ = gatewayTestRouter(t, true, nil)
+	if logs := buf.String(); !strings.Contains(logs, "development mode disables fnOS identity verification") {
+		t.Fatalf("logs = %q, want development-mode warning", logs)
 	}
 }

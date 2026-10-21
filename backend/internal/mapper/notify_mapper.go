@@ -1,7 +1,6 @@
 package mapper
 
 import (
-	"errors"
 	"fmt"
 	"opensync/internal/msg"
 )
@@ -106,7 +105,7 @@ func executeNotifyUpdate(query string, args ...interface{}) error {
 		return err
 	}
 	if affected == 0 {
-		return errors.New(msg.T(msg.NotifyNotFound))
+		return notFound(ErrNotifyNotFound, msg.NotifyNotFound)
 	}
 	return nil
 }

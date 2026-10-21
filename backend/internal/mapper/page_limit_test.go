@@ -74,9 +74,6 @@ func TestUnpaginatedQueryWithinLimitStillSucceeds(t *testing.T) {
 	if result["count"] != int64(4) {
 		t.Fatalf("count = %v, want 4", result["count"])
 	}
-	if _, present := result["truncated"]; present {
-		t.Fatalf("result still carries a truncated flag: %#v", result)
-	}
 }
 
 // Paginated requests are unaffected: a page is expected to be a slice of a

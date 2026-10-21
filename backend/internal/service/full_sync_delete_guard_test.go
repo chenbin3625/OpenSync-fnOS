@@ -49,3 +49,35 @@ func TestUnsafeDeleteVolumeRequiresRatioAndFloor(t *testing.T) {
 		})
 	}
 }
+
+// Files relocated out of a doomed tree are moved, not deleted, so the safety
+// valve must not count them: the upper bound it computes has to drop by exactly
+// the number of files the plan relocates out of that delete root.
+func TestPlannedDeleteWeightSubtractsRelocatedFiles(t *testing.T) {
+	metadata := FileMetadata{
+		Size: 4096,
+		MD5:  "0123456789abcdef0123456789abcdef",
+	}
+	src := &fullSyncSnapshot{root: "/src/", dirs: map[string]FileListResult{
+		"":       {"new/": {}},
+		"new/":   {"movie.mkv": metadata},
+	}}
+	dst := &fullSyncSnapshot{root: "/dst/", dirs: map[string]FileListResult{
+		"":     {"old/": {}},
+		"old/": {"movie.mkv": metadata},
+	}}
+	plan := newFullSyncPlan(src, dst, nil)
+	plan.build(map[string]interface{}{"method": 1})
+
+	relocations := plan.relocations()
+	if len(relocations) != 1 {
+		t.Fatalf("relocations = %d, want 1 (move old/movie.mkv to new/)", len(relocations))
+	}
+	writes := plan.writeIndex()
+	if got := plan.plannedDeleteWeight(nil, writes); got != 2 {
+		t.Fatalf("plannedDeleteWeight without relocation = %d, want 2 (the directory and its file)", got)
+	}
+	if got := plan.plannedDeleteWeight(relocations, writes); got != 1 {
+		t.Fatalf("plannedDeleteWeight with relocation = %d, want 1 (the relocated file is moved, not deleted)", got)
+	}
+}

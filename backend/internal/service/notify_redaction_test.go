@@ -136,3 +136,72 @@ func TestRedactNotifyParamsMasksShortQueryParamNames(t *testing.T) {
 		t.Fatalf("redactNotifyParams leaked a short-named query secret:\n%s", out)
 	}
 }
+
+// --- regression tests: Bark server, fail-closed redaction (P3-2, P3-3) ---
+
+// Bark keeps its target in server, which may carry userinfo or query
+// credentials; it must be masked like url/webhook.
+func TestRedactNotifyParamsMasksBarkServerCredentials(t *testing.T) {
+	in := `{"server":"https://bot:SUPERSECRET@bark.example/push?token=SECRETTOKEN1234","deviceKey":"DEVICEKEY1234"}`
+	out := redactNotifyParams(5, in)
+	for _, secret := range []string{"SUPERSECRET", "SECRETTOKEN1234", "DEVICEKEY1234"} {
+		if strings.Contains(out, secret) {
+			t.Fatalf("redactNotifyParams leaked %q: %s", secret, out)
+		}
+	}
+	if !strings.Contains(out, "bark.example") {
+		t.Fatalf("redacted server lost its host: %s", out)
+	}
+}
+
+// An unparseable row must not be echoed: a token inside broken JSON is still a
+// token. Returning the raw string was the same fail-open bug maskNotifyQuery
+// already fixed for query strings.
+func TestRedactNotifyParamsFailsClosedOnMalformedJSON(t *testing.T) {
+	in := `{"url":"https://hook.example/push?token=SUPERSECRETVALUE`
+	out := redactNotifyParams(0, in)
+	if strings.Contains(out, "SUPERSECRETVALUE") {
+		t.Fatalf("redactNotifyParams leaked a secret from malformed JSON: %q", out)
+	}
+	if out != "{}" {
+		t.Fatalf("redactNotifyParams() = %q, want the fail-closed empty object", out)
+	}
+}
+
+// An unknown method must mask the union of secret keys, not nothing.
+func TestRedactNotifyParamsMasksUnknownMethod(t *testing.T) {
+	in := `{"url":"https://hook.example/push?token=SUPERSECRETVALUE","sendKey":"SCTSUPERSECRET","deviceKey":"DEVKEYSUPERSECRET"}`
+	out := redactNotifyParams(99, in)
+	for _, secret := range []string{"SUPERSECRETVALUE", "SCTSUPERSECRET", "DEVKEYSUPERSECRET"} {
+		if strings.Contains(out, secret) {
+			t.Fatalf("redactNotifyParams(unknown method) leaked %q: %s", secret, out)
+		}
+	}
+}
+
+// A masked Bark server round-trips back to the stored value on edit.
+func TestResolveNotifyParamsRestoresMaskedBarkServer(t *testing.T) {
+	old := loadStoredNotify
+	defer func() { loadStoredNotify = old }()
+	loadStoredNotify = func(int64) (map[string]interface{}, error) {
+		return map[string]interface{}{
+			"params": `{"server":"https://bot:REALPASS@bark.example/push?token=REALTOKEN","deviceKey":"REALDEVICEKEY"}`,
+		}, nil
+	}
+	got, err := resolveNotifyParams(map[string]interface{}{
+		"id": 9, "method": 5,
+		"params": map[string]interface{}{
+			"server":    "https://****@bark.example/push?token=****OKEN",
+			"deviceKey": "****KEY",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["server"] != "https://bot:REALPASS@bark.example/push?token=REALTOKEN" {
+		t.Fatalf("server = %#v, want the stored URL", got["server"])
+	}
+	if got["deviceKey"] != "REALDEVICEKEY" {
+		t.Fatalf("deviceKey = %#v, want the stored key", got["deviceKey"])
+	}
+}

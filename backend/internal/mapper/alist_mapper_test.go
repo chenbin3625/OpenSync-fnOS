@@ -31,8 +31,7 @@ func TestAlistTokenIsEncryptedAtRestAndDecryptedOnRead(t *testing.T) {
 
 	restoreDB := SetDBForTest(testDB)
 	defer restoreDB()
-	config.SetConfigForTest(&config.Config{Server: config.ServerConfig{PasswdStr: "credential-test-key"}})
-	defer config.SetConfigForTest(nil)
+	setMapperTestConfig(t, &config.Config{Server: config.ServerConfig{PasswdStr: "credential-test-key"}})
 
 	id, err := AddAlist("test", "https://example.test", "tester", "plain-token")
 	if err != nil {
@@ -71,8 +70,7 @@ func TestMigrateStoredCredentialsEncryptsLegacyRows(t *testing.T) {
 			t.Fatalf("setup SQL %q: %v", stmt, err)
 		}
 	}
-	config.SetConfigForTest(&config.Config{Server: config.ServerConfig{PasswdStr: "migration-test-key"}})
-	defer config.SetConfigForTest(nil)
+	setMapperTestConfig(t, &config.Config{Server: config.ServerConfig{PasswdStr: "migration-test-key"}})
 
 	if err := migrateStoredCredentials(testDB); err != nil {
 		t.Fatalf("migrateStoredCredentials() error: %v", err)
@@ -124,8 +122,7 @@ func TestNotifyParamsAreEncryptedAtRestAndDecryptedOnRead(t *testing.T) {
 	}
 	restoreDB := SetDBForTest(testDB)
 	defer restoreDB()
-	config.SetConfigForTest(&config.Config{Server: config.ServerConfig{PasswdStr: "notify-test-key"}})
-	defer config.SetConfigForTest(nil)
+	setMapperTestConfig(t, &config.Config{Server: config.ServerConfig{PasswdStr: "notify-test-key"}})
 
 	params := `{"sendKey":"secret-key"}`
 	id, err := AddNotify(map[string]interface{}{
@@ -205,7 +202,8 @@ func TestMigrateStoredCredentialsSkipsUndecryptableRows(t *testing.T) {
 		t.Fatalf("sql.Open() error: %v", err)
 	}
 	defer testDB.Close()
-	defer config.SetConfigForTest(nil)
+	restoreConfig := snapshotConfigForTest(t)
+	defer restoreConfig()
 	seedUndecryptableCredentials(t, testDB)
 	if _, err := testDB.Exec(`INSERT INTO notify(id, enable, method, params) VALUES (3, 1, 1, '{"sendKey":"legacy"}')`); err != nil {
 		t.Fatal(err)
@@ -240,7 +238,8 @@ func TestListReadsBlankUndecryptableCredentialsInsteadOfFailing(t *testing.T) {
 		t.Fatalf("sql.Open() error: %v", err)
 	}
 	defer testDB.Close()
-	defer config.SetConfigForTest(nil)
+	restoreConfig := snapshotConfigForTest(t)
+	defer restoreConfig()
 	seedUndecryptableCredentials(t, testDB)
 	restoreDB := SetDBForTest(testDB)
 	defer restoreDB()
@@ -280,7 +279,8 @@ func TestSingleReadsReportUndecryptableCredentials(t *testing.T) {
 		t.Fatalf("sql.Open() error: %v", err)
 	}
 	defer testDB.Close()
-	defer config.SetConfigForTest(nil)
+	restoreConfig := snapshotConfigForTest(t)
+	defer restoreConfig()
 	seedUndecryptableCredentials(t, testDB)
 	restoreDB := SetDBForTest(testDB)
 	defer restoreDB()
@@ -318,11 +318,8 @@ func TestCountJobsByAlistID(t *testing.T) {
 		t.Fatalf("insert jobs: %v", err)
 	}
 
-	oldDB := db
-	db = testDB
-	defer func() {
-		db = oldDB
-	}()
+	restore := SetDBForTest(testDB)
+	defer restore()
 
 	count, err := CountJobsByAlistID(7)
 	if err != nil {

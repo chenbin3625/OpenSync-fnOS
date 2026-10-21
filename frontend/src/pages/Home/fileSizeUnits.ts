@@ -59,12 +59,18 @@ export function splitBytesToFileSize(bytes?: number | null): {
   const units = [...fileSizeUnitOptions]
     .map((option) => option.value)
     .reverse();
-  const unit =
-    units.find((candidate) => normalized >= fileSizeUnitFactors[candidate]) ||
-    "B";
-  const value = normalized / fileSizeUnitFactors[unit];
-  return {
-    value: Number.isInteger(value) ? value : Number(value.toFixed(2)),
-    unit,
-  };
+  // Pick the largest unit whose displayed value (at most two decimals) converts
+  // back to exactly the same byte count. Opening a task and saving it unchanged
+  // must never rewrite the stored limit, so a lossy unit is skipped in favour of
+  // a smaller one, down to plain bytes which is always exact.
+  for (const unit of units) {
+    const factor = fileSizeUnitFactors[unit];
+    if (normalized < factor) continue;
+    const raw = normalized / factor;
+    const value = Number.isInteger(raw) ? raw : Number(raw.toFixed(2));
+    if (fileSizeToBytes(value, unit) === Math.round(normalized)) {
+      return { value, unit };
+    }
+  }
+  return { value: Math.round(normalized), unit: "B" };
 }

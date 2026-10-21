@@ -117,3 +117,39 @@ func TestRetryFailedTaskReturnsErrorWhenJobDisabled(t *testing.T) {
 		t.Fatalf("RetryFailedTask did not return error when job is disabled")
 	}
 }
+
+// A retry run replays its source task's items in batches. Deleting the source
+// task mid-run would silently drop the unread remainder while the retry still
+// reports success, so RemoveTask must refuse while that task is claimed.
+func TestRemoveTaskRejectsTaskBeingReplayed(t *testing.T) {
+	client, taskID := setupRetryFailedTaskTest(t, 1)
+	// Finish the source task so RemoveTask's status check would otherwise allow
+	// the delete.
+	if _, err := mapper.GetDB().Exec("UPDATE job_task SET status=? WHERE id=?", taskStatusStopped.Int(), taskID); err != nil {
+		t.Fatalf("finish source task: %v", err)
+	}
+
+	client.setRetrySource(taskID)
+	if err := RemoveTask(taskID); err == nil {
+		t.Fatal("RemoveTask() deleted a task that a retry run is replaying")
+	}
+	var count int
+	if err := mapper.GetDB().QueryRow("SELECT COUNT(*) FROM job_task WHERE id=?", taskID).Scan(&count); err != nil {
+		t.Fatalf("count source task: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("source task rows = %d, want the task kept while replayed", count)
+	}
+
+	// Once the replay is over the claim is released and the task is deletable.
+	client.clearCurrentTask(nil)
+	if err := RemoveTask(taskID); err != nil {
+		t.Fatalf("RemoveTask() after the replay finished: %v", err)
+	}
+	if err := mapper.GetDB().QueryRow("SELECT COUNT(*) FROM job_task WHERE id=?", taskID).Scan(&count); err != nil {
+		t.Fatalf("count source task after delete: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("source task rows = %d, want 0 after a permitted delete", count)
+	}
+}

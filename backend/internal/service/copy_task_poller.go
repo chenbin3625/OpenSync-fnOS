@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"opensync/internal/msg"
 	"opensync/pkg/util"
 	"sync"
@@ -80,6 +81,10 @@ type copyTaskMonitor struct {
 	// exited must not enqueue a watch nobody will ever process, otherwise the
 	// copy goroutine blocks forever on <-watch.done and the job stays "doing".
 	stopped bool
+	// lastUndoneErr dedupes the log line emitted when listing undone tasks
+	// fails: the loop retries every poll interval, and the error is otherwise
+	// swallowed, which is how the POST/GET endpoint bug stayed hidden.
+	lastUndoneErr string
 }
 
 func (jt *JobTask) ensureCopyMonitor() *copyTaskMonitor {
@@ -244,7 +249,19 @@ func (m *copyTaskMonitor) waitForPollInterval() bool {
 	} else {
 		sleepFor = pollIntervalIdle
 	}
-	return m.jt.waitForBreak(sleepFor)
+	// Observe stopCh as well as the task context: stop() is called once the
+	// executor has drained, and sleeping through the poll interval made task
+	// shutdown wait up to 2.9s before the loop noticed.
+	timer := time.NewTimer(sleepFor)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-m.stopCh:
+		return false
+	case <-m.jt.context().Done():
+		return false
+	}
 }
 
 func (m *copyTaskMonitor) fetchUndoneByType(active []*copyTaskWatch) map[taskItemType]map[string]map[string]interface{} {
@@ -259,10 +276,25 @@ func (m *copyTaskMonitor) fetchUndoneByType(active []*copyTaskWatch) map[taskIte
 	for copyType := range needed {
 		tasks, err := client.TaskUndoneListContext(ctx, copyType)
 		if err != nil {
+			// A cancelled context or a stopping task is not an error worth
+			// logging. Everything else is a real failure of the fast path: log
+			// each distinct failure once so a wrong endpoint/method (the
+			// historical POST-vs-GET bug) is visible instead of silently
+			// degrading to one /info request per watch.
+			if ctx.Err() == nil && !m.jt.isBreak() {
+				if errText := err.Error(); errText != m.lastUndoneErr {
+					m.lastUndoneErr = errText
+					log.Printf("Task %d: list undone %s tasks failed (falling back to per-task info): %s", m.jt.TaskID, alistTaskGroup(copyType), errText)
+				}
+			}
 			continue
 		}
+		m.lastUndoneErr = ""
 		byID := make(map[string]map[string]interface{}, len(tasks))
 		for _, task := range tasks {
+			if task["id"] == nil {
+				continue
+			}
 			id := fmt.Sprintf("%v", task["id"])
 			if id == "" {
 				continue
@@ -396,16 +428,18 @@ func (m *copyTaskMonitor) finishWatch(watch *copyTaskWatch) {
 	if !m.takeWatch(watch) {
 		return
 	}
-	// The item already reached a terminal state, so delete the finished remote
-	// task off the polling loop: a slow cleanup (up to the 30s cleanup timeout)
-	// would otherwise delay status updates for the remaining watches.
+	// The item already reached a terminal state, so unblock the copy goroutine
+	// first: it used to wait for the remote task deletion below, which kept an
+	// executor slot busy for up to the 30s cleanup timeout on a slow AList.
+	watch.closeDone()
+	// Delete the finished remote task off the polling loop. The goroutine is
+	// still tracked so stop() does not let it outlive the task's shutdown.
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
 		ctx, cancel := m.jt.cleanupContext()
 		_ = m.jt.copyMonitorClient().TaskDeleteContext(ctx, watch.taskID, watch.copyType)
 		cancel()
-		watch.closeDone()
 	}()
 }
 

@@ -55,6 +55,7 @@ function DeliveryNote({ item }: { item: NotifyItem }) {
 
 export default function Notifications() {
   const resource = useResource((signal) => api.notifications(signal));
+  const action = useAction();
   const [editing, setEditing] = useState<NotifyItem | null | undefined>();
   const [testingId, setTestingId] = useState<number | null>(null);
   const [togglingId, setTogglingId] = useState<number | null>(null);
@@ -79,7 +80,9 @@ export default function Notifications() {
     try {
       await api.toggleNotification(id, checked ? 1 : 0);
       Toast.success("通知状态已更新");
-      await resource.refresh();
+      // Silent: reloading with a full-page spinner made the switch list blink
+      // away on every toggle.
+      await resource.refresh(true);
     } catch (error) {
       errorToast(error);
     } finally {
@@ -117,7 +120,7 @@ export default function Notifications() {
             >
               <div className="item-content">
                 <h2>
-                  {channelNames[item.method]}
+                  {channelNames[item.method] || `未知渠道 #${item.method}`}
                 </h2>
                 <div className="item-meta mono">
                   {(() => {
@@ -156,10 +159,12 @@ export default function Notifications() {
                   icon={<IconDeleteStroked aria-hidden="true" />}
                   danger
                   onClick={() =>
-                    confirmDelete("删除此通知渠道？", async () => {
-                      await api.deleteNotification(item.id);
-                      await resource.refresh();
-                    })
+                    confirmDelete("删除此通知渠道？", () =>
+                      action.run(async () => {
+                        await api.deleteNotification(item.id);
+                        await resource.refresh(true);
+                      }),
+                    )
                   }
                 />
               </div>
@@ -173,7 +178,7 @@ export default function Notifications() {
           onClose={() => setEditing(undefined)}
           onSaved={() => {
             setEditing(undefined);
-            void resource.refresh();
+            void resource.refresh(true);
           }}
         />
       )}
@@ -261,11 +266,16 @@ function NotificationEditor({
             onChange={(value) => {
               setDirty(true);
               const method = Number(value);
-              setForm({
+              // enable / notSendNull are not channel-specific: rebuilding the
+              // form from the defaults used to silently re-enable a disabled
+              // notification and reset its "skip empty" choice.
+              setForm((current) => ({
                 ...defaultNotifyForm(),
                 method,
+                enable: current.enable,
+                notSendNull: current.notSendNull,
                 ...(method === 5 ? { server: defaultBarkServer } : {}),
-              });
+              }));
             }}
           />
         </Field>

@@ -88,8 +88,8 @@ func TestUpdateNotifyRejectsUnknownPayloadShape(t *testing.T) {
 
 	router.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
 	}
 	if !strings.Contains(w.Body.String(), `"code":500`) {
 		t.Fatalf("response = %s, want error envelope", w.Body.String())

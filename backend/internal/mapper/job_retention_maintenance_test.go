@@ -54,6 +54,7 @@ func newRetentionTestDB(t *testing.T, dsn string) *sql.DB {
 			jobId integer,
 			status integer DEFAULT 1,
 			runTime integer,
+			taskNum text,
 			createTime integer
 		)`,
 		`CREATE TABLE job_task_item(
@@ -62,7 +63,8 @@ func newRetentionTestDB(t *testing.T, dsn string) *sql.DB {
 			srcPath text,
 			dstPath text,
 			fileName text,
-			status integer
+			status integer,
+			progress real
 		)`,
 	}
 	stmts = append(stmts, jobTaskItemFTSStatements(false)...)

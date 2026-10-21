@@ -8,6 +8,7 @@ import (
 	"opensync/internal/msg"
 	"opensync/pkg/util"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -20,6 +21,64 @@ type JobClient struct {
 	CurrentJobTask *JobTask
 	mu             sync.Mutex
 	stateCh        chan struct{}
+	// opMu serializes configuration changes (edit, delete, pause, resume) so
+	// they cannot interleave: an edit racing a delete used to start a new
+	// scheduler for a job whose row was already gone. It is held across slow
+	// steps (waiting for a task to stop), so it must never be taken under mu.
+	opMu sync.Mutex
+	// deleted is set, under opMu, once the job row is removed. Operations that
+	// were waiting on opMu for this client then fail instead of reviving it.
+	deleted bool
+	// closing is set while a delete attempt is in progress (and stays set once
+	// the row is gone). runMarkedJobConfig checks it before creating or starting
+	// a task, so a cron tick racing a delete cannot create a task for a job that
+	// is about to disappear.
+	closing atomic.Bool
+	// retrySourceID is the historical task whose items the current run replays,
+	// guarded by mu. RemoveTask refuses to delete it while the replay is
+	// running: the replay reads the source task's items in id-ordered batches,
+	// so deleting them mid-run silently drops the remainder.
+	retrySourceID int64
+}
+
+// lockOp takes the configuration lock and reports whether the job still
+// exists. The caller must call opMu.Unlock, whether ok is true or false.
+func (jc *JobClient) lockOp() bool {
+	jc.opMu.Lock()
+	return jc.lockOpLocked()
+}
+
+// lockOpLocked is lockOp without taking the lock; the caller already holds opMu.
+func (jc *JobClient) lockOpLocked() bool {
+	return !jc.deleted && !jc.closing.Load()
+}
+
+// beginClose marks the job as being torn down and returns false when it was
+// already closing/deleted.
+func (jc *JobClient) beginCloseLocked() bool {
+	if jc.deleted || jc.closing.Load() {
+		return false
+	}
+	jc.closing.Store(true)
+	return true
+}
+
+func (jc *JobClient) isClosing() bool {
+	return jc.closing.Load()
+}
+
+// setRetrySource records the task the current run replays (0 clears it).
+func (jc *JobClient) setRetrySource(taskID int64) {
+	jc.mu.Lock()
+	jc.retrySourceID = taskID
+	jc.mu.Unlock()
+}
+
+// retrySource is the historical task the current run replays, or 0.
+func (jc *JobClient) retrySource() int64 {
+	jc.mu.Lock()
+	defer jc.mu.Unlock()
+	return jc.retrySourceID
 }
 
 func (jc *JobClient) tryMarkDoing() bool {
@@ -48,6 +107,13 @@ func (jc *JobClient) isBusy() bool {
 func (jc *JobClient) markDone() {
 	jc.mu.Lock()
 	jc.JobDoing = false
+	// A run that failed before a task was registered never calls
+	// clearCurrentTask, so clear the retry claim here too. When a task is
+	// still current, clearCurrentTask releases it (it must stay claimed until
+	// the task itself is finished).
+	if jc.CurrentJobTask == nil {
+		jc.retrySourceID = 0
+	}
 	jc.signalStateChangeLocked()
 	jc.mu.Unlock()
 }
@@ -69,6 +135,7 @@ func (jc *JobClient) clearCurrentTask(task *JobTask) {
 	jc.mu.Lock()
 	if task == nil || jc.CurrentJobTask == task {
 		jc.CurrentJobTask = nil
+		jc.retrySourceID = 0
 		jc.signalStateChangeLocked()
 	}
 	jc.mu.Unlock()
@@ -272,6 +339,16 @@ func NewJobClient(job map[string]interface{}, isInit bool) (*JobClient, error) {
 		job["method"] = 0
 	}
 
+	// Every construction path runs the same safety validation as job creation.
+	// Without this, GetJobClientByID could revive a stored job that startup
+	// deliberately refused to load (overlapping source/destination, nested
+	// sources) and arm a cron scheduler for it, defeating exactly the checks
+	// that keep a mirror sync from deleting outside its destination.
+	// rejectNestedDst is relaxed for startup loading, matching InitJobs.
+	if err := validateJobInput(job, !isInit); err != nil {
+		return nil, err
+	}
+
 	if _, ok := job["id"]; !ok {
 		id, err := mapper.AddJob(job)
 		if err != nil {
@@ -281,6 +358,11 @@ func NewJobClient(job map[string]interface{}, isInit bool) (*JobClient, error) {
 		var err2 error
 		job, err2 = mapper.GetJobByID(id)
 		if err2 != nil {
+			// Do not leave a scheduled-enabled row behind for a request that
+			// failed: it would be loaded at the next startup or fail again.
+			if delErr := mapper.DeleteJob(id); delErr != nil {
+				log.Printf("Failed to roll back job %d after read failure: %v", id, delErr)
+			}
 			return nil, fmt.Errorf("get job after add: %w", err2)
 		}
 	}
@@ -300,7 +382,9 @@ func NewJobClient(job map[string]interface{}, isInit bool) (*JobClient, error) {
 			// Log the identifier and the cause, not the whole config: the config
 			// carries source/destination paths and dumping it loses the error.
 			log.Printf("Error during job setup, deleting job %d: %v", jc.JobID, err)
-			mapper.DeleteJob(jc.JobID)
+			if delErr := mapper.DeleteJob(jc.JobID); delErr != nil {
+				log.Printf("Failed to delete job %d after setup error: %v", jc.JobID, delErr)
+			}
 		} else if isInit {
 			log.Printf("Error during job setup, disabling job %d: %v", jc.JobID, err)
 			if updateErr := mapper.UpdateJobEnable(jc.JobID, 0); updateErr != nil {
@@ -337,7 +421,7 @@ func (jc *JobClient) runMarkedJobConfig(sourceTaskID int64, statuses []taskStatu
 		}
 	}()
 
-	if !jc.enabled() {
+	if !jc.enabled() || jc.isClosing() {
 		// tryMarkDoing already set JobDoing=true; the async task.Start() below
 		// is never reached on this path, so we must clear it here or the job is
 		// permanently stuck "doing" (cannot rerun/delete without a restart).
@@ -348,11 +432,11 @@ func (jc *JobClient) runMarkedJobConfig(sourceTaskID int64, statuses []taskStatu
 	var err error
 	taskID, err = mapper.AddJobTask(jc.idSnapshot(), time.Now().Unix())
 	if err != nil {
-		log.Printf("Failed to create task for job %d: %v", jc.JobID, err)
+		log.Printf("Failed to create task for job %d: %v", jc.idSnapshot(), err)
 		jc.markDone()
 		return
 	}
-	if !jc.enabled() {
+	if !jc.enabled() || jc.isClosing() {
 		if err := UpdateJobTaskStatusSimple(taskID, taskStatusStopped, nil); err != nil {
 			log.Printf("Failed to mark disabled task %d as stopped: %v", taskID, err)
 		}
@@ -362,9 +446,18 @@ func (jc *JobClient) runMarkedJobConfig(sourceTaskID int64, statuses []taskStatu
 	task, err := newJobTask(taskID, jc)
 	if err != nil {
 		errMsg := err.Error()
-		log.Printf("Failed to init task for job %d: %v", jc.JobID, err)
+		log.Printf("Failed to init task for job %d: %v", jc.idSnapshot(), err)
 		if err := UpdateJobTaskStatusSimple(taskID, taskStatusSystemFailed, &errMsg); err != nil {
 			log.Printf("Failed to mark task %d as failed: %v", taskID, err)
+		}
+		jc.markDone()
+		return
+	}
+	if jc.isClosing() {
+		// The job is being deleted: record the task as stopped instead of
+		// starting transfers that nobody will ever see or be able to stop.
+		if err := UpdateJobTaskStatusSimple(taskID, taskStatusStopped, nil); err != nil {
+			log.Printf("Failed to mark closing task %d as stopped: %v", taskID, err)
 		}
 		jc.markDone()
 		return
@@ -384,7 +477,7 @@ func (jc *JobClient) DoJob() {
 	for attempt := 0; !jc.tryMarkDoing(); attempt++ {
 		if !jc.enabled() || attempt >= maxAttempts {
 			if attempt >= maxAttempts {
-				log.Printf("DoJob: gave up waiting for job %d after %d attempts", jc.JobID, maxAttempts)
+				log.Printf("DoJob: gave up waiting for job %d after %d attempts", jc.idSnapshot(), maxAttempts)
 			}
 			return
 		}
@@ -396,7 +489,7 @@ func (jc *JobClient) DoJob() {
 // DoScheduled executes a scheduled job once, skipping if the previous run is still active.
 func (jc *JobClient) DoScheduled() bool {
 	if !jc.tryMarkDoing() {
-		log.Printf("Skipping job %d because previous run is still active", jc.JobID)
+		log.Printf("Skipping job %d because previous run is still active", jc.idSnapshot())
 		return false
 	}
 	jc.runMarkedJob()
@@ -405,6 +498,9 @@ func (jc *JobClient) DoScheduled() bool {
 
 // DoManual triggers manual execution
 func (jc *JobClient) DoManual() error {
+	if jc.isClosing() {
+		return publicError(msg.T(msg.JobNotFound))
+	}
 	if !jc.tryMarkDoing() {
 		return publicError(msg.T(msg.JobRunning))
 	}
@@ -415,15 +511,30 @@ func (jc *JobClient) DoManual() error {
 // DoRetryFailedTaskItems triggers a manual execution that replays the non-success
 // items of a historical task.
 func (jc *JobClient) DoRetryFailedTaskItems(sourceTaskID int64) error {
+	if jc.isClosing() {
+		return publicError(msg.T(msg.JobNotFound))
+	}
 	if !jc.tryMarkDoing() {
 		return publicError(msg.T(msg.JobRunning))
 	}
+	// Claim the source task before the goroutine starts: RemoveTask checks this
+	// claim, so the task cannot disappear while the replay is reading it.
+	jc.setRetrySource(sourceTaskID)
 	go jc.runMarkedJobConfig(sourceTaskID, retryableTaskStatuses)
 	return nil
 }
 
 // ResumeJob enables and resumes the job
 func (jc *JobClient) ResumeJob() error {
+	// Serialize against edit/delete: a resume that snapshots the scheduler while
+	// an edit replaces it would leave the job enabled in the database but with
+	// the old (stopped) scheduler, i.e. enabled and never scheduled.
+	if !jc.lockOp() {
+		jc.opMu.Unlock()
+		return publicError(msg.T(msg.JobNotFound))
+	}
+	defer jc.opMu.Unlock()
+
 	jobID, job, scheduler := jc.configSnapshot()
 	isCron := util.ToInt(job["isCron"])
 	if isCron == 2 {
@@ -459,8 +570,23 @@ func (jc *JobClient) AbortJob() {
 	}
 }
 
-// StopJob stops the job (for disable or delete)
+// StopJob stops the job (for disable or delete). Configuration changes are
+// serialized through opMu so a pause/resume/edit/delete cannot interleave.
 func (jc *JobClient) StopJob(remove bool) error {
+	if !jc.lockOp() {
+		jc.opMu.Unlock()
+		if remove {
+			// Already deleted (or being deleted): the teardown is in progress.
+			return nil
+		}
+		return publicError(msg.T(msg.JobNotFound))
+	}
+	defer jc.opMu.Unlock()
+	return jc.stopJobLocked(remove)
+}
+
+// stopJobLocked is StopJob's body; the caller holds opMu.
+func (jc *JobClient) stopJobLocked(remove bool) error {
 	jobID := jc.idSnapshot()
 	scheduler := jc.schedulerSnapshot()
 	if remove {

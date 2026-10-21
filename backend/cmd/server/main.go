@@ -177,8 +177,14 @@ func main() {
 		Handler:           newRouter(*development, config.GetConfig().Server.AllowedOrigins),
 		BaseContext:       func(net.Listener) context.Context { return baseCtx },
 		ReadHeaderTimeout: 5 * time.Second,
-		IdleTimeout:       120 * time.Second,
-		MaxHeaderBytes:    32 << 10,
+		// ReadTimeout bounds a slow request body as well. Without it a client
+		// (or a stalled proxy) could hold a request goroutine and connection
+		// open indefinitely. WriteTimeout stays unset on purpose: the SSE
+		// progress stream is a long-lived response and arms its own per-write
+		// deadline instead.
+		ReadTimeout:    60 * time.Second,
+		IdleTimeout:    120 * time.Second,
+		MaxHeaderBytes: 32 << 10,
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -252,6 +258,11 @@ func gracefulShutdown(steps shutdownSteps, total, reserve time.Duration) {
 // the fnOS unix socket. It refuses to start when another instance answers on
 // the socket, and replaces a stale socket file left by a crash.
 //
+// An exclusive lock file is taken before the socket/database are touched:
+// probing alone is not atomic, so two starts that both probe before either
+// binds its private socket would both run the migrations and both publish
+// app.sock.
+//
 // Outside dev mode the socket is bound under a temporary name next to app.sock;
 // the returned socketPublisher renames it into place (commit) once the service
 // is ready, or removes it (discard) if startup fails first. Accepting starts as
@@ -264,6 +275,16 @@ func openListener(development bool, port, destination string) (net.Listener, *so
 	if destination == "" {
 		return nil, nil, errors.New("TRIM_APPDEST is required; use --dev only for local development")
 	}
+	lock, err := acquireStartupLock(destination)
+	if err != nil {
+		return nil, nil, err
+	}
+	keepLock := false
+	defer func() {
+		if !keepLock {
+			_ = lock.Close()
+		}
+	}()
 	socket := filepath.Join(destination, "app.sock")
 	if info, statErr := os.Lstat(socket); statErr == nil {
 		if info.Mode()&os.ModeSocket == 0 {
@@ -300,7 +321,32 @@ func openListener(development bool, port, destination string) (net.Listener, *so
 		_ = os.Remove(pending)
 		return nil, nil, err
 	}
-	return listener, &socketPublisher{pending: pending, final: socket, info: info}, nil
+	keepLock = true
+	return listener, &socketPublisher{pending: pending, final: socket, info: info, lock: lock}, nil
+}
+
+// startupLockName is the exclusive lock file taken before startup touches the
+// shared socket or the database. The file itself is left in place (an empty
+// marker); the kernel releases the flock when the process exits.
+const startupLockName = ".app.lock"
+
+// acquireStartupLock takes an exclusive non-blocking flock so concurrent starts
+// serialize before probing/binding. The returned file owns the lock until it is
+// closed.
+func acquireStartupLock(destination string) (*os.File, error) {
+	path := filepath.Join(destination, startupLockName)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = file.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return nil, errServiceAlreadyRunning
+		}
+		return nil, err
+	}
+	return file, nil
 }
 
 // pendingSocketPrefix names the private sockets bound before app.sock is
@@ -337,6 +383,9 @@ type socketPublisher struct {
 	// app.sock that a later instance published after this one stopped serving.
 	info      os.FileInfo
 	committed bool
+	// lock is the exclusive startup lock, held for the life of the process and
+	// released by discard.
+	lock *os.File
 }
 
 func (p *socketPublisher) commit() error {
@@ -350,11 +399,19 @@ func (p *socketPublisher) commit() error {
 	return nil
 }
 
-// discard removes whichever socket file this process owns. log.Fatal skips
-// deferred calls, so startup failures after binding rely on the pending name
-// being private: the next start ignores it and the start script never saw it.
+// discard removes whichever socket file this process owns and releases the
+// startup lock. log.Fatal skips deferred calls, so startup failures after
+// binding rely on the pending name being private: the next start ignores it and
+// the start script never saw it.
 func (p *socketPublisher) discard() {
-	if p == nil || p.pending == "" {
+	if p == nil {
+		return
+	}
+	if p.lock != nil {
+		_ = p.lock.Close()
+		p.lock = nil
+	}
+	if p.pending == "" {
 		return
 	}
 	name := p.pending

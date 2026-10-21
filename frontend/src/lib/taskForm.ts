@@ -34,10 +34,14 @@ export function defaultJobForm(alistId?: number) {
   };
 }
 export type JobForm = ReturnType<typeof defaultJobForm>;
-const supportedJobMethods = new Set([0, 1]);
+// 0=增量同步、1=全量同步、2=移动。The backend still implements 2 as a move
+// (copy then delete the source), so editing such a job must not silently turn
+// it into a copy: only unknown values fall back to 0.
+const supportedJobMethods = new Set([0, 1, 2]);
 
-function normalizeJobMethod(method: unknown) {
-  return supportedJobMethods.has(Number(method)) ? Number(method) : 0;
+export function normalizeJobMethod(method: unknown) {
+  const parsed = Number(method);
+  return supportedJobMethods.has(parsed) && Number.isInteger(parsed) ? parsed : 0;
 }
 
 export function selectJob<T extends { id: number }>(
@@ -67,7 +71,10 @@ export function jobToForm(job: JobItem): JobForm {
     minFileSizeUnit: min.unit,
     maxFileSize: max.value,
     maxFileSizeUnit: max.unit,
-    exclude: job.exclude ?? defaultExclude,
+    // A stored job with no rules must stay without rules: falling back to the
+    // default template silently added filters the user never configured (and
+    // saved them back on the next edit).
+    exclude: job.exclude ?? "",
     second: job.second || "0",
     minute: job.minute || "0",
     hour: job.hour || "2",
@@ -97,6 +104,58 @@ const ranges = {
   month: [1, 12, "月"],
   day_of_week: [0, 6, "周"],
 } as const;
+/** Directory spelling used for overlap checks: absolute, no duplicate or trailing slashes. */
+function comparableDirPath(path: string): string {
+  const trimmed = String(path || "").trim();
+  if (!trimmed) return "/";
+  const absolute = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+  const collapsed = absolute.replace(/\/+/g, "/");
+  return collapsed.length > 1 ? collapsed.replace(/\/+$/, "") : "/";
+}
+
+function pathContains(parent: string, child: string): boolean {
+  return parent === "/" || child === parent || child.startsWith(`${parent}/`);
+}
+
+function findOverlappingPaths(
+  left: string[],
+  right: string[],
+): [string, string] | undefined {
+  for (const a of left) {
+    for (const b of right) {
+      if (pathContains(a, b) || pathContains(b, a)) return [a, b];
+    }
+  }
+}
+
+function findNestedPath(paths: string[]): [string, string] | undefined {
+  for (const parent of paths) {
+    for (const child of paths) {
+      if (parent === child) continue;
+      if (pathContains(parent, child)) return [parent, child];
+    }
+  }
+}
+
+// Mirrors validateJobInput in backend/internal/service/job_service.go: same or
+// nested source/destination roots would make two scan works mutate one tree,
+// and in mirror mode delete each other's files. Catching it here keeps the
+// error on the field instead of surfacing it only after the final save.
+function validateJobPaths(form: JobForm): string {
+  const srcPaths = form.srcPath.map(comparableDirPath);
+  const dstPaths = form.dstPath.map(comparableDirPath);
+  const overlap = findOverlappingPaths(srcPaths, dstPaths);
+  if (overlap)
+    return `源目录与目标目录不能相同或互相包含（${overlap[0]} / ${overlap[1]}）`;
+  const nestedSrc = findNestedPath(srcPaths);
+  if (nestedSrc)
+    return `多个源目录之间不能互相包含（${nestedSrc[0]} / ${nestedSrc[1]}）`;
+  const nestedDst = findNestedPath(dstPaths);
+  if (nestedDst)
+    return `多个目标目录之间不能互相包含（${nestedDst[0]} / ${nestedDst[1]}）`;
+  return "";
+}
+
 export function validateJobFormStep(form: JobForm, step: number) {
   switch (step) {
     case 0:
@@ -104,7 +163,7 @@ export function validateJobFormStep(form: JobForm, step: number) {
       if (!form.alistId) return "请选择存储引擎";
       if (!form.srcPath.length) return "请选择源目录";
       if (!form.dstPath.length) return "请选择目标目录";
-      return "";
+      return validateJobPaths(form);
     case 1:
       if (
         form.isCron === 0 &&
@@ -295,6 +354,15 @@ export function isExcludePatternEnabled(exclude: string, pattern: string) {
   });
 }
 
+/**
+ * Adds or removes one or more exclude rules.
+ *
+ * There is no persisted "disabled" state: the backend strips every "# " comment
+ * when it saves (normalizeExclude in backend/internal/service/job_exclude.go),
+ * so a rule kept as a comment would silently disappear on the next load.
+ * Unchecking a rule therefore removes it from the exclude text; the UI treats
+ * absence as disabled. Comment lines in the text are left untouched.
+ */
 export function updateExcludePatterns(
   exclude: string,
   patterns: readonly string[],
@@ -307,20 +375,36 @@ export function updateExcludePatterns(
     const nextLines: string[] = [];
     for (const line of lines) {
       const value = line.trim();
-      const isDisabled = value.startsWith("# ");
-      const serialized = isDisabled ? value.slice(2).trim() : value;
-      if (!serialized || filterRuleKey(serialized) !== target) {
+      if (!value || value.startsWith("# ")) {
+        nextLines.push(line);
+        continue;
+      }
+      if (filterRuleKey(value) !== target) {
         nextLines.push(line);
         continue;
       }
       if (found) continue;
       found = true;
-      nextLines.push(enabled ? serialized : `# ${serialized}`);
+      if (!enabled) continue;
+      nextLines.push(value);
     }
-    if (!found && enabled) nextLines.push(pattern);
+    if (found && !enabled) {
+      // Removing the last rule must not leave a blank trailing line that turns
+      // re-adding it into "\n#recycle/".
+      while (nextLines.length && nextLines[nextLines.length - 1].trim() === "")
+        nextLines.pop();
+    }
+    if (!found && enabled) {
+      if (nextLines.length === 1 && nextLines[0] === "") nextLines.length = 0;
+      nextLines.push(pattern);
+    }
     lines = nextLines;
   }
   return lines.join("\n");
+}
+
+export function normalizeCustomFileTypePattern(input: string) {
+  return normalizeCustomFilePattern(input);
 }
 
 function normalizeCustomFilePattern(input: string) {
@@ -400,14 +484,15 @@ export function parseOtherFileTypeFilters(exclude: string) {
   const block = findCustomFileFilterBlock(lines);
   const filters = new Map<string, { pattern: string; enabled: boolean }>();
   const add = (item: { pattern: string; enabled: boolean } | null) => {
-    if (
-      !item ||
-      presetPatterns.has(filterRuleKey(item.pattern)) ||
-      filters.has(filterRuleKey(item.pattern))
-    ) {
+    if (!item || presetPatterns.has(filterRuleKey(item.pattern))) return;
+    const pattern = filterRuleKey(item.pattern);
+    const current = filters.get(pattern);
+    if (current) {
+      // A legacy "# " comment line can name the same rule as a live one; the
+      // live rule is what the job actually applies.
+      if (!current.enabled && item.enabled) filters.set(pattern, { ...item, pattern });
       return;
     }
-    const pattern = filterRuleKey(item.pattern);
     filters.set(pattern, { ...item, pattern });
   };
 

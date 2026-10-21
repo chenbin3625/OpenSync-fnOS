@@ -363,3 +363,129 @@ func TestVersionHandlerReturnsUpdateStatus(t *testing.T) {
 		t.Fatalf("result = %+v", response.Data)
 	}
 }
+
+// A cache hit must not queue behind the 4s upstream request: the fetched result
+// is shared, but the lock is not held across the network call.
+func TestVersionCheckerCacheHitIsNotBlockedByForcedRefresh(t *testing.T) {
+	var calls atomic.Int32
+	fetchStarted := make(chan struct{})
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			_, _ = w.Write([]byte(`{"tag_name":"v0.0.27"}`))
+			return
+		}
+		close(fetchStarted)
+		<-release
+		_, _ = w.Write([]byte(`{"tag_name":"v0.0.28"}`))
+	}))
+	defer upstream.Close()
+	checker := newVersionChecker(upstream.URL, upstream.Client())
+	if _, err := checker.check(context.Background(), "0.0.26"); err != nil {
+		t.Fatalf("warm check: %v", err)
+	}
+
+	forcedDone := make(chan struct{})
+	go func() {
+		defer close(forcedDone)
+		_, _ = checker.checkWithRefresh(context.Background(), "0.0.26", true)
+	}()
+	select {
+	case <-fetchStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("forced refresh never reached the upstream")
+	}
+
+	start := time.Now()
+	result, err := checker.check(context.Background(), "0.0.26")
+	elapsed := time.Since(start)
+	if err != nil || result.LatestVersion != "v0.0.27" {
+		t.Fatalf("cached check = %+v, %v", result, err)
+	}
+	if elapsed > 200*time.Millisecond {
+		t.Fatalf("cache hit took %v behind an in-flight refresh, want no lock contention", elapsed)
+	}
+
+	close(release)
+	select {
+	case <-forcedDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("forced refresh did not finish")
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("upstream calls = %d, want 2", got)
+	}
+}
+
+// Concurrent clicks share one upstream request instead of serialising behind
+// the lock and then each hitting GitHub.
+func TestVersionCheckerConcurrentForcedRefreshesIssueOneRequest(t *testing.T) {
+	var calls atomic.Int32
+	fetchStarted := make(chan struct{})
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			close(fetchStarted)
+		}
+		<-release
+		_, _ = w.Write([]byte(`{"tag_name":"v0.0.27"}`))
+	}))
+	defer upstream.Close()
+	checker := newVersionChecker(upstream.URL, upstream.Client())
+
+	const requests = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, requests)
+	for i := 0; i < requests; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			result, err := checker.checkWithRefresh(context.Background(), "0.0.26", true)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if result.LatestVersion != "v0.0.27" {
+				errs <- fmt.Errorf("result = %+v", result)
+			}
+		}()
+	}
+	select {
+	case <-fetchStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no refresh reached the upstream")
+	}
+	close(release)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("upstream calls = %d, want exactly 1 shared request", got)
+	}
+}
+
+// The release document must come from the endpoint we asked, not from wherever
+// a redirect points; otherwise a redirect could downgrade the transport or feed
+// an unrelated body into the version parser.
+func TestVersionCheckerDoesNotFollowRedirects(t *testing.T) {
+	var redirectHits atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirectHits.Add(1)
+		_, _ = w.Write([]byte(`{"tag_name":"v9.9.9"}`))
+	}))
+	defer target.Close()
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer first.Close()
+
+	checker := newVersionChecker(first.URL, first.Client())
+	if _, err := checker.check(context.Background(), "0.0.26"); err == nil {
+		t.Fatal("check() = nil error, want the unfollowed redirect reported as a failure")
+	}
+	if got := redirectHits.Load(); got != 0 {
+		t.Fatalf("redirect target was contacted %d times, want 0", got)
+	}
+}

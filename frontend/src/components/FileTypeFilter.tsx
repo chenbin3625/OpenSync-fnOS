@@ -19,6 +19,7 @@ import {
   addCustomFileTypeFilter,
   fileTypeFilterGroups,
   isExcludePatternEnabled,
+  normalizeCustomFileTypePattern,
   parseOtherFileTypeFilters,
   removeCustomFileTypeFilter,
   updateExcludePatterns,
@@ -69,12 +70,20 @@ export function FileTypeFilter({
     });
   };
   const addCustom = () => {
-    const next = addCustomFileTypeFilter(value, customInput);
-    if (next === value) {
+    const pattern = normalizeCustomFileTypePattern(customInput);
+    if (!pattern) {
       Toast.warning("请输入有效的文件名或文件后缀");
       return;
     }
-    onChange(next);
+    if (isExcludePatternEnabled(value, pattern)) {
+      // A valid rule that is already active is not an input error; the old
+      // code showed "请输入有效的文件名或文件后缀" because addCustomFileTypeFilter
+      // returned the text unchanged for an already-enabled rule.
+      Toast.info("该规则已启用");
+      setCustomInput("");
+      return;
+    }
+    onChange(addCustomFileTypeFilter(value, pattern));
     setCustomInput("");
   };
 
@@ -82,6 +91,9 @@ export function FileTypeFilter({
     <div
       className="file-type-filter"
       id={id}
+      // A labelled plain div has no accessible role, so its name was never
+      // announced; group makes the Field label apply to the checkbox set.
+      role="group"
       aria-label={ariaLabel}
       aria-labelledby={ariaLabelledBy}
     >
@@ -173,23 +185,9 @@ export function FileTypeFilter({
                 aria-expanded={otherExpanded}
                 onClick={() => setOtherExpanded((current) => !current)}
               />
-              <Checkbox
-                aria-label="其他"
-                checked={otherFilters.every((item) => item.enabled)}
-                indeterminate={
-                  otherFilters.some((item) => item.enabled) &&
-                  !otherFilters.every((item) => item.enabled)
-                }
-                onChange={(event) =>
-                  onChange(
-                    updateExcludePatterns(
-                      value,
-                      otherFilters.map((item) => item.pattern),
-                      Boolean(event.target.checked),
-                    ),
-                  )
-                }
-              />
+              {/* 自定义规则没有"禁用"状态：取消勾选即删除（后端保存时会丢掉
+                  "# " 注释），因此这里不提供"全部取消"的批量复选框，避免误删。 */}
+              <span className="file-type-group-spacer" aria-hidden="true" />
               <span className="file-type-icon other">
                 <IconFile aria-hidden="true" />
               </span>
@@ -213,6 +211,9 @@ export function FileTypeFilter({
                       aria-label={item.pattern}
                       checked={item.enabled}
                       onChange={(event) =>
+                        // No persisted "disabled" state: unchecking removes the
+                        // rule instead of parking a "# " comment the backend
+                        // would drop on save.
                         onChange(
                           updateExcludePatterns(
                             value,

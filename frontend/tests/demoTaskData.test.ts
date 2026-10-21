@@ -4,7 +4,7 @@ import {
   createDemoTaskRecords,
   createDemoTaskView,
   pageDemoRows,
-} from "../src/pages/Home/demoTaskData";
+} from "../src/mocks/fixtures/tasks";
 
 describe("demo task data", () => {
   it("provides at least 100 realtime rows for every task item group", () => {
@@ -34,6 +34,23 @@ describe("demo task data", () => {
       other: items.filter((item) => ![0, 1, 2, 7].includes(item.status)).length,
     });
     expect(task.doingTask).toHaveLength(task.num.running);
+  });
+
+  it("keeps copy operations dominant and excludes delete sizes, like the backend", () => {
+    const items = createDemoTaskItems();
+    const copies = items.filter((item) => item.type === 0);
+    const deletes = items.filter((item) => item.type === 1);
+    expect(copies.length).toBeGreaterThan(deletes.length);
+    expect(deletes.length).toBeGreaterThan(0);
+
+    const task = createDemoTaskView(1_800_000_000, items);
+    const copySize = (status: number) =>
+      items
+        .filter((item) => item.status === status && item.type !== 1)
+        .reduce((sum, item) => sum + (item.fileSize || 0), 0);
+    // streamDoingItem.countableSize() counts delete operations as 0 bytes.
+    expect(task.size.success).toBe(copySize(2));
+    expect(task.doneSize).toBe(copySize(2));
   });
 
   it("provides at least 100 history records", () => {

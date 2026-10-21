@@ -195,7 +195,15 @@ func buildCronSpec(jobData map[string]interface{}) (string, error) {
 			val = strings.TrimSpace(fmt.Sprintf("%v", v))
 		}
 		if val == "" {
-			parts[i] = "*"
+			// An empty second would become "*" and fire every second; the UI
+			// always sends one, so an API caller leaving it out means "on the
+			// minute". It does not count as a value: an all-empty spec stays
+			// rejected as missing.
+			if field == "second" {
+				parts[i] = "0"
+			} else {
+				parts[i] = "*"
+			}
 		} else {
 			if !isSafeCronField(val) {
 				return "", errors.New(msg.T(msg.CronLost))

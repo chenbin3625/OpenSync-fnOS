@@ -28,7 +28,16 @@ var (
 	taskRetentionCancel      context.CancelFunc
 	taskRetentionStopped     bool
 	taskRetentionWG          sync.WaitGroup
+	// taskRetentionIdleOnce starts a single waiter for the wait group. Creating
+	// a fresh goroutine on every stop call leaked one that could never finish
+	// if the cleanup was wedged past the deadline.
+	taskRetentionIdleOnce sync.Once
+	taskRetentionIdleCh   chan struct{}
 )
+
+// cleanupExpiredTasksRun is the cleanup entry point. Swapped in tests so the
+// scheduler/lifecycle tests do not open the real database.
+var cleanupExpiredTasksRun = cleanupExpiredTasksContext
 
 func init() {
 	taskRetentionCtx, taskRetentionCancel = context.WithCancel(context.Background())
@@ -74,7 +83,7 @@ func runTaskRetentionCleanup(async bool) bool {
 				log.Printf("panic during task retention cleanup: %v", r)
 			}
 		}()
-		cleanupExpiredTasksContext(ctx, log.Default(), config.GetConfig().Server.TaskSave, time.Now())
+		cleanupExpiredTasksRun(ctx, log.Default(), config.GetConfig().Server.TaskSave, time.Now())
 	}
 	if async {
 		go run()
@@ -95,11 +104,7 @@ func stopTaskRetentionCleanup(ctx context.Context) bool {
 	taskRetentionCancel()
 	taskRetentionLifecycleMu.Unlock()
 
-	done := make(chan struct{})
-	go func() {
-		taskRetentionWG.Wait()
-		close(done)
-	}()
+	done := taskRetentionIdle()
 	select {
 	case <-done:
 		return true
@@ -109,12 +114,31 @@ func stopTaskRetentionCleanup(ctx context.Context) bool {
 	}
 }
 
+// taskRetentionIdle returns a channel closed once every admitted cleanup has
+// returned. The waiter is created at most once: after stopTaskRetentionCleanup
+// has cancelled and refused new runs, the wait group can only drain.
+func taskRetentionIdle() <-chan struct{} {
+	taskRetentionIdleOnce.Do(func() {
+		ch := make(chan struct{})
+		taskRetentionIdleCh = ch
+		go func() {
+			taskRetentionWG.Wait()
+			close(ch)
+		}()
+	})
+	return taskRetentionIdleCh
+}
+
 // resetTaskRetentionCleanupForTest re-arms the cleanup after a test stopped it.
 func resetTaskRetentionCleanupForTest() {
 	taskRetentionLifecycleMu.Lock()
 	defer taskRetentionLifecycleMu.Unlock()
 	taskRetentionStopped = false
 	taskRetentionCtx, taskRetentionCancel = context.WithCancel(context.Background())
+	// Re-arm the idle waiter too: the previous one belongs to the stopped
+	// generation and may already be closed (or waiting on the old drain).
+	taskRetentionIdleOnce = sync.Once{}
+	taskRetentionIdleCh = nil
 }
 
 // StartTaskRetentionCleanupAsync runs the cleanup in the background and reports

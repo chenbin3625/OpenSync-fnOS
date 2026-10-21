@@ -1,4 +1,4 @@
-import { request } from "./client";
+import { requestCurrentTask } from "./client";
 import type {
   CurrentTaskData,
   PageData,
@@ -16,11 +16,7 @@ export async function jobGetTaskCurrent(
 ): Promise<
   CurrentTaskData | RealtimeTaskItemPage | PageData<TaskItem> | TaskItem[] | null
 > {
-  return request<
+  return requestCurrentTask<
     CurrentTaskData | RealtimeTaskItemPage | PageData<TaskItem> | TaskItem[] | null
-  >("/job", {
-    params: { ...params, current: 1 },
-    signal: options?.signal,
-    cache: "no-store",
-  });
+  >(params, options?.signal);
 }

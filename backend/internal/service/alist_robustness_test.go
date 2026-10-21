@@ -515,3 +515,64 @@ func jsonResponse(r *http.Request, body string) *http.Response {
 func httptraceFrom(r *http.Request) *httptrace.ClientTrace {
 	return httptrace.ContextClientTrace(r.Context())
 }
+
+// Only read-only requests and non-mutating API paths may be transparently
+// replayed after an HTTP/3 transport failure. Replaying copy/move/remove (or a
+// task admin action) could execute the server-side operation twice.
+func TestIsReplayableAlistRequest(t *testing.T) {
+	cases := []struct {
+		method string
+		path   string
+		want   bool
+	}{
+		{http.MethodGet, "/api/fs/list", true},
+		{http.MethodHead, "/api/fs/get", true},
+		{http.MethodPost, "/api/fs/list", true},
+		{http.MethodPost, "/api/fs/get", true},
+		{http.MethodPost, "/api/fs/copy", false},
+		{http.MethodPost, "/api/fs/move", false},
+		{http.MethodPost, "/api/fs/remove", false},
+		{http.MethodPost, "/api/admin/task/copy/cancel", false},
+		{http.MethodPost, "/api/admin/task/move/info", false},
+	}
+	for _, tc := range cases {
+		req, err := http.NewRequest(tc.method, "https://nas.example"+tc.path, nil)
+		if err != nil {
+			t.Fatalf("NewRequest(%s %s) error: %v", tc.method, tc.path, err)
+		}
+		if got := isReplayableAlistRequest(req); got != tc.want {
+			t.Errorf("isReplayableAlistRequest(%s %s) = %v, want %v", tc.method, tc.path, got, tc.want)
+		}
+	}
+}
+
+// A failed HTTP/3 attempt must not blacklist the host forever: the mark expires
+// so a transient QUIC blip does not disable HTTP/3 for the cached client's
+// lifetime.
+func TestProtocolTripperHTTP3FailureExpires(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	tripper := newProtocolTripper(
+		roundTripFunc(func(r *http.Request) (*http.Response, error) { return jsonResponse(r, `{}`), nil }),
+		roundTripFunc(func(r *http.Request) (*http.Response, error) { return jsonResponse(r, `{}`), nil }),
+	)
+	tripper.now = func() time.Time { return now }
+	tripper.markHTTP3("nas.example")
+	if !tripper.preferHTTP3("nas.example") {
+		t.Fatal("HTTP/3 not preferred despite a valid Alt-Svc mark")
+	}
+
+	tripper.markHTTP3Failed("nas.example")
+	if tripper.preferHTTP3("nas.example") {
+		t.Fatal("HTTP/3 still preferred right after a failure")
+	}
+	tripper.markHTTP3("nas.example")
+	if tripper.preferHTTP3("nas.example") {
+		t.Fatal("HTTP/3 re-enabled before the failure mark expired")
+	}
+
+	now = now.Add(h3FailedTTL + time.Second)
+	tripper.markHTTP3("nas.example")
+	if !tripper.preferHTTP3("nas.example") {
+		t.Fatal("HTTP/3 stayed disabled after the failure mark expired")
+	}
+}

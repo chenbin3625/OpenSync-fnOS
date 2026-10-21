@@ -22,7 +22,9 @@ const fields = [
     key: "scanConcurrency",
     label: "扫描并发数",
     min: 1,
-    max: 20,
+    // Backend config.MaxScanConcurrency is 50 (config.go); a smaller UI cap
+    // rejected values the server accepts.
+    max: 50,
     unit: "个",
     tip: "同时扫描源端和目标端目录的请求数量",
   },
@@ -110,7 +112,9 @@ export default function Settings() {
       try {
         await api.saveSettings(values);
         Toast.success("配置已保存");
-        await resource.refresh();
+        // Silent reload: a full loading state would replace the whole form
+        // with a spinner right after a successful save.
+        await resource.refresh(true);
       } catch (err) {
         errorToast(err, "保存失败");
       }

@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import DatePicker from "@douyinfe/semi-ui/lib/es/datePicker";
 import Input from "@douyinfe/semi-ui/lib/es/input";
@@ -61,7 +61,14 @@ const fileTableWidths = {
   status: 160,
 } as const;
 
-export function Realtime({ jobId }: { jobId: number }) {
+export function Realtime({
+  jobId,
+  onTaskEnded,
+}: {
+  jobId: number;
+  /** Called once the stream/poll reports "no task running" (tab recycling). */
+  onTaskEnded?: () => void;
+}) {
   const {
     currentTask,
     loading: taskLoading,
@@ -75,6 +82,20 @@ export function Realtime({ jobId }: { jobId: number }) {
     pageSize: 10,
   });
   const action = useAction();
+  const hadTask = useRef(false);
+  useEffect(() => {
+    if (currentTask) {
+      hadTask.current = true;
+      return;
+    }
+    if (taskLoading || taskError || !hadTask.current) return;
+    // A hidden tab closes the stream; that must not be mistaken for "the task
+    // ended" and kick the user back to the overview tab. A deep link that never
+    // saw a task also stays put (the tab is disabled anyway).
+    if (document.visibilityState === "hidden") return;
+    hadTask.current = false;
+    onTaskEnded?.();
+  }, [currentTask, taskLoading, taskError, onTaskEnded]);
   if (!currentTask) {
     // The first poll used to flash "空空如也" before the task arrived, and a
     // failed first poll looked like "nothing running".
@@ -160,6 +181,12 @@ export function Realtime({ jobId }: { jobId: number }) {
       </Tabs>
       </div>
       <div className="execution-scroll">
+      {items.tabError && tabItems.length > 0 && (
+        <div className="realtime-notice" role="status">
+          <IconAlertTriangle aria-hidden="true" size="small" />
+          明细连接中断，正在重试…
+        </div>
+      )}
       {items.tabError && tabItems.length === 0 ? (
         <LoadState
           loading={false}
@@ -209,8 +236,7 @@ export function History({ jobId }: { jobId: number }) {
     [jobId, page, size, status, keyword, range],
   );
   const action = useAction();
-  const realRows = resource.data?.dataList || [];
-  const rows = realRows;
+  const rows = resource.data?.dataList || [];
   const totalCount = resource.data?.count || 0;
   // Deleting the last record on the last page left the table empty.
   useClampedPage(page, resource.data ? totalCount : null, size, setPage);
@@ -220,7 +246,7 @@ export function History({ jobId }: { jobId: number }) {
       try {
         await api.taskAction(record.id, "retry");
         Toast.success("已提交重试");
-        await resource.refresh();
+        await resource.refresh(true);
       } catch (error) {
         errorToast(error);
       }
@@ -243,10 +269,12 @@ export function History({ jobId }: { jobId: number }) {
         icon={<IconDeleteStroked aria-hidden="true" />}
         danger
         onClick={() =>
-          confirmDelete("删除此执行记录？", async () => {
-            await api.deleteTask(record.id);
-            await resource.refresh();
-          })
+          confirmDelete("删除此执行记录？", () =>
+            action.run(async () => {
+              await api.deleteTask(record.id);
+              await resource.refresh(true);
+            }),
+          )
         }
       />
     </div>
@@ -264,8 +292,10 @@ export function History({ jobId }: { jobId: number }) {
         </span>
         <Input
           prefix={<IconSearchStroked aria-hidden="true" />}
-          aria-label="搜索执行记录"
-          placeholder="任务 / 错误关键词"
+          aria-label="搜索执行记录（任务 ID）"
+          // The backend GetJobTaskList keyword filter only matches job_task.id;
+          // promising "error keyword" here made every such search return 0.
+          placeholder="任务 ID"
           value={input}
           showClear
           onChange={(value) => {
@@ -302,6 +332,9 @@ export function History({ jobId }: { jobId: number }) {
           ]}
           onChange={(value) => {
             setStatus(value === "all" ? undefined : Number(value));
+            // The typed text and the applied filter must not diverge: applying
+            // a status/date change also applies the current search text.
+            setKeyword(input.trim());
             setPage(1);
           }}
         />
@@ -311,6 +344,7 @@ export function History({ jobId }: { jobId: number }) {
           value={range}
           onChange={(value) => {
             setRange(Array.isArray(value) ? value.map((v) => new Date(v)) : []);
+            setKeyword(input.trim());
             setPage(1);
           }}
           showClear
@@ -377,7 +411,10 @@ export function History({ jobId }: { jobId: number }) {
                 <strong>{formatTimestamp(record.createTime, true)}</strong>
                 <Status
                   status={record.status}
-                  label={taskRecordStatusNames[record.status]}
+                  label={
+                    taskRecordStatusNames[record.status] ||
+                    String(record.status)
+                  }
                   error={record.errMsg}
                 />
               </div>
@@ -612,9 +649,6 @@ function FileDetails({
     // pure load on the NAS and the AList box behind it.
     false,
   );
-  useEffect(() => {
-    if (resource.error) Toast.error(resource.error);
-  }, [resource.error]);
   useClampedPage(
     page,
     resource.data ? resource.data.count || 0 : null,
@@ -696,6 +730,7 @@ function FileDetails({
             ]}
             onChange={(value) => {
               filter.set(value === "all" ? undefined : Number(value));
+              setKeyword(input.trim());
               setPage(1);
             }}
           />
@@ -714,10 +749,18 @@ function FileDetails({
           重置
         </Button>
       </div>
-      <FileTable
-        rows={resource.data?.dataList || []}
-        loading={resource.loading}
-      />
+      {resource.error ? (
+        <LoadState
+          loading={false}
+          error={resource.error}
+          retry={() => void resource.refresh()}
+        />
+      ) : (
+        <FileTable
+          rows={resource.data?.dataList || []}
+          loading={resource.loading}
+        />
+      )}
       </div>
       <Pager
         total={resource.data?.count || 0}

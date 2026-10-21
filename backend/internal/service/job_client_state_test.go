@@ -294,6 +294,119 @@ func TestRemoveJobClientStopsRunningJobBeforeDeleting(t *testing.T) {
 	if got := util.ToInt(client.Job["enable"]); got != 0 {
 		t.Fatalf("job enable after remove = %d, want 0", got)
 	}
+	// The delete failed (the job_task tables do not exist in this stub DB) after
+	// the scheduler was already stopped. The stored enable flag must follow the
+	// stopped in-memory state, otherwise a restart silently revives the job.
+	var storedEnable int
+	if err := testDB.QueryRow("SELECT enable FROM job WHERE id=99").Scan(&storedEnable); err != nil {
+		t.Fatalf("read stored enable: %v", err)
+	}
+	if storedEnable != 0 {
+		t.Fatalf("stored enable after failed delete = %d, want 0", storedEnable)
+	}
+	if client.isClosing() {
+		t.Fatal("failed delete left the client permanently marked as closing")
+	}
+}
+
+// A stored job that fails the safety validation must not be revived by an
+// on-demand GetJobClientByID (which is reached by status/pause/run endpoints):
+// that is exactly how a legacy overlapping-paths job could re-arm a mirror sync.
+func TestGetJobClientByIDRejectsUnsafeStoredJob(t *testing.T) {
+	testDB, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open() error: %v", err)
+	}
+	defer testDB.Close()
+	if _, err := testDB.Exec(`CREATE TABLE job(
+		id integer primary key autoincrement,
+		enable integer DEFAULT 1,
+		remark text,
+		srcPath text,
+		dstPath text,
+		alistId integer,
+		isCron integer DEFAULT 0,
+		interval integer DEFAULT 0,
+		method integer DEFAULT 0,
+		minFileSize integer DEFAULT 0,
+		maxFileSize integer DEFAULT 0
+	)`); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if _, err := testDB.Exec(
+		`INSERT INTO job(id, enable, srcPath, dstPath, alistId, isCron, interval)
+		 VALUES (1, 1, '["/data"]', '["/data/sub"]', 1, 2, 0)`); err != nil {
+		t.Fatalf("insert unsafe job: %v", err)
+	}
+	if _, err := testDB.Exec(
+		`INSERT INTO job(id, enable, srcPath, dstPath, alistId, isCron, interval)
+		 VALUES (2, 1, '["/data/src"]', '["/data/dst"]', 1, 2, 0)`); err != nil {
+		t.Fatalf("insert safe job: %v", err)
+	}
+	restoreDB := mapper.SetDBForTest(testDB)
+	defer restoreDB()
+
+	jobClientListMu.Lock()
+	previousClients := jobClientList
+	jobClientList = map[int64]*JobClient{}
+	jobClientListMu.Unlock()
+	defer func() {
+		resetJobClientsForTest()
+		jobClientListMu.Lock()
+		jobClientList = previousClients
+		jobClientListMu.Unlock()
+	}()
+
+	if client, err := GetJobClientByID(1); err == nil {
+		client.Scheduler.Stop()
+		t.Fatal("GetJobClientByID() accepted a job whose source/destination overlap")
+	}
+	jobClientListMu.RLock()
+	_, cached := jobClientList[1]
+	jobClientListMu.RUnlock()
+	if cached {
+		t.Fatal("unsafe job was cached as a client (and its cron armed)")
+	}
+
+	client, err := GetJobClientByID(2)
+	if err != nil {
+		t.Fatalf("GetJobClientByID() rejected a valid job: %v", err)
+	}
+	if client == nil || client.idSnapshot() != 2 {
+		t.Fatalf("GetJobClientByID() = %#v, want client for job 2", client)
+	}
+}
+
+// Configuration operations must fail fast once a delete is in progress instead
+// of reviving a scheduler for a job that is being removed.
+func TestJobClientLifecycleRejectsClosingJob(t *testing.T) {
+	client := &JobClient{
+		JobID: 7,
+		Job:   map[string]interface{}{"id": int64(7), "enable": 1, "isCron": 2},
+	}
+	client.closing.Store(true)
+
+	if err := client.ResumeJob(); err == nil {
+		t.Fatal("ResumeJob() accepted a closing job")
+	}
+	if err := client.StopJob(false); err == nil {
+		t.Fatal("StopJob(false) accepted a closing job")
+	}
+	if err := client.DoManual(); err == nil {
+		t.Fatal("DoManual() accepted a closing job")
+	}
+	if err := client.DoRetryFailedTaskItems(3); err == nil {
+		t.Fatal("DoRetryFailedTaskItems() accepted a closing job")
+	}
+	// None of the rejected paths may have taken the configuration lock or left
+	// the client marked as doing.
+	if !client.tryMarkDoing() {
+		t.Fatal("rejected lifecycle calls left the client marked as doing")
+	}
+	client.markDone()
+	if _, _, scheduler := client.configSnapshot(); scheduler != nil {
+		t.Fatal("rejected lifecycle calls created a scheduler")
+	}
 }
 
 func TestRemoveTaskRejectsRunningTaskWithoutDeletingIt(t *testing.T) {

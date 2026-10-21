@@ -171,6 +171,15 @@ const start = (name, command, args, { cwd, env = {}, color }) => {
   child.on("error", (error) =>
     shutdown(1, `\x1b[31m✗ ${name} 启动失败：${error.message}\x1b[0m`),
   );
+  // 退出监听在拉起时立即注册：等待另一个服务就绪期间本服务挂掉，也要立刻整体
+  // 收尾，而不是等两个都就绪后才发现、把已退出的服务报告为“就绪”。
+  child.on("exit", (code, signal) => {
+    if (closing) return;
+    shutdown(
+      code || 1,
+      `\x1b[31m✗ ${name} 已退出（退出码 ${code}，信号 ${signal}），停止其余服务。日志：${logs.get(name)}\x1b[0m`,
+    );
+  });
   streamLogs(child, name, color, join(logDir, `${name}.log`));
   children.push({ name, child });
   return child;
@@ -237,13 +246,4 @@ console.log(`
 ────────────────────────────────────────────────────────
   Ctrl-C 停止前后端。两个服务仅监听 127.0.0.1，请勿对外暴露。
 `);
-
-// ── 7. 任一服务退出即整体收尾 ────────────────────────────────────────────
-for (const { name, child } of children)
-  child.on("exit", (code, signal) => {
-    if (closing) return;
-    shutdown(
-      code ?? 1,
-      `\x1b[31m✗ ${name} 已退出（退出码 ${code}，信号 ${signal}），停止其余服务。\x1b[0m`,
-    );
-  });
+// 任一服务退出即整体收尾：监听已在 start() 中注册（第 5 节）。

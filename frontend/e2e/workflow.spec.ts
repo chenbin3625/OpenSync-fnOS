@@ -263,9 +263,10 @@ test("creates an engine and manual job, then edits without changing sync mode", 
     await expect(saveButton).toBeVisible();
     await saveButton.click({ force: forceMobileClick });
     await expect(page.getByRole("dialog")).not.toBeVisible();
-    await page.screenshot({
-      path: `test-results/workspace-${testInfo.project.name}.png`,
-    });
+    if (process.env.PLAYWRIGHT_SCREENSHOTS === "1")
+      await page.screenshot({
+        path: `test-results/workspace-${testInfo.project.name}.png`,
+      });
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth,

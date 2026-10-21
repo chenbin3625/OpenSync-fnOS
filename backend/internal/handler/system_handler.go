@@ -53,12 +53,18 @@ func (p systemSettingsPatch) applyTo(current config.SystemSettings) config.Syste
 // the body change; the rest keep their current values.
 func UpdateSystemConfig(c *gin.Context) {
 	var patch systemSettingsPatch
-	if c.ShouldBindJSON(&patch) != nil {
-		c.JSON(400, model.Error(msg.T(msg.InvalidConfigParams)))
+	if err := c.ShouldBindJSON(&patch); err != nil {
+		if isBodyTooLargeError(err) {
+			respondBodyTooLarge(c)
+			return
+		}
+		respondError(c, msg.T(msg.InvalidConfigParams))
 		return
 	}
-	next := patch.applyTo(config.GetSystemSettings())
-	if err := config.UpdateSystemSettings(next); err != nil {
+	// The merge runs inside the config lock: reading the current settings here
+	// and writing later would let two concurrent partial updates each restore
+	// the other's fields to their old values.
+	if err := config.UpdateSystemSettingsWith(patch.applyTo); err != nil {
 		if errors.Is(err, config.ErrConfigWrite) {
 			// The cause names the config path and the OS error; keep that in the
 			// service log rather than handing it to the browser.
@@ -66,7 +72,7 @@ func UpdateSystemConfig(c *gin.Context) {
 			c.JSON(500, model.Error(msg.T(msg.ConfigSaveFail)))
 			return
 		}
-		c.JSON(400, model.Error(err.Error()))
+		respondError(c, err.Error())
 		return
 	}
 	// Applying the new retention window can delete a large backlog and VACUUM

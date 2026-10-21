@@ -28,10 +28,25 @@ LOG_FILE="${TRIM_PKGVAR}/app.log"
 # 保留 app.log.1 .. app.log.5，避免日志无限增长占满数据盘。
 LOG_MAX_BYTES=10485760
 LOG_KEEP=5
+# 长跑期间由后台看护进程按同样阈值轮转；测试可用环境变量缩短检查间隔。
+LOG_CHECK_INTERVAL="${OPENSYNC_LOG_CHECK_INTERVAL:-300}"
+LOG_ROTATOR_PID_FILE="${TRIM_PKGVAR}/log-rotator.pid"
 # 等待服务创建 Socket 的最长秒数；期间持续确认进程仍存活。
 START_TIMEOUT=60
-# 本脚本的规范路径，用于确认启动锁的持有者仍是本应用的 `main start`。
+# 本脚本的规范路径，用于确认启动锁的持有者仍是本应用的 `main start|stop`。
 SELF="$(readlink -f "$0" 2>/dev/null || true)"
+# start / stop 共用的生命周期锁。有 flock 时用它做内核级互斥（进程退出即释放，
+# 不存在“建锁到写 PID 之间”的空窗）；start.lock 目录 + pid 仍在 flock 保护下维护，
+# 兼容旧版脚本并作为缺少 flock 时的回退。
+LIFECYCLE_LOCK="${TRIM_PKGTMP}/lifecycle.lock"
+START_LOCK="${TRIM_PKGTMP}/start.lock"
+# stop 需要等待正在进行的 start（最长 START_TIMEOUT 秒）结束。
+STOP_LOCK_WAIT=$((START_TIMEOUT + 30))
+# upgrade_init 写入：下一次 start 失败时提示升级前备份的位置，成功后删除。
+UPGRADE_PENDING="${TRIM_PKGVAR}/upgrade-pending"
+LAST_BACKUP_FILE="${TRIM_PKGVAR}/last-upgrade-backup"
+LOCK_OWNED=0
+FLOCK_HELD=0
 
 check_process() {
     local pid="$1" executable
@@ -46,14 +61,37 @@ check_process() {
         [ "$executable" = "$BIN" ]
     fi
 }
+# pid 文件丢失、被截断或指向无关进程时，按可执行文件身份扫描 /proc 找回服务进程，
+# 避免 stop 在服务仍运行时报告成功（升级随后会拷贝正在写入的数据库）。
+find_service_pid() {
+    local entry pid
+    [ -d /proc ] || return 1
+    for entry in /proc/[0-9]*; do
+        pid="${entry#/proc/}"
+        [ "$pid" != "$$" ] || continue
+        if check_process "$pid"; then printf '%s\n' "$pid"; return 0; fi
+    done
+    return 1
+}
 status_app() {
-    [ -f "$PID_FILE" ] || return 1
-    PID="$(head -n 1 "$PID_FILE" | tr -d '[:space:]')"
-    check_process "$PID"
+    PID=''
+    if [ -f "$PID_FILE" ]; then
+        PID="$(head -n 1 "$PID_FILE" | tr -d '[:space:]')"
+        if check_process "$PID"; then return 0; fi
+    fi
+    PID="$(find_service_pid)" || { PID=''; return 1; }
+    # 找回的进程重新记入 pid 文件，后续 status / stop 不必再扫描。
+    { printf '%s\n' "$PID" > "$PID_FILE"; } 2>/dev/null || true
 }
 stop_app() {
+    mkdir -p "$TRIM_PKGTMP"
+    acquire_lifecycle_lock "$STOP_LOCK_WAIT" '应用正在启动或停止，请稍后重试'
+    stop_log_rotator
     if ! status_app; then rm -f "$PID_FILE"; return 0; fi
-    kill -TERM "$PID" || fail '无法停止应用，请检查运行权限'
+    if ! kill -TERM "$PID" 2>/dev/null; then
+        # status 与 kill 之间进程可能已自行退出，这属于停止成功。
+        if check_process "$PID"; then fail '无法停止应用，请检查运行权限'; fi
+    fi
     local count=0
     while check_process "$PID" && [ "$count" -lt 40 ]; do sleep 1; count=$((count + 1)); done
     if check_process "$PID"; then fail '应用尚未完成停止，请稍后重试；未强制结束以保护任务数据'; fi
@@ -71,47 +109,96 @@ is_self_path() {
     real="$(readlink -f "$path" 2>/dev/null || true)"
     [ "$real" = "$SELF" ]
 }
-# 启动锁里的 PID 可能已被无关的长驻进程复用：只有它仍在执行本脚本的 start 才视为
-# 正在启动，否则按残留锁处理，避免启动被永久阻塞。
-is_start_script() {
+# 锁里的 PID 可能已被无关的长驻进程复用：只有它仍在执行本脚本的 start 或 stop 才
+# 视为锁仍被持有，否则按残留锁处理，避免启动被永久阻塞。
+is_lifecycle_script() {
     local pid="$1" arg prev='' cmdline
     kill -0 "$pid" 2>/dev/null || return 1
     if [ -d /proc ]; then
         # 读不到命令行时无法确认身份，保守地沿用 kill -0 的结论。
         [ -r "/proc/$pid/cmdline" ] || return 0
         while IFS= read -r arg || [ -n "$arg" ]; do
-            if [ "$arg" = start ] && is_self_path "$prev"; then return 0; fi
+            case "$arg" in start|stop) if is_self_path "$prev"; then return 0; fi ;; esac
             prev="$arg"
         done < <({ tr '\0' '\n' < "/proc/$pid/cmdline"; } 2>/dev/null || true)
         return 1
     fi
     cmdline="$(ps -p "$pid" -o command= 2>/dev/null || true)"
     if [ -n "$cmdline" ]; then
-        case " $cmdline " in *[/\ ]main\ start\ *) return 0 ;; *) return 1 ;; esac
+        case " $cmdline " in *[/\ ]main\ start\ *|*[/\ ]main\ stop\ *) return 0 ;; *) return 1 ;; esac
     fi
     # 没有 /proc 且 ps 给不出命令行时无法确认身份，保守地沿用 kill -0 的结论。
     kill -0 "$pid" 2>/dev/null
 }
-acquire_start_lock() {
-    START_LOCK="${TRIM_PKGTMP}/start.lock"
-    if mkdir "$START_LOCK" 2>/dev/null; then
-        printf '%s\n' "$$" > "$START_LOCK/pid"
-        trap 'rm -f "$START_LOCK/pid"; rmdir "$START_LOCK" 2>/dev/null || true' EXIT
-        return 0
-    fi
-    local lock_pid=''
+read_lock_pid() {
+    local value=''
     if [ -f "$START_LOCK/pid" ]; then
-        lock_pid="$(head -n 1 "$START_LOCK/pid" | tr -d '[:space:]')"
+        value="$(head -n 1 "$START_LOCK/pid" 2>/dev/null | tr -d '[:space:]')" || value=''
     fi
-    case "$lock_pid" in
-        ''|*[!0-9]*|0|1) ;;
-        *) if is_start_script "$lock_pid"; then fail '应用正在启动，请稍后重试'; fi ;;
-    esac
-    [ ! -f "$START_LOCK/pid" ] || rm -f "$START_LOCK/pid"
-    rmdir "$START_LOCK" 2>/dev/null || fail '应用正在启动，请稍后重试'
-    mkdir "$START_LOCK" 2>/dev/null || fail '应用正在启动，请稍后重试'
-    printf '%s\n' "$$" > "$START_LOCK/pid"
-    trap 'rm -f "$START_LOCK/pid"; rmdir "$START_LOCK" 2>/dev/null || true' EXIT
+    printf '%s' "$value"
+}
+# 把判定为残留的锁目录原子地改名后再删除：并发的两个回收者只有一个能改名成功，
+# 不会出现“一方刚建好的锁被另一方删掉”的情况。
+discard_stale_lock() {
+    local trash="${START_LOCK}.stale.$$"
+    mv "$START_LOCK" "$trash" 2>/dev/null || return 0
+    rm -f "$trash/pid"
+    rmdir "$trash" 2>/dev/null || true
+}
+# 在 wait 秒内取得 start.lock 目录锁。持有 flock 时目录只是兼容旧版脚本的标记；
+# 没有 flock 时它是唯一的互斥手段：没有 pid 的锁目录可能是对方刚 mkdir、尚未写入
+# pid，先观察几秒再按残留回收，而不是像旧版那样立即删除。
+take_dir_lock() {
+    local wait="$1" message="$2" deadline lock_pid empty_seen=0 attempts=0
+    deadline=$(( $(date +%s) + wait ))
+    while :; do
+        attempts=$((attempts + 1))
+        if mkdir "$START_LOCK" 2>/dev/null; then
+            printf '%s\n' "$$" > "$START_LOCK/pid"
+            return 0
+        fi
+        [ "$attempts" -le 200 ] || fail "$message"
+        lock_pid="$(read_lock_pid)"
+        case "$lock_pid" in
+            '')
+                if [ "$FLOCK_HELD" = 1 ] || [ "$empty_seen" -ge 3 ]; then
+                    discard_stale_lock; continue
+                fi
+                empty_seen=$((empty_seen + 1)) ;;
+            *[!0-9]*|0|1) discard_stale_lock; continue ;;
+            *)
+                empty_seen=0
+                if ! is_lifecycle_script "$lock_pid"; then discard_stale_lock; continue; fi
+                [ "$(date +%s)" -lt "$deadline" ] || fail "$message" ;;
+        esac
+        sleep 1
+    done
+}
+# start / stop 共用的互斥。重入（start 超时后调用 stop）直接返回。
+acquire_lifecycle_lock() {
+    local wait="$1" message="$2"
+    [ "$LOCK_OWNED" != 1 ] || return 0
+    if command -v flock >/dev/null 2>&1; then
+        exec 9>>"$LIFECYCLE_LOCK" || fail '无法创建应用运行锁，请检查临时目录权限'
+        if [ "$wait" -gt 0 ]; then
+            flock -w "$wait" 9 || fail "$message"
+        else
+            flock -n 9 || fail "$message"
+        fi
+        FLOCK_HELD=1
+    fi
+    take_dir_lock "$wait" "$message"
+    LOCK_OWNED=1
+    trap release_lifecycle_lock EXIT
+}
+# 只删除自己持有的锁目录；flock 随文件描述符在进程退出时自动释放。
+release_lifecycle_lock() {
+    [ "$LOCK_OWNED" = 1 ] || return 0
+    if [ "$(read_lock_pid)" = "$$" ]; then
+        rm -f "$START_LOCK/pid"
+        rmdir "$START_LOCK" 2>/dev/null || true
+    fi
+    LOCK_OWNED=0
 }
 # 只在服务未运行时调用；仅对由已校验的 LOG_FILE 派生的固定后缀路径执行 mv/rm -f。
 rotate_log() {
@@ -130,25 +217,90 @@ rotate_log() {
     done
     mv -f "$LOG_FILE" "${LOG_FILE}.1" || return 0
 }
+# 服务运行期间不能 mv app.log：服务持有旧 inode，重命名后日志会继续写进 .1。
+# 这里用 copy-truncate：把内容复制到 .1 后清空原文件，追加写不受影响。
+rotate_log_running() {
+    local size index
+    [ -f "$LOG_FILE" ] && [ ! -L "$LOG_FILE" ] || return 0
+    size="$({ wc -c < "$LOG_FILE"; } 2>/dev/null | tr -d '[:space:]')" || return 0
+    case "$size" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$size" -ge "$LOG_MAX_BYTES" ] || return 0
+    rm -f "${LOG_FILE}.${LOG_KEEP}" || return 0
+    index=$((LOG_KEEP - 1))
+    while [ "$index" -ge 1 ]; do
+        if [ -e "${LOG_FILE}.${index}" ]; then
+            mv -f "${LOG_FILE}.${index}" "${LOG_FILE}.$((index + 1))" || return 0
+        fi
+        index=$((index - 1))
+    done
+    cp -f "$LOG_FILE" "${LOG_FILE}.1" || return 0
+    : > "$LOG_FILE"
+}
+# 看护进程只做日志轮转，服务退出后自动结束。9>&- 必须保留：否则它继承
+# 生命周期锁的 fd，会一直持有 flock，导致之后的 stop/start 拿不到锁。
+start_log_rotator() {
+    local service_pid="$1"
+    stop_log_rotator
+    (
+        while kill -0 "$service_pid" 2>/dev/null; do
+            sleep "$LOG_CHECK_INTERVAL"
+            rotate_log_running
+        done
+    ) 9>&- </dev/null >/dev/null 2>&1 &
+    printf '%s\n' "$!" > "$LOG_ROTATOR_PID_FILE" 2>/dev/null || true
+}
+stop_log_rotator() {
+    local pid=''
+    if [ -f "$LOG_ROTATOR_PID_FILE" ]; then
+        pid="$(head -n 1 "$LOG_ROTATOR_PID_FILE" 2>/dev/null | tr -d '[:space:]')" || pid=''
+        case "$pid" in ''|*[!0-9]*) ;; *) kill "$pid" 2>/dev/null || true ;; esac
+        rm -f "$LOG_ROTATOR_PID_FILE"
+    fi
+}
+# 升级后的首次启动失败时，在错误信息里给出升级前备份的位置。不自动回滚：新版本
+# 可能已迁移数据库，盲目覆盖比保留现场风险更大，恢复交给用户确认后手动进行。
+fail_start() {
+    local message="$1" backup=''
+    if [ -f "$UPGRADE_PENDING" ] && [ -f "$LAST_BACKUP_FILE" ]; then
+        IFS= read -r backup < "$LAST_BACKUP_FILE" || true
+    fi
+    if [ -n "$backup" ]; then
+        message="${message}。升级前的数据备份位于 ${backup}，如新版本无法使用，可停止应用后将其中文件复制回 ${TRIM_PKGVAR}（config.ini 复制回 ${TRIM_PKGETC}）"
+    fi
+    fail "$message"
+}
+start_succeeded() {
+    rm -f "$UPGRADE_PENDING" 2>/dev/null || true
+    return 0
+}
 start_app() {
-    if status_app; then return 0; fi
-    [ -x "$BIN" ] || fail '应用服务文件缺失，请重新安装对应架构的安装包'
+    if status_app; then start_log_rotator "$PID"; start_succeeded; return 0; fi
+    [ -x "$BIN" ] || fail_start '应用服务文件缺失，请重新安装对应架构的安装包'
     mkdir -p "$TRIM_PKGVAR" "$TRIM_PKGETC" "$TRIM_PKGTMP"
-    acquire_start_lock
-    if status_app; then return 0; fi
+    acquire_lifecycle_lock 0 '应用正在启动，请稍后重试'
+    if status_app; then start_log_rotator "$PID"; start_succeeded; return 0; fi
     rotate_log
+    # 服务崩溃或被 kill -9 时 app.sock 会残留；此时已持锁且确认服务未运行，先删除，
+    # 否则下面的就绪判断第一轮就会把尚未监听的服务误判为启动成功。
+    if [ -S "$SOCKET" ] || [ -L "$SOCKET" ]; then rm -f "$SOCKET"; fi
     cd "$TRIM_APPDEST"
-    GIN_MODE=release "$BIN" >> "$LOG_FILE" 2>&1 &
+    # 9>&- ：服务进程不能继承生命周期锁的描述符，否则它会一直持有 flock，
+    # 之后的 stop / start 都拿不到锁。
+    GIN_MODE=release "$BIN" >> "$LOG_FILE" 2>&1 9>&- &
     local pid=$!
     printf '%s\n' "$pid" > "$PID_FILE"
     local count=0
     while [ "$count" -lt "$START_TIMEOUT" ]; do
-        check_process "$pid" || fail '服务启动失败，请查看应用日志'
-        if [ -S "$SOCKET" ]; then return 0; fi
+        check_process "$pid" || fail_start '服务启动失败，请查看应用日志'
+        if [ -S "$SOCKET" ]; then
+            start_log_rotator "$pid"
+            start_succeeded
+            return 0
+        fi
         sleep 1; count=$((count + 1))
     done
     stop_app
-    fail '服务启动超时，请查看应用日志'
+    fail_start '服务启动超时，请查看应用日志'
 }
 case "${1:-}" in
     start) start_app ;;

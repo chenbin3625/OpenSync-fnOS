@@ -7,12 +7,6 @@ export interface ApiResponse<T> {
 export interface PageData<T> {
   dataList: T[];
   count: number;
-  // Set by the backend when a request without pageNum/pageSize was capped at
-  // its unpaged row limit, so dataList holds fewer rows than count. Every call
-  // in src/api paginates, which is why this should never arrive; it is typed
-  // and checked so a future unpaginated caller fails loudly instead of
-  // silently rendering a short list as if it were complete.
-  truncated?: boolean;
 }
 
 export interface RealtimeTaskItemPage extends PageData<TaskItem> {

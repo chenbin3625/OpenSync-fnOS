@@ -135,7 +135,6 @@ h3 {
 }
 .muted,
 .field-hint,
-.field-label-inline-note,
 .flow-sub,
 .item-meta,
 .execution-metrics,
@@ -145,19 +144,10 @@ h3 {
   color: var(--muted);
   font-size: var(--font-size-small);
 }
-.field-label-with-tip,
-.field-label-with-note {
+.field-label-with-tip {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-}
-.field-label-with-note {
-  align-items: baseline;
-  gap: 8px;
-  min-width: 0;
-}
-.field-label-inline-note {
-  font-weight: 400;
 }
 .field-tip-icon {
   display: inline-flex;
@@ -245,6 +235,17 @@ h3 {
   gap: 4px;
   margin: 0;
 }
+.sidebar-task-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 16px;
+  min-width: 0;
+}
+.sidebar-task-error .inline-error {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .task-sub-link {
   display: flex;
   align-items: center;
@@ -300,6 +301,13 @@ h3 {
 }
 .version-tag {
   flex: 0 0 auto;
+}
+.version-error {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  color: var(--warning);
+  margin-left: auto;
 }
 .version-check {
   flex: 0 0 auto;
@@ -634,14 +642,6 @@ h3 {
   min-width: 0;
   overflow-wrap: anywhere;
 }
-.exclude-details pre {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  margin: 12px 0 0;
-}
-.exclude-details summary {
-  cursor: pointer;
-}
 .latest-execution {
   display: flex;
   flex-wrap: wrap;
@@ -802,6 +802,14 @@ body .semi-modal-mask {
   gap: 12px;
   min-width: 0;
 }
+/* Multiple controls under one Field label are wrapped in a named group so the
+   label association survives (see Field in common.tsx). */
+.field-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
 .field > label {
   font-size: var(--font-size-body);
   font-weight: 500;
@@ -833,23 +841,10 @@ body .semi-modal-mask {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
 }
-.unit-input {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.unit-input .semi-input-wrapper {
-  flex: 1;
-  min-width: 0;
-}
-.unit-input .semi-select {
-  flex: 0 0 82px;
-}
-.remote-path-error {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 8px;
+.schedule-preview {
+  color: var(--muted);
+  font-size: var(--font-size-small);
+  line-height: 1.6;
 }
 .file-size-filters {
   display: grid;
@@ -948,6 +943,16 @@ body .semi-modal-mask {
 .exclude-tree-empty {
   padding: 24px 0;
   text-align: center;
+}
+.exclude-tree-field {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.exclude-tree-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
 }
 
 /* 根节点隐藏复选框 */
@@ -1169,6 +1174,17 @@ body .semi-modal-mask {
 }
 .numeric-setting .semi-input-wrapper {
   width: 116px;
+}
+
+/* Semi's default hover fill (grey) leaked into these flat form controls after
+   the global !important hover override was removed. Restore the surface colour
+   on hover only for the intended scopes; disabled/custom states stay untouched. */
+.editor-modal .semi-input-wrapper:hover,
+.editor-modal .semi-select:hover,
+.editor-modal .semi-tree-select:hover,
+.editor-modal .semi-input-textarea-wrapper:hover,
+.numeric-setting .semi-input-wrapper:hover {
+  background: var(--surface);
 }
 .numeric-setting > span {
   width: 40px;
@@ -1451,20 +1467,10 @@ body .semi-modal-mask {
 .file-expanded p {
   margin-top: 6px;
 }
-.inline-error,
-.inline-error-text {
+.inline-error {
   color: var(--danger);
   font-size: var(--font-size-small);
-}
-.inline-error {
   overflow-wrap: anywhere;
-}
-.inline-error-text {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 100%;
 }
 .file-expanded .inline-error span {
   color: var(--muted);
@@ -1525,7 +1531,8 @@ body .semi-modal-mask {
   .page {
     padding: 20px 16px;
   }
-  h1 {
+  h1,
+  .page-title {
     font-size: var(--font-size-modal-title);
   }
   .page-toolbar {
@@ -1852,12 +1859,6 @@ body .semi-modal-mask {
 .page-tabs .semi-tabs-tab:last-child {
   margin-right: 0;
 }
-.page-tabs .semi-tabs-bar-line {
-  bottom: 0;
-  height: 2px;
-  background: var(--accent);
-  border-radius: 2px 2px 0 0;
-}
 .page-tabs .semi-tabs,
 .page-tabs .semi-tabs-bar,
 .execution-tabs .semi-tabs,
@@ -1887,10 +1888,9 @@ body .semi-modal-mask {
 .execution-tabs .semi-tabs-bar-line .semi-tabs-tab-active {
   border-bottom: 2px solid var(--accent) !important;
 }
-.semi-input-wrapper:hover,
-.semi-select:hover,
-.semi-tree-select:hover {
-  background: var(--surface) !important;
+.semi-input-wrapper:not(.semi-input-wrapper-disabled):hover,
+.semi-select:not(.semi-select-disabled):hover,
+.semi-tree-select:not(.semi-tree-select-disabled):hover {
   border-color: var(--accent) !important;
 }
 .semi-tree-option-switcher {
@@ -1958,9 +1958,6 @@ body .semi-modal-mask {
   border: 0;
   border-radius: 0;
   background: var(--surface);
-}
-.settings-card-note {
-  padding: 0 24px 12px;
 }
 .pager-controls {
   display: flex;

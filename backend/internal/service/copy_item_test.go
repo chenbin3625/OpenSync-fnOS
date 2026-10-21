@@ -3,8 +3,11 @@ package service
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
+
+	"opensync/internal/config"
 )
 
 type copyItemTestRuntime struct{}
@@ -52,6 +55,9 @@ type copyItemTestClient struct {
 	taskInfoFn    func(call int) (map[string]interface{}, error)
 	// transferErr is returned by the first copy/move call only.
 	transferErr error
+	// transferID is the remote task id the copy/move call reports ("" means
+	// AList completed synchronously and returned no task).
+	transferID string
 	undone      []map[string]interface{}
 	undoneErr   error
 	undoneCalls int
@@ -66,7 +72,7 @@ func (c *copyItemTestClient) transferResult() (string, error) {
 		c.transferErr = nil
 		return "", err
 	}
-	return "", nil
+	return c.transferID, nil
 }
 
 func (c *copyItemTestClient) CopyFileContext(context.Context, string, string, string) (string, error) {
@@ -124,11 +130,38 @@ func (c *copyItemTestClient) FileExistsContext(_ context.Context, dir, name stri
 // statCopyItemTestClient adds destination metadata to copyItemTestClient.
 type statCopyItemTestClient struct {
 	*copyItemTestClient
+	// statFn overrides stat per probed directory when set; stat is the fallback
+	// for tests that do not need to distinguish source from destination.
+	statFn func(dir, name string) (FileStat, error)
 }
 
-func (c statCopyItemTestClient) FileStatContext(context.Context, string, string) (FileStat, error) {
+func (c statCopyItemTestClient) FileStatContext(_ context.Context, dir, name string) (FileStat, error) {
 	c.existsCalls++
+	if c.statFn != nil {
+		return c.statFn(dir, name)
+	}
 	return *c.stat, nil
+}
+
+// pinCopyTestDeps makes copy-item tests hermetic: retry counts come from the
+// process config (runtimeTaskLimits), so a developer's config.ini with
+// max_retries=0 changed how many attempts these tests observe.
+func pinCopyTestDeps(t *testing.T) {
+	t.Helper()
+	oldConfig := config.GetConfig()
+	config.SetConfigForTest(&config.Config{Server: config.ServerConfig{
+		CopyConcurrency: config.DefaultCopyConcurrency,
+		ScanConcurrency: config.DefaultScanConcurrency,
+		MaxRetries:      config.DefaultMaxRetries,
+	}})
+	oldJobDeps := *jobDeps
+	deps := oldJobDeps
+	deps.CopyRetryDelay = func(int) time.Duration { return 0 }
+	SetJobDepsForTest(&deps)
+	t.Cleanup(func() {
+		SetJobDepsForTest(&oldJobDeps)
+		config.SetConfigForTest(oldConfig)
+	})
 }
 
 func TestCopyItemUsesMoveAPIForMoveItems(t *testing.T) {
@@ -197,6 +230,7 @@ func TestCopyItemAmbiguousMoveTreatedAsSuccessWhenSourceGoneAndDstPresent(t *tes
 }
 
 func TestCopyItemAmbiguousMoveRetriedWhenSourceStillExists(t *testing.T) {
+	pinCopyTestDeps(t)
 	client := &copyItemTestClient{transferErr: errAmbiguousTransfer, fileExists: true}
 	item := newCopyItem(copyItemTestRuntime{}, client, "/src", "/dst", "file.txt", int64(1), taskItemTypeMove)
 
@@ -236,7 +270,7 @@ func TestCopyItemAmbiguousCopyWithCompleteDestinationIsSuccess(t *testing.T) {
 		transferErr: errAmbiguousTransfer,
 		stat:        &FileStat{Exists: true, SizeKnown: true, Size: 2048, Modified: time.Now().Unix()},
 	}
-	item := newCopyItem(copyItemTestRuntime{}, statCopyItemTestClient{base}, "/src", "/dst", "file.txt", int64(2048), taskItemTypeCopy)
+	item := newCopyItem(copyItemTestRuntime{}, statCopyItemTestClient{copyItemTestClient: base}, "/src", "/dst", "file.txt", int64(2048), taskItemTypeCopy)
 
 	item.DoIt()
 
@@ -252,11 +286,20 @@ func TestCopyItemAmbiguousCopyWithCompleteDestinationIsSuccess(t *testing.T) {
 // destination matches it, so only a destination written after the submission
 // may count as this copy's result.
 func TestCopyItemAmbiguousCopyWithSameSizeOldDestinationIsRetried(t *testing.T) {
+	pinCopyTestDeps(t)
+	oldModified := time.Now().Add(-time.Hour).Unix()
 	base := &copyItemTestClient{
 		transferErr: errAmbiguousTransfer,
-		stat:        &FileStat{Exists: true, SizeKnown: true, Size: 2048, Modified: time.Now().Add(-time.Hour).Unix()},
 	}
-	item := newCopyItem(copyItemTestRuntime{}, statCopyItemTestClient{base}, "/src", "/dst", "file.txt", int64(2048), taskItemTypeCopy)
+	client := statCopyItemTestClient{base, func(dir, name string) (FileStat, error) {
+		if dir == "/src" {
+			// The source changed, so its mtime differs from the stale
+			// destination's: the metadata-mirror criterion must not accept it.
+			return FileStat{Exists: true, SizeKnown: true, Size: 2048, Modified: time.Now().Unix()}, nil
+		}
+		return FileStat{Exists: true, SizeKnown: true, Size: 2048, Modified: oldModified}, nil
+	}}
+	item := newCopyItem(copyItemTestRuntime{}, client, "/src", "/dst", "file.txt", int64(2048), taskItemTypeCopy)
 
 	item.DoIt()
 
@@ -266,12 +309,13 @@ func TestCopyItemAmbiguousCopyWithSameSizeOldDestinationIsRetried(t *testing.T) 
 }
 
 func TestCopyItemAmbiguousCopyWithStaleDestinationIsRetried(t *testing.T) {
+	pinCopyTestDeps(t)
 	// Overwrite:true: the old, smaller file is still at the destination.
 	base := &copyItemTestClient{
 		transferErr: errAmbiguousTransfer,
 		stat:        &FileStat{Exists: true, SizeKnown: true, Size: 10},
 	}
-	item := newCopyItem(copyItemTestRuntime{}, statCopyItemTestClient{base}, "/src", "/dst", "file.txt", int64(2048), taskItemTypeCopy)
+	item := newCopyItem(copyItemTestRuntime{}, statCopyItemTestClient{copyItemTestClient: base}, "/src", "/dst", "file.txt", int64(2048), taskItemTypeCopy)
 
 	item.DoIt()
 
@@ -289,6 +333,7 @@ func TestCopyItemAmbiguousCopyWithStaleDestinationIsRetried(t *testing.T) {
 }
 
 func TestCopyItemDefiniteErrorSkipsReconciliation(t *testing.T) {
+	pinCopyTestDeps(t)
 	client := &copyItemTestClient{
 		transferErr: &alistStatusError{alistCode: 500, message: "storage error"},
 		fileExists:  true,
@@ -361,4 +406,66 @@ type trackingCopyItemRuntime struct {
 func (r *trackingCopyItemRuntime) waitForRemoteCopyCompletion(ci *CopyItem) {
 	r.watched = ci.taskID()
 	ci.setProgress(taskStatusSuccess, 100, nil)
+}
+
+// A same-storage AList copy calls the driver's Copy, and server-side copies
+// commonly preserve the source mtime. The destination then carries the
+// source's timestamp, not the submission time; the combined criterion (dst
+// metadata mirrors the source and the sizes match) must accept that as the
+// result of this submission instead of resubmitting a duplicate copy.
+func TestCopyItemAmbiguousCopyWithPreservedMtimeIsSuccess(t *testing.T) {
+	pinCopyTestDeps(t)
+	preserved := time.Now().Add(-time.Hour).Unix()
+	base := &copyItemTestClient{transferErr: errAmbiguousTransfer}
+	client := statCopyItemTestClient{base, func(dir, name string) (FileStat, error) {
+		return FileStat{Exists: true, SizeKnown: true, Size: 2048, Modified: preserved}, nil
+	}}
+	item := newCopyItem(copyItemTestRuntime{}, client, "/src", "/dst", "file.txt", int64(2048), taskItemTypeCopy)
+
+	item.DoIt()
+
+	if base.copyCalls != 1 {
+		t.Fatalf("copyCalls = %d, want 1 (the completed copy must not be resubmitted)", base.copyCalls)
+	}
+	if status := item.status(); status != taskStatusSuccess {
+		t.Fatalf("status = %d, want success", status)
+	}
+}
+
+// A probe that keeps erroring is not evidence that the file arrived. Treating
+// it as success marked never-transferred files as 100% successes, and success
+// is terminal so they were never retried.
+func TestCopyItemSynchronousCopyProbeFailureFails(t *testing.T) {
+	pinCopyTestDeps(t)
+	client := &copyItemTestClient{fileExistsErr: errors.New("probe down")}
+	item := newCopyItem(copyItemTestRuntime{}, client, "/src", "/dst", "file.txt", int64(1), taskItemTypeCopy)
+
+	item.DoIt()
+
+	if status := item.status(); status != taskStatusFailed {
+		t.Fatalf("status = %d, want failed when the destination probe cannot verify the copy", status)
+	}
+	if item.ErrMsg == nil || !strings.Contains(*item.ErrMsg, "probe down") {
+		t.Fatalf("ErrMsg = %#v, want the probe failure recorded", item.ErrMsg)
+	}
+}
+
+type noopWaitRuntime struct{ copyItemTestRuntime }
+
+// Leaves the item Running, mimicking the monitor being aborted between removing
+// the watch and applying the stopped status.
+func (noopWaitRuntime) waitForRemoteCopyCompletion(*CopyItem) {}
+
+// Never finish a copy item in a non-terminal state: a persisted Running row is
+// counted neither as success nor as failure by the task statistics.
+func TestCopyItemNeverFinishesInRunningState(t *testing.T) {
+	pinCopyTestDeps(t)
+	client := &copyItemTestClient{transferID: "task-1"}
+	item := newCopyItem(noopWaitRuntime{}, client, "/src", "/dst", "file.txt", int64(1), taskItemTypeCopy)
+
+	item.DoIt()
+
+	if status := item.status(); status != taskStatusStopped {
+		t.Fatalf("status = %d, want stopped for an item whose monitor never applied a terminal state", status)
+	}
 }

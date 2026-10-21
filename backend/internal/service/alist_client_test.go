@@ -216,10 +216,21 @@ func TestGetContextDoesNotSendContentTypeWithoutBody(t *testing.T) {
 	}
 }
 
+// AList registers /api/admin/task/{copy,move}/undone as GET only. A POST falls
+// through to the SPA NoRoute handler, which answers HTTP 200 with HTML, so the
+// JSON decode failed and both callers swallowed the error: task adoption and
+// the monitor's undone fast path were silently dead. Assert the method, not
+// just the path.
 func TestTaskUndoneListContextUsesOperationSpecificTaskEndpoint(t *testing.T) {
-	var paths []string
+	type request struct{ method, path string }
+	var requests []request
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		paths = append(paths, r.URL.Path)
+		requests = append(requests, request{method: r.Method, path: r.URL.Path})
+		if r.Method != http.MethodGet {
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte("<html></html>"))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"code":200,"message":"ok","data":[{"id":"task-1","state":1,"progress":50}]}`))
 	}))
@@ -237,8 +248,14 @@ func TestTaskUndoneListContextUsesOperationSpecificTaskEndpoint(t *testing.T) {
 	if len(tasks) != 1 || fmt.Sprintf("%v", tasks[0]["id"]) != "task-1" {
 		t.Fatalf("tasks = %#v, want one undone task", tasks)
 	}
-	if len(paths) != 1 || paths[0] != "/api/admin/task/copy/undone" {
-		t.Fatalf("paths = %v, want [/api/admin/task/copy/undone]", paths)
+	if len(requests) != 1 {
+		t.Fatalf("requests = %#v, want exactly one", requests)
+	}
+	if requests[0].method != http.MethodGet {
+		t.Fatalf("method = %s, want GET for the undone endpoint", requests[0].method)
+	}
+	if requests[0].path != "/api/admin/task/copy/undone" {
+		t.Fatalf("path = %q, want /api/admin/task/copy/undone", requests[0].path)
 	}
 }
 
@@ -276,7 +293,7 @@ func TestTaskInfoContextUsesOperationSpecificTaskEndpoint(t *testing.T) {
 
 func TestCheckWaitContextBoundsTrackedPathBuckets(t *testing.T) {
 	client := &AlistClient{
-		waits: make(map[string]time.Time),
+		waits: make(map[string]alistWaitSlot),
 	}
 
 	for i := 0; i < maxAlistWaitBuckets+128; i++ {
@@ -446,5 +463,183 @@ func TestNormalizeAlistTokenTrimsAndRejectsMissingRequiredToken(t *testing.T) {
 	_, _, err = normalizeAlistToken(map[string]interface{}{}, true)
 	if err == nil {
 		t.Fatalf("normalizeAlistToken() error = nil, want missing required token error")
+	}
+}
+
+// Removing an object that is already gone must be success: otherwise a delete
+// whose response was lost is retried, the retry hits "object not found", and a
+// delete that actually happened is reported as failed.
+func TestDeleteFileContextTreatsMissingObjectAsSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":500,"message":"object not found","data":null}`))
+	}))
+	defer server.Close()
+
+	client := &AlistClient{URL: server.URL, client: server.Client()}
+	if err := client.DeleteFileContext(context.Background(), "/dst", []string{"gone.txt"}, 0); err != nil {
+		t.Fatalf("DeleteFileContext() error = %v, want nil for an already-removed object", err)
+	}
+}
+
+func TestDeleteFileContextPropagatesRealErrors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":500,"message":"storage error","data":null}`))
+	}))
+	defer server.Close()
+
+	client := &AlistClient{URL: server.URL, client: server.Client()}
+	if err := client.DeleteFileContext(context.Background(), "/dst", []string{"file.txt"}, 0); err == nil {
+		t.Fatal("DeleteFileContext() error = nil, want the storage error to surface")
+	}
+}
+
+// A 401 from a stale client must not evict (and close) the newer client stored
+// for the same engine id — UpdateClient may have replaced it while the old
+// request was in flight.
+func TestRemoveCachedAlistClientIfOnlyEvictsMatchingClient(t *testing.T) {
+	stale := &AlistClient{AlistID: 9}
+	newer := &AlistClient{AlistID: 9}
+
+	alistClientListMu.Lock()
+	previousList := alistClientList
+	alistClientList = map[int64]*AlistClient{9: newer}
+	alistClientListMu.Unlock()
+	defer func() {
+		alistClientListMu.Lock()
+		alistClientList = previousList
+		alistClientListMu.Unlock()
+	}()
+
+	removeCachedAlistClientIf(9, stale)
+	alistClientListMu.RLock()
+	cached := alistClientList[9]
+	alistClientListMu.RUnlock()
+	if cached != newer {
+		t.Fatal("stale client evicted the newer cached client for the same id")
+	}
+
+	removeCachedAlistClientIf(9, newer)
+	alistClientListMu.RLock()
+	_, stillCached := alistClientList[9]
+	alistClientListMu.RUnlock()
+	if stillCached {
+		t.Fatal("matching client was not evicted")
+	}
+}
+
+// A garbled /api/fs/get payload used to report "exists with unknown size", and
+// verifyDstComplete treats SizeKnown=false as a completed copy.
+func TestFileStatContextRejectsUndecodablePayload(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":200,"message":"ok","data":[1,2,3]}`))
+	}))
+	defer server.Close()
+
+	client := &AlistClient{URL: server.URL, client: server.Client()}
+	if _, err := client.FileStatContext(context.Background(), "/d", "f"); err == nil {
+		t.Fatal("FileStatContext() error = nil, want a decode error for a non-object payload")
+	}
+}
+
+// A proxy's large error page must surface as its HTTP status, not as a
+// "response body exceeds" error, and an embedded AList 401 must still evict the
+// cached client.
+func TestNon200ResponseKeepsHTTPStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(strings.Repeat("x", maxErrorBodyBytes*2)))
+	}))
+	defer server.Close()
+
+	client := &AlistClient{URL: server.URL, client: server.Client()}
+	_, err := client.GetContext(context.Background(), "/api/fs/get", nil)
+	if err == nil {
+		t.Fatal("GetContext() error = nil, want an HTTP status error")
+	}
+	if !isAlistObjectNotFound(err) {
+		t.Fatalf("error = %v, want an object-not-found status error", err)
+	}
+	if strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("error = %v, want the HTTP status instead of the body-size cap", err)
+	}
+}
+
+func TestNon200WithEmbedded401EvictsMatchingClient(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":401,"message":"token is invalidated","data":null}`))
+	}))
+	defer server.Close()
+
+	client := &AlistClient{AlistID: 77, URL: server.URL, client: server.Client()}
+	alistClientListMu.Lock()
+	previousList := alistClientList
+	alistClientList = map[int64]*AlistClient{77: client}
+	alistClientListMu.Unlock()
+	defer func() {
+		alistClientListMu.Lock()
+		alistClientList = previousList
+		alistClientListMu.Unlock()
+	}()
+
+	if _, err := client.GetContext(context.Background(), "/api/fs/get", nil); err == nil {
+		t.Fatal("GetContext() error = nil, want an unauthorized error")
+	}
+	alistClientListMu.RLock()
+	_, stillCached := alistClientList[77]
+	alistClientListMu.RUnlock()
+	if stillCached {
+		t.Fatal("embedded 401 did not evict the cached client")
+	}
+}
+
+// scanInterval is a per-mount request-rate limit: concurrent callers must be
+// spaced by the configured interval, not by interval/concurrency (which
+// multiplied the request rate by the scan concurrency).
+func TestCheckWaitContextSpacesRequestsByConfiguredInterval(t *testing.T) {
+	client := &AlistClient{}
+	start := time.Now()
+	// Distinct buckets share nothing, so this one must not wait.
+	if err := client.CheckWaitContext(context.Background(), "/mnt/a/first", 1); err != nil {
+		t.Fatalf("first CheckWaitContext() error: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 300*time.Millisecond {
+		t.Fatalf("first call waited %v, want no wait", elapsed)
+	}
+	// Same top-level segment: must wait the full configured interval.
+	if err := client.CheckWaitContext(context.Background(), "/mnt/a/second", 1); err != nil {
+		t.Fatalf("second CheckWaitContext() error: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < 800*time.Millisecond {
+		t.Fatalf("second call returned after %v, want roughly the configured 1s interval", elapsed)
+	}
+}
+
+// A caller that gives up while waiting must roll its reservation back, or every
+// cancelled request pushes the next one further out.
+func TestCheckWaitContextCancelRestoresPreviousReservation(t *testing.T) {
+	client := &AlistClient{}
+	if err := client.CheckWaitContext(context.Background(), "/mnt/a/first", 1); err != nil {
+		t.Fatalf("first CheckWaitContext() error: %v", err)
+	}
+	client.mu.Lock()
+	first := client.waits["mnt"]
+	client.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := client.CheckWaitContext(ctx, "/mnt/a/cancelled", 1); err == nil {
+		t.Fatal("CheckWaitContext() error = nil, want the cancelled context error")
+	}
+
+	client.mu.Lock()
+	got := client.waits["mnt"]
+	client.mu.Unlock()
+	if got != first {
+		t.Fatalf("reservation after cancellation = %+v, want the previous slot %+v", got, first)
 	}
 }

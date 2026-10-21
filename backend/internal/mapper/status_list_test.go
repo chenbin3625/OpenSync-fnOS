@@ -19,6 +19,10 @@ func TestParseStatusListSplitsCommaSeparatedEntries(t *testing.T) {
 		{"partially unparseable", []string{"2,abc,7"}, []int{2, 7}},
 		{"spaces tolerated", []string{" 2 , 7 "}, []int{2, 7}},
 		{"int slice passthrough", []int{4, 5}, []int{4, 5}},
+		{"interface slice parsed strictly", []interface{}{"2", "abc", float64(7)}, []int{2, 7}},
+		{"interface slice malformed dropped, not zero", []interface{}{"abc"}, []int{}},
+		{"unknown scalar is not zero", true, []int{}},
+		{"malformed scalar dropped", "abc", []int{}},
 		{"nil", nil, nil},
 	}
 	for _, tc := range cases {

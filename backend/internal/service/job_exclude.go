@@ -205,6 +205,12 @@ func (matcher *excludeMatcher) matches(relativePath string, isDir bool) bool {
 				return true
 			}
 		case excludeDirectory:
+			// "build/" names a directory; a plain file called build is synced.
+			// Both sides are filtered alike, so this never exposes an excluded
+			// directory to deletion.
+			if !isDirectory {
+				continue
+			}
 			rulePath := strings.TrimSuffix(rule.value, "/")
 			if strings.Contains(rulePath, "/") {
 				if cleanPath == rulePath || strings.HasSuffix(cleanPath, "/"+rulePath) {
@@ -216,6 +222,34 @@ func (matcher *excludeMatcher) matches(relativePath string, isDir bool) bool {
 		}
 	}
 	return false
+}
+
+// matchesListed checks a listed entry against the rules under both its raw
+// relative path and its canonical spelling. Source and destination entries are
+// paired by canonicalFileName, so a destination that stores an escaped or
+// fullwidth form of a name ("a：b", "a%3Ab") must be excluded by the same rule
+// that excludes the source spelling. Otherwise the excluded destination entry
+// matches nothing at the source and mirror mode deletes it as extra.
+func (matcher *excludeMatcher) matchesListed(relativePath string, isDir bool) bool {
+	if matcher.matches(relativePath, isDir) {
+		return true
+	}
+	canonical := canonicalRelativePath(relativePath)
+	return canonical != relativePath && matcher.matches(canonical, isDir)
+}
+
+func canonicalRelativePath(relativePath string) string {
+	suffix := ""
+	trimmed := relativePath
+	if strings.HasSuffix(trimmed, "/") {
+		suffix = "/"
+		trimmed = strings.TrimSuffix(trimmed, "/")
+	}
+	segments := strings.Split(trimmed, "/")
+	for i, segment := range segments {
+		segments[i] = canonicalFileName(segment)
+	}
+	return strings.Join(segments, "/") + suffix
 }
 
 func simpleWildcardMatch(pattern, value string) bool {

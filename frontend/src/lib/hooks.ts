@@ -13,6 +13,11 @@ export function useResource<T>(
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  // Failure of a silent (background/polling) refresh, exposed separately so a
+  // consumer can keep rendering stale data with a "reconnecting" notice. It is
+  // also written to `error` for backwards compatibility: the realtime view
+  // (TaskExecution) relies on `error` to show that notice while data exists.
+  const [refreshError, setRefreshError] = useState("");
   const refresh = useCallback(async (silent = false) => {
     if (silent && abortRef.current) return;
     abortRef.current?.abort();
@@ -28,10 +33,17 @@ export function useResource<T>(
       if (!controller.signal.aborted && id === requestRef.current) {
         setData(result);
         setError("");
+        setRefreshError("");
       }
     } catch (err) {
-      if (!controller.signal.aborted && id === requestRef.current)
-        setError(getErrorMessage(err, "加载失败"));
+      if (!controller.signal.aborted && id === requestRef.current) {
+        const message = getErrorMessage(err, "加载失败");
+        setRefreshError(message);
+        // Kept identical to the previous behaviour so the realtime view keeps
+        // showing its "连接中断" notice; pages that want to keep stale data can
+        // read `refreshError` instead of `error`.
+        setError(message);
+      }
     } finally {
       if (id === requestRef.current) {
         abortRef.current = null;
@@ -58,7 +70,7 @@ export function useResource<T>(
   }, [depsKey, poll, refresh]);
   // setData is for callers that fetch outside the hook (the manual
   // "检查更新" request) and must publish the result without a second round trip.
-  return { data, loading, error, refresh, setData };
+  return { data, loading, error, refreshError, refresh, setData };
 }
 
 /** Returned when a run was dropped because another action was still in flight. */
@@ -91,13 +103,23 @@ export function useEditorForm<T extends object>(
 ) {
   const [form, setForm] = useState<T>(initial);
   const [dirty, setDirty] = useState(false);
+  // Snapshot of the form as it was opened, used to keep "dirty" honest: simply
+  // re-selecting the current value (or typing and reverting it) is not an
+  // unsaved change and must not trigger the "放弃修改？" / beforeunload prompts.
+  const initialRef = useRef(form);
+  const isPristine = (value: T) =>
+    (Object.keys(initialRef.current) as (keyof T)[]).every((key) =>
+      Object.is(value[key], initialRef.current[key]),
+    );
   const change = <K extends keyof T>(key: K, value: T[K]) => {
-    setDirty(true);
-    setForm((f) => ({ ...f, [key]: value }));
+    const next = { ...form, [key]: value };
+    setForm(next);
+    setDirty(!isPristine(next));
   };
   const patch = (values: Partial<T>) => {
-    setDirty(true);
-    setForm((f) => ({ ...f, ...values }));
+    const next = { ...form, ...values };
+    setForm(next);
+    setDirty(!isPristine(next));
   };
   return { form, dirty, change, patch, setForm, setDirty };
 }

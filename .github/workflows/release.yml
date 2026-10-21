@@ -84,6 +84,14 @@ jobs:
         run: npm test
         working-directory: frontend
 
+      # The unit tests run in Node, so neither the Vite plugin (Go embed
+      # placeholder, mock worker pruning) nor the production bundle is
+      # exercised before the release job builds it. Build once here so a broken
+      # vite.config.ts fails the test gate instead of the tagged release.
+      - name: Frontend production build
+        run: npm run build
+        working-directory: frontend
+
       - name: Go vet
         run: go vet ./...
         working-directory: backend
@@ -108,9 +116,47 @@ jobs:
       - name: Lifecycle script tests
         run: OPENSYNC_TEST_BINARY="$RUNNER_TEMP/opensync" npm run test:lifecycle
 
+  e2e:
+    name: E2E
+    needs: [version, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # Playwright starts both the Go backend (loopback --dev) and Vite itself.
+    # The data directory is isolated per run so the CRUD specs never depend on
+    # or mutate a reused SQLite file.
+    env:
+      CI: true
+      PLAYWRIGHT_CHANNEL: chromium
+      OPENSYNC_E2E_DATA_DIR: ${{ runner.temp }}/opensync-e2e-data
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+        working-directory: frontend
+
+      - name: Run e2e suite
+        run: npx playwright test
+        working-directory: frontend
+
   build:
     name: Build and upload
-    needs: [version, test]
+    needs: [version, test, e2e]
     runs-on: ubuntu-latest
     # Only this job may create the Release. Scoped here instead of at workflow
     # level so test/e2e run without any write token in their environment.

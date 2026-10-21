@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { jobGetTaskCurrent } from "../../api/job";
 import { useResource } from "../../lib/hooks";
 import { useClampedPage } from "../../lib/pagination";
@@ -54,6 +54,12 @@ export function useRealtimeTaskItems({
     pageSize,
     refreshToken,
   ].join(":");
+  // A new task reuses the same status tab, but never the old page number:
+  // page N of the previous task usually does not exist, so asking for it only
+  // produced an empty page that useClampedPage then pulled back to page 1.
+  useEffect(() => {
+    setTabTaskPageValue(1);
+  }, [taskIdentity]);
   const requestIdentity = currentTask
     ? {
         taskId: currentTask.taskId,

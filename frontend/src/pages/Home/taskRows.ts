@@ -97,6 +97,41 @@ export function normalizeTaskItemPage(
   return { rows: [], total: 0 };
 }
 
+function sameTaskItemKey(item: TaskItem, patch: TaskItem): boolean {
+  const patchId = patch.id === undefined || patch.id === null ? 0 : Number(patch.id);
+  if (patchId > 0) return Number(item.id) === patchId;
+  if (patch.alistTaskId) return item.alistTaskId === patch.alistTaskId;
+  // Path-keyed items are only used before AList returns a remote task id; the
+  // patch carries all three path pieces for that case (see streamKey backend).
+  return (
+    (item.fileName || "") === (patch.fileName || "") &&
+    (item.srcPath || "") === (patch.srcPath || "") &&
+    (item.dstPath || "") === (patch.dstPath || "")
+  );
+}
+
+/**
+ * Applies an SSE `doingPatch` frame to the previous `doingTask` list.
+ *
+ * The backend only emits patches while the set of in-progress files is stable
+ * (add/remove ships a full snapshot), so patches normally update existing rows.
+ * A patch without a matching row is appended defensively: dropping it would
+ * silently freeze a progress bar, and the next full snapshot reconciles it.
+ */
+export function mergeTaskItemPatches(
+  base: TaskItem[],
+  patches: TaskItem[] | null | undefined,
+): TaskItem[] {
+  if (!Array.isArray(patches) || patches.length === 0) return base;
+  const next = base.slice();
+  for (const patch of patches) {
+    const index = next.findIndex((item) => sameTaskItemKey(item, patch));
+    if (index >= 0) next[index] = { ...next[index], ...patch };
+    else next.push(patch);
+  }
+  return next;
+}
+
 export function taskProgressPercent(progress: unknown): number {
   const value = Number(progress);
   if (!Number.isFinite(value)) return 0;
@@ -144,11 +179,17 @@ export function calcRealtimeProgress(
   } else if (
     previous &&
     typeof previous.duration === "number" &&
-    cur.duration !== previous.duration
+    typeof cur.duration === "number" &&
+    cur.duration > previous.duration
   ) {
-    speed =
+    // Only a forward-moving clock yields a meaningful rate; a rescan/reset can
+    // make duration (or doneSize) smaller, which used to render a negative
+    // speed as "0 B/s" and briefly looked like a stalled transfer.
+    speed = Math.max(
+      0,
       (doneSize - (previous.doneSize || 0)) /
-      (cur.duration - previous.duration);
+        (cur.duration - previous.duration),
+    );
   }
 
   let speedAvg = 0;

@@ -84,8 +84,8 @@ if (runTests) {
     cwd: join(root, "frontend"),
     env: envWithNode(node.dir),
   });
-  console.log("· Go：go test ./...");
-  run("go", ["test", "./..."], { cwd: join(root, "backend") });
+  console.log("· Go：go test -race ./...");
+  run("go", ["test", "-race", "./..."], { cwd: join(root, "backend") });
 }
 
 // ── 4. 前端构建 ──────────────────────────────────────────────────────────

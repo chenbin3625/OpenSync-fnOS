@@ -35,15 +35,23 @@ func ConvertSeconds(seconds int) (int, int, int) {
 	return hours, minutes, secs
 }
 
-// ToInt converts various types to int
+// ToInt converts various types to int. Numeric values that do not fit in int
+// (NaN, ±Inf, fractional or out-of-range float64) are rejected as 0 instead of
+// relying on Go's implementation-defined float-to-int conversion, which would
+// otherwise yield a surprising huge negative value from JSON numbers such as
+// 1e300.
 func ToInt(v interface{}) int {
 	switch val := v.(type) {
 	case int:
 		return val
 	case int64:
-		return int(val)
+		return int64ToInt(val)
 	case float64:
-		return int(val)
+		n, ok := integralFloatToInt64(val)
+		if !ok {
+			return 0
+		}
+		return int64ToInt(n)
 	case string:
 		val = strings.TrimSpace(val)
 		if val == "" {
@@ -67,7 +75,11 @@ func ToInt64(v interface{}) int64 {
 	case int:
 		return int64(val)
 	case float64:
-		return int64(val)
+		n, ok := integralFloatToInt64(val)
+		if !ok {
+			return 0
+		}
+		return n
 	case string:
 		val = strings.TrimSpace(val)
 		if val == "" {
@@ -81,6 +93,31 @@ func ToInt64(v interface{}) int64 {
 	default:
 		return 0
 	}
+}
+
+// integralFloatToInt64 converts v when it is a finite integer representable as
+// int64. NaN, ±Inf, fractional values and values outside the int64 range return
+// ok=false; the caller maps that to its documented zero value.
+func integralFloatToInt64(v float64) (int64, bool) {
+	if math.IsNaN(v) || math.IsInf(v, 0) || v != math.Trunc(v) {
+		return 0, false
+	}
+	// 2^63 is exactly representable as float64 and is one past math.MaxInt64.
+	const maxInt64Exclusive = float64(1 << 63)
+	if v < math.MinInt64 || v >= maxInt64Exclusive {
+		return 0, false
+	}
+	return int64(v), true
+}
+
+// int64ToInt narrows n to int, returning 0 when the value does not fit (only
+// possible on 32-bit platforms, but keeps the helper safe everywhere).
+func int64ToInt(n int64) int {
+	i := int(n)
+	if int64(i) != n {
+		return 0
+	}
+	return i
 }
 
 // ToFloat64 converts various types to float64
@@ -120,11 +157,18 @@ func StringValue(v interface{}) string {
 	return fmt.Sprintf("%v", v)
 }
 
-// ValidateHTTPURL checks that rawURL is a valid http or https URL.
-// Returns an error with errMsg if invalid.
+// ValidateHTTPURL checks that rawURL is a syntactically valid http or https
+// URL. Returns an error with errMsg if invalid.
+//
+// Embedded credentials ("http://user:pass@host") are rejected so a stored URL
+// cannot smuggle a secret that would later be logged or sent. Note that this
+// only validates syntax: loopback/private hosts are accepted on purpose because
+// AList is commonly deployed on the same NAS (a malicious administrator could
+// otherwise use the URL as an SSRF primitive). Callers must keep this input
+// administrator-only.
 func ValidateHTTPURL(rawURL, errMsg string) error {
 	u, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil || u.Scheme == "" || u.Host == "" {
+	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil {
 		return errors.New(errMsg)
 	}
 	scheme := strings.ToLower(u.Scheme)
@@ -134,19 +178,45 @@ func ValidateHTTPURL(rawURL, errMsg string) error {
 	return nil
 }
 
-// ToBool converts various types to bool
+// ToBool converts various types to bool. Strings are trimmed and accept the
+// same spellings as handler.parseEnableValue ("1"/"true"/"yes"/"on" and
+// "0"/"false"/"no"/"off") so a stored JSON value such as " true " is not
+// silently treated as false.
 func ToBool(v interface{}) bool {
 	switch val := v.(type) {
 	case bool:
 		return val
 	case int:
 		return val != 0
+	case int8:
+		return val != 0
+	case int16:
+		return val != 0
+	case int32:
+		return val != 0
 	case int64:
+		return val != 0
+	case uint:
+		return val != 0
+	case uint8:
+		return val != 0
+	case uint16:
+		return val != 0
+	case uint32:
+		return val != 0
+	case uint64:
+		return val != 0
+	case float32:
 		return val != 0
 	case float64:
 		return val != 0
 	case string:
-		return val == "1" || strings.EqualFold(val, "true")
+		switch strings.ToLower(strings.TrimSpace(val)) {
+		case "1", "true", "yes", "on":
+			return true
+		default:
+			return false
+		}
 	default:
 		return false
 	}

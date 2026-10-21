@@ -1,4 +1,4 @@
-import { useRef, useState, type MutableRefObject } from "react";
+import { useId, useRef, useState, type MutableRefObject } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import { Form } from "@douyinfe/semi-ui/lib/es/form";
 import Input from "@douyinfe/semi-ui/lib/es/input";
@@ -37,6 +37,7 @@ import {
   cronFields,
   cronTypeNames,
   formatSchedulePlan,
+  legacyMoveMethodLabel,
   methodOptions,
 } from "./Home/homeUtils";
 import {
@@ -50,6 +51,13 @@ import type { AlistItem, JobItem } from "../types";
 type CronFieldName = "second" | "minute" | "hour" | "day" | "month" | "day_of_week";
 type FileSizeDraftKey = "minFileSize" | "maxFileSize";
 type FileSizeDrafts = Partial<Record<FileSizeDraftKey, string>>;
+
+// The interval input is edited as text: keeping the raw draft lets the user
+// clear the field or type a partial number without it being rewritten to 0.
+function parseIntervalInput(value: string): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : 0;
+}
 
 const taskEditorTabs = [
   { key: "engine", label: "引擎与路径" },
@@ -91,6 +99,13 @@ export default function TaskEditor({
     job ? jobToForm(job) : defaultJobForm(engines[0]?.id),
   );
   const fileSizeDrafts = useRef<FileSizeDrafts>({});
+  const [intervalDraft, setIntervalDraft] = useState<string | null>(null);
+  // Legacy backend method 2 ("move") is not part of the current two-mode UI,
+  // but opening and saving such a job must not silently rewrite it to 0
+  // (incremental copy). Until the user touches the select, keep the stored
+  // value in both the display and the payload.
+  const [methodTouched, setMethodTouched] = useState(false);
+  const legacyMethod = job?.method === 2;
   const isNew = !job;
   const [step, setStep] = useState(0);
   const [activeTab, setActiveTab] = useState("engine");
@@ -119,9 +134,16 @@ export default function TaskEditor({
       Toast.warning(validation);
       return;
     }
+    const payload = buildJobPayload(formToSave);
+    if (legacyMethod && !methodTouched && form.method !== 2) {
+      // taskForm's normalizeJobMethod may still have folded 2 to 0; the page
+      // owns the "don't lose the stored mode" guarantee until the user edits
+      // the select.
+      payload.method = 2;
+    }
     void action.run(async () => {
       try {
-        await api.saveJob(buildJobPayload(formToSave));
+        await api.saveJob(payload);
         fileSizeDrafts.current = {};
         setDirty(false);
         Toast.success(job ? "编辑成功，下次任务生效" : "任务已创建");
@@ -205,48 +227,58 @@ export default function TaskEditor({
                         alistId: Number(value),
                         srcPath: [],
                         dstPath: [],
+                        // 文件夹过滤记录的是旧引擎源目录下的相对路径，换引擎后不再对应
+                        exclude: updateExcludeFolders(current.exclude, []),
                       }));
                     }}
                   />
                 </Field>
                 <div className="form-grid">
                   <Field label="源路径" required>
-                    <RemotePaths
-                      key={`src-${form.alistId}`}
-                      engineId={form.alistId}
-                      value={form.srcPath}
-                      onChange={(paths) => change("srcPath", paths)}
-                      multiple={false}
-                    />
-                    <SettingRow
-                      label="源端缓存"
-                      variant="bordered"
-                      tip="开启后优先使用引擎缓存目录列表，减少远程请求次数，提升同步速度"
-                    >
-                      <Switch
-                        checked={form.useCacheS}
-                        onChange={(value) => change("useCacheS", value)}
+                    <div className="field-group" role="group">
+                      <RemotePaths
+                        key={`src-${form.alistId}`}
+                        engineId={form.alistId}
+                        value={form.srcPath}
+                        onChange={(paths) => change("srcPath", paths)}
+                        multiple={false}
+                        ariaLabel="选择源目录"
                       />
-                    </SettingRow>
+                      <SettingRow
+                        label="源端缓存"
+                        variant="bordered"
+                        tip="开启后优先使用引擎缓存目录列表，减少远程请求次数，提升同步速度"
+                      >
+                        <Switch
+                          aria-label="源端缓存"
+                          checked={form.useCacheS}
+                          onChange={(value) => change("useCacheS", value)}
+                        />
+                      </SettingRow>
+                    </div>
                   </Field>
                   <Field label="目标路径" required>
-                    <RemotePaths
-                      key={`dst-${form.alistId}`}
-                      engineId={form.alistId}
-                      value={form.dstPath}
-                      onChange={(paths) => change("dstPath", paths)}
-                      multiple={false}
-                    />
-                    <SettingRow
-                      label="目标缓存"
-                      variant="bordered"
-                      tip="开启后优先使用引擎缓存目录列表，减少远程请求次数，提升同步速度"
-                    >
-                      <Switch
-                        checked={form.useCacheT}
-                        onChange={(value) => change("useCacheT", value)}
+                    <div className="field-group" role="group">
+                      <RemotePaths
+                        key={`dst-${form.alistId}`}
+                        engineId={form.alistId}
+                        value={form.dstPath}
+                        onChange={(paths) => change("dstPath", paths)}
+                        multiple={false}
+                        ariaLabel="选择目标目录"
                       />
-                    </SettingRow>
+                      <SettingRow
+                        label="目标缓存"
+                        variant="bordered"
+                        tip="开启后优先使用引擎缓存目录列表，减少远程请求次数，提升同步速度"
+                      >
+                        <Switch
+                          aria-label="目标缓存"
+                          checked={form.useCacheT}
+                          onChange={(value) => change("useCacheT", value)}
+                        />
+                      </SettingRow>
+                    </div>
                   </Field>
                 </div>
               </div>
@@ -272,12 +304,27 @@ export default function TaskEditor({
                     ariaLabel="同步方式"
                   >
                     <Select
-                      value={form.method}
-                      optionList={methodOptions.map((method, value) => ({
-                        value,
-                        label: method.name,
-                      }))}
-                      onChange={(value) => change("method", Number(value))}
+                      value={
+                        legacyMethod && !methodTouched ? 2 : form.method
+                      }
+                      optionList={[
+                        ...methodOptions.map((method, value) => ({
+                          value,
+                          label: method.name,
+                        })),
+                        ...(legacyMethod || form.method === 2
+                          ? [
+                              {
+                                value: 2,
+                                label: legacyMoveMethodLabel,
+                              },
+                            ]
+                          : []),
+                      ]}
+                      onChange={(value) => {
+                        setMethodTouched(true);
+                        change("method", Number(value));
+                      }}
                     />
                   </Field>
                   <Field label="调度方式">
@@ -295,11 +342,13 @@ export default function TaskEditor({
                   <Field label="执行间隔（分钟）">
                     <Input
                       inputMode="numeric"
-                      value={String(form.interval)}
+                      value={intervalDraft ?? String(form.interval)}
                       onChange={(value) => {
-                        const n = Number(value);
-                        change("interval", Number.isFinite(n) ? n : 0);
+                        // 保留原始输入，清空或输入到一半时不被强制改写成 0
+                        setIntervalDraft(value);
+                        change("interval", parseIntervalInput(value));
                       }}
+                      onBlur={() => setIntervalDraft(null)}
                     />
                   </Field>
                 )}
@@ -309,6 +358,7 @@ export default function TaskEditor({
                       <Field key={field.name} label={field.label}>
                         <Input
                           value={form[field.name as CronFieldName]}
+                          placeholder={field.placeholder}
                           onChange={(value) =>
                             change(
                               field.name as CronFieldName,
@@ -327,7 +377,7 @@ export default function TaskEditor({
             )}
             {activePanel === "filter" && (
               <div className="form-section">
-                <div className="file-size-filters" aria-label="文件大小过滤">
+                <div className="file-size-filters" role="group" aria-label="文件大小过滤">
                   {(["min", "max"] as const).map((kind) => (
                     <FileSizeFilterRow
                       key={kind}
@@ -356,20 +406,24 @@ export default function TaskEditor({
                   label="文件夹过滤"
                   hint="仅针对源目录，勾选要忽略的子文件夹"
                 >
-                  <ExcludeTree
+                  {/* ExcludeTree forwards id/aria-*; the group keeps the
+                      visible Field label associated with the tree region. */}
+                  <div className="field-group" role="group">
+                    <ExcludeTree
                     engineId={form.alistId}
                     srcPaths={form.srcPath}
                     excludedPaths={parseExcludeFolders(form.exclude)}
-                    onChange={(folders) =>
-                      change(
-                        "exclude",
-                        updateExcludeFolders(form.exclude, folders),
-                      )
-                    }
-                  />
+                      onChange={(folders) =>
+                        change(
+                          "exclude",
+                          updateExcludeFolders(form.exclude, folders),
+                        )
+                      }
+                    />
+                  </div>
                 </Field>
                 <Field label="系统目录过滤" hint="忽略操作系统和 NAS 的系统目录">
-                  <div className="system-dir-groups">
+                  <div className="system-dir-groups" role="group">
                     {systemDirFilterGroups.map((group) => {
                       const selected = group.patterns.filter((p) =>
                         isExcludePatternEnabled(form.exclude, p),
@@ -441,6 +495,7 @@ function FileSizeFilterRow({
       : String(config.value);
   const displayUnit = enabled ? form[unitKey] : config.unit;
   const controlLabel = `${config.label}文件大小`;
+  const unitLabelId = useId();
 
   const commitInput = (raw: string) => {
     setDraft(null);
@@ -481,8 +536,11 @@ function FileSizeFilterRow({
           commitInput((event.target as HTMLInputElement).value ?? "")
         }
       />
+      <span id={unitLabelId} className="sr-only">
+        {controlLabel}单位
+      </span>
       <Select
-        aria-label={`${controlLabel}单位`}
+        aria-labelledby={unitLabelId}
         disabled={!enabled}
         value={displayUnit}
         optionList={fileSizeUnitOptions}

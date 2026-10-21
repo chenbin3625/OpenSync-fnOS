@@ -2,6 +2,7 @@ import Notification from "@douyinfe/semi-ui/lib/es/notification";
 import { IconArrowUp } from "@douyinfe/semi-icons";
 import type { LatestVersion } from "../api/client";
 import { formatVersion, latestReleaseURL } from "./VersionLink";
+import { openExternalURL } from "../lib/host";
 
 /**
  * Remembers which release the user has already been told about, so a reload
@@ -32,6 +33,10 @@ export function notifyUpdateAvailable(
           href={url}
           target="_blank"
           rel="noopener noreferrer"
+          onClick={(event) => {
+            event.preventDefault();
+            void openExternalURL(url);
+          }}
         >
           前往 GitHub 下载升级
         </a>
@@ -49,7 +54,7 @@ export function notifyUpdateAvailable(
     // 卡片整体可点击；点在链接上时让浏览器自己处理，避免开两个标签页。
     onClick: (event: MouseEvent) => {
       if ((event?.target as HTMLElement | null)?.closest("a")) return;
-      window.open(url, "_blank", "noopener,noreferrer");
+      void openExternalURL(url);
     },
   });
 }

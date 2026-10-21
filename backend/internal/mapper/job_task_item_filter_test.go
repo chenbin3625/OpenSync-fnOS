@@ -62,10 +62,9 @@ func setupTaskItemFilterDB(t *testing.T) *sql.DB {
 		}
 	}
 
-	oldDB := db
-	db = testDB
+	restore := SetDBForTest(testDB)
 	t.Cleanup(func() {
-		db = oldDB
+		restore()
 		testDB.Close()
 	})
 

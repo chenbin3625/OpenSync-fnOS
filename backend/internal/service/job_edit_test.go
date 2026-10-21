@@ -1,8 +1,11 @@
 package service
 
 import (
+	"errors"
 	"opensync/internal/config"
 	"opensync/internal/mapper"
+	"opensync/internal/msg"
+	"opensync/pkg/util"
 	"path/filepath"
 	"testing"
 )
@@ -122,6 +125,78 @@ func resetJobClientsForTest() {
 	}
 	jobClientList = make(map[int64]*JobClient)
 	jobClientListMu.Unlock()
+}
+
+// Editing a job must validate the engine reference under the same lock
+// RemoveClient uses; otherwise the job can point at an engine that no longer
+// exists and only fails when the next task starts.
+func TestEditJobClientRejectsUnknownEngine(t *testing.T) {
+	oldConfig := config.GetConfig()
+	config.SetConfigForTest(&config.Config{
+		DB: config.DBConfig{DBName: filepath.Join(t.TempDir(), "opensync-test.db")},
+		Server: config.ServerConfig{
+			Timeout:         0,
+			CopyConcurrency: 1,
+			ScanConcurrency: 1,
+			PasswdStr:       "test-secret",
+		},
+	})
+	defer config.SetConfigForTest(oldConfig)
+	_ = mapper.CloseDB()
+	defer func() { _ = mapper.CloseDB() }()
+	mapper.InitSQL()
+	resetJobClientsForTest()
+	defer resetJobClientsForTest()
+
+	d := *alistDeps
+	d.GetAlistByID = func(alistID int64) (map[string]interface{}, error) {
+		if alistID == 2 {
+			return nil, errors.New(msg.T(msg.AlistNotFound))
+		}
+		return map[string]interface{}{"id": alistID, "url": "https://alist.test", "token": "t"}, nil
+	}
+	restoreAlistDeps := SetAlistDepsForTest(&d)
+	defer restoreAlistDeps()
+
+	base := func(alistID int64, remark string) map[string]interface{} {
+		return map[string]interface{}{
+			"enable":        1,
+			"remark":        remark,
+			"srcPath":       []string{"/src"},
+			"dstPath":       []string{"/dst"},
+			"alistId":       alistID,
+			"useCacheT":     0,
+			"scanIntervalT": 0,
+			"useCacheS":     0,
+			"scanIntervalS": 0,
+			"method":        0,
+			"interval":      60,
+			"isCron":        0,
+			"minFileSize":   0,
+			"maxFileSize":   0,
+		}
+	}
+	if err := AddJobClient(base(1, "original"), false); err != nil {
+		t.Fatalf("AddJobClient: %v", err)
+	}
+	client := onlyJobClientForTest(t)
+
+	edit := base(2, "edited")
+	edit["id"] = client.JobID
+	if err := EditJobClient(edit); err == nil {
+		t.Fatal("EditJobClient() accepted an engine that does not exist")
+	}
+
+	stored, err := mapper.GetJobByID(client.JobID)
+	if err != nil {
+		t.Fatalf("GetJobByID() error: %v", err)
+	}
+	if got := util.ToInt64(stored["alistId"]); got != 1 {
+		t.Fatalf("stored alistId = %d, want the rejected edit to leave 1", got)
+	}
+	if got := util.ToInt64(client.jobSnapshot()["alistId"]); got != 1 {
+		t.Fatalf("in-memory alistId = %d, want the rejected edit to leave 1", got)
+	}
 }
 
 func onlyJobClientForTest(t *testing.T) *JobClient {

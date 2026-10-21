@@ -77,6 +77,35 @@ describe("mock store", () => {
     ).toBe(4);
   });
 
+  it("filters history by terminal status and an exclusive end boundary", () => {
+    const store = createMockStore({
+      jobs: [{ id: 3, remark: "历史过滤", enable: 1 }],
+      history: {
+        3: [
+          { id: 101, status: 2, createTime: 1_700_000_000 },
+          { id: 102, status: 7, createTime: 1_700_000_100 },
+          { id: 103, status: 4, createTime: 1_700_000_200 },
+        ],
+      },
+    });
+
+    const statusIn = store.listHistory(3, {
+      statusIn: [2, 7],
+      pageNum: 1,
+      pageSize: 20,
+    });
+    expect(statusIn.dataList.map((record) => record.id)).toEqual([101, 102]);
+
+    const ranged = store.listHistory(3, {
+      startTime: 1_700_000_050,
+      endTimeExclusive: 1_700_000_200,
+      pageNum: 1,
+      pageSize: 20,
+    });
+    expect(ranged.dataList.map((record) => record.id)).toEqual([102]);
+    expect(ranged.count).toBe(1);
+  });
+
   it("returns a page scoped to the requested realtime status", () => {
     const store = createMockStore({
       jobs: [{ id: 9, remark: "实时任务", enable: 1 }],

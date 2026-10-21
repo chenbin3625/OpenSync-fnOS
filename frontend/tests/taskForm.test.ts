@@ -5,9 +5,11 @@ import {
   fileTypeFilterGroups,
   isExcludePatternEnabled,
   jobToForm,
+  normalizeCustomFileTypePattern,
   parseExcludeFolders,
   selectJob,
   systemDirFilterGroups,
+  updateExcludePatterns,
   updateExcludeFolders,
   validateJobForm,
 } from "../src/lib/taskForm";
@@ -105,7 +107,10 @@ describe("existing synchronization contracts", () => {
       ["*.tmp", "*.temp"],
       false,
     );
-    expect(disabled).toContain("# *.tmp");
+    // No "# " comment: the backend drops comments on save, so a disabled rule
+    // must be removed instead of being parked as a comment.
+    expect(disabled).not.toContain("*.tmp");
+    expect(disabled).toContain("# *.log");
     expect(disabled).toContain("keep-this/");
     expect(disabled).toContain("photos/raw/");
 
@@ -124,7 +129,7 @@ describe("existing synchronization contracts", () => {
       ["#recycle/"],
       false,
     );
-    expect(disabled).toBe("# #recycle/");
+    expect(disabled).toBe("");
     expect(isExcludePatternEnabled(disabled, "#recycle/")).toBe(false);
     expect(
       taskFormModule.updateExcludePatterns(
@@ -162,10 +167,13 @@ describe("existing synchronization contracts", () => {
     ]);
     expect(isExcludePatternEnabled(added, "*.doc")).toBe(true);
     const disabled = filters.updateExcludePatterns!(added, ["a.bcd"], false);
+    // "禁用" == 删除：后端 normalizeExclude 会丢弃 "# " 注释，保留注释形式的
+    // 禁用规则只会在保存后静默消失。
     expect(filters.parseOtherFileTypeFilters!(disabled)).toEqual([
-      { pattern: "a.bcd", enabled: false },
       { pattern: "ipc-socket", enabled: true },
     ]);
+    expect(disabled).not.toContain("a.bcd");
+    expect(disabled).not.toContain("# a.bcd");
     expect(isExcludePatternEnabled(disabled, "*.doc")).toBe(true);
     expect(disabled).toContain(".DS_Store");
   });
@@ -199,15 +207,19 @@ describe("existing synchronization contracts", () => {
       ) => string;
     };
     const added = filters.addCustomFileTypeFilter!("", "*.PST");
+    expect(isExcludePatternEnabled(added, "*.pst")).toBe(true);
     const disabled = filters.updateExcludePatterns!(
       added,
       ["*.pst"],
       false,
     );
 
-    expect(disabled).toBe("# --- 自定义文件过滤 ---\n# *.PST\n# --- 自定义文件过滤结束 ---");
+    // The live rule is removed; the marker comments (which the backend drops on
+    // save anyway) are left alone.
+    expect(disabled).not.toContain("*.PST");
+    expect(filters.parseOtherFileTypeFilters!(disabled)).toEqual([]);
     expect(
-      filters.removeCustomFileTypeFilter!(disabled, "*.pst"),
+      filters.removeCustomFileTypeFilter!(added, "*.pst"),
     ).toBe("");
   });
   it("treats legacy manual file patterns and file names as other file filters", () => {
@@ -265,8 +277,8 @@ describe("existing synchronization contracts", () => {
       dstPath: ["/c"],
     });
   });
-  it("normalizes unsupported legacy synchronization methods when editing", () => {
-    const form = jobToForm({
+  it("preserves the legacy move method when editing (backend still implements it)", () => {
+    const job = {
       id: 9,
       alistId: 7,
       srcPath: '["/a"]',
@@ -277,9 +289,54 @@ describe("existing synchronization contracts", () => {
       useCacheT: 0,
       interval: 0,
       isCron: 2,
-    });
+    };
+    const form = jobToForm(job);
 
-    expect(form.method).toBe(0);
+    // method 2 = move (copy + delete source) in backend/internal/service/
+    // task_scan.go; silently normalizing it to 0 turned a move job into a copy.
+    expect(form.method).toBe(2);
+    expect(buildJobPayload(form).method).toBe(2);
+  });
+
+  it("rejects sources and destinations that are equal or nested", () => {
+    const base = { ...defaultJobForm(7), remark: "路径校验" };
+    const error = (srcPath: string[], dstPath: string[]) =>
+      validateJobForm({ ...base, srcPath, dstPath });
+
+    expect(error(["/Photos"], ["/Photos"])).toContain("源目录与目标目录");
+    expect(error(["/Photos"], ["/Photos/Backup"])).toContain("源目录与目标目录");
+    expect(error(["/Photos/Backup"], ["/Photos"])).toContain("源目录与目标目录");
+    // 归一化后相同（尾斜杠/重复斜杠）也要能识别
+    expect(error(["/Photos/"], ["//Photos"])).toContain("源目录与目标目录");
+    expect(error(["/Photos", "/Photos/Raw"], ["/Backup"])).toContain(
+      "多个源目录",
+    );
+    expect(error(["/Photos"], ["/Backup", "/Backup/Nightly"])).toContain(
+      "多个目标目录",
+    );
+    expect(error(["/Photos"], ["/Backup"])).toBe("");
+  });
+
+  it("validates custom file filter input before trying to add it", () => {
+    expect(normalizeCustomFileTypePattern("  ")).toBe("");
+    expect(normalizeCustomFileTypePattern("folder/name.txt")).toBe("");
+    expect(normalizeCustomFileTypePattern("!important.txt")).toBe("");
+    expect(normalizeCustomFileTypePattern("*.PST")).toBe("*.PST");
+    expect(normalizeCustomFileTypePattern("ipc-socket")).toBe("ipc-socket");
+    // A duplicate add must be detectable without treating it as invalid input.
+    const exclude = updateExcludePatterns("", ["*.pst"], true);
+    expect(isExcludePatternEnabled(exclude, "*.pst")).toBe(true);
+    expect(normalizeCustomFileTypePattern("*.pst")).toBe("*.pst");
+  });
+
+  it("keeps user comments untouched when toggling rules", () => {
+    const withComment = "# 这是说明\n*.tmp";
+    expect(updateExcludePatterns(withComment, ["*.tmp"], false)).toBe(
+      "# 这是说明",
+    );
+    expect(updateExcludePatterns(withComment, ["*.log"], true)).toBe(
+      "# 这是说明\n*.tmp\n*.log",
+    );
   });
   it("rejects missing paths, inverted sizes and invalid Cron ranges", () => {
     const namedForm = { ...defaultJobForm(7), remark: "测试任务" };

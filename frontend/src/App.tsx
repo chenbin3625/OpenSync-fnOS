@@ -85,7 +85,15 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
   const notifiedRelease = useRef<string | null>(null);
   const taskItems = taskMenu.data?.dataList || [];
   const hasTaskItems = taskItems.length > 0;
-  const currentTaskId = new URLSearchParams(search).get("jobId");
+  const rawJobId = new URLSearchParams(search).get("jobId");
+  const currentTaskId = rawJobId && /^\d+$/.test(rawJobId) ? rawJobId : null;
+  // Tasks.selectJob() falls back to the first job when the URL has no jobId, so
+  // the sidebar must highlight the same row instead of showing nothing selected.
+  const activeTaskId =
+    currentTaskId ??
+    (pathname.startsWith("/tasks") && taskItems[0]
+      ? String(taskItems[0].id)
+      : null);
   const taskHref = (jobId: number) => {
     const next = new URLSearchParams(pathname.startsWith("/tasks") ? search : "");
     next.set("jobId", String(jobId));
@@ -119,6 +127,19 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
     const refresh = () => void taskMenu.refresh();
     window.addEventListener("opensync:jobs-changed", refresh);
     return () => window.removeEventListener("opensync:jobs-changed", refresh);
+  }, [taskMenu.refresh]);
+  useEffect(() => {
+    // Jobs can be changed from the Tasks page, another tab or the scheduler.
+    // Refreshing on focus keeps the sidebar list from going stale indefinitely.
+    let lastRefresh = Date.now();
+    const refresh = () => {
+      if (document.visibilityState !== "visible") return;
+      if (Date.now() - lastRefresh < 60_000) return;
+      lastRefresh = Date.now();
+      void taskMenu.refresh(true);
+    };
+    document.addEventListener("visibilitychange", refresh);
+    return () => document.removeEventListener("visibilitychange", refresh);
   }, [taskMenu.refresh]);
   useEffect(() => {
     // 后端成功结果缓存 30 分钟（backend/cmd/server/version_checker.go），前端按
@@ -179,6 +200,7 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
       value={{
         currentVersion: version,
         latest: latest.data,
+        latestError: latest.error,
         checking,
         checkUpdate,
       }}
@@ -226,13 +248,26 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
                 <span className="nav-label">任务管理</span>
               </NavLink>
             )}
+            {taskMenu.error && (
+              <div className="sidebar-task-error" role="status">
+                <span className="inline-error">{taskMenu.error}</span>
+                <Button
+                  theme="borderless"
+                  size="small"
+                  loading={taskMenu.loading}
+                  onClick={() => void taskMenu.refresh()}
+                >
+                  重试
+                </Button>
+              </div>
+            )}
             {hasTaskItems && taskMenuOpen && (
               <div className="nav-submenu" id="task-menu">
                 {taskItems.map((job) => (
                   <NavLink
                     key={job.id}
                     to={taskHref(job.id)}
-                    className={`task-sub-link${currentTaskId === String(job.id) ? " selected" : ""}`}
+                    className={`task-sub-link${activeTaskId === String(job.id) ? " selected" : ""}`}
                     title={getJobName(job)}
                   >
                     <IconFolderStroked
@@ -298,7 +333,7 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
   );
 }
 function Workspace() {
-  const session = useResource(() => api.session());
+  const session = useResource((signal) => api.session(signal));
   const refreshSession = session.refresh;
   // Parallel requests that all hit 401 each dispatch the event; the guard
   // collapses them into one /session check instead of aborting and restarting

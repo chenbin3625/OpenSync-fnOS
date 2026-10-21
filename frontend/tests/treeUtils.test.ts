@@ -52,6 +52,36 @@ describe("patchTreeNodes", () => {
   });
 });
 
+describe("toTreeChildren", () => {
+  it("builds absolute keys from names returned by the path API", () => {
+    expect(toTreeChildren("/Photos", [{ name: "Albums" }, { path: "Raw" }])).toEqual([
+      { label: "Albums", value: "/Photos/Albums", key: "/Photos/Albums", isLeaf: false },
+      { label: "Raw", value: "/Photos/Raw", key: "/Photos/Raw", isLeaf: false },
+    ]);
+  });
+
+  it("joins at the root without a double slash", () => {
+    expect(toTreeChildren("/", [{ name: "Photos" }])[0].key).toBe("/Photos");
+  });
+
+  it("tolerates a missing name and an empty list", () => {
+    expect(toTreeChildren("/A", [{}])[0].key).toBe("/A/");
+    expect(toTreeChildren("/A", undefined as never)).toEqual([]);
+  });
+});
+
+describe("collectTreeKeys", () => {
+  it("collects nested keys once", () => {
+    const tree = [node("/", [node("/A", [node("/A/B")]), node("/C")])];
+    expect([...collectTreeKeys(tree)].sort()).toEqual([
+      "/",
+      "/A",
+      "/A/B",
+      "/C",
+    ]);
+  });
+});
+
 describe("sortPathsByDepth", () => {
   it("orders parents before children", () => {
     expect(sortPathsByDepth(["/A/B", "/", "/C", "/A"])).toEqual([

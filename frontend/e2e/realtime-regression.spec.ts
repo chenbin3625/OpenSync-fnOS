@@ -1097,11 +1097,16 @@ test("engine connectivity checks are serialized", async ({ page }) => {
   const buttons = page.getByRole("button", { name: "测试引擎", exact: true });
   await buttons.first().click();
   await requestStarted;
-  await expect(buttons).toHaveCount(2);
-  await expect(buttons.nth(0)).toBeDisabled();
-  await expect(buttons.nth(1)).toBeDisabled();
+  // The active engine shows progress feedback and every button is disabled so
+  // two connectivity checks cannot overlap; the other engine keeps its label.
+  const testing = page.getByRole("button", { name: "测试中…", exact: true });
+  await expect(testing).toHaveCount(1);
+  await expect(testing).toBeDisabled();
+  await expect(buttons).toHaveCount(1);
+  await expect(buttons.first()).toBeDisabled();
   finishRequest?.();
-  await expect(buttons.nth(0)).toBeEnabled();
+  await expect(buttons).toHaveCount(2);
+  await expect(buttons.first()).toBeEnabled();
 });
 
 test("history load errors stay visible and can be retried", async ({ page }) => {

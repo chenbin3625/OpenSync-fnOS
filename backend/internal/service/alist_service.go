@@ -15,11 +15,17 @@ var (
 	alistClientList   = make(map[int64]*AlistClient)
 	alistClientListMu sync.RWMutex
 	alistClientLoads  = make(map[int64]*alistClientLoad)
+	// alistClientRemovals counts RemoveClient calls per id. A load that read
+	// the DB row before the row was deleted would otherwise cache a client for
+	// an id that no longer exists; finishAlistClientLoad compares epochs and
+	// discards such a client instead.
+	alistClientRemovals = make(map[int64]uint64)
 )
 
 type alistClientLoad struct {
 	client   *AlistClient
 	baseline *AlistClient
+	epoch    uint64
 	err      error
 	done     chan struct{}
 }
@@ -49,15 +55,7 @@ func GetClientByIDContext(ctx context.Context, alistID int64) (*AlistClient, err
 
 	load, owner := beginAlistClientLoad(alistID)
 	if !owner {
-		select {
-		case <-load.done:
-		case <-ctx.Done():
-			return nil, alistClientLoadError(ctx.Err())
-		}
-		if load.err != nil {
-			return nil, alistClientLoadError(load.err)
-		}
-		return load.client, nil
+		return awaitAlistClientLoad(ctx, load)
 	}
 
 	alist, err := alistDeps.GetAlistByID(alistID)
@@ -66,7 +64,24 @@ func GetClientByIDContext(ctx context.Context, alistID int64) (*AlistClient, err
 		return nil, alistClientLoadError(err)
 	}
 
-	newClient, err := alistDeps.NewAlistClientCtx(
+	// The load is shared by every concurrent caller for this id, so it must
+	// not inherit the owner's cancellation: one aborted request would fail all
+	// waiters with a connect error although their own contexts are fine. The
+	// load runs detached, bounded by alistValidationTimeout, and every caller
+	// (owner included) only waits on it with its own context.
+	//
+	// Resolve the dependency now instead of inside the goroutine: tests swap
+	// the package-level alistDeps when they return, and a detached goroutine
+	// reading it later is a data race.
+	newClient := alistDeps.NewAlistClientCtx
+	go runAlistClientLoad(context.WithoutCancel(ctx), alistID, alist, load, newClient)
+	return awaitAlistClientLoad(ctx, load)
+}
+
+func runAlistClientLoad(ctx context.Context, alistID int64, alist map[string]interface{}, load *alistClientLoad, newClient func(context.Context, string, string, int64) (*AlistClient, error)) {
+	ctx, cancel := context.WithTimeout(ctx, alistValidationTimeout)
+	defer cancel()
+	client, err := newClient(
 		ctx,
 		fmt.Sprintf("%v", alist["url"]),
 		fmt.Sprintf("%v", alist["token"]),
@@ -74,10 +89,20 @@ func GetClientByIDContext(ctx context.Context, alistID int64) (*AlistClient, err
 	)
 	if err != nil {
 		finishAlistClientLoad(alistID, load, nil, err)
-		return nil, alistClientLoadError(err)
+		return
 	}
+	finishAlistClientLoad(alistID, load, client, nil)
+}
 
-	finishAlistClientLoad(alistID, load, newClient, nil)
+func awaitAlistClientLoad(ctx context.Context, load *alistClientLoad) (*AlistClient, error) {
+	select {
+	case <-load.done:
+	case <-ctx.Done():
+		return nil, alistClientLoadError(ctx.Err())
+	}
+	if load.err != nil {
+		return nil, alistClientLoadError(load.err)
+	}
 	return load.client, nil
 }
 
@@ -94,7 +119,11 @@ func beginAlistClientLoad(alistID int64) (*alistClientLoad, bool) {
 		return load, false
 	}
 
-	load := &alistClientLoad{baseline: alistClientList[alistID], done: make(chan struct{})}
+	load := &alistClientLoad{
+		baseline: alistClientList[alistID],
+		epoch:    alistClientRemovals[alistID],
+		done:     make(chan struct{}),
+	}
 	alistClientLoads[alistID] = load
 	return load, true
 }
@@ -103,7 +132,12 @@ func finishAlistClientLoad(alistID int64, load *alistClientLoad, client *AlistCl
 	var stale *AlistClient
 	alistClientListMu.Lock()
 	load.err = err
-	if err == nil && client != nil {
+	if err == nil && client != nil && alistClientRemovals[alistID] != load.epoch {
+		// The engine was removed while we were loading it.
+		load.client = nil
+		load.err = publicError(msg.T(msg.AlistNotFound))
+		stale = client
+	} else if err == nil && client != nil {
 		current := alistClientList[alistID]
 		if current != nil && current != load.baseline {
 			// A newer client was stored (e.g. via UpdateClient) while we were
@@ -144,6 +178,23 @@ func removeCachedAlistClient(alistID int64) {
 	alistClientListMu.Unlock()
 	if previous != nil {
 		previous.Close()
+	}
+}
+
+// removeCachedAlistClientIf evicts the cached client for alistID only when it
+// is still client. A task holding an old client whose token was just replaced
+// via UpdateClient gets a 401; evicting by id alone would drop (and close) the
+// new, valid client instead of the stale one.
+func removeCachedAlistClientIf(alistID int64, client *AlistClient) {
+	alistClientListMu.Lock()
+	current, ok := alistClientList[alistID]
+	evict := ok && current == client
+	if evict {
+		delete(alistClientList, alistID)
+	}
+	alistClientListMu.Unlock()
+	if evict {
+		client.Close()
 	}
 }
 
@@ -286,6 +337,9 @@ func AddClient(alist map[string]interface{}) error {
 
 	newID, err := mapper.AddAlist(remarkStr, urlStr, client.User, token)
 	if err != nil {
+		// The validated client is never cached on this path; release its
+		// connection pool (and any HTTP/3 UDP socket) now instead of at GC.
+		client.Close()
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return publicError(msg.T(msg.AlistExists))
 		}
@@ -314,11 +368,24 @@ func RemoveClient(alistID int64) error {
 		return publicError(msg.T(msg.AlistInUse))
 	}
 
-	removeCachedAlistClient(alistID)
+	// Delete the row before dropping the cache: in the other order a
+	// concurrent GetClientByIDContext could read the still-present row and
+	// re-cache a client for the id being removed. The removal epoch covers a
+	// load that read the row just before the delete.
 	if err := mapper.RemoveAlist(alistID); err != nil {
 		return fmt.Errorf("remove alist: %w", err)
 	}
+	markAlistClientRemoved(alistID)
 	return nil
+}
+
+// markAlistClientRemoved evicts the cached client for alistID and bumps its
+// removal epoch so an in-flight load discards the client it is building.
+func markAlistClientRemoved(alistID int64) {
+	alistClientListMu.Lock()
+	alistClientRemovals[alistID]++
+	alistClientListMu.Unlock()
+	removeCachedAlistClient(alistID)
 }
 
 // TestClient tests connectivity to an existing AList engine by creating a fresh

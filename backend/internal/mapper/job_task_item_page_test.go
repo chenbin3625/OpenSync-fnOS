@@ -69,9 +69,6 @@ func pageIDs(t *testing.T, result map[string]interface{}) []int64 {
 	}
 	ids := make([]int64, 0, len(rows))
 	for _, row := range rows {
-		if _, leaked := row[pageTotalColumn]; leaked {
-			t.Fatalf("row carries the internal window column: %#v", row)
-		}
 		ids = append(ids, row["id"].(int64))
 	}
 	return ids

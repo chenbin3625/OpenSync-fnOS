@@ -28,12 +28,14 @@ export type MockStoreSeed = {
   history?: Record<number, Partial<TaskRecord>[]>;
 };
 
+// Mirrors backend/internal/config/config.go defaults; mock mode must not show
+// different defaults than a real install.
 const defaultSettings: SystemSettings = {
   taskTimeout: 48,
   taskSave: 30,
-  copyConcurrency: 3,
-  scanConcurrency: 3,
-  maxRetries: 3,
+  copyConcurrency: 5,
+  scanConcurrency: 16,
+  maxRetries: 2,
 };
 
 const defaultPaths: Record<string, { name: string }[]> = {
@@ -156,6 +158,123 @@ function includesStatus(status: number, requested: number): boolean {
     : status === requested;
 }
 
+
+const notifyRedactionMarker = "****";
+const notifyBodyRedacted = "******";
+
+/** Same key set as backend notifySecretKeys (service/notify_service.go). */
+const notifySecretKeys: Record<number, string[]> = {
+  0: ["url", "headers", "body"],
+  1: ["sendKey"],
+  2: ["url", "webhook", "secret"],
+  3: ["corpsecret", "corpSecret"],
+  4: ["url", "webhook", "secret"],
+  5: ["deviceKey"],
+};
+
+function maskSecretValue(value: string): string {
+  return value.length <= 8 ? notifyRedactionMarker : notifyRedactionMarker + value.slice(-4);
+}
+
+/** Keeps the host visible while masking credentials in query/path (like backend). */
+function maskNotifyUrl(rawUrl: string): string {
+  try {
+    const url = new URL(rawUrl);
+    if (url.username) url.username = notifyRedactionMarker;
+    if (url.password) url.password = notifyRedactionMarker;
+    if (url.search) {
+      const pairs = url.search.slice(1).split("&").map((pair) => {
+        const [name] = pair.split("=");
+        return `${name}=${notifyRedactionMarker}`;
+      });
+      url.search = `?${pairs.join("&")}`;
+    }
+    const segments = url.pathname.split("/");
+    const last = segments[segments.length - 1];
+    if (last && last.length >= 12) {
+      segments[segments.length - 1] = maskSecretValue(last);
+      url.pathname = segments.join("/");
+    }
+    return url.toString();
+  } catch {
+    return maskSecretValue(rawUrl);
+  }
+}
+
+function isMaskedNotifyValue(value: string): boolean {
+  return value.includes(notifyRedactionMarker);
+}
+
+function redactNotifyParams(method: number, paramsStr: string): string {
+  let params: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(paramsStr || "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return "{}";
+    params = { ...(parsed as Record<string, unknown>) };
+  } catch {
+    // Fail closed like the backend: a malformed row may still contain a token.
+    return "{}";
+  }
+  const keys =
+    notifySecretKeys[method] ?? Object.values(notifySecretKeys).flat();
+  for (const key of keys) {
+    const value = params[key];
+    if (value === undefined || value === null || value === "") continue;
+    if (key === "headers") {
+      params[key] = notifyRedactionMarker;
+      continue;
+    }
+    const text = typeof value === "string" ? value : "";
+    if (key === "body") params[key] = notifyBodyRedacted;
+    else if (key === "url" || key === "webhook" || key === "server")
+      params[key] = maskNotifyUrl(text);
+    else params[key] = maskSecretValue(text);
+  }
+  return JSON.stringify(params);
+}
+
+function notifyParamsRecord(value: unknown): Record<string, unknown> | null {
+  if (typeof value === "string") {
+    try {
+      const parsed: unknown = JSON.parse(value || "{}");
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? ({ ...(parsed as Record<string, unknown>) })
+        : null;
+    } catch {
+      return null;
+    }
+  }
+  if (value && typeof value === "object" && !Array.isArray(value))
+    return { ...(value as Record<string, unknown>) };
+  return null;
+}
+
+/** Restores redacted/blank secrets from the stored config on edit (backend resolveNotifyParams). */
+function resolveNotifyInput(
+  input: NotifyInput,
+  previous: NotifyItem,
+): NotifyInput {
+  const incoming = notifyParamsRecord(input.params);
+  const stored = notifyParamsRecord(previous.params);
+  if (!incoming || !stored) return input;
+  const method = numberValue(input.method, previous.method);
+  const keys =
+    notifySecretKeys[method] ?? Object.values(notifySecretKeys).flat();
+  for (const key of keys) {
+    const value = incoming[key];
+    if (value === undefined || value === null) {
+      if (stored[key] !== undefined) incoming[key] = stored[key];
+      continue;
+    }
+    if (typeof value !== "string") continue;
+    if (key === "secret" && value === "") continue; // explicit "disable signing"
+    if (value === "" || isMaskedNotifyValue(value)) {
+      if (stored[key] !== undefined) incoming[key] = stored[key];
+    }
+  }
+  return { ...input, params: JSON.stringify(incoming) };
+}
+
 export class MockStore {
   private engines: AlistItem[];
   private jobs: JobItem[];
@@ -250,8 +369,11 @@ export class MockStore {
     return this.engines.map((engine) => ({ ...engine }));
   }
 
-  listPaths(path: string): { name: string }[] {
-    return (defaultPaths[path] || []).map((item) => ({ ...item }));
+  // The real handler (service.GetChildPath -> AlistClient.FilePathList) returns
+  // [{"path": "<name>"}]; the frontend tolerates both shapes, so mock mode
+  // should exercise the real one.
+  listPaths(path: string): { path: string }[] {
+    return (defaultPaths[path] || []).map((item) => ({ path: item.name }));
   }
 
   saveEngine(input: EngineInput): AlistItem {
@@ -304,6 +426,19 @@ export class MockStore {
     this.histories.delete(id);
   }
 
+  /** Removes one finished task record, mirroring service.RemoveTask. */
+  removeTaskRecord(taskId: number): "deleted" | "running" | "missing" {
+    for (const [jobId, records] of this.histories) {
+      const index = records.findIndex((record) => record.id === taskId);
+      if (index < 0) continue;
+      if (this.currentTasks.get(jobId)?.taskId === taskId) return "running";
+      records.splice(index, 1);
+      this.taskItems.delete(taskId);
+      return "deleted";
+    }
+    return "missing";
+  }
+
   runJob(jobId: number): CurrentTaskData {
     const items = createDemoTaskItems();
     const base = createDemoTaskView(now(), items);
@@ -320,30 +455,59 @@ export class MockStore {
     return task ? { ...task } : null;
   }
 
+  /** Marks a running task as aborted and keeps a history record (status 4). */
+  private finishCurrentTask(
+    jobId: number,
+    status = 4,
+    taskId?: number,
+  ): void {
+    const task = this.currentTasks.get(jobId);
+    if (!task) return;
+    this.currentTasks.delete(jobId);
+    this.currentItems.delete(jobId);
+    const records = this.histories.get(jobId) || [];
+    records.unshift({
+      id: taskId ?? task.taskId,
+      status,
+      createTime: task.createTime,
+      runTime: now(),
+      successNum: task.num.success,
+      failNum: task.num.fail,
+      allNum: Object.values(task.num).reduce((sum, value) => sum + value, 0),
+    });
+    this.histories.set(jobId, records);
+  }
+
   stopTask(taskId: number): void {
     for (const [jobId, task] of this.currentTasks) {
-      if (task.taskId !== taskId) continue;
-      this.currentTasks.delete(jobId);
-      this.currentItems.delete(jobId);
-      const records = this.histories.get(jobId) || [];
-      records.unshift({
-        id: taskId,
-        status: 4,
-        createTime: task.createTime,
-        runTime: now(),
-        successNum: task.num.success,
-        failNum: task.num.fail,
-        allNum: Object.values(task.num).reduce((sum, value) => sum + value, 0),
-      });
-      this.histories.set(jobId, records);
-      return;
+      if (task.taskId === taskId) {
+        this.finishCurrentTask(jobId, 4, taskId);
+        return;
+      }
     }
   }
 
+  /** AbortJob: stop the running task but keep the job enabled. */
+  abortJob(jobId: number): void {
+    this.finishCurrentTask(jobId);
+  }
+
+  /** PauseJob: disable the schedule and abort the running task. */
+  pauseJob(jobId: number): void {
+    const job = this.jobs.find((item) => item.id === jobId);
+    if (job) job.enable = 0;
+    this.finishCurrentTask(jobId);
+  }
+
   retryTask(taskId: number): void {
-    for (const [jobId, task] of this.currentTasks) {
-      if (task.taskId === taskId) return;
-      if (!this.histories.get(jobId)?.some((record) => record.id === taskId)) continue;
+    // Retry applies to a *history* record, so it must not depend on another
+    // task currently running (the old loop body never executed with an empty
+    // currentTasks map, making retry a no-op).
+    for (const [jobId, records] of this.histories) {
+      if (!records.some((record) => record.id === taskId)) continue;
+      if (this.currentTasks.has(jobId)) return; // backend rejects while busy
+      const job = this.jobs.find((item) => item.id === jobId);
+      if (!job || job.enable !== 1) return;
       this.runJob(jobId);
       return;
     }
@@ -354,6 +518,7 @@ export class MockStore {
     taskId?: number | string;
     action?: string;
     pause?: boolean;
+    abort?: boolean;
   }): void {
     if (input.taskId !== undefined) {
       const taskId = numberValue(input.taskId, 0);
@@ -365,9 +530,11 @@ export class MockStore {
     const job = this.jobs.find((item) => item.id === jobId);
     if (!job) return;
     if (input.pause === true) {
-      job.enable = 0;
-      this.currentTasks.delete(jobId);
-      this.currentItems.delete(jobId);
+      // AbortJob keeps the schedule enabled; PauseJob disables it. Both stop
+      // the running task and leave an aborted history row, unlike the old mock
+      // which silently deleted the task.
+      if (input.abort === true) this.abortJob(jobId);
+      else this.pauseJob(jobId);
       return;
     }
     if (input.pause === false) {
@@ -395,9 +562,11 @@ export class MockStore {
     if (params.statusIn?.length)
       records = records.filter((record) => params.statusIn!.includes(record.status));
     if (params.keyword) {
+      // matches backend mapper.GetJobTaskList: the job-task keyword filter only
+      // searches the task id (item-level search is a different endpoint).
       const keyword = params.keyword.toLowerCase();
       records = records.filter((record) =>
-        `${record.id} ${record.errMsg || ""}`.toLowerCase().includes(keyword),
+        String(record.id).toLowerCase().includes(keyword),
       );
     }
     if (params.startTime !== undefined)
@@ -493,8 +662,18 @@ export class MockStore {
     };
   }
 
+  /** Raw (unredacted) params for tests that assert the redaction round-trip. */
+  getRawNotificationParams(id: number): string {
+    return this.notifications.find((item) => item.id === id)?.params ?? "";
+  }
+
   listNotifications(): NotifyItem[] {
-    return this.notifications.map((item) => ({ ...item }));
+    // Mirrors service.GetNotifyList: secrets never leave the backend, the UI
+    // gets redaction markers and round-trips them on save.
+    return this.notifications.map((item) => ({
+      ...item,
+      params: redactNotifyParams(item.method, item.params),
+    }));
   }
 
   saveNotification(input: NotifyInput): NotifyItem {
@@ -504,11 +683,9 @@ export class MockStore {
       ? this.notifications.findIndex((item) => item.id === requestedId)
       : -1;
     if (index >= 0) {
-      const updated = normalizeNotify(
-        input,
-        requestedId!,
-        this.notifications[index],
-      );
+      const previous = this.notifications[index];
+      const resolved = resolveNotifyInput(input, previous);
+      const updated = normalizeNotify(resolved, requestedId!, previous);
       this.notifications[index] = updated;
       return { ...updated };
     }

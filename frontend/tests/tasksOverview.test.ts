@@ -1,21 +1,26 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { formatTimestamp } from "../src/utils/date";
+import { formatDuration } from "../src/pages/Home/homeUtils";
 
-const tasksSource = () =>
-  readFileSync(new URL("../src/pages/Tasks.tsx", import.meta.url), "utf8");
+// The old version of this file asserted substrings of Tasks.tsx (e.g.
+// `not.toContain("<Status")`). That broke on any refactor and proved nothing
+// about behaviour, so it now tests the formatting the overview actually
+// renders for "最近一次执行".
+describe("task overview latest execution", () => {
+  it("shows a dash when there is no execution timestamp", () => {
+    expect(formatTimestamp(undefined)).toBe("—");
+    expect(formatTimestamp(null)).toBe("—");
+    expect(formatTimestamp(0)).toBe("—");
+  });
 
-describe("task overview", () => {
-  it("shows latest execution time and duration instead of file size and exclude rules", () => {
-    const source = tasksSource();
+  it("formats the execution start time without seconds", () => {
+    expect(formatTimestamp(1_800_000_000)).toMatch(
+      /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/,
+    );
+  });
 
-    expect(source).toContain('label="最近一次执行"');
-    expect(source).toContain("api.history");
-    expect(source).toContain("formatTimestamp(record.createTime)");
-    expect(source).toContain("formatDuration(record.runTime - record.createTime)");
-    expect(source).not.toContain('label="文件大小"');
-    expect(source).not.toContain('label="排除规则"');
-    expect(source).not.toContain("<Status");
-    expect(source).not.toContain("taskRecordStatusNames");
-    expect(source).not.toContain("成功 ${success}");
+  it("formats the duration between createTime and runTime", () => {
+    expect(formatDuration(125)).toBe("2分 5秒");
+    expect(formatDuration(0)).toBe("0秒");
   });
 });

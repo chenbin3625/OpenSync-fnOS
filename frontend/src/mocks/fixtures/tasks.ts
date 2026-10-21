@@ -60,7 +60,9 @@ export function createDemoTaskItems(): TaskItem[] {
         srcPath: `${root}/${String(Math.floor(i / 12) + 1).padStart(2, "0")}`,
         dstPath: `/backup${root}/${String(Math.floor(i / 12) + 1).padStart(2, "0")}`,
         fileSize: fileSize(id),
-        type: i % 17 === 0 ? 2 : 1,
+        // Real syncs are overwhelmingly copies; keep delete/move as a
+        // minority so the mock type tags match production-like data.
+        type: i % 23 === 0 ? 1 : i % 31 === 0 ? 2 : 0,
         status,
         progress: progressForStatus(status, i),
         errMsg:
@@ -90,6 +92,9 @@ function countByGroup(items: TaskItem[]): Record<TaskNumKey, number> {
 function sizeByGroup(items: TaskItem[]): Record<TaskNumKey, number> {
   return items.reduce<Record<TaskNumKey, number>>(
     (sizes, item) => {
+      // Backend streamDoingItem.countableSize() counts delete operations as 0
+      // bytes; showing them as transferred size made the demo numbers lie.
+      if (item.type === 1) return sizes;
       sizes[itemGroupName(item.status)] += item.fileSize || 0;
       return sizes;
     },

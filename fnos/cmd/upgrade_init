@@ -17,10 +17,58 @@ CMD_DIR="$(cd "$(dirname "$0")" && pwd)"
 "${CMD_DIR}/main" stop
 BACKUP_ROOT="${TRIM_PKGVAR}/backups"
 LAST_BACKUP_FILE="${TRIM_PKGVAR}/last-upgrade-backup"
+UPGRADE_PENDING="${TRIM_PKGVAR}/upgrade-pending"
 # 创建本次备份前保留的历史备份数；本次成功后共 BACKUP_KEEP + 1 份。
 BACKUP_KEEP=2
-DATA_FILES=(openSync.db openSync.db-wal openSync.db-shm secret.key local-mappings.json)
+DB_FILES=(openSync.db openSync.db-wal openSync.db-shm)
+
+# main stop 只能确认它知道的服务进程已退出；拷贝前再确认没有任何进程仍打开数据库，
+# 否则备份到的是正在写入、不一致的快照。优先用 fuser（以 stdout 是否输出 PID 判断，
+# 兼容 Linux 与 BSD 的退出码差异），没有 fuser 时扫描 /proc/*/fd。
+db_in_use() {
+    local name file real link fd
+    for name in "${DB_FILES[@]}"; do
+        file="${TRIM_PKGVAR}/$name"
+        [ -e "$file" ] || continue
+        if command -v fuser >/dev/null 2>&1; then
+            [ -z "$(fuser "$file" 2>/dev/null | tr -d '[:space:]')" ] || return 0
+            continue
+        fi
+        [ -d /proc ] || continue
+        real="$(readlink -f "$file" 2>/dev/null || printf '%s' "$file")"
+        for fd in /proc/[0-9]*/fd/*; do
+            link="$(readlink "$fd" 2>/dev/null)" || continue
+            [ "$link" != "$real" ] || return 0
+        done
+    done
+    return 1
+}
+if db_in_use; then
+    fail '仍有进程在使用应用数据库，已中止升级以保护数据；请在应用设置中停止应用后重试'
+fi
 mkdir -p "$BACKUP_ROOT" || fail "升级备份失败：无法创建 ${BACKUP_ROOT}，已中止升级（请检查磁盘空间）"
+
+# 备份整个数据目录，而不是写死的文件清单：后端新增持久化文件时不会被漏掉。
+# 只排除备份自身、备份记录、运行时文件和日志。
+is_backup_excluded() {
+    case "$1" in
+        backups|last-upgrade-backup|last-upgrade-backup.tmp|upgrade-pending|app.pid) return 0 ;;
+        app.log|app.log.*|*.log) return 0 ;;
+    esac
+    return 1
+}
+DATA_ENTRIES=()
+collect_data_entries() {
+    local path base
+    shopt -s nullglob dotglob
+    for path in "${TRIM_PKGVAR}"/*; do
+        base="$(basename "$path")"
+        is_backup_excluded "$base" && continue
+        DATA_ENTRIES+=("$base")
+    done
+    shopt -u nullglob dotglob
+}
+collect_data_entries
 
 # 只处理 mktemp 生成的 upgrade.XXXXXXXX：名字严格匹配、直接位于 BACKUP_ROOT 下且是真实目录。
 is_backup_dir() {
@@ -54,13 +102,24 @@ file_bytes() {
     case "$size" in ''|*[!0-9]*) size=0 ;; esac
     printf '%s\n' "$size"
 }
+# 普通文件按字节计；目录用 du -sk 估算（KiB 换算成字节）。
+entry_bytes() {
+    local kib
+    if [ -d "$1" ] && [ ! -L "$1" ]; then
+        kib="$({ du -sk "$1"; } 2>/dev/null | awk 'NR == 1 { print $1 }')"
+        case "$kib" in ''|*[!0-9]*) kib=0 ;; esac
+        printf '%s\n' "$((kib * 1024))"
+        return 0
+    fi
+    file_bytes "$1"
+}
 # 复制前估算所需空间（KiB，另留 10% 与 1 MiB 余量），不足时直接中止，避免写出半份备份。
 # df -Pk 是可移植格式；以容量百分比列为锚点取它前一列（可用），文件系统名含空格也能取对。
 # 取不到可用空间时跳过检查，复制失败仍会被 copy_file 拦下。
 check_free_space() {
     local name bytes=0 need avail
-    for name in "${DATA_FILES[@]}"; do
-        if [ -f "${TRIM_PKGVAR}/$name" ]; then bytes=$((bytes + $(file_bytes "${TRIM_PKGVAR}/$name"))); fi
+    for name in ${DATA_ENTRIES[@]+"${DATA_ENTRIES[@]}"}; do
+        bytes=$((bytes + $(entry_bytes "${TRIM_PKGVAR}/$name")))
     done
     if [ -f "${TRIM_PKGETC}/config.ini" ]; then bytes=$((bytes + $(file_bytes "${TRIM_PKGETC}/config.ini"))); fi
     need=$((bytes / 1024 + bytes / 10240 + 1024))
@@ -82,14 +141,19 @@ trap cleanup_backup EXIT
 BACKUP="$(mktemp -d "${BACKUP_ROOT}/upgrade.XXXXXXXX")" || fail '升级备份失败：无法创建备份目录，已中止升级（请检查磁盘空间）'
 is_backup_dir "$BACKUP" || fail "升级备份失败：备份目录异常：$BACKUP"
 copy_file() {
-    cp -p "$1" "$2" || fail "升级备份失败：无法复制 $1，已中止升级以保护数据（请检查磁盘空间与文件权限）"
+    # -R 让子目录一并复制；符号链接按链接本身复制，不跟随到数据目录之外。
+    cp -pR "$1" "$2" || fail "升级备份失败：无法复制 $1，已中止升级以保护数据（请检查磁盘空间与文件权限）"
 }
 # Copy the database and WAL only after the service is fully stopped.
-for name in "${DATA_FILES[@]}"; do
-    if [ -f "${TRIM_PKGVAR}/$name" ]; then copy_file "${TRIM_PKGVAR}/$name" "$BACKUP/$name"; fi
+for name in ${DATA_ENTRIES[@]+"${DATA_ENTRIES[@]}"}; do
+    copy_file "${TRIM_PKGVAR}/$name" "$BACKUP/$name"
 done
 if [ -f "${TRIM_PKGETC}/config.ini" ]; then copy_file "${TRIM_PKGETC}/config.ini" "$BACKUP/config.ini"; fi
 # 先写临时文件再改名：写入失败时保留上一次的备份记录，而不是留下被截断的空文件。
 { printf '%s\n' "$BACKUP" > "${LAST_BACKUP_FILE}.tmp" && mv -f "${LAST_BACKUP_FILE}.tmp" "$LAST_BACKUP_FILE"; } || \
     fail '升级备份失败：无法记录备份位置，已中止升级（请检查磁盘空间）'
 BACKUP_DONE=1
+# 标记“升级后尚未成功启动”：新版本首次启动失败时，main 会在错误信息中给出本备份的
+# 位置。写不进去只影响提示，不影响升级。
+{ printf '%s\n' "$BACKUP" > "$UPGRADE_PENDING"; } 2>/dev/null || true
+printf '%s\n' "升级前数据已备份到 ${BACKUP}"

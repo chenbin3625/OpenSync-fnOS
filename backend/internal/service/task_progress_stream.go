@@ -52,11 +52,19 @@ type progressSubscriber struct {
 }
 
 type progressHub struct {
+	// publishMu serializes whole publishes (build + dispatch) and new
+	// subscriptions with their initial snapshot. Lock order: publishMu, then
+	// mu / framesMu.
+	publishMu   sync.Mutex
 	mu          sync.Mutex
 	framesMu    sync.Mutex
 	subscribers map[int64]map[chan []byte]*progressSubscriber
 	pending     map[int64]struct{}
-	frames      map[int64]progressFrame
+	// timers holds the pending debounced publish of each job so it can be
+	// stopped: a timer that outlived every viewer (or the process shutdown)
+	// would publish after ShutdownDB. Guarded by mu.
+	timers map[int64]*time.Timer
+	frames map[int64]progressFrame
 }
 
 var jobProgressHub = newProgressHub()
@@ -65,6 +73,7 @@ func newProgressHub() *progressHub {
 	return &progressHub{
 		subscribers: make(map[int64]map[chan []byte]*progressSubscriber),
 		pending:     make(map[int64]struct{}),
+		timers:      make(map[int64]*time.Timer),
 		frames:      make(map[int64]progressFrame),
 	}
 }
@@ -94,8 +103,35 @@ func (h *progressHub) subscribe(jobID int64, ch chan []byte) bool {
 	return true
 }
 
+// StopJobProgressHub stops every pending debounced publish and drops the diff
+// frames. Shutdown must call it before the database handle is closed: a timer
+// that fires afterwards would read the closed handle (the persist flush timer is
+// cancelled for the same reason). Subscribers are left alone — their request
+// contexts end on shutdown and their deferred unsubscribe cleans them up.
+func StopJobProgressHub() {
+	jobProgressHub.stopAll()
+}
+
+func (h *progressHub) stopAll() {
+	h.mu.Lock()
+	timers := make([]*time.Timer, 0, len(h.timers))
+	for jobID, timer := range h.timers {
+		timers = append(timers, timer)
+		delete(h.timers, jobID)
+		delete(h.pending, jobID)
+	}
+	h.mu.Unlock()
+	for _, timer := range timers {
+		timer.Stop()
+	}
+	h.framesMu.Lock()
+	h.frames = make(map[int64]progressFrame)
+	h.framesMu.Unlock()
+}
+
 func (h *progressHub) unsubscribe(jobID int64, ch <-chan []byte) {
 	clearFrame := false
+	var pendingTimer *time.Timer
 	h.mu.Lock()
 	subs := h.subscribers[jobID]
 	if subs == nil {
@@ -111,8 +147,17 @@ func (h *progressHub) unsubscribe(jobID int64, ch <-chan []byte) {
 	if len(subs) == 0 {
 		delete(h.subscribers, jobID)
 		clearFrame = true
+		// Nobody is left to receive the debounced frame, so stop the timer
+		// instead of letting it publish after the last viewer left (and, at
+		// shutdown, after ShutdownDB closed the database).
+		pendingTimer = h.timers[jobID]
+		delete(h.timers, jobID)
+		delete(h.pending, jobID)
 	}
 	h.mu.Unlock()
+	if pendingTimer != nil {
+		pendingTimer.Stop()
+	}
 	// A disconnected viewer no longer needs the last progress diff frame.
 	// Release it immediately so a job with many completed/aborted viewers does
 	// not retain all active-item keys until the next task snapshot.
@@ -148,9 +193,10 @@ func (h *progressHub) schedule(jobID int64) {
 		return
 	}
 	h.pending[jobID] = struct{}{}
-	h.mu.Unlock()
-
-	time.AfterFunc(progressNotifyDebounce, func() {
+	if h.timers == nil {
+		h.timers = make(map[int64]*time.Timer)
+	}
+	timer := time.AfterFunc(progressNotifyDebounce, func() {
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("panic in progressHub.schedule publish for job %d: %v", jobID, r)
@@ -159,13 +205,22 @@ func (h *progressHub) schedule(jobID int64) {
 
 		h.mu.Lock()
 		delete(h.pending, jobID)
+		delete(h.timers, jobID)
 		h.mu.Unlock()
 
 		h.publish(jobID)
 	})
+	h.timers[jobID] = timer
+	h.mu.Unlock()
 }
 
 func (h *progressHub) publish(jobID int64) {
+	// Building and dispatching are one step. The debounced timer and
+	// notifyProgressNow can publish concurrently; serialized only while
+	// building, an older patch could still be queued after a newer frame and
+	// leave the client on the older state.
+	h.publishMu.Lock()
+	defer h.publishMu.Unlock()
 	subs := h.subscriberSnapshot(jobID)
 	if len(subs) == 0 {
 		return
@@ -268,21 +323,17 @@ func queueProgressPayload(ch chan []byte, payload []byte) (queued, dropped bool)
 	}
 }
 
-func marshalJobProgress(jobID int64, snapshot bool) ([]byte, error) {
+// marshalJobSnapshot renders the job's current state as a self-contained
+// frame WITHOUT touching the shared diff baseline. The baseline describes what
+// the existing subscribers were last sent; overwriting it with a frame only the
+// new connection received would make the next patch skip every file-set change
+// that happened in between, for everyone else.
+func marshalJobSnapshot(jobID int64) ([]byte, error) {
 	data, err := GetJobCurrent(jobID, map[string]interface{}{})
 	if err != nil {
 		return nil, err
 	}
-	if data == nil {
-		jobProgressHub.clearFrame(jobID)
-		return marshalProgressJSON(model.Success(nil))
-	}
-	current, ok := data.(jobCurrentPayload)
-	if !ok {
-		return marshalProgressJSON(model.Success(data))
-	}
-	jobProgressHub.prepareStreamPayload(jobID, &current, snapshot)
-	return marshalProgressJSON(model.Success(current))
+	return marshalProgressJSON(model.Success(data))
 }
 
 // progressFrames holds the frame to publish plus the means to render the same
@@ -334,6 +385,10 @@ func buildProgressFrames(jobID int64) (*progressFrames, error) {
 	isPatch := jobProgressHub.prepareStreamPayload(jobID, &current, false)
 	payload, err := marshalProgressJSON(model.Success(current))
 	if err != nil {
+		// The baseline above already advanced to this observation. Drop it so
+		// the next publish renders a full snapshot: a patch is a delta from a
+		// frame the subscribers never received.
+		jobProgressHub.clearFrame(jobID)
 		return nil, err
 	}
 	return &progressFrames{
@@ -369,8 +424,49 @@ func marshalProgressJSON(v any) ([]byte, error) {
 	return out, nil
 }
 
+// BuildJobProgressStreamPayload renders a full snapshot of the job's progress
+// without affecting the stream's diff baseline.
 func BuildJobProgressStreamPayload(jobID int64) ([]byte, error) {
-	return marshalJobProgress(jobID, true)
+	return marshalJobSnapshot(jobID)
+}
+
+// SubscribeJobProgressWithSnapshot registers a stream subscriber and returns
+// the first frame it must write. Both happen under the hub's publish lock:
+//
+//   - Built before subscribing, a publish landing in between (e.g. the task's
+//     final frame) reached nobody and the client stayed on the stale state.
+//     Under the lock every publish is either reflected in the snapshot or
+//     delivered to the new channel.
+//   - The new subscriber starts with needsSnapshot, because the snapshot was
+//     not recorded as the shared baseline: a patch computed against that
+//     baseline would not apply to it. Its next frame is therefore a full one.
+//
+// ok=false means the per-job subscriber limit was reached; err is a failure to
+// build the snapshot (no subscription is left behind in either case).
+func SubscribeJobProgressWithSnapshot(jobID int64) (updates <-chan []byte, initial []byte, ok bool, err error) {
+	return jobProgressHub.subscribeWithSnapshot(jobID, func() ([]byte, error) {
+		return marshalJobSnapshot(jobID)
+	})
+}
+
+func (h *progressHub) subscribeWithSnapshot(jobID int64, build func() ([]byte, error)) (<-chan []byte, []byte, bool, error) {
+	h.publishMu.Lock()
+	defer h.publishMu.Unlock()
+	initial, err := build()
+	if err != nil {
+		return nil, nil, true, err
+	}
+	ch := make(chan []byte, 1)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.subscribers[jobID]) >= maxProgressSubscribersPerJob {
+		return nil, nil, false, nil
+	}
+	if h.subscribers[jobID] == nil {
+		h.subscribers[jobID] = make(map[chan []byte]*progressSubscriber)
+	}
+	h.subscribers[jobID][ch] = &progressSubscriber{ch: ch, needsSnapshot: true}
+	return ch, initial, true, nil
 }
 
 func (item streamDoingItem) streamKey() progressItemKey {
@@ -416,10 +512,28 @@ func (item streamDoingItem) toPatch(includePaths bool) streamDoingPatch {
 // prepareStreamPayload converts payload into either a full snapshot or a patch
 // relative to the previous frame, and reports whether it produced a patch.
 func (h *progressHub) prepareStreamPayload(jobID int64, payload *jobCurrentPayload, snapshot bool) bool {
+	patch, isPatch := h.updateFrame(jobID, payload, snapshot)
+	if !isPatch {
+		return false
+	}
+	payload.DoingTask = nil
+	payload.DoingPatch = patch
+	return true
+}
+
+// updateFrame records payload's doing set as the shared diff baseline and
+// returns the patch that turns the previous baseline into this observation (nil
+// when a full snapshot must be sent).
+//
+// The lock is released by defer: a panic while rebuilding the frame would
+// otherwise leave framesMu locked forever, and every publish and every new SSE
+// connection would block on it.
+func (h *progressHub) updateFrame(jobID int64, payload *jobCurrentPayload, snapshot bool) ([]streamDoingPatch, bool) {
 	doing := payload.DoingTask
 	patch := make([]streamDoingPatch, 0, len(doing))
 
 	h.framesMu.Lock()
+	defer h.framesMu.Unlock()
 	if h.frames == nil {
 		h.frames = make(map[int64]progressFrame)
 	}
@@ -464,14 +578,11 @@ func (h *progressHub) prepareStreamPayload(jobID int64, payload *jobCurrentPaylo
 		}
 	}
 	h.frames[jobID] = frame
-	h.framesMu.Unlock()
 
 	if snapshot || !hasPrev || !sameTask || fileSetChanged {
-		return false
+		return nil, false
 	}
-	payload.DoingTask = nil
-	payload.DoingPatch = patch
-	return true
+	return patch, true
 }
 
 func (h *progressHub) clearFrame(jobID int64) {

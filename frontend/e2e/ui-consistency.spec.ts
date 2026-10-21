@@ -1,4 +1,93 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
+const activeTask = {
+  taskId: 91,
+  scanFinish: true,
+  createTime: 1,
+  duration: 1,
+  num: { wait: 0, running: 1, success: 2, fail: 0, other: 0 },
+  size: { wait: 0, running: 1, success: 2, fail: 0, other: 0 },
+  doneSize: 2,
+  remainSize: 1,
+  speed: 1,
+  speedAvg: 1,
+  remainTime: 1,
+};
+
+const fixtureJob = {
+  id: 1,
+  enable: 1,
+  remark: "布局测试任务",
+  srcPath: '["/src"]',
+  dstPath: '["/dst"]',
+  alistId: 1,
+  method: 0,
+  interval: 0,
+  isCron: 2,
+  useCacheT: 0,
+  useCacheS: 0,
+  minFileSize: 0,
+  maxFileSize: 0,
+  exclude: "",
+};
+
+function realtimePage(url: URL, task: typeof activeTask, dataList: unknown[]) {
+  return {
+    taskId: task.taskId,
+    createTime: task.createTime,
+    status: Number(url.searchParams.get("status")),
+    pageNum: Number(url.searchParams.get("pageNum") || 1),
+    pageSize: Number(url.searchParams.get("pageSize") || 10),
+    stale: false,
+    dataList,
+    count: dataList.length,
+  };
+}
+
+/**
+ * These layout specs used to depend on whatever task happened to exist in the
+ * developer's database (jobId=1). The e2e backend now runs on an isolated data
+ * directory, so every case must provide its own task workspace fixture.
+ */
+async function routeTaskWorkspace(page: Page, current: typeof activeTask | null) {
+  await page.route("**/app/opensync/svr/**", async (route) => {
+    const url = new URL(route.request().url());
+    const success = (data: unknown) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ code: 200, data, msg: "success" }),
+      });
+    if (url.pathname.endsWith("/session"))
+      return success({ uid: 1, development: false, version: "test" });
+    if (url.pathname.endsWith("/version/latest"))
+      return success({
+        latestVersion: "v0.0.0",
+        releaseURL: "https://example.test/releases",
+        hasUpdate: false,
+      });
+    if (url.pathname.endsWith("/system/config"))
+      return success({
+        taskTimeout: 48,
+        taskSave: 30,
+        copyConcurrency: 5,
+        scanConcurrency: 16,
+        maxRetries: 2,
+      });
+    if (url.pathname.endsWith("/alist")) return success([]);
+    if (url.pathname.endsWith("/job") && url.searchParams.get("current")) {
+      if (url.searchParams.has("status"))
+        return success(realtimePage(url, current!, []));
+      return success(current);
+    }
+    if (url.pathname.endsWith("/job") && url.searchParams.has("taskId"))
+      return success({ dataList: [], count: 0 });
+    if (url.pathname.endsWith("/job") && url.searchParams.has("id"))
+      return success({ dataList: [], count: 0 });
+    if (url.pathname.endsWith("/job"))
+      return success({ dataList: [fixtureJob], count: 1 });
+    return success(null);
+  });
+}
+
 
 test("dark host theme colors the shell, surfaces, controls, and text together", async ({
   page,
@@ -72,6 +161,7 @@ test("320px task controls and realtime status tabs stay on one row", async ({
   page,
 }) => {
   test.skip(page.viewportSize()?.width !== 320, "narrow mobile layout only");
+  await routeTaskWorkspace(page, activeTask);
   await page.goto("/app/opensync/tasks?jobId=1&tab=overview");
   const toolbar = page.locator(".page-toolbar");
   const toolbarBox = await toolbar.boundingBox();
@@ -109,6 +199,7 @@ test("320px settings and overview labels keep a single line", async ({
   page,
 }) => {
   test.skip(page.viewportSize()?.width !== 320, "narrow mobile layout only");
+  await routeTaskWorkspace(page, null);
   await page.goto("/app/opensync/settings");
   await expect(page.locator(".settings-card")).toHaveCount(2);
   const settingLabel = page.locator(".setting-row-label").first();

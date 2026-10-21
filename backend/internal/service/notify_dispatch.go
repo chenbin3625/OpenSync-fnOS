@@ -18,7 +18,9 @@ const (
 	// requests to the same provider.
 	notifyWorkerCount = 2
 	// notifySendConcurrency bounds the fan-out across configs within one
-	// notification, so N configs cost about one timeout instead of N.
+	// notification, so N configs cost about one timeout instead of N. The
+	// process-wide ceiling is notifyWorkerCount * notifySendConcurrency; this
+	// constant alone is not a global limit.
 	notifySendConcurrency = 4
 )
 
@@ -41,11 +43,43 @@ type notifyDispatcher struct {
 	wg      sync.WaitGroup
 	started bool
 	closed  bool
+	// ctx scopes every outbound notification request. shutdown cancels it
+	// when its wait expires, so in-flight HTTP calls abort instead of running
+	// on (and recording their outcome) after the database has been closed.
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
-var notifyDispatch = &notifyDispatcher{
-	queue:  make(chan notifyJob, notifyQueueCapacity),
-	handle: deliverTaskNotification,
+func newNotifyDispatcher(handle func(notifyJob)) *notifyDispatcher {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &notifyDispatcher{
+		queue:  make(chan notifyJob, notifyQueueCapacity),
+		handle: handle,
+		ctx:    ctx,
+		cancel: cancel,
+	}
+}
+
+// The handler is installed in init rather than in the variable initializer:
+// referencing deliverTaskNotification here would form an initialization cycle,
+// because the delivery path reaches notifyBaseContext, which reads
+// notifyDispatch.
+var notifyDispatch = newNotifyDispatcher(nil)
+
+func init() {
+	notifyDispatch.handle = deliverTaskNotification
+}
+
+// notifyBaseContext is the parent context of every notification request.
+func notifyBaseContext() context.Context {
+	return notifyDispatch.context()
+}
+
+func (d *notifyDispatcher) context() context.Context {
+	if d == nil || d.ctx == nil {
+		return context.Background()
+	}
+	return d.ctx
 }
 
 // StartNotifyDispatcher launches the delivery workers. It is idempotent so the
@@ -162,6 +196,9 @@ func (d *notifyDispatcher) shutdown(ctx context.Context) {
 	select {
 	case <-done:
 	case <-ctx.Done():
-		log.Printf("Gave up waiting for pending notifications to finish")
+		log.Printf("Gave up waiting for pending notifications to finish; cancelling in-flight requests")
+		if d.cancel != nil {
+			d.cancel()
+		}
 	}
 }

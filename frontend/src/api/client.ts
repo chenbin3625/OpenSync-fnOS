@@ -83,16 +83,19 @@ export async function request<T>(
     params?: Record<string, unknown>;
     signal?: AbortSignal;
     cache?: RequestCache;
+    /** Per-call timeout; falls back to requestTimeoutMs. */
+    timeoutMs?: number;
   } = {},
 ): Promise<T> {
   // A manual timer instead of AbortSignal.timeout keeps older WebViews working
   // and lets the timeout be told apart from a caller's abort.
   const timeout = new AbortController();
   let timedOut = false;
+  const timeoutMs = options.timeoutMs ?? requestTimeoutMs;
   const timer = setTimeout(() => {
     timedOut = true;
     timeout.abort();
-  }, requestTimeoutMs);
+  }, timeoutMs);
   const combined = combineSignals([options.signal, timeout.signal]);
   let response: Response;
   let result: ApiResponse<T> | null = null;
@@ -139,31 +142,16 @@ export async function request<T>(
         : `服务响应异常（HTTP ${response.status}），请重试`,
     );
   if (!response.ok || result.code !== 200)
-    throw new Error(result.msg || "操作失败");
-  warnIfTruncated(path, result.data);
+    throw new Error(
+      result.msg ||
+        (response.ok ? "操作失败" : `操作失败（HTTP ${response.status}）`),
+    );
   return result.data;
 }
 
-// The backend caps a list request that carries no pageNum/pageSize and marks the
-// response `truncated`. Nothing read that flag, so such a response rendered as a
-// complete list. Every caller in this module paginates, so this is a guard
-// against a future one that forgets: it is a developer-facing error, not a user
-// message, because the fix is to pass paging parameters.
-export function warnIfTruncated(path: string, data: unknown): boolean {
-  if (
-    !data ||
-    typeof data !== "object" ||
-    !("truncated" in data) ||
-    (data as PageData<unknown>).truncated !== true
-  )
-    return false;
-  const page = data as PageData<unknown>;
-  console.error(
-    `[OpenSync] ${path} 返回了被截断的列表：共 ${page.count} 条，仅取回 ${page.dataList?.length ?? 0} 条。请求必须携带 pageNum/pageSize。`,
-  );
-  return true;
-}
-
+// 500 == backend/internal/mapper.MaxPageSize (mapper/db.go). The backend clamps
+// larger values silently, so keep this in sync with that constant: a larger
+// value here would silently stop after the first 500 rows.
 async function requestAllJobs(signal?: AbortSignal) {
   const pageSize = 500;
   const first = await request<PageData<JobItem>>("/job", {
@@ -182,9 +170,28 @@ async function requestAllJobs(signal?: AbortSignal) {
   return { dataList, count: first.count };
 }
 
+/**
+ * Single shared request for the realtime progress endpoint
+ * (`GET /svr/job?current=1`). It is used both by the shell/overview (snapshot
+ * only) and by the realtime page (snapshot, status page or item page), so the
+ * cache policy lives here instead of being repeated at each call site.
+ */
+export function requestCurrentTask<T>(
+  params: Record<string, unknown>,
+  signal?: AbortSignal,
+) {
+  return request<T>("/job", {
+    params: { ...params, current: 1 },
+    signal,
+    cache: "no-store",
+  });
+}
+
 export const api = {
-  session: () =>
-    request<{ uid: number; development: boolean; version: string }>("/session"),
+  session: (signal?: AbortSignal) =>
+    request<{ uid: number; development: boolean; version: string }>("/session", {
+      signal,
+    }),
   latestVersion: (signal?: AbortSignal, refresh = false) =>
     // refresh=1 makes the backend ask GitHub instead of answering from its
     // 30 minute cache; the version entry's "检查更新" button uses it.
@@ -208,13 +215,13 @@ export const api = {
   saveJob: (data: unknown, signal?: AbortSignal) =>
     request("/job", { method: "POST", data, signal }),
   jobAction: (data: unknown) => request("/job", { method: "PUT", data }),
+  // RemoveJobClient waits up to 2 minutes for a running task to stop before it
+  // deletes the row (backend/internal/service/job_service.go), so this call
+  // must outlive the default 90s request timeout.
   deleteJob: (id: number) =>
-    request("/job", { method: "DELETE", params: { id } }),
+    request("/job", { method: "DELETE", params: { id }, timeoutMs: 130000 }),
   current: (id: number, signal?: AbortSignal) =>
-    request<CurrentTaskData | null>("/job", {
-      params: { id, current: 1 },
-      signal,
-    }),
+    requestCurrentTask<CurrentTaskData | null>({ id }, signal),
   history: (
     id: number,
     params: Record<string, unknown>,

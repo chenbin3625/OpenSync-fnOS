@@ -8,7 +8,6 @@ import {
   requestTimeoutMs,
   sessionExpiredEvent,
   timeoutMessage,
-  warnIfTruncated,
 } from "../src/api/client";
 import { jobGetTaskCurrent } from "../src/api/job";
 
@@ -115,32 +114,43 @@ describe("gateway-aware API requests", () => {
 
     await expect(request("/job")).rejects.toThrow("真实后端错误");
   });
-  it("reports a truncated list instead of rendering it as complete", () => {
-    // The backend caps an unpaginated list at its row limit and marks the
-    // response. Nothing read the flag, so a short list looked like the whole
-    // thing.
-    const error = vi.spyOn(console, "error").mockImplementation(() => {});
-    try {
-      expect(
-        warnIfTruncated("/job", {
-          dataList: [{ id: 1 }],
-          count: 900,
-          truncated: true,
-        }),
-      ).toBe(true);
-      expect(error).toHaveBeenCalledOnce();
-      expect(String(error.mock.calls[0][0])).toContain("pageNum/pageSize");
+  it("rejects a backend business error returned as HTTP 200 + code 500", async () => {
+    // respondError in backend/internal/handler/validation.go answers with HTTP
+    // 200 and a 500 envelope, so the client must not treat `ok: true` as success.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ code: 500, data: null, msg: "源目录不能与目标目录重叠" }),
+      }),
+    );
 
-      error.mockClear();
-      expect(
-        warnIfTruncated("/job", { dataList: [{ id: 1 }], count: 1 }),
-      ).toBe(false);
-      expect(warnIfTruncated("/notify", [{ id: 1 }])).toBe(false);
-      expect(warnIfTruncated("/session", null)).toBe(false);
-      expect(error).not.toHaveBeenCalled();
-    } finally {
-      error.mockRestore();
-    }
+    await expect(request("/job")).rejects.toThrow("源目录不能与目标目录重叠");
+  });
+  it("includes the HTTP status when the error body is not the API envelope", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 429,
+        json: async () => ({ error: "too many requests" }),
+      }),
+    );
+
+    await expect(request("/job")).rejects.toThrow("HTTP 429");
+  });
+  it("returns the envelope data on success", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ code: 200, data: { dataList: [], count: 0 }, msg: "success" }),
+      }),
+    );
+
+    await expect(request("/job")).resolves.toEqual({ dataList: [], count: 0 });
   });
 });
 
@@ -238,6 +248,67 @@ describe("request signals", () => {
     controller.abort();
     const error = (await pending) as Error;
     expect(error.name).toBe("AbortError");
+  });
+  it("honours a per-call timeout override", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_url: string, init: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            init.signal!.addEventListener("abort", () =>
+              reject(new DOMException("aborted", "AbortError")),
+            );
+          }),
+      ),
+    );
+
+    const pending = request("/job", { timeoutMs: 1000 }).catch((e: Error) => e);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(((await pending) as Error).message).toBe(timeoutMessage);
+  });
+  it("keeps a 130s window for deleting a job that is still stopping", async () => {
+    // RemoveJobClient waits up to 2 minutes for the running task to stop, so a
+    // delete that outlives the default 90s timeout is not a failure.
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_url: string, init: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            init.signal!.addEventListener("abort", () =>
+              reject(new DOMException("aborted", "AbortError")),
+            );
+          }),
+      ),
+    );
+
+    const pending = api.deleteJob(7).catch((e: Error) => e);
+    await vi.advanceTimersByTimeAsync(requestTimeoutMs);
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(130000 - requestTimeoutMs);
+    await expect(pending).resolves.toBeInstanceOf(Error);
+    await expect(pending).resolves.toMatchObject({ message: timeoutMessage });
+  });
+  it("aborts the session request with the caller signal", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_url: string, init: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            init.signal!.addEventListener("abort", () =>
+              reject(new DOMException("aborted", "AbortError")),
+            );
+          }),
+      ),
+    );
+    const controller = new AbortController();
+
+    const pending = api.session(controller.signal).catch((e: Error) => e);
+    controller.abort();
+    expect(((await pending) as Error).name).toBe("AbortError");
   });
   it("does not require AbortSignal.any or AbortSignal.timeout", async () => {
     // Older fnOS WebViews lack both; every request used to throw a TypeError.

@@ -24,6 +24,7 @@ import type { AlistItem } from "../types";
 
 export default function Engines() {
   const engines = useResource((signal) => api.engines(signal));
+  const action = useAction();
   const [editing, setEditing] = useState<AlistItem | null | undefined>();
   const [testingId, setTestingId] = useState<number | null>(null);
   const testEngine = (id: number) => {
@@ -66,7 +67,7 @@ export default function Engines() {
               </div>
               <div className="row-actions">
                 <IconButton
-                  label="测试引擎"
+                  label={testingId === engine.id ? "测试中…" : "测试引擎"}
                   icon={<IconChainStroked aria-hidden="true" />}
                   disabled={testingId !== null}
                   onClick={() => testEngine(engine.id)}
@@ -83,10 +84,13 @@ export default function Engines() {
                   onClick={() =>
                     confirmDelete(
                       "删除此存储引擎？",
-                      async () => {
-                        await api.deleteEngine(engine.id);
-                        await engines.refresh();
-                      },
+                      () =>
+                        action.run(async () => {
+                          await api.deleteEngine(engine.id);
+                          // Silent: the card list must not flash to a spinner
+                          // after the confirm dialog has already closed.
+                          await engines.refresh(true);
+                        }),
                       "关联同步任务需先删除；引擎中的文件不会被删除。",
                     )
                   }
@@ -102,7 +106,7 @@ export default function Engines() {
           onClose={() => setEditing(undefined)}
           onSaved={() => {
             setEditing(undefined);
-            void engines.refresh();
+            void engines.refresh(true);
           }}
         />
       )}

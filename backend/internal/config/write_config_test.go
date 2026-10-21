@@ -12,22 +12,24 @@ func TestWriteConfigFileReplacesDuplicateManagedKeys(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("TRIM_PKGETC", dir)
 	path := filepath.Join(dir, "config.ini")
-	if err := os.WriteFile(path, []byte("[opensync]\nport=9000\nport=9001\n[other]\nport=8000\n"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte("[opensync]\ntask_save=9000\ntask_save=9001\n[other]\ntask_save=8000\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeConfigFile(testServerConfig()); err != nil {
+	before := testServerConfig()
+	before.TaskSave = 9001 // last duplicate on disk, matching readINI's last-wins behavior
+	if err := writeConfigFile(testServerConfig(), before); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), "port=9001") || !strings.Contains(string(data), "port=8000") {
+	if strings.Contains(string(data), "task_save=9001") || !strings.Contains(string(data), "task_save=8000") {
 		t.Fatalf("duplicate or foreign key changed: %s", data)
 	}
 	parsed, err := readINI(path)
-	if err != nil || parsed["opensync"]["port"] != "8023" {
-		t.Fatalf("reloaded port=%q, err=%v", parsed["opensync"]["port"], err)
+	if err != nil || parsed["opensync"]["task_save"] != "30" {
+		t.Fatalf("reloaded task_save=%q, err=%v", parsed["opensync"]["task_save"], err)
 	}
 }
 
@@ -38,7 +40,7 @@ func TestWriteConfigFileReportsUnreadableExistingFile(t *testing.T) {
 	if err := os.Mkdir(path, 0700); err != nil {
 		t.Fatal(err)
 	}
-	err := writeConfigFile(testServerConfig())
+	err := writeConfigFile(testServerConfig(), testServerConfig())
 	if err == nil {
 		t.Fatal("writeConfigFile() succeeded despite failing to read existing config")
 	}
@@ -81,7 +83,7 @@ func TestLoadServerConfigUsesEnvironmentWhenFileIsAbsent(t *testing.T) {
 func TestWriteConfigFileLeavesNoTempFiles(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("TRIM_PKGETC", dir)
-	if err := writeConfigFile(testServerConfig()); err != nil {
+	if err := writeConfigFile(testServerConfig(), testServerConfig()); err != nil {
 		t.Fatal(err)
 	}
 	entries, err := os.ReadDir(dir)
@@ -99,11 +101,6 @@ func TestWriteConfigFileLeavesNoTempFiles(t *testing.T) {
 
 func testServerConfig() ServerConfig {
 	return ServerConfig{
-		Bind:            defaultBind,
-		Port:            defaultPort,
-		LogLevel:        defaultLogLevel,
-		ConsoleLevel:    defaultConsoleLevel,
-		LogSave:         defaultLogSave,
 		TaskSave:        defaultTaskSave,
 		Timeout:         defaultTaskTimeout,
 		CopyConcurrency: DefaultCopyConcurrency,
@@ -123,8 +120,9 @@ func TestWriteConfigFileKeepsOneOpensyncSection(t *testing.T) {
 		{"section with one managed key", "[opensync]\nport=9000\n"},
 		{"section with every managed key", "[opensync]\n" + func() string {
 			var b strings.Builder
+			values := configManagedValues(testServerConfig())
 			for _, k := range configManagedKeys {
-				b.WriteString(k + "=1\n")
+				b.WriteString(k + "=" + values[k] + "\n")
 			}
 			return b.String()
 		}()},
@@ -145,7 +143,7 @@ func TestWriteConfigFileKeepsOneOpensyncSection(t *testing.T) {
 				}
 			}
 
-			if err := writeConfigFile(testServerConfig()); err != nil {
+			if err := writeConfigFile(testServerConfig(), testServerConfig()); err != nil {
 				t.Fatalf("writeConfigFile() error: %v", err)
 			}
 
@@ -186,7 +184,7 @@ func TestWriteConfigFilePreservesForeignContent(t *testing.T) {
 		t.Fatalf("seed config: %v", err)
 	}
 
-	if err := writeConfigFile(testServerConfig()); err != nil {
+	if err := writeConfigFile(testServerConfig(), testServerConfig()); err != nil {
 		t.Fatalf("writeConfigFile() error: %v", err)
 	}
 

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"opensync/internal/model"
 	"opensync/internal/msg"
@@ -16,6 +17,9 @@ import (
 )
 
 var globalSSEConns atomic.Int32
+
+// subscribeJobProgress is swapped in tests.
+var subscribeJobProgress = service.SubscribeJobProgressWithSnapshot
 
 const maxGlobalSSEConns = 64
 
@@ -41,16 +45,8 @@ func StreamJobCurrent(c *gin.Context) {
 
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
-		c.JSON(http.StatusInternalServerError, model.Error("streaming unsupported"))
-		return
-	}
-
-	// Validate the job and build the first frame BEFORE switching the response
-	// to SSE, so an unknown job still returns a normal JSON error instead of a
-	// JSON body glued onto an event-stream response.
-	initialPayload, err := service.BuildJobProgressStreamPayload(jobID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, model.Error("failed to build progress payload"))
+		log.Printf("SSE unavailable: response writer does not support flushing")
+		c.JSON(http.StatusInternalServerError, model.Error(msg.T(msg.InternalError)))
 		return
 	}
 
@@ -60,9 +56,19 @@ func StreamJobCurrent(c *gin.Context) {
 	}
 	defer globalSSEConns.Add(-1)
 
-	updates := service.SubscribeJobProgress(jobID)
-	if updates == nil {
-		c.JSON(http.StatusTooManyRequests, model.Error("too many progress streams"))
+	// Subscribe and build the first frame atomically, BEFORE switching the
+	// response to SSE, so an unknown job still returns a normal JSON error
+	// instead of a JSON body glued onto an event-stream response. Building
+	// first and subscribing afterwards lost any frame published in between —
+	// including the task's final one, which left the page showing "running".
+	updates, initialPayload, ok, err := subscribeJobProgress(jobID)
+	if err != nil {
+		log.Printf("SSE initial payload for job %d failed: %v", jobID, err)
+		c.JSON(http.StatusInternalServerError, model.Error(msg.T(msg.InternalError)))
+		return
+	}
+	if !ok {
+		c.JSON(http.StatusTooManyRequests, model.Error(msg.T(msg.SSEStreamLimit)))
 		return
 	}
 	defer func() {

@@ -3,7 +3,6 @@ package mapper
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"log"
 	"opensync/internal/msg"
@@ -16,9 +15,9 @@ import (
 )
 
 // List queries order by createTime DESC, id DESC. createTime is second-grained
-// and AddJobTaskItemMany stamps a whole batch with the same value, so ties are
-// the norm rather than an edge case; without the unique id tiebreaker LIMIT/
-// OFFSET paging can repeat or skip rows between pages.
+// and a flush can write several items with the same value, so ties are the norm
+// rather than an edge case; without the unique id tiebreaker LIMIT/OFFSET
+// paging can repeat or skip rows between pages.
 const (
 	jobTaskItemListColumns     = "id, taskId, srcPath, dstPath, isPath, fileName, fileSize, type, alistTaskId, status, progress, errMsg, createTime"
 	jobTaskItemRuntimeColumns  = "id, taskId, srcPath, dstPath, isPath, fileName, fileSize, type, alistTaskId, status, errMsg, createTime"
@@ -47,7 +46,7 @@ func GetJobByID(jobID int64) (map[string]interface{}, error) {
 		return nil, err
 	}
 	if len(rst) == 0 {
-		return nil, errors.New(msg.T(msg.JobNotFound))
+		return nil, notFound(ErrJobNotFound, msg.JobNotFound)
 	}
 	return rst[0], nil
 }
@@ -64,14 +63,14 @@ func GetJobByTaskID(taskID int64) (map[string]interface{}, error) {
 		return nil, err
 	}
 	if len(rst) == 0 {
-		return nil, errors.New(msg.T(msg.JobNotFound))
+		return nil, notFound(ErrJobNotFound, msg.JobNotFound)
 	}
 	return rst[0], nil
 }
 
 // AddJob inserts a new job
 func AddJob(job map[string]interface{}) (int64, error) {
-	return ExecuteInsert(
+	id, err := ExecuteInsert(
 		`INSERT INTO job (enable, remark, srcPath, dstPath, alistId, useCacheT, scanIntervalT, useCacheS, scanIntervalS,
 		 method, interval, isCron, month, day, day_of_week, hour, minute, second, exclude,
 		 minFileSize, maxFileSize)
@@ -83,11 +82,25 @@ func AddJob(job map[string]interface{}) (int64, error) {
 		job["hour"], job["minute"], job["second"], job["exclude"],
 		job["minFileSize"], job["maxFileSize"],
 	)
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "unique constraint failed") {
+		// job has UNIQUE(srcPath, dstPath, alistId); surface the duplicate as a
+		// user-facing reason instead of an opaque 500.
+		return 0, jobExistsError()
+	}
+	return id, err
 }
 
-// UpdateJob updates a job
+// UpdateJob updates a job. It overwrites every mutable column, so the caller
+// must pass the complete normalized definition: a missing key is written as
+// NULL (that is how a user clears an optional field, e.g. exclude or remark).
+// The id is validated here because an absent/nil id used to make the statement
+// match no row and still report success.
 func UpdateJob(job map[string]interface{}) error {
-	return ExecuteUpdate(
+	jobID := util.ToInt64(job["id"])
+	if jobID <= 0 {
+		return fmt.Errorf("update job: missing or invalid id")
+	}
+	affected, err := executeUpdateAffected(
 		`UPDATE job SET enable=?, remark=?, srcPath=?, dstPath=?, alistId=?, useCacheT=?, scanIntervalT=?,
 		 useCacheS=?, scanIntervalS=?, method=?, interval=?, isCron=?, month=?, day=?,
 		 day_of_week=?, hour=?, minute=?, second=?, exclude=?, minFileSize=?, maxFileSize=? WHERE id=?`,
@@ -97,8 +110,24 @@ func UpdateJob(job map[string]interface{}) error {
 		job["month"], job["day"], job["day_of_week"],
 		job["hour"], job["minute"], job["second"], job["exclude"],
 		job["minFileSize"], job["maxFileSize"],
-		job["id"],
+		jobID,
 	)
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return notFound(ErrJobNotFound, msg.JobNotFound)
+	}
+	return nil
+}
+
+// clearJobTaskCounts drops the cached item counters for the tasks matched by
+// where. Deletion removes items in separately committed batches before the
+// parent rows, so a failure can leave the task row behind with part of its
+// history gone; keeping the cached counters would then show counts for items
+// that no longer exist, with no path that recomputes them.
+func clearJobTaskCounts(where string, args ...interface{}) error {
+	return ExecuteUpdate("UPDATE job_task SET taskNum=NULL WHERE "+where, args...)
 }
 
 // UpdateJobEnable updates job enable status
@@ -114,6 +143,11 @@ func UpdateJobEnable(jobID int64, enable int) error {
 // locked". An interruption leaves the job and its tasks in place with fewer
 // items, so deleting again finishes the job.
 func DeleteJob(jobID int64) error {
+	// Invalidate cached counters first (P2-1): the batches below commit
+	// separately, so a later failure leaves the tasks with a shorter history.
+	if err := clearJobTaskCounts("jobId=?", jobID); err != nil {
+		return err
+	}
 	if err := deleteJobTaskItemsInBatches(context.Background(),
 		"taskId IN (SELECT id FROM job_task WHERE jobId=?)", jobID); err != nil {
 		return err
@@ -204,15 +238,20 @@ func parseStatusList(value interface{}) []int {
 		}
 		return statuses
 	case []interface{}:
+		// A JSON-decoded array. Each element goes through the same strict
+		// parser as the string form: util.ToInt("abc") is 0, which would
+		// silently turn a malformed filter into "waiting only".
 		statuses := make([]int, 0, len(v))
 		for _, item := range v {
-			statuses = append(statuses, util.ToInt(item))
+			statuses = append(statuses, parseStatusCSV(fmt.Sprint(item))...)
 		}
 		return statuses
 	case string:
 		return parseStatusCSV(v)
 	default:
-		return []int{util.ToInt(v)}
+		// Unknown scalar type (e.g. float64 from JSON): format and parse it
+		// strictly; "true"/"1.5" are dropped instead of becoming status 0.
+		return parseStatusCSV(fmt.Sprint(v))
 	}
 }
 
@@ -243,7 +282,7 @@ func GetJobTaskByID(taskID int64) (map[string]interface{}, error) {
 		return nil, err
 	}
 	if len(rst) == 0 {
-		return nil, errors.New(msg.T(msg.TaskNotFound))
+		return nil, notFound(ErrTaskNotFound, msg.TaskNotFound)
 	}
 	return rst[0], nil
 }
@@ -266,6 +305,9 @@ func UpdateJobTaskStatusByStatusAndJobID(jobID int64) error {
 // DeleteJobTaskByTaskID deletes a task and its items. The items are removed in
 // batches first for the same reason as DeleteJob.
 func DeleteJobTaskByTaskID(taskID int64) error {
+	if err := clearJobTaskCounts("id=?", taskID); err != nil {
+		return err
+	}
 	if err := deleteJobTaskItemsInBatches(context.Background(), "taskId=?", taskID); err != nil {
 		return err
 	}
@@ -278,12 +320,6 @@ func DeleteJobTaskByTaskID(taskID int64) error {
 		}
 		return nil
 	})
-}
-
-// DeleteJobTaskByRunTime deletes old tasks. It is the context-free form of
-// DeleteJobTaskByRunTimeContext and never skips maintenance.
-func DeleteJobTaskByRunTime(runTime int64) error {
-	return DeleteJobTaskByRunTimeContext(context.Background(), runTime, nil)
 }
 
 // DeleteJobTaskByRunTimeContext deletes finished tasks older than runTime, then
@@ -323,10 +359,39 @@ func DeleteJobTaskByRunTimeContext(ctx context.Context, runTime int64, maintenan
 	// years of history returned no pages to the filesystem. TRUNCATE actually
 	// shrinks the WAL, and the freed pages are reclaimed by an explicit VACUUM
 	// below.
-	_, _ = GetDB().ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
-	_, _ = GetDB().ExecContext(ctx, "PRAGMA optimize")
+	if err := walCheckpointTruncate(ctx); err != nil {
+		// Not fatal (the cleanup itself succeeded), but no longer silent: a
+		// WAL that cannot be truncated is how a fixed-size disk fills up.
+		if ctx.Err() == nil {
+			log.Printf("WAL checkpoint after task history cleanup failed: %v", err)
+		}
+	}
+	if _, err := GetDB().ExecContext(ctx, "PRAGMA optimize"); err != nil && ctx.Err() == nil {
+		log.Printf("PRAGMA optimize after task history cleanup failed: %v", err)
+	}
+	if maintenanceBlocked() {
+		// A sync task started after the check above (e.g. while the checkpoint
+		// ran); do not take the write lock for a full VACUUM now.
+		log.Printf("Skipping database VACUUM: a sync task just started")
+		return nil
+	}
 	if err := vacuumIfWorthwhile(ctx, maintenanceBlocked); err != nil {
 		log.Printf("Failed to reclaim free database pages: %v", err)
+	}
+	return nil
+}
+
+// walCheckpointTruncate runs PRAGMA wal_checkpoint(TRUNCATE) and reports
+// whether it completed. SQLite answers with a row even when it only made
+// partial progress because a reader still pins the WAL (busy=1), so the old
+// "discard the result" call could not tell a shrunken WAL from a failed one.
+func walCheckpointTruncate(ctx context.Context) error {
+	var busy, logFrames, checkpointed int64
+	if err := GetDB().QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logFrames, &checkpointed); err != nil {
+		return err
+	}
+	if busy != 0 {
+		return fmt.Errorf("checkpoint busy: %d of %d WAL frames not checkpointed", logFrames-checkpointed, logFrames)
 	}
 	return nil
 }
@@ -364,6 +429,10 @@ func shouldVacuum(freePages, pageCount, minFreePages int64) bool {
 // the database in temp storage: on a NAS with a multi-GB history that copy was
 // built in RAM and the process was OOM-killed mid-rewrite.
 func vacuumIfWorthwhile(ctx context.Context, maintenanceBlocked func() bool) error {
+	if maintenanceBlocked != nil && maintenanceBlocked() {
+		log.Printf("Skipping database VACUUM: a sync task is running")
+		return nil
+	}
 	conn, err := GetDB().Conn(ctx)
 	if err != nil {
 		return err
@@ -486,10 +555,13 @@ func deleteJobTasksByIDs(ctx context.Context, taskIDs []int64) error {
 		return nil
 	}
 	clause, args := int64InClause(taskIDs)
+	if err := clearJobTaskCounts("id IN ("+clause+")", args...); err != nil {
+		return err
+	}
 	if err := deleteJobTaskItemsInBatches(ctx, "taskId IN ("+clause+")", args...); err != nil {
 		return err
 	}
-	return retryOnBusy(func() error {
+	return retryOnBusyContext(ctx, func() error {
 		_, err := GetDB().ExecContext(ctx, "DELETE FROM job_task WHERE id IN ("+clause+")", args...)
 		return err
 	})
@@ -506,7 +578,7 @@ func deleteJobTaskItemsInBatches(ctx context.Context, where string, args ...inte
 			return err
 		}
 		var n int64
-		err := retryOnBusy(func() error {
+		err := retryOnBusyContext(ctx, func() error {
 			result, err := GetDB().ExecContext(ctx, query, batchArgs...)
 			if err != nil {
 				return err
@@ -527,17 +599,23 @@ func deleteJobTaskItemsInBatches(ctx context.Context, where string, args ...inte
 // repeats the whole transaction when it fails on lock contention. fn must
 // therefore only touch state through tx, or overwrite its outputs each run.
 func withTx(fn func(*sql.Tx) error) error {
-	return retryOnBusy(func() error { return runTx(nil, fn) })
+	return retryOnBusy(func() error { return runTxOn(GetDB(), nil, fn) })
 }
 
 // withReadTx runs fn in a read-only transaction: one consistent snapshot that
 // begins deferred and so never queues for the write lock.
 func withReadTx(fn func(*sql.Tx) error) error {
-	return runTx(&sql.TxOptions{ReadOnly: true}, fn)
+	return runTxOn(GetDB(), &sql.TxOptions{ReadOnly: true}, fn)
 }
 
 func runTx(opts *sql.TxOptions, fn func(*sql.Tx) error) error {
-	tx, err := GetDB().BeginTx(context.Background(), opts)
+	return runTxOn(GetDB(), opts, fn)
+}
+
+// runTxOn is runTx against an explicit handle, for maintenance work that was
+// handed its database (e.g. the startup FTS repair) instead of using the global.
+func runTxOn(handle *sql.DB, opts *sql.TxOptions, fn func(*sql.Tx) error) error {
+	tx, err := handle.BeginTx(context.Background(), opts)
 	if err != nil {
 		return err
 	}
@@ -597,12 +675,16 @@ func AddJobTaskItemMany(items []map[string]interface{}) error {
 		argsList = append(argsList, []interface{}{
 			item["taskId"], item["srcPath"], item["dstPath"], item["isPath"], item["fileName"],
 			item["fileSize"], item["type"], item["alistTaskId"], item["status"], item["errMsg"],
+			// progress is optional: live progress is streamed over SSE and the
+			// finalized items have no meaningful value, so absent stays NULL.
+			// It is persisted when a caller does supply it (see P3-10).
+			item["progress"],
 			createTime,
 		})
 	}
 	return ExecuteMany(
-		`INSERT INTO job_task_item (taskId, srcPath, dstPath, isPath, fileName, fileSize, type, alistTaskId, status, errMsg, createTime)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO job_task_item (taskId, srcPath, dstPath, isPath, fileName, fileSize, type, alistTaskId, status, errMsg, progress, createTime)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		argsList,
 	)
 }
@@ -745,19 +827,6 @@ func int64InClause(values []int64) (string, []interface{}) {
 	return inClause(args)
 }
 
-// GetJobTaskCounts is the legacy, error-swallowing form of QueryJobTaskCounts:
-// on failure it logs and returns zero counters. New callers should use
-// QueryJobTaskCounts, which lets them avoid caching or acting on counts that
-// were never actually read.
-func GetJobTaskCounts(taskID int64) map[string]interface{} {
-	counts, err := QueryJobTaskCounts(taskID)
-	if err != nil {
-		log.Printf("Failed to count items of task %d: %v", taskID, err)
-		return EmptyJobTaskCounts()
-	}
-	return counts
-}
-
 // QueryJobTaskCounts returns all task item status counters in one query.
 //
 // A failed read is returned, not folded into zero counts: callers cache the
@@ -889,6 +958,12 @@ func taskItemKeywordFilter(keyword string) (string, []interface{}) {
 		[]interface{}{like, like, like, like, like}
 }
 
+// taskItemFTSAvailable reports whether keyword search may rely on the FTS
+// index. The table alone is not enough: without the AFTER INSERT/DELETE/UPDATE
+// triggers the index silently stops tracking new rows, and a MATCH then misses
+// items the LIKE fallback would have found. The check therefore requires the
+// virtual table and all sync triggers, and only caches a *successful*
+// introspection.
 func taskItemFTSAvailable() bool {
 	handle := GetDB()
 	ftsAvailability.mu.Lock()
@@ -896,9 +971,11 @@ func taskItemFTSAvailable() bool {
 	if ftsAvailability.known && ftsAvailability.db == handle {
 		return ftsAvailability.ok
 	}
-	var name string
-	err := handle.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name='job_task_item_fts'").Scan(&name)
-	ok := err == nil && name == "job_task_item_fts"
+	ok, err := ftsObjectsHealthy(handle)
+	if err != nil {
+		log.Printf("Failed to inspect the task item search index; keyword search falls back to LIKE: %v", err)
+		return false
+	}
 	ftsAvailability.db = handle
 	ftsAvailability.known = true
 	ftsAvailability.ok = ok

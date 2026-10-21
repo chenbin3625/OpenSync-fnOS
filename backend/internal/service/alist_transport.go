@@ -105,7 +105,7 @@ func newProtocolTripper(h12 http.RoundTripper, h3 http.RoundTripper) *protocolTr
 		h12:      h12,
 		h3:       h3,
 		h3Hosts:  make(map[string]struct{}),
-		h3Failed: make(map[string]struct{}),
+		h3Failed: make(map[string]time.Time),
 	}
 }
 
@@ -119,8 +119,13 @@ type protocolTripper struct {
 	h12Long  http.RoundTripper
 	h3       http.RoundTripper
 	mu       sync.Mutex
-	h3Hosts  map[string]struct{}
-	h3Failed map[string]struct{}
+	h3Hosts map[string]struct{}
+	// h3Failed maps a host to when its HTTP/3 failure mark expires. The mark
+	// is temporary: one transient QUIC failure must not disable HTTP/3 for
+	// the lifetime of a long-lived cached client.
+	h3Failed map[string]time.Time
+	// now is the clock for h3Failed expiry; nil means time.Now (tests inject).
+	now func() time.Time
 	// inflight counts requests whose response body has not been closed yet.
 	// Close defers http3.Transport.Close until it reaches zero, because that
 	// call tears down active QUIC connections and would break a request that
@@ -305,7 +310,7 @@ func (t *protocolTripper) markHTTP3(host string) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if _, failed := t.h3Failed[host]; failed {
+	if t.h3FailedLocked(host) {
 		return
 	}
 	if t.h3Hosts == nil {
@@ -322,19 +327,55 @@ func (t *protocolTripper) unmarkHTTP3(host string) {
 	delete(t.h3Hosts, host)
 }
 
-const maxH3FailedEntries = 1000
+const (
+	maxH3FailedEntries = 1000
+	// h3FailedTTL is how long a host stays on plain HTTP/2 after an HTTP/3
+	// failure. Long enough that a UDP-blocked path does not pay a failing QUIC
+	// handshake on every request, short enough that a transient blip does not
+	// disable HTTP/3 for the client's lifetime.
+	h3FailedTTL = 10 * time.Minute
+)
+
+func (t *protocolTripper) clock() time.Time {
+	if t.now != nil {
+		return t.now()
+	}
+	return time.Now()
+}
+
+// h3FailedLocked reports whether host carries an unexpired HTTP/3 failure
+// mark, dropping an expired one. Caller holds t.mu.
+func (t *protocolTripper) h3FailedLocked(host string) bool {
+	until, failed := t.h3Failed[host]
+	if !failed {
+		return false
+	}
+	if t.clock().Before(until) {
+		return true
+	}
+	delete(t.h3Failed, host)
+	return false
+}
 
 func (t *protocolTripper) markHTTP3Failed(host string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	delete(t.h3Hosts, host)
 	if t.h3Failed == nil {
-		t.h3Failed = make(map[string]struct{})
+		t.h3Failed = make(map[string]time.Time)
 	}
+	now := t.clock()
 	if len(t.h3Failed) >= maxH3FailedEntries {
-		t.h3Failed = make(map[string]struct{})
+		for h, until := range t.h3Failed {
+			if !now.Before(until) {
+				delete(t.h3Failed, h)
+			}
+		}
+		if len(t.h3Failed) >= maxH3FailedEntries {
+			t.h3Failed = make(map[string]time.Time)
+		}
 	}
-	t.h3Failed[host] = struct{}{}
+	t.h3Failed[host] = now.Add(h3FailedTTL)
 }
 
 func (t *protocolTripper) CloseIdleConnections() {
