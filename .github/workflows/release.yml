@@ -20,46 +20,29 @@ jobs:
     name: Verify version
     runs-on: ubuntu-latest
     steps:
+      # persist-credentials: false on every checkout: otherwise the job token
+      # is written into .git/config, where any dependency script run later in
+      # the job can read it.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       # The tag is what users install; the manifest version is what fnOS shows
       # and what the artifact filenames carry. Publishing them out of sync
       # ships a package that claims a different version than the release.
-      - name: Tag matches manifest and package.json
-        run: |
-          set -euo pipefail
-          tag="${GITHUB_REF_NAME#v}"
-          manifest="$(sed -n 's/^version=//p' fnos/manifest)"
-          pkg="$(node -p "require('./frontend/package.json').version")"
-          root_pkg="$(node -p "require('./package.json').version")"
-          readme="$(sed -n 's/^当前版本：\*\*v\([0-9][0-9.]*\)\*\*$/\1/p' README.md)"
-          echo "tag=$tag manifest=$manifest package.json=$pkg root package.json=$root_pkg README=$readme"
-          if [ -z "$manifest" ]; then
-            echo "::error::fnos/manifest 未声明 version"
-            exit 1
-          fi
-          if [ "$tag" != "$manifest" ]; then
-            echo "::error::Git tag ($tag) 与 fnos/manifest ($manifest) 版本不一致"
-            exit 1
-          fi
-          if [ "$tag" != "$pkg" ]; then
-            echo "::error::Git tag ($tag) 与 frontend/package.json ($pkg) 版本不一致"
-            exit 1
-          fi
-          if [ "$tag" != "$root_pkg" ]; then
-            echo "::error::Git tag ($tag) 与根目录 package.json ($root_pkg) 版本不一致"
-            exit 1
-          fi
-          if [ "$tag" != "$readme" ]; then
-            echo "::error::Git tag ($tag) 与 README.md 当前版本 ($readme) 不一致"
-            exit 1
-          fi
+      # scripts/check-version.mjs is the same check release.mjs runs locally.
+      - name: Tag matches manifest, package.json and README
+        env:
+          TAG: ${{ github.ref_name }}
+        run: node scripts/check-version.mjs "$TAG"
 
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -96,6 +79,13 @@ jobs:
         run: go vet ./...
         working-directory: backend
 
+      # Known-vulnerability scan of the Go dependencies and the toolchain's
+      # standard library. The tool version is pinned so the gate does not
+      # change underneath us.
+      - name: Go vulnerability check
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+        working-directory: backend
+
       # -race is the gate that catches the concurrency regressions this codebase
       # is most exposed to (shared task state, debounced timers, the DB handle).
       - name: Go tests (race detector)
@@ -123,13 +113,17 @@ jobs:
     timeout-minutes: 60
     # Playwright starts both the Go backend (loopback --dev) and Vite itself.
     # The data directory is isolated per run so the CRUD specs never depend on
-    # or mutate a reused SQLite file.
+    # or mutate a reused SQLite file. It is set on the step below rather than
+    # here: the `runner` context is not available in a job-level `env:`, and an
+    # expression GitHub cannot resolve invalidates the whole workflow file (the
+    # run then fails with zero jobs — what v0.0.34 hit).
     env:
       CI: true
       PLAYWRIGHT_CHANNEL: chromium
-      OPENSYNC_E2E_DATA_DIR: ${{ runner.temp }}/opensync-e2e-data
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -153,15 +147,18 @@ jobs:
       - name: Run e2e suite
         run: npx playwright test
         working-directory: frontend
+        env:
+          OPENSYNC_E2E_DATA_DIR: ${{ runner.temp }}/opensync-e2e-data
 
+  # Build runs third-party code (npm install/build scripts, Go modules, fnpack)
+  # and therefore holds only a read token. Publishing is a separate job that
+  # never installs or runs project dependencies.
   build:
-    name: Build and upload
+    name: Build artifacts
     needs: [version, test, e2e]
     runs-on: ubuntu-latest
-    # Only this job may create the Release. Scoped here instead of at workflow
-    # level so test/e2e run without any write token in their environment.
     permissions:
-      contents: write
+      contents: read
     env:
       FNPACK_VERSION: "1.2.3"
       # fnpack is a third-party binary fetched over the network with no vendor
@@ -172,17 +169,19 @@ jobs:
       FNPACK_SHA256: "54b97fa7b70968c4d05c79840f5daeff508957d0bb2062fdb0376d00d9615c93"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
+      # No dependency cache in the release build: a cache restored here could
+      # have been written by any earlier workflow run (cache poisoning).
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: backend/go.mod
-          cache-dependency-path: backend/go.sum
+          cache: false
 
       - name: Download and verify fnpack
         run: |
@@ -197,11 +196,40 @@ jobs:
         env:
           FNPACK: /usr/local/bin/fnpack
 
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-artifacts
+          path: |
+            dist/*.fpk
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+
+  # The only job holding a write token. It does not check out the repository
+  # or install anything: it downloads the built files and creates the Release.
+  publish:
+    name: Publish release
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-artifacts
+          path: dist
+
+      - name: Verify checksums
+        working-directory: dist
+        run: sha256sum --check --strict SHA256SUMS
+
       - name: Create release and upload assets
         # The tag name is attacker-influenced text: pass it through the
         # environment instead of expanding the expression inside the shell script.
+        # Without a checkout, gh needs the repository named explicitly.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
           gh release create "$TAG" \

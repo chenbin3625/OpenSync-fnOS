@@ -4,7 +4,6 @@ import (
 	"log"
 	"opensync/internal/msg"
 	"opensync/internal/service"
-	"opensync/pkg/util"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -103,7 +102,7 @@ func UpdateNotify(c *gin.Context) {
 
 	if notifyIDStr, ok := req["notifyId"]; ok {
 		// Update status
-		notifyID, err := parseRequiredID(util.StringValue(notifyIDStr))
+		notifyID, err := parseIDValue(notifyIDStr)
 		if err != nil {
 			respondError(c, err.Error())
 			return
@@ -124,6 +123,13 @@ func UpdateNotify(c *gin.Context) {
 	} else if notify, ok := req["notify"]; ok {
 		// Edit notify
 		if nMap, ok := notify.(map[string]interface{}); ok {
+			// Editing needs the row id. Without this check a missing id ran
+			// "UPDATE ... WHERE id=NULL", matched nothing and surfaced as a
+			// generic internal error instead of a parameter error.
+			if _, err := parseIDValue(nMap["id"]); err != nil {
+				respondError(c, err.Error())
+				return
+			}
 			handleServiceVoid(c, func() error {
 				return service.EditNotify(nMap)
 			})

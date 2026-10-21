@@ -291,22 +291,28 @@ func TestRemoveJobClientStopsRunningJobBeforeDeleting(t *testing.T) {
 	if !task.isBreak() {
 		t.Fatalf("RemoveJobClient() did not request task break")
 	}
-	if got := util.ToInt(client.Job["enable"]); got != 0 {
-		t.Fatalf("job enable after remove = %d, want 0", got)
+	// The delete failed (the job_task tables do not exist in this stub DB), so
+	// the job still exists. It must roll back to its previous state — enabled,
+	// with a usable scheduler — instead of being left disabled with a stopped
+	// scheduler that a later resume can no longer revive.
+	if !client.enabled() {
+		t.Fatal("failed delete left the job disabled in memory")
 	}
-	// The delete failed (the job_task tables do not exist in this stub DB) after
-	// the scheduler was already stopped. The stored enable flag must follow the
-	// stopped in-memory state, otherwise a restart silently revives the job.
 	var storedEnable int
 	if err := testDB.QueryRow("SELECT enable FROM job WHERE id=99").Scan(&storedEnable); err != nil {
 		t.Fatalf("read stored enable: %v", err)
 	}
-	if storedEnable != 0 {
-		t.Fatalf("stored enable after failed delete = %d, want 0", storedEnable)
+	if storedEnable != 1 {
+		t.Fatalf("stored enable after failed delete = %d, want 1 (unchanged)", storedEnable)
 	}
 	if client.isClosing() {
 		t.Fatal("failed delete left the client permanently marked as closing")
 	}
+	if !client.lockOp() {
+		client.opMu.Unlock()
+		t.Fatal("failed delete left the client marked deleted")
+	}
+	client.opMu.Unlock()
 }
 
 // A stored job that fails the safety validation must not be revived by an

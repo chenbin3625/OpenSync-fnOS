@@ -52,6 +52,39 @@ export function selectJob<T extends { id: number }>(
     ? jobs[0]
     : jobs.find((job) => job.id === selectedId);
 }
+
+/**
+ * Resolves the task shown for the jobId in the URL.
+ *
+ * A well-formed id that is no longer in the list (deleted in another tab, an
+ * old bookmark) falls back to the first task and reports `replaceWith`, so the
+ * caller rewrites the URL (history replace) and the address bar, the sidebar
+ * highlight and every action keep pointing at the task actually on screen.
+ * A malformed id (the -1 sentinel) stays an explicit empty selection.
+ */
+export function resolveJobSelection<T extends { id: number }>(
+  jobs: T[],
+  selectedId: number | null,
+): { job: T | undefined; replaceWith: number | null } {
+  const job = selectJob(jobs, selectedId);
+  if (job || selectedId === null || selectedId <= 0 || !jobs.length) {
+    return { job, replaceWith: null };
+  }
+  return { job: jobs[0], replaceWith: jobs[0].id };
+}
+
+/**
+ * The tab actually rendered. The realtime tab is disabled without a running
+ * task, so a deep link or sidebar link carrying tab=realtime must not leave a
+ * disabled tab active over an empty pane once the current-task check settles.
+ */
+export function resolveTaskTab(
+  tab: string,
+  { settled, hasCurrentTask }: { settled: boolean; hasCurrentTask: boolean },
+): string {
+  if (tab === "realtime" && settled && !hasCurrentTask) return "overview";
+  return tab;
+}
 export function jobToForm(job: JobItem): JobForm {
   const min = splitBytesToFileSize(job.minFileSize),
     max = splitBytesToFileSize(job.maxFileSize);

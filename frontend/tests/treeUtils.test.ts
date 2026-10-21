@@ -3,6 +3,7 @@ import type { TreeNodeData } from "@douyinfe/semi-ui/lib/es/tree/interface";
 import {
   collectTreeKeys,
   patchTreeNodes,
+  refreshTreePaths,
   sortPathsByDepth,
   splitDirPath,
   toTreeChildren,
@@ -90,6 +91,69 @@ describe("sortPathsByDepth", () => {
       "/C",
       "/A/B",
     ]);
+  });
+});
+
+describe("refreshTreePaths", () => {
+  const listing: Record<string, string[]> = {
+    "/": ["A", "B"],
+    "/A": ["X"],
+    "/A/X": [],
+    "/data": ["photos"],
+    "/data/photos": ["raw"],
+  };
+  const loader =
+    (fail: string[] = [], calls: string[] = []) =>
+    async (path: string) => {
+      calls.push(path);
+      if (fail.includes(path)) return undefined;
+      return toTreeChildren(path, (listing[path] ?? []).map((name) => ({ name })));
+    };
+
+  it("collapses directories that disappeared on the engine", async () => {
+    const calls: string[] = [];
+    const kept = await refreshTreePaths(
+      ["/"],
+      ["/", "/A", "/A/X", "/Gone", "/Gone/sub"],
+      loader([], calls),
+    );
+    expect(kept).toEqual(["/", "/A", "/A/X"]);
+    // 已不存在的目录不再请求
+    expect(calls).not.toContain("/Gone");
+  });
+
+  it("keeps expanded keys when the root itself fails to load", async () => {
+    const calls: string[] = [];
+    const expanded = ["/", "/A", "/A/X"];
+    expect(await refreshTreePaths(["/"], expanded, loader(["/"], calls))).toEqual(
+      expanded,
+    );
+    expect(calls).toEqual(["/"]);
+  });
+
+  it("keeps only the failed subtree when a nested directory fails", async () => {
+    const kept = await refreshTreePaths(
+      ["/"],
+      ["/", "/A", "/A/X", "/Gone"],
+      loader(["/A"]),
+    );
+    expect(kept).toEqual(["/", "/A", "/A/X"]);
+  });
+
+  it("starts from the given roots instead of /", async () => {
+    // 文件夹过滤树的根是源目录，从 "/" 刷新会把它们全部当成已删除
+    const calls: string[] = [];
+    const kept = await refreshTreePaths(
+      ["/data"],
+      ["/data", "/data/photos"],
+      loader([], calls),
+    );
+    expect(kept).toEqual(["/data", "/data/photos"]);
+    expect(calls).toEqual(["/data", "/data/photos"]);
+  });
+
+  it("returns null once aborted", async () => {
+    expect(await refreshTreePaths(["/"], ["/"], loader(), () => true)).toBeNull();
   });
 });
 

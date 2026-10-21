@@ -116,9 +116,9 @@ type protocolTripper struct {
 	h12 http.RoundTripper
 	// h12Long is used for requests marked withAlistLongOperation. nil falls
 	// back to h12 (tests, custom trippers).
-	h12Long  http.RoundTripper
-	h3       http.RoundTripper
-	mu       sync.Mutex
+	h12Long http.RoundTripper
+	h3      http.RoundTripper
+	mu      sync.Mutex
 	h3Hosts map[string]struct{}
 	// h3Failed maps a host to when its HTTP/3 failure mark expires. The mark
 	// is temporary: one transient QUIC failure must not disable HTTP/3 for

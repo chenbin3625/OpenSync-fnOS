@@ -152,6 +152,29 @@ describe("gateway-aware API requests", () => {
 
     await expect(request("/job")).resolves.toEqual({ dataList: [], count: 0 });
   });
+
+  it("treats a bodiless success (204 / empty 200) as success", async () => {
+    const json = vi.fn(async () => {
+      throw new SyntaxError("Unexpected end of JSON input");
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: true, status: 204, json }),
+    );
+    await expect(request("/job", { method: "DELETE" })).resolves.toBeUndefined();
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: new Headers({ "Content-Length": "0" }),
+        json,
+      }),
+    );
+    await expect(request("/job", { method: "DELETE" })).resolves.toBeUndefined();
+    expect(json).not.toHaveBeenCalled();
+  });
 });
 
 describe("session expiry", () => {

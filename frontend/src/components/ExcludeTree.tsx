@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Tree from "@douyinfe/semi-ui/lib/es/tree";
 import type { TreeNodeData } from "@douyinfe/semi-ui/lib/es/tree/interface";
@@ -47,6 +47,13 @@ export function ExcludeTree({
   const [loadFailed, setLoadFailed] = useState(false);
   const onLoaded = useCallback(() => setLoadFailed(false), []);
   const onError = useCallback(() => setLoadFailed(true), []);
+  const srcKey = srcPaths.join(",");
+  // 刷新/重试必须从源目录根节点开始；从 "/" 开始会把已展开的子目录全部当成已删除而折叠
+  const rootKeys = useMemo(
+    () => initialExcludeExpandedKeys(srcPaths),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [srcKey],
+  );
   const {
     treeData,
     expandedKeys,
@@ -59,7 +66,13 @@ export function ExcludeTree({
     loadData,
     refresh,
     resetTree,
-  } = useAsyncTree({ engineId, onLoaded, onError, errorFallback: "目录加载失败" });
+  } = useAsyncTree({
+    engineId,
+    onLoaded,
+    onError,
+    errorFallback: "目录加载失败",
+    rootKeys,
+  });
 
   // 根据 srcPaths 初始化根节点
   useEffect(() => {

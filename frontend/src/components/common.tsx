@@ -292,12 +292,21 @@ export function Status({
  * click/tap all open it and Escape closes it.
  */
 function ErrorReason({ error }: { error: string }) {
-  const [visible, setVisible] = useState(false);
+  // Two sources of visibility: a transient one (hover / focus) and a pinned
+  // one (click, tap, Enter/Space). Leaving the icon only ends the transient
+  // one, so a reason opened by click stays readable until it is dismissed.
+  const [hovered, setHovered] = useState(false);
+  const [pinned, setPinned] = useState(false);
+  const visible = hovered || pinned;
+  const close = () => {
+    setHovered(false);
+    setPinned(false);
+  };
   return (
     <Tooltip
       trigger="custom"
       visible={visible}
-      onClickOutSide={() => setVisible(false)}
+      onClickOutSide={close}
       content={<div className="error-detail">{error}</div>}
     >
       <span
@@ -306,23 +315,23 @@ function ErrorReason({ error }: { error: string }) {
         aria-label="查看错误原因"
         aria-expanded={visible}
         className="error-indicator"
-        onMouseEnter={() => setVisible(true)}
-        onMouseLeave={() => setVisible(false)}
-        onFocus={() => setVisible(true)}
-        onBlur={() => setVisible(false)}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        onFocus={() => setHovered(true)}
+        onBlur={close}
         onClick={(event) => {
           // Mobile rows expand on click; opening the reason must not toggle them.
           event.stopPropagation();
-          setVisible(true);
+          setPinned((p) => !p);
         }}
         onKeyDown={(event) => {
           if (event.key === "Escape") {
             event.stopPropagation();
-            setVisible(false);
+            close();
           } else if (event.key === "Enter" || event.key === " ") {
             event.preventDefault();
             event.stopPropagation();
-            setVisible((v) => !v);
+            setPinned((p) => !p);
           }
         }}
       >

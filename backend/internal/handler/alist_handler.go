@@ -70,11 +70,10 @@ func TestAlist(c *gin.Context) {
 
 // DeleteAlist handles DELETE /svr/alist
 func DeleteAlist(c *gin.Context) {
+	// The id comes from the query string only. A form-body fallback could
+	// never fire: GatewayRequired rejects writes that are not
+	// application/json, and PostForm does not parse JSON.
 	idStr := c.Query("id")
-	if idStr == "" {
-		// Try from body/form
-		idStr = c.PostForm("id")
-	}
 	if idStr == "" {
 		respondError(c, msg.T(msg.LostPart))
 		return

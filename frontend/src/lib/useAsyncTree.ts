@@ -5,7 +5,7 @@ import { errorToast } from "../components/common";
 import {
   collectTreeKeys,
   patchTreeNodes,
-  sortPathsByDepth,
+  refreshTreePaths,
   toTreeChildren,
 } from "./treeUtils";
 
@@ -21,14 +21,21 @@ export interface UseAsyncTreeOptions {
   onError?: (err: unknown) => void;
   /** 错误提示的 fallback 文案 */
   errorFallback?: string;
+  /** 树的真实根节点，刷新从这里开始；默认 ["/"]（文件夹过滤树的根是各个源目录） */
+  rootKeys?: string[];
 }
+
+const defaultRootKeys = ["/"];
 
 export function useAsyncTree({
   engineId,
   onLoaded,
   onError,
   errorFallback = "目录加载失败",
+  rootKeys = defaultRootKeys,
 }: UseAsyncTreeOptions) {
+  const rootKeysRef = useRef(rootKeys);
+  rootKeysRef.current = rootKeys;
   const [treeData, setTreeData] = useState<TreeNodeData[]>([]);
   const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
   // 已加载节点由这里管理（受控 loadedKeys），而不是交给 Semi 内部记录：
@@ -91,31 +98,19 @@ export function useAsyncTree({
     setRefreshing(true);
     setLoadedKeys(new Set());
     try {
-      // 父级先于子级加载；只有父级刷新后仍存在的目录才继续刷新，
-      // 已在引擎上删除的目录不再请求，避免一串报错。
-      const present = new Set(["/"]);
-      // 加载失败的目录无法确认其子目录是否仍存在：保留它下面已展开的目录，
-      // 否则根目录一次失败就会把整棵树折叠。
-      const failed: string[] = [];
-      const underFailed = (key: string) =>
-        failed.some(
-          (dir) =>
-            dir === "/" || key === dir || key.startsWith(dir.replace(/\/+$/, "") + "/"),
-        );
-      const targets = sortPathsByDepth(new Set(["/", ...expandedRef.current]));
-      for (const path of targets) {
-        if (signal?.aborted) return;
-        if (!present.has(path) || underFailed(path)) continue;
-        const children = await loadChildren(path, engineId, signal);
-        if (!children) {
-          failed.push(path);
-          continue;
-        }
-        children.forEach((child) => present.add(String(child.key)));
-      }
-      if (signal?.aborted) return;
+      const before = [...expandedRef.current];
+      const kept = await refreshTreePaths(
+        rootKeysRef.current,
+        before,
+        (path) => loadChildren(path, engineId, signal),
+        () => Boolean(signal?.aborted),
+      );
+      if (!kept) return;
+      const keep = new Set(kept);
+      const checked = new Set(before);
+      // 只折叠本次核对过且已不存在的目录；刷新期间新展开的（如 onLoaded 追加的）保留
       setExpandedKeys((prev) =>
-        prev.filter((key) => present.has(key) || underFailed(key)),
+        prev.filter((key) => keep.has(key) || !checked.has(key)),
       );
     } finally {
       if (!signal?.aborted) setRefreshing(false);

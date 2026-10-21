@@ -29,6 +29,7 @@ func (jt *JobTask) finishSuccessfulTask() {
 		jt.finishFailedTask(taskStatusUpdateErrorMessage(err))
 		return
 	}
+	enqueue := queueTaskNotification
 	// Mark the job idle after the DB update succeeds, before notification
 	// delivery is handed off, so the next run is never gated on it.
 	jt.JobClient.markDone()
@@ -36,7 +37,7 @@ func (jt *JobTask) finishSuccessfulTask() {
 	jt.notifyProgressNow()
 	// Queued rather than sent here: delivery costs one HTTP timeout per
 	// unreachable destination, and the task is already finished.
-	QueueTaskNotification(jt.TaskID, status.Int(), taskNum, duration, jt.CreateTime)
+	enqueue(jt.TaskID, status.Int(), taskNum, duration, jt.CreateTime)
 }
 
 func taskPersistenceErrorMessage(err error) string {
@@ -48,19 +49,39 @@ func taskStatusUpdateErrorMessage(err error) string {
 }
 
 func (jt *JobTask) finishFailedTask(errMsg string) {
-	jobID := int64(0)
-	if jt.JobClient != nil {
-		jobID = jt.JobClient.JobID
-	}
-	log.Printf("Task %d failed (job %d): %s", jt.TaskID, jobID, errMsg)
+	log.Printf("Task %d failed (job %d): %s", jt.TaskID, jt.jobIDSnapshot(), errMsg)
 	if err := UpdateJobTaskStatusSimple(jt.TaskID, taskStatusSystemFailed, &errMsg); err != nil {
 		log.Printf("Failed to mark task %d as failed: %v", jt.TaskID, err)
 	}
+	// A failed run is exactly what the user needs to hear about; the success
+	// path was the only one that queued a notification. Counters are best
+	// effort: the failure may itself be the database. Gathered before the job
+	// is marked idle so nothing of this task runs after waiters are released.
+	taskNum, err := GetCuTaskNum(jt.TaskID)
+	if err != nil {
+		taskNum = map[string]interface{}{}
+	}
+	duration := taskDuration(jt.CreateTime)
+	taskNum["duration"] = duration
+	enqueue := queueTaskNotification
 	if jt.JobClient != nil {
 		jt.JobClient.markDone()
 		jt.JobClient.clearCurrentTask(jt)
 		jt.notifyProgressNow()
 	}
+	enqueue(jt.TaskID, taskStatusSystemFailed.Int(), taskNum, duration, jt.CreateTime)
+}
+
+// queueTaskNotification is swapped in tests to observe completion notifications.
+var queueTaskNotification = QueueTaskNotification
+
+// jobIDSnapshot reads the owning job's id under its lock; replaceJobConfig
+// writes it concurrently.
+func (jt *JobTask) jobIDSnapshot() int64 {
+	if jt.JobClient == nil {
+		return 0
+	}
+	return jt.JobClient.idSnapshot()
 }
 
 func (jt *JobTask) updateTaskStatus() (taskStatus, map[string]interface{}, int, error) {
@@ -72,7 +93,13 @@ func (jt *JobTask) updateTaskStatus() (taskStatus, map[string]interface{}, int, 
 	}
 	failOrOtherNum := util.ToInt(taskNum["failNum"]) + util.ToInt(taskNum["otherNum"])
 	allNum := util.ToInt(taskNum["allNum"])
-	status := finalTaskStatus(jt.isBreak(), jt.context().Err(), allNum, failOrOtherNum)
+	ctxErr := jt.context().Err()
+	if jt.isDrained() {
+		// Every item finished before the deadline; a deadline that expired
+		// during the final flush is not a timeout of the sync itself.
+		ctxErr = nil
+	}
+	status := finalTaskStatus(jt.isBreak(), ctxErr, allNum, failOrOtherNum)
 	duration := taskDuration(jt.CreateTime)
 	taskNum["duration"] = duration
 	taskNum["scanFinish"] = jt.ScanFinish.Load()

@@ -373,17 +373,17 @@ func TestCopyMonitorFinishWatchUnblocksBeforeRemoteDelete(t *testing.T) {
 // terminal state look like Running and poll forever.
 func TestMapAlistTaskState(t *testing.T) {
 	cases := map[int]taskStatus{
-		0:  taskStatusWaiting,  // pending
-		1:  taskStatusRunning,  // running
-		2:  taskStatusSuccess,  // succeeded
-		3:  taskStatusRunning,  // canceling
-		4:  taskStatusStopped,  // canceled
-		5:  taskStatusRunning,  // errored (will retry)
-		6:  taskStatusRunning,  // failing (hook running)
-		7:  taskStatusFailed,   // failed
-		8:  taskStatusRunning,  // waiting retry
-		9:  taskStatusRunning,  // before retry
-		42: taskStatusRunning,  // unknown state keeps polling
+		0:  taskStatusWaiting, // pending
+		1:  taskStatusRunning, // running
+		2:  taskStatusSuccess, // succeeded
+		3:  taskStatusRunning, // canceling
+		4:  taskStatusStopped, // canceled
+		5:  taskStatusRunning, // errored (will retry)
+		6:  taskStatusRunning, // failing (hook running)
+		7:  taskStatusFailed,  // failed
+		8:  taskStatusRunning, // waiting retry
+		9:  taskStatusRunning, // before retry
+		42: taskStatusRunning, // unknown state keeps polling
 	}
 	for state, want := range cases {
 		if got := mapAlistTaskState(state); got != want {

@@ -324,7 +324,7 @@ func AddClient(alist map[string]interface{}) error {
 		return err
 	}
 
-	client, err := NewAlistClient(urlStr, token, 0)
+	client, err := alistDeps.NewAlistClient(urlStr, token, 0)
 	if err != nil {
 		log.Printf("Failed to add alist client: %v", err)
 		return publicError(msg.T(msg.AlistConnectFail))

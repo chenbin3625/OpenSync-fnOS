@@ -57,7 +57,7 @@ type copyItemTestClient struct {
 	transferErr error
 	// transferID is the remote task id the copy/move call reports ("" means
 	// AList completed synchronously and returned no task).
-	transferID string
+	transferID  string
 	undone      []map[string]interface{}
 	undoneErr   error
 	undoneCalls int

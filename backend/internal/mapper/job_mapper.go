@@ -223,6 +223,36 @@ func (b *whereBuilder) and(condition string, args ...interface{}) {
 }
 
 func parseStatusList(value interface{}) []int {
+	statuses := parseStatusListRaw(value)
+	if statuses == nil {
+		return nil
+	}
+	return uniqueKnownStatuses(statuses)
+}
+
+// knownStatuses are the status codes stored in job_task / job_task_item.
+var knownStatuses = map[int]struct{}{0: {}, 1: {}, 2: {}, 3: {}, 4: {}, 5: {}, 6: {}, 7: {}, 8: {}, 10: {}}
+
+// uniqueKnownStatuses drops unknown codes and duplicates while keeping order,
+// so a client-supplied list never grows the IN (...) clause beyond the handful
+// of real states (an unbounded list could exceed SQLite's variable limit).
+func uniqueKnownStatuses(statuses []int) []int {
+	seen := make(map[int]struct{}, len(knownStatuses))
+	out := make([]int, 0, len(statuses))
+	for _, s := range statuses {
+		if _, ok := knownStatuses[s]; !ok {
+			continue
+		}
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
+func parseStatusListRaw(value interface{}) []int {
 	switch v := value.(type) {
 	case nil:
 		return nil

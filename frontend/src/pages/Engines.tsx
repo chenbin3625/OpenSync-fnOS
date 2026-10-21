@@ -147,7 +147,13 @@ function EngineEditor({
     void action.run(async () => {
       try {
         await api.saveEngine(
-          { ...form, ...(engine ? { id: engine.id } : {}) },
+          {
+            ...form,
+            // Validation tolerates surrounding blanks; the saved values must not keep them.
+            url: form.url.trim(),
+            remark: form.remark.trim(),
+            ...(engine ? { id: engine.id } : {}),
+          },
           Boolean(engine),
         );
         Toast.success("引擎连接已保存");

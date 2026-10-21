@@ -61,6 +61,43 @@ export function sortPathsByDepth(paths: Iterable<string>): string[] {
   return [...paths].sort((a, b) => depth(a) - depth(b) || a.localeCompare(b));
 }
 
+function isPathWithin(key: string, dir: string): boolean {
+  if (dir === "/" || key === dir) return true;
+  return key.startsWith(dir.replace(/\/+$/, "") + "/");
+}
+
+/**
+ * 刷新目录树：根节点和所有已展开目录按层级从浅到深重新加载，返回刷新后仍应保持展开的 key。
+ *
+ * - 只有父级刷新后仍存在的目录才继续请求，已在引擎上删除的目录不再请求，避免一串报错。
+ * - load 返回 undefined 表示加载失败：此时无法确认它下面的目录是否还在，
+ *   保留这些展开状态，不让一次失败把整棵树折叠。
+ * - roots 是树的真实根节点（目录选择器为 "/"，文件夹过滤为各个源目录）。
+ * - aborted 返回 true 时立即停止，返回 null，调用方不应再改动展开状态。
+ */
+export async function refreshTreePaths(
+  roots: string[],
+  expanded: string[],
+  load: (path: string) => Promise<TreeNodeData[] | undefined>,
+  aborted: () => boolean = () => false,
+): Promise<string[] | null> {
+  const present = new Set(roots);
+  const failed: string[] = [];
+  const underFailed = (key: string) => failed.some((dir) => isPathWithin(key, dir));
+  for (const path of sortPathsByDepth(new Set([...roots, ...expanded]))) {
+    if (aborted()) return null;
+    if (!present.has(path) || underFailed(path)) continue;
+    const children = await load(path);
+    if (aborted()) return null;
+    if (!children) {
+      failed.push(path);
+      continue;
+    }
+    children.forEach((child) => present.add(String(child.key)));
+  }
+  return expanded.filter((key) => present.has(key) || underFailed(key));
+}
+
 /** 拆分路径为「父路径」和「最后一级名称」，用于选择框里突出显示目录名 */
 export function splitDirPath(path: string): { parent: string; name: string } {
   const clean = path.length > 1 ? path.replace(/\/+$/, "") : path;

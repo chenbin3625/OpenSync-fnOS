@@ -1,8 +1,11 @@
 package handler
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"log"
+	"math"
 	"net/http"
 	"opensync/internal/model"
 	"opensync/internal/msg"
@@ -24,6 +27,68 @@ func parseRequiredID(value string) (int64, error) {
 		return 0, errors.New(msg.T(msg.LostPart))
 	}
 	return id, nil
+}
+
+// parseIDValue parses a positive id from a decoded JSON value. Clients send
+// ids both as strings ("12") and as numbers (12); a float64 must be an exact
+// integer, so 1.5 or "abc" is rejected instead of truncated or zeroed.
+func parseIDValue(value interface{}) (int64, error) {
+	n, ok := strictInt64(value)
+	if !ok || n <= 0 {
+		return 0, errors.New(msg.T(msg.LostPart))
+	}
+	return n, nil
+}
+
+// strictInt64 converts a decoded JSON number or a base-10 integer string.
+// It reports false for anything else: non-numeric strings, fractional or
+// out-of-range numbers, booleans, objects. util.ToInt silently mapped all of
+// those to 0 (or truncated 1.9 to 1), letting them pass range checks.
+func strictInt64(value interface{}) (int64, bool) {
+	switch v := value.(type) {
+	case int:
+		return int64(v), true
+	case int64:
+		return v, true
+	case float64:
+		if v != math.Trunc(v) || math.IsInf(v, 0) || math.IsNaN(v) || v > math.MaxInt64 || v < math.MinInt64 {
+			return 0, false
+		}
+		return int64(v), true
+	case json.Number:
+		n, err := v.Int64()
+		return n, err == nil
+	case string:
+		n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		return n, err == nil
+	}
+	return 0, false
+}
+
+// flexibleID accepts a JSON string or number for an id field.
+type flexibleID struct {
+	set   bool
+	value interface{}
+}
+
+func (f *flexibleID) UnmarshalJSON(data []byte) error {
+	f.set = true
+	if string(data) == "null" {
+		f.value = nil
+		return nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	return dec.Decode(&f.value)
+}
+
+// parse returns the positive id, or an error when the field is absent,
+// null, or not an integer.
+func (f *flexibleID) parse() (int64, error) {
+	if f == nil || !f.set || f.value == nil {
+		return 0, errors.New(msg.T(msg.LostPart))
+	}
+	return parseIDValue(f.value)
 }
 
 func respondOK(c *gin.Context, data interface{}) {

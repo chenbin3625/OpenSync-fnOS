@@ -59,8 +59,8 @@ func TestPlannedDeleteWeightSubtractsRelocatedFiles(t *testing.T) {
 		MD5:  "0123456789abcdef0123456789abcdef",
 	}
 	src := &fullSyncSnapshot{root: "/src/", dirs: map[string]FileListResult{
-		"":       {"new/": {}},
-		"new/":   {"movie.mkv": metadata},
+		"":     {"new/": {}},
+		"new/": {"movie.mkv": metadata},
 	}}
 	dst := &fullSyncSnapshot{root: "/dst/", dirs: map[string]FileListResult{
 		"":     {"old/": {}},

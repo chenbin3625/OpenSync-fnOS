@@ -22,22 +22,25 @@ import {
   sha256,
   writeChecksums,
 } from "./lib/package.mjs";
+import { collectVersions, versionProblems } from "./lib/version.mjs";
 
 const argv = process.argv.slice(2);
 if (argv.includes("--help") || argv.includes("-h")) {
   console.log(`一键发布飞牛安装包。
 
-  node scripts/release.mjs [--skip-tests]
+  node scripts/release.mjs [--skip-tests] [--allow-dirty]
 
-依次执行：工作区检查 → 前端类型检查与单元测试 → Go 测试 →
-前端构建 → 交叉编译 amd64 / arm64 → fnpack 打包 → 输出校验和。
+依次执行：工作区与版本一致性检查 → 前端类型检查与单元测试 → go vet 与
+go test -race → 前端构建 → 交叉编译 amd64 / arm64 → fnpack 打包 → 输出校验和。
 
-  --skip-tests   跳过前后端测试（仅构建，出包更快）
+  --skip-tests    跳过前后端测试（仅构建，出包更快）
+  --allow-dirty   允许在有未提交改动的工作区打包（默认报错退出）
 GitHub 推送与 Release 由 CI 完成。
 `);
   process.exit(0);
 }
 const runTests = !argv.includes("--skip-tests");
+const allowDirty = argv.includes("--allow-dirty");
 
 const step = (index, total, text) =>
   console.log(`\n\x1b[1m[${index}/${total}] ${text}\x1b[0m`);
@@ -51,14 +54,24 @@ const dirty = status
   .map((line) => line.trim())
   .filter(Boolean);
 if (dirty.length > 0) {
-  console.warn("\x1b[33m⚠ 工作区存在未提交改动，产物无法用提交号追溯：\x1b[0m");
-  for (const line of dirty) console.warn(`    ${line}`);
-  console.warn(
-    "\x1b[33m  建议先提交，或在发布说明中记录对应提交。\x1b[0m",
+  const log = allowDirty ? console.warn : console.error;
+  log(
+    `\x1b[${allowDirty ? 33 : 31}m${allowDirty ? "⚠" : "✗"} 工作区存在未提交改动，产物无法用提交号追溯：\x1b[0m`,
   );
+  for (const line of dirty) log(`    ${line}`);
+  if (!allowDirty) {
+    console.error("  请先提交；确需打包未提交的改动时加 --allow-dirty。");
+    process.exit(1);
+  }
 }
 const head = (capture("git", ["rev-parse", "--short", "HEAD"]).stdout || "").trim();
-console.log(`HEAD ${head}；工作区${dirty.length === 0 ? "干净" : "有改动"}`);
+console.log(`HEAD ${head}；工作区${dirty.length === 0 ? "干净" : "有改动（--allow-dirty）"}`);
+// 与 CI 同一套版本一致性检查：manifest、两个 package.json、README 必须一致。
+const versionIssues = versionProblems(collectVersions());
+if (versionIssues.length > 0) {
+  for (const problem of versionIssues) console.error(`✗ ${problem}`);
+  process.exit(1);
+}
 
 // ── 2. Node 与依赖 ───────────────────────────────────────────────────────
 step(2, TOTAL, "准备 Node 运行时与依赖");
@@ -84,6 +97,8 @@ if (runTests) {
     cwd: join(root, "frontend"),
     env: envWithNode(node.dir),
   });
+  console.log("· Go：go vet ./...");
+  run("go", ["vet", "./..."], { cwd: join(root, "backend") });
   console.log("· Go：go test -race ./...");
   run("go", ["test", "-race", "./..."], { cwd: join(root, "backend") });
 }

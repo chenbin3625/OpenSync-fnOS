@@ -203,3 +203,42 @@ func TestEscapeLikeAndFTSPhrase(t *testing.T) {
 		t.Fatalf("fts5Phrase(5 quotes) = %q, want %q", got, want)
 	}
 }
+
+// Databases from earlier releases carry an update trigger that re-indexes on
+// every UPDATE; InitSQL narrows it to the indexed columns, and the narrowed
+// trigger must still keep renamed files searchable.
+func TestUpgradeJobTaskItemFTSUpdateTriggerNarrowsLegacyTrigger(t *testing.T) {
+	db := newFTSItemDB(t)
+	mustExec(t, db, "DROP TRIGGER job_task_item_au")
+	mustExec(t, db, `CREATE TRIGGER job_task_item_au AFTER UPDATE ON job_task_item BEGIN
+		INSERT INTO job_task_item_fts(job_task_item_fts, rowid, fileName, srcPath, dstPath)
+		VALUES ('delete', old.id, old.fileName, old.srcPath, old.dstPath);
+		INSERT INTO job_task_item_fts(rowid, fileName, srcPath, dstPath)
+		VALUES (new.id, new.fileName, new.srcPath, new.dstPath);
+	END`)
+
+	if err := upgradeJobTaskItemFTSUpdateTrigger(db); err != nil {
+		t.Fatalf("upgrade: %v", err)
+	}
+	var stored string
+	if err := db.QueryRow("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='job_task_item_au'").Scan(&stored); err != nil {
+		t.Fatalf("read trigger: %v", err)
+	}
+	if !strings.Contains(strings.ToUpper(stored), "AFTER UPDATE OF") {
+		t.Fatalf("trigger not narrowed: %s", stored)
+	}
+	// Idempotent on an already-current schema.
+	if err := upgradeJobTaskItemFTSUpdateTrigger(db); err != nil {
+		t.Fatalf("second upgrade: %v", err)
+	}
+
+	insertItem(t, db, 1, "before.txt")
+	mustExec(t, db, "UPDATE job_task_item SET fileName='after.txt' WHERE id=1")
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM job_task_item_fts WHERE job_task_item_fts MATCH '"after.txt"'`).Scan(&n); err != nil {
+		t.Fatalf("fts query: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("renamed item matches = %d, want 1", n)
+	}
+}

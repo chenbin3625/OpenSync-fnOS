@@ -161,6 +161,11 @@ func InitSQL() {
 	if err := ensureJobTaskItemFTSHealth(db); err != nil {
 		log.Fatalf("Failed to verify the task item search index: %v", err)
 	}
+	// Databases created by earlier releases carry an update trigger that
+	// re-indexes on every status write; narrow it to the indexed columns.
+	if err := upgradeJobTaskItemFTSUpdateTrigger(db); err != nil {
+		log.Fatalf("Failed to upgrade the task item search trigger: %v", err)
+	}
 	if err := migrateStoredCredentials(db); err != nil {
 		log.Fatalf("Failed to migrate stored credentials: %v", err)
 	}
@@ -447,6 +452,44 @@ func rebuildJobTaskItemFTSStatements() []string {
 	return append(stmts, jobTaskItemFTSStatements(true)...)
 }
 
+// jobTaskItemFTSUpdateTrigger re-indexes a row only when an indexed column
+// changes. Status/progress/errMsg updates would otherwise rewrite the FTS
+// entry for every item on every state transition.
+const jobTaskItemFTSUpdateTrigger = `CREATE TRIGGER IF NOT EXISTS job_task_item_au AFTER UPDATE OF fileName, srcPath, dstPath ON job_task_item BEGIN
+			INSERT INTO job_task_item_fts(job_task_item_fts, rowid, fileName, srcPath, dstPath)
+			VALUES ('delete', old.id, old.fileName, old.srcPath, old.dstPath);
+			INSERT INTO job_task_item_fts(rowid, fileName, srcPath, dstPath)
+			VALUES (new.id, new.fileName, new.srcPath, new.dstPath);
+		END`
+
+// upgradeJobTaskItemFTSUpdateTrigger replaces a job_task_item_au trigger that
+// fires on every UPDATE (as created by earlier releases) with the
+// column-scoped one. It needs no schema version bump: it inspects the stored
+// trigger SQL, so it is idempotent and an older binary still finds a trigger
+// with the name it expects.
+func upgradeJobTaskItemFTSUpdateTrigger(db *sql.DB) error {
+	var stored sql.NullString
+	err := db.QueryRow("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='job_task_item_au'").Scan(&stored)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if strings.Contains(strings.ToUpper(stored.String), "AFTER UPDATE OF") {
+		return nil
+	}
+	return retryOnBusy(func() error {
+		return runTxOn(db, nil, func(tx *sql.Tx) error {
+			if _, err := tx.Exec("DROP TRIGGER IF EXISTS job_task_item_au"); err != nil {
+				return err
+			}
+			_, err := tx.Exec(jobTaskItemFTSUpdateTrigger)
+			return err
+		})
+	})
+}
+
 func jobTaskItemFTSStatements(rebuild bool) []string {
 	stmts := []string{
 		`CREATE VIRTUAL TABLE IF NOT EXISTS job_task_item_fts USING fts5(
@@ -470,12 +513,7 @@ func jobTaskItemFTSStatements(rebuild bool) []string {
 			INSERT INTO job_task_item_fts(job_task_item_fts, rowid, fileName, srcPath, dstPath)
 			VALUES ('delete', old.id, old.fileName, old.srcPath, old.dstPath);
 		END`,
-		`CREATE TRIGGER IF NOT EXISTS job_task_item_au AFTER UPDATE ON job_task_item BEGIN
-			INSERT INTO job_task_item_fts(job_task_item_fts, rowid, fileName, srcPath, dstPath)
-			VALUES ('delete', old.id, old.fileName, old.srcPath, old.dstPath);
-			INSERT INTO job_task_item_fts(rowid, fileName, srcPath, dstPath)
-			VALUES (new.id, new.fileName, new.srcPath, new.dstPath);
-		END`,
+		jobTaskItemFTSUpdateTrigger,
 	)
 	return stmts
 }
@@ -635,12 +673,7 @@ func shouldSkipMigrationStatement(insp schemaInspector, stmt string, legacySpeed
 			VALUES ('delete', old.id, old.fileName, old.srcPath, old.dstPath);
 		END`:
 		return skipTriggerWithoutTables(insp)
-	case `CREATE TRIGGER IF NOT EXISTS job_task_item_au AFTER UPDATE ON job_task_item BEGIN
-			INSERT INTO job_task_item_fts(job_task_item_fts, rowid, fileName, srcPath, dstPath)
-			VALUES ('delete', old.id, old.fileName, old.srcPath, old.dstPath);
-			INSERT INTO job_task_item_fts(rowid, fileName, srcPath, dstPath)
-			VALUES (new.id, new.fileName, new.srcPath, new.dstPath);
-		END`:
+	case jobTaskItemFTSUpdateTrigger:
 		return skipTriggerWithoutTables(insp)
 	default:
 		return false, nil

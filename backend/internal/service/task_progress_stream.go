@@ -172,14 +172,14 @@ func (jt *JobTask) notifyProgressChange() {
 	if jt == nil || jt.JobClient == nil {
 		return
 	}
-	jobProgressHub.schedule(jt.JobClient.JobID)
+	jobProgressHub.schedule(jt.JobClient.idSnapshot())
 }
 
 func (jt *JobTask) notifyProgressNow() {
 	if jt == nil || jt.JobClient == nil {
 		return
 	}
-	jobProgressHub.publish(jt.JobClient.JobID)
+	jobProgressHub.publish(jt.JobClient.idSnapshot())
 }
 
 func (h *progressHub) schedule(jobID int64) {

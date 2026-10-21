@@ -447,6 +447,18 @@ export function History({ jobId }: { jobId: number }) {
   );
 }
 
+/**
+ * Stable row identity. Records without an id (realtime rows not yet saved)
+ * fall back to every field that tells two entries apart — never the index,
+ * which re-associated per-row state (an expanded mobile card) on page changes.
+ */
+export function fileRowKey(record?: TaskItem): string {
+  if (record?.id) return String(record.id);
+  return [record?.type, record?.srcPath, record?.dstPath, record?.fileName]
+    .map((part) => String(part ?? ""))
+    .join("\u0000");
+}
+
 export function FileTable({
   rows,
   loading = false,
@@ -461,9 +473,7 @@ export function FileTable({
           className="file-table"
           dataSource={rows}
           loading={loading}
-          rowKey={(record) =>
-            String(record?.id || `${record?.srcPath}-${record?.dstPath}`)
-          }
+          rowKey={fileRowKey}
           pagination={false}
           empty={<EmptyState />}
           columns={[
@@ -537,12 +547,16 @@ export function FileTable({
       </div>
       <div className="mobile-data">
         {loading ? (
-          <LoadState loading retry={() => {}} />
+          // Loading only: errors are rendered (with retry) by the caller, so
+          // no dead "重试" button is wired to a no-op here.
+          <div className="state-panel">
+            <Spin size="large" />
+          </div>
         ) : !rows.length ? (
           <EmptyState />
         ) : (
-          rows.map((record, index) => (
-            <MobileFileRecord key={record.id || index} record={record} />
+          rows.map((record) => (
+            <MobileFileRecord key={fileRowKey(record)} record={record} />
           ))
         )}
       </div>

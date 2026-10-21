@@ -609,12 +609,64 @@ func (jc *JobClient) stopJobLocked(remove bool) error {
 	if task := jc.currentTask(); task != nil {
 		task.requestBreak()
 	}
-	jc.waitUntilIdle(30 * time.Second)
-	if err := mapper.UpdateJobTaskStatusByStatusAndJobID(jobID); err != nil {
-		return fmt.Errorf("mark tasks aborted: %w", err)
-	}
+	idle := jc.waitUntilIdle(pauseJobIdleTimeout)
 	if scheduler != nil {
 		scheduler.Pause()
 	}
+	if !idle {
+		// The task was told to stop but is still finishing. Rewriting its
+		// history row now is exactly the race the ordering above avoids: its
+		// own final write would land afterwards. It records its terminal
+		// status itself, so leave the row to it.
+		log.Printf("Job %d disabled; its running task has not stopped yet and will record its own final status", jobID)
+		return nil
+	}
+	if err := mapper.UpdateJobTaskStatusByStatusAndJobID(jobID); err != nil {
+		return fmt.Errorf("mark tasks aborted: %w", err)
+	}
 	return nil
+}
+
+// pauseJobIdleTimeout bounds how long a pause waits for the running task to
+// stop before leaving its history to it; swapped by tests.
+var pauseJobIdleTimeout = 30 * time.Second
+
+// pauseForRemoval stops new runs and asks the current one to stop, but keeps
+// the scheduler alive so a delete that cannot complete can be rolled back. It
+// returns the previous in-memory enable value. The caller holds opMu.
+func (jc *JobClient) pauseForRemoval() int {
+	jc.mu.Lock()
+	previous := 0
+	if jc.Job != nil {
+		previous = util.ToInt(jc.Job["enable"])
+		jc.Job["enable"] = 0
+	}
+	scheduler := jc.Scheduler
+	task := jc.CurrentJobTask
+	jc.mu.Unlock()
+	if scheduler != nil {
+		scheduler.Pause()
+	}
+	if task != nil {
+		task.requestBreak()
+	}
+	return previous
+}
+
+// restoreAfterFailedRemoval undoes pauseForRemoval: the row still exists, so
+// the job must keep its enable flag and schedule. The caller holds opMu.
+func (jc *JobClient) restoreAfterFailedRemoval(previousEnable int) {
+	jc.setEnable(previousEnable)
+	if previousEnable != 1 {
+		return
+	}
+	_, job, scheduler := jc.configSnapshot()
+	if scheduler == nil {
+		return
+	}
+	if err := scheduler.Resume(util.ToInt(job["isCron"]), job, func() {
+		jc.DoScheduled()
+	}); err != nil {
+		log.Printf("Job %d: failed to restore its schedule after an aborted delete: %v", jc.idSnapshot(), err)
+	}
 }

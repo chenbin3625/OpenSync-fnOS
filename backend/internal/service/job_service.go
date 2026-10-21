@@ -157,25 +157,42 @@ func GetJobClientByID(jobID int64) (*JobClient, error) {
 		return client, nil
 	}
 
-	jobClientListMu.Lock()
-	defer jobClientListMu.Unlock()
-
-	if client, ok := jobClientList[jobID]; ok {
-		return client, nil
-	}
-
+	// Load and build outside the global lock: the read hits the database and
+	// NewJobClient starts a cron scheduler, and holding the write lock across
+	// both stalled every other job lookup (anyJobTaskRunning, ShutdownJobs).
 	job, err := mapper.GetJobByID(jobID)
 	if err != nil {
 		if err := publicErrorIf(err, msg.T(msg.JobNotFound)); err != nil {
 			return nil, err
 		}
 	}
-	client, err = NewJobClient(job, false)
+	// NewJobClient runs validateJobInput. A stored row is loaded under the same
+	// rules as InitJobs (isInit): overlapping or nested sources are refused, a
+	// legacy nested destination is accepted with a warning. Using the stricter
+	// create-time rule here made a job that loaded at startup fail on the next
+	// lazy lookup after it dropped out of the cache. The row is normalized
+	// first, exactly as AddJobClient does at startup, so both paths judge the
+	// same values.
+	if err := CleanJobInput(job); err != nil {
+		return nil, err
+	}
+	built, err := NewJobClient(job, true)
 	if err != nil {
 		return nil, err
 	}
-	jobClientList[jobID] = client
-	return client, nil
+
+	jobClientListMu.Lock()
+	if existing, ok := jobClientList[jobID]; ok {
+		jobClientListMu.Unlock()
+		// Another caller won the race; discard the duplicate and its cron.
+		if built.Scheduler != nil {
+			built.Scheduler.Stop()
+		}
+		return existing, nil
+	}
+	jobClientList[jobID] = built
+	jobClientListMu.Unlock()
+	return built, nil
 }
 
 // CleanJobInput sanitizes job input data
@@ -192,6 +209,11 @@ func CleanJobInput(job map[string]interface{}) error {
 				job[key] = trimmed
 			}
 		}
+	}
+	// A cron job without a second would be scheduled with "*" in that field and
+	// fire every second. Store the "on the minute" value the UI sends instead.
+	if util.ToInt(job["isCron"]) == 1 && job["second"] == nil {
+		job["second"] = "0"
 	}
 	if job["exclude"] != nil {
 		excludeStr := fmt.Sprintf("%v", job["exclude"])
@@ -466,16 +488,18 @@ func RemoveJobClient(jobID int64) error {
 		client.opMu.Unlock()
 		return nil
 	}
-	client.stopJobLocked(true) // remove=true never fails
+	// Pause instead of stopping: the scheduler stays usable so a delete that
+	// cannot complete rolls back to the exact previous state.
+	previousEnable := client.pauseForRemoval()
 	client.opMu.Unlock()
 
-	if !client.waitUntilIdle(2 * time.Minute) {
-		// The task is still draining. stopJobLocked already took the scheduler
-		// down, so persist the same "disabled" state instead of leaving the row
-		// enabled: otherwise a restart would resurrect the job the user tried to
-		// delete, while in this process it never runs again.
-		disableJobAfterFailedDelete(jobID)
+	if !client.waitUntilIdle(removeJobIdleTimeout) {
+		// The task is still draining and the row stays. Restore the previous
+		// schedule and enable flag: leaving the client disabled with a dead
+		// scheduler made it "enabled in the database, never scheduled", and a
+		// later resume failed with CannotResumeLostJob until a restart.
 		client.opMu.Lock()
+		client.restoreAfterFailedRemoval(previousEnable)
 		client.closing.Store(false)
 		client.opMu.Unlock()
 		return publicError(msg.T(msg.JobDeleteWaitTimeout))
@@ -486,18 +510,18 @@ func RemoveJobClient(jobID int64) error {
 		client.opMu.Unlock()
 		return nil
 	}
-	deleteErr := mapper.DeleteJob(jobID)
+	deleteErr := removeJobRow(jobID)
 	if deleteErr == nil {
 		client.deleted = true
+		// Only now is the job really gone; stop its scheduler for good.
+		client.stopJobLocked(true) //nolint:errcheck // remove=true never fails
+	} else {
+		// Row still exists: roll back to the previous state and allow a retry.
+		client.restoreAfterFailedRemoval(previousEnable)
+		client.closing.Store(false)
 	}
 	client.opMu.Unlock()
 	if deleteErr != nil {
-		// Row still exists: keep the database consistent with the stopped
-		// in-memory state and allow a later retry.
-		disableJobAfterFailedDelete(jobID)
-		client.opMu.Lock()
-		client.closing.Store(false)
-		client.opMu.Unlock()
 		return fmt.Errorf("delete job: %w", deleteErr)
 	}
 	jobClientListMu.Lock()
@@ -506,13 +530,12 @@ func RemoveJobClient(jobID int64) error {
 	return nil
 }
 
-// disableJobAfterFailedDelete keeps the stored enable flag in sync with the
-// already-stopped client after a failed delete.
-func disableJobAfterFailedDelete(jobID int64) {
-	if err := mapper.UpdateJobEnable(jobID, 0); err != nil {
-		log.Printf("Failed to disable job %d after a failed delete: %v", jobID, err)
-	}
-}
+// removeJobIdleTimeout bounds how long a delete waits for the running task;
+// removeJobRow deletes the stored job. Both are swapped by tests.
+var (
+	removeJobIdleTimeout = 2 * time.Minute
+	removeJobRow         = mapper.DeleteJob
+)
 
 // ContinueJob enables a job
 func ContinueJob(jobID int64) error {

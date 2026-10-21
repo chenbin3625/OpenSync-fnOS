@@ -62,6 +62,10 @@ type CopyItem struct {
 	ErrMsg      *string
 	CreateTime  int64
 	DoingKey    int64
+	// submittedAt is the Unix time the current transfer attempt was sent to
+	// AList (guarded by mu). When the remote task record later vanishes, a
+	// copy only counts as done if the destination was written since then.
+	submittedAt int64
 
 	runtime copyItemRuntime
 	client  copyItemClient
@@ -156,6 +160,37 @@ func (ci *CopyItem) status() taskStatus {
 	return ci.Status
 }
 
+func (ci *CopyItem) setSubmittedAt(unix int64) {
+	ci.mu.Lock()
+	ci.submittedAt = unix
+	ci.mu.Unlock()
+}
+
+func (ci *CopyItem) submittedAtUnix() int64 {
+	ci.mu.RLock()
+	defer ci.mu.RUnlock()
+	return ci.submittedAt
+}
+
+// verifyVanishedTaskComplete decides whether a transfer whose AList task
+// record disappeared (404) actually finished. A move removes its source, so
+// the destination can only be its result. A copy runs with Overwrite:true and
+// the old version of the file usually already sits at the destination, so a
+// matching size alone does not prove the copy ran: the destination must also
+// have been written by this submission (verifyDstWrittenSince).
+func (ci *CopyItem) verifyVanishedTaskComplete(runtime copyItemRuntime, client copyItemClient) (bool, error) {
+	submittedAt := ci.submittedAtUnix()
+	if ci.CopyType == taskItemTypeMove || submittedAt <= 0 {
+		return ci.verifyDstComplete(runtime, client)
+	}
+	if _, canStat := client.(copyItemStatClient); !canStat {
+		// Without metadata there is no freshness evidence at all; keep the
+		// historical existence check rather than failing every such copy.
+		return ci.verifyDstComplete(runtime, client)
+	}
+	return ci.verifyDstWrittenSince(runtime, client, submittedAt)
+}
+
 func (ci *CopyItem) taskID() string {
 	ci.mu.RLock()
 	defer ci.mu.RUnlock()
@@ -227,6 +262,7 @@ func (ci *CopyItem) DoIt() {
 
 		ci.setRunning()
 		submittedAt := time.Now().Unix()
+		ci.setSubmittedAt(submittedAt)
 		taskID, err := ci.startTransfer(runtime.context(), client)
 		if err != nil && ci.CopyType != taskItemTypeDelete && isAmbiguousTransferError(err) && !runtime.isBreak() {
 			// The request may have reached AList even though no answer came
@@ -246,6 +282,9 @@ func (ci *CopyItem) DoIt() {
 		if err != nil {
 			if errors.Is(err, context.Canceled) && runtime.isBreak() {
 				ci.setStatus(taskStatusStopped)
+				if ci.CopyType != taskItemTypeDelete {
+					ci.cancelOrphanedRemoteTask(runtime, client)
+				}
 				break
 			}
 			if attempt < maxRetries {
@@ -380,6 +419,28 @@ func isAmbiguousTransferError(err error) bool {
 		}
 	}
 	return true
+}
+
+// cancelOrphanedRemoteTask runs after a user stop cancelled a copy/move
+// request mid-flight. AList may already have created the task even though we
+// never saw its id; left alone, a copy keeps transferring and a move keeps
+// removing the source while the item reads "stopped". The undone list is
+// searched on a cleanup context (the task context is already cancelled) and
+// the single exact match is cancelled and deleted through stopRemoteTask.
+// Nothing is cancelled when the match is ambiguous or the list is unavailable.
+func (ci *CopyItem) cancelOrphanedRemoteTask(runtime copyItemRuntime, client copyItemClient) {
+	ctx, cancel := runtime.cleanupContext()
+	tasks, err := client.TaskUndoneListContext(ctx, ci.CopyType)
+	cancel()
+	if err != nil {
+		return
+	}
+	taskID := ci.matchUndoneTask(tasks)
+	if taskID == "" {
+		return
+	}
+	ci.setTaskID(taskID)
+	ci.stopRemoteTask(client, nil)
 }
 
 // reconcileAmbiguousTransfer inspects AList after an ambiguous copy/move

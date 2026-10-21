@@ -11,6 +11,7 @@ import {
 } from "react";
 import {
   BrowserRouter,
+  Link,
   Navigate,
   NavLink,
   Route,
@@ -81,6 +82,7 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
   const taskMenu = useResource((signal) => api.jobMenu(signal));
   const latest = useResource((signal) => api.latestVersion(signal));
   const [checking, setChecking] = useState(false);
+  const checkInFlight = useRef<AbortController | null>(null);
   const lastVersionCheck = useRef(Date.now());
   const notifiedRelease = useRef<string | null>(null);
   const taskItems = taskMenu.data?.dataList || [];
@@ -176,11 +178,16 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
     notifyUpdateAvailable(version, info);
   }, [latest.data, version]);
   const checkUpdate = useCallback(async () => {
-    if (checking) return;
+    // A ref, not the `checking` state: two clicks in the same render both saw
+    // checking=false and fired two upstream requests.
+    if (checkInFlight.current) return;
+    const controller = new AbortController();
+    checkInFlight.current = controller;
     setChecking(true);
     try {
       // refresh=1：用户点了按钮就要真实结果，绕过后端 30 分钟的缓存。
-      const info = await api.latestVersion(undefined, true);
+      const info = await api.latestVersion(controller.signal, true);
+      if (controller.signal.aborted) return;
       latest.setData(info);
       if (info.hasUpdate) {
         notifiedRelease.current = info.latestVersion;
@@ -189,11 +196,13 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
         Toast.success(`已是最新版本 ${info.latestVersion}`);
       }
     } catch (err) {
-      errorToast(err, "检查更新失败");
+      if (!controller.signal.aborted) errorToast(err, "检查更新失败");
     } finally {
-      setChecking(false);
+      checkInFlight.current = null;
+      if (!controller.signal.aborted) setChecking(false);
     }
-  }, [checking, latest.setData, version]);
+  }, [latest.setData, version]);
+  useEffect(() => () => checkInFlight.current?.abort(), []);
   const tasksSelected = pathname.startsWith("/tasks") && !hasTaskItems;
   return (
     <VersionContext
@@ -264,10 +273,13 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
             {hasTaskItems && taskMenuOpen && (
               <div className="nav-submenu" id="task-menu">
                 {taskItems.map((job) => (
-                  <NavLink
+                  // A plain Link: NavLink ignores the query string, so every
+                  // /tasks?jobId=… entry was marked aria-current="page".
+                  <Link
                     key={job.id}
                     to={taskHref(job.id)}
                     className={`task-sub-link${activeTaskId === String(job.id) ? " selected" : ""}`}
+                    aria-current={activeTaskId === String(job.id) ? "page" : undefined}
                     title={getJobName(job)}
                   >
                     <IconFolderStroked
@@ -275,7 +287,7 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
                       aria-hidden="true"
                     />
                     {getJobName(job)}
-                  </NavLink>
+                  </Link>
                 ))}
               </div>
             )}

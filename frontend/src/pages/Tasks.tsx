@@ -30,7 +30,7 @@ import {
   type MenuAction,
 } from "../components/common";
 import { useAction, useResource } from "../lib/hooks";
-import { selectJob } from "../lib/taskForm";
+import { resolveJobSelection, resolveTaskTab } from "../lib/taskForm";
 import {
   formatDuration,
   formatSchedule,
@@ -68,7 +68,7 @@ export default function Tasks() {
       : Number.isInteger(parsedJobId) && (parsedJobId as number) > 0
         ? parsedJobId
         : -1;
-  const tab = ["overview", "realtime", "history"].includes(
+  const requestedTab = ["overview", "realtime", "history"].includes(
     params.get("tab") || "",
   )
     ? params.get("tab")!
@@ -81,7 +81,15 @@ export default function Tasks() {
   });
   const actions = useAction();
   const list = jobs.data?.dataList || [];
-  const selected = selectJob(list, selectedId);
+  const { job: selected, replaceWith } = resolveJobSelection(list, selectedId);
+  // A stale jobId (deleted elsewhere, old bookmark) shows the first task; the
+  // URL is rewritten in place so the address bar and sidebar match the screen.
+  useEffect(() => {
+    if (replaceWith === null) return;
+    const next = new URLSearchParams(params);
+    next.set("jobId", String(replaceWith));
+    setParams(next, { replace: true });
+  }, [replaceWith, params, setParams]);
   const currentTask = useResource(
     (signal) =>
       selected ? api.current(selected.id, signal) : Promise.resolve(null),
@@ -95,40 +103,53 @@ export default function Tasks() {
   // stopping) while that tab is open: stopping it froze `hasCurrentTask` and
   // left a dead realtime tab after the task ended.
   const selectedJobId = selected?.id;
-  const realtimeTab = tab === "realtime";
+  const realtimeTab = requestedTab === "realtime";
+  // Which job the last completed snapshot request belongs to. `loading` alone
+  // cannot prove that a snapshot for this job arrived: the resource also runs
+  // its mount fetch while no job is selected yet (that one resolves
+  // immediately), so the first render after the job list loads still has
+  // loading=false and data=null — long enough for the tab reconciliation below
+  // to rewrite tab=realtime to overview before the real request ever ran.
+  const [snapshotJobId, setSnapshotJobId] = useState<number | undefined>(
+    undefined,
+  );
   useEffect(() => {
+    setSnapshotJobId(undefined);
     if (!selectedJobId) return;
-    void refreshCurrentTask(true);
+    let alive = true;
+    const load = () =>
+      void refreshCurrentTask(true).finally(() => {
+        if (alive) setSnapshotJobId(selectedJobId);
+      });
+    load();
     const interval = setInterval(
       () => {
-        if (document.visibilityState !== "hidden") void refreshCurrentTask(true);
+        if (document.visibilityState !== "hidden") load();
       },
       realtimeTab ? currentTaskRealtimePollMs : currentTaskPollMs,
     );
-    return () => clearInterval(interval);
+    return () => {
+      alive = false;
+      clearInterval(interval);
+    };
   }, [selectedJobId, realtimeTab, refreshCurrentTask]);
-  // Reconcile the tab with reality once the snapshot settles: a task that
-  // *was* running must not leave the user on an enabled-but-empty realtime tab.
-  // A deep link into the realtime tab with no task keeps the tab as-is (it is
-  // disabled, and switching tabs behind the user's back is surprising).
-  const currentTaskSettled = !currentTask.loading;
-  const hadCurrentTask = useRef(false);
-  useEffect(() => {
-    const previouslyRunning = hadCurrentTask.current;
-    hadCurrentTask.current = hasCurrentTask;
-    if (!selectedJobId || !currentTaskSettled || !realtimeTab) return;
-    if (hasCurrentTask || !previouslyRunning) return;
-    const next = new URLSearchParams(params);
-    next.set("tab", "overview");
-    setParams(next);
-  }, [
-    selectedJobId,
-    currentTaskSettled,
-    realtimeTab,
+  // Reconcile the tab with reality once a snapshot for *this* job has settled.
+  // Whether the task just ended or the link (sidebar / deep link to another
+  // job) carried tab=realtime for a job with nothing running, the realtime tab
+  // is disabled then, so the overview is rendered instead of a disabled-but-
+  // active tab over an empty pane. The URL is rewritten in place to match.
+  const currentTaskSettled =
+    !!selectedJobId && snapshotJobId === selectedJobId && !currentTask.loading;
+  const tab = resolveTaskTab(requestedTab, {
+    settled: currentTaskSettled,
     hasCurrentTask,
-    params,
-    setParams,
-  ]);
+  });
+  useEffect(() => {
+    if (tab === requestedTab) return;
+    const next = new URLSearchParams(params);
+    next.set("tab", tab);
+    setParams(next, { replace: true });
+  }, [tab, requestedTab, params, setParams]);
   const followUp = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(followUp.current), []);
   const update = (values: Record<string, string | number | null>) => {
@@ -200,6 +221,20 @@ export default function Tasks() {
           ) : undefined
         }
       />
+      {engines.error && !engines.loading && (
+        // Without engines the editor's engine select is empty and a new task
+        // would be saved without alistId; say so instead of failing silently.
+        <div className="inline-error engine-load-error" role="alert">
+          存储引擎加载失败：{engines.error}
+          <Button
+            size="small"
+            theme="borderless"
+            onClick={() => void engines.refresh()}
+          >
+            重试
+          </Button>
+        </div>
+      )}
       {list.length > 1 && (
         <div
           className="mobile-job-bar"
@@ -269,6 +304,7 @@ export default function Tasks() {
                     engines={engines.data || []}
                     busy={actions.busy}
                     running={!!currentTask.data}
+                    runKey={String(currentTask.data?.taskId ?? "idle")}
                     onRun={() =>
                       action(
                         () => api.jobAction({ id: String(selected.id) }),
@@ -372,6 +408,8 @@ export default function Tasks() {
           <JobEditor
             job={editor.job}
             engines={engines.data || []}
+            enginesError={engines.error}
+            onRetryEngines={() => void engines.refresh()}
             onClose={() => setEditor({ open: false, job: null })}
             onSaved={() => {
               setEditor({ open: false, job: null });
@@ -397,6 +435,7 @@ function Overview({
   engines,
   busy,
   running,
+  runKey,
   onRun,
   onStop,
   onToggle,
@@ -407,6 +446,8 @@ function Overview({
   engines: AlistItem[];
   busy: boolean;
   running: boolean;
+  /** Identifies the running task (or none); a change means a run started or ended. */
+  runKey: string;
   onRun: () => void;
   onStop: () => void;
   onToggle: () => void;
@@ -418,6 +459,16 @@ function Overview({
       api.history(job.id, { pageNum: 1, pageSize: 1 }, signal),
     [job.id],
   );
+  // Starting a run adds a history row and stopping/finishing one changes its
+  // time: re-read silently whenever the running task changes, instead of
+  // showing the value fetched when the job was first selected.
+  const refreshLatest = latestExecution.refresh;
+  const firstRunKey = useRef(runKey);
+  useEffect(() => {
+    if (firstRunKey.current === runKey) return;
+    firstRunKey.current = runKey;
+    void refreshLatest(true);
+  }, [runKey, refreshLatest]);
   const engine = engines.find((e) => e.id === job.alistId);
   const engineName = engine
     ? engine.remark || engine.userName

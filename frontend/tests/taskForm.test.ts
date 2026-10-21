@@ -7,6 +7,8 @@ import {
   jobToForm,
   normalizeCustomFileTypePattern,
   parseExcludeFolders,
+  resolveJobSelection,
+  resolveTaskTab,
   selectJob,
   systemDirFilterGroups,
   updateExcludePatterns,
@@ -352,6 +354,29 @@ describe("existing synchronization contracts", () => {
     const jobs = [{ id: 1 }, { id: 2 }];
     expect(selectJob(jobs, null)).toEqual({ id: 1 });
     expect(selectJob(jobs, 999)).toBeUndefined();
+  });
+
+  it("falls back to the first task for a stale id and asks to rewrite the URL", () => {
+    const jobs = [{ id: 1 }, { id: 2 }];
+    expect(resolveJobSelection(jobs, 2)).toEqual({ job: { id: 2 }, replaceWith: null });
+    expect(resolveJobSelection(jobs, null)).toEqual({ job: { id: 1 }, replaceWith: null });
+    // deleted elsewhere / stale bookmark: show jobs[0] and point the URL at it
+    expect(resolveJobSelection(jobs, 999)).toEqual({ job: { id: 1 }, replaceWith: 1 });
+    // malformed id sentinel stays an explicit empty selection
+    expect(resolveJobSelection(jobs, -1)).toEqual({ job: undefined, replaceWith: null });
+    expect(resolveJobSelection([], 5)).toEqual({ job: undefined, replaceWith: null });
+  });
+
+  it("never renders the disabled realtime tab once the task check settles", () => {
+    const idle = { settled: true, hasCurrentTask: false };
+    expect(resolveTaskTab("realtime", idle)).toBe("overview");
+    expect(resolveTaskTab("realtime", { settled: false, hasCurrentTask: false })).toBe(
+      "realtime",
+    );
+    expect(resolveTaskTab("realtime", { settled: true, hasCurrentTask: true })).toBe(
+      "realtime",
+    );
+    expect(resolveTaskTab("history", idle)).toBe("history");
   });
 
   it("updates generated folder exclude rules without changing manual rules", () => {

@@ -342,7 +342,7 @@ func (m *copyTaskMonitor) pollTaskInfo(watch *copyTaskWatch) bool {
 		}
 		eMsg := err.Error()
 		if isAlistObjectNotFound(err) {
-			if exists, verr := watch.ci.verifyDstComplete(m.jt, client); verr == nil && exists {
+			if exists, verr := watch.ci.verifyVanishedTaskComplete(m.jt, client); verr == nil && exists {
 				watch.ci.setProgress(taskStatusSuccess, 100, nil)
 				m.finishWatch(watch)
 				return true

@@ -98,15 +98,18 @@ func validateJobFields(req map[string]interface{}) error {
 			return errors.New(msg.T(msg.LostPart))
 		}
 	}
-	if v, ok := req["interval"]; ok {
-		interval := util.ToInt(v)
-		if interval < 0 {
+	// Numeric fields must really be integers. util.ToInt turned "abc" into 0
+	// and 1.9 into 1, so junk passed the range checks and was stored. null
+	// and "" mean "not set" and are left to the service defaults.
+	if v, ok := req["interval"]; ok && v != nil && v != "" {
+		interval, isInt := strictInt64(v)
+		if !isInt || interval < 0 {
 			return errors.New(msg.T(msg.LostPart))
 		}
 	}
-	if v, ok := req["method"]; ok {
-		method := util.ToInt(v)
-		if method < 0 || method > 2 {
+	if v, ok := req["method"]; ok && v != nil && v != "" {
+		method, isInt := strictInt64(v)
+		if !isInt || method < 0 || method > 2 {
 			return errors.New(msg.T(msg.LostPart))
 		}
 	}
@@ -165,8 +168,17 @@ func AddJob(c *gin.Context) {
 		respondError(c, err.Error())
 		return
 	}
-	// Check if it's an edit (has 'id') or add
-	if _, hasID := req["id"]; hasID {
+	// POST with an "id" edits that job. PUT /svr/job is reserved for actions
+	// (run/pause/resume/stop/retry), and the bundled UI saves both new and
+	// edited jobs through POST (frontend/src/api/client.ts saveJob), so this
+	// upsert behaviour is kept for compatibility. The id must be a valid
+	// positive integer; a malformed one is rejected instead of being treated as
+	// a create or reaching the service layer.
+	if rawID, hasID := req["id"]; hasID && rawID != nil && rawID != "" {
+		if _, err := parseIDValue(rawID); err != nil {
+			respondError(c, err.Error())
+			return
+		}
 		handleServiceVoid(c, func() error { return service.EditJobClient(req) })
 	} else {
 		handleServiceVoid(c, func() error { return service.AddJobClient(req, false) })
@@ -176,18 +188,20 @@ func AddJob(c *gin.Context) {
 // UpdateJob handles PUT /svr/job
 func UpdateJob(c *gin.Context) {
 	var req struct {
-		ID     *string `json:"id"`
-		TaskID *string `json:"taskId"`
-		Action string  `json:"action"`
-		Pause  *bool   `json:"pause"`
-		Abort  *bool   `json:"abort"`
+		// ids arrive as strings from the bundled UI and as numbers from
+		// other clients; both are accepted, fractions and junk are not.
+		ID     *flexibleID `json:"id"`
+		TaskID *flexibleID `json:"taskId"`
+		Action string      `json:"action"`
+		Pause  *bool       `json:"pause"`
+		Abort  *bool       `json:"abort"`
 	}
 	if !bindJSON(c, &req) {
 		return
 	}
 
 	if req.TaskID != nil {
-		taskID, err := parseRequiredID(*req.TaskID)
+		taskID, err := req.TaskID.parse()
 		if err != nil {
 			respondError(c, err.Error())
 			return
@@ -211,7 +225,7 @@ func UpdateJob(c *gin.Context) {
 			respondError(c, msg.T(msg.LostPart))
 			return
 		}
-		id, err := parseRequiredID(*req.ID)
+		id, err := req.ID.parse()
 		if err != nil {
 			respondError(c, err.Error())
 			return
@@ -223,7 +237,7 @@ func UpdateJob(c *gin.Context) {
 			respondError(c, msg.T(msg.LostPart))
 			return
 		}
-		id, err := parseRequiredID(*req.ID)
+		id, err := req.ID.parse()
 		if err != nil {
 			respondError(c, err.Error())
 			return
@@ -239,7 +253,7 @@ func UpdateJob(c *gin.Context) {
 			respondError(c, msg.T(msg.LostPart))
 			return
 		}
-		id, err := parseRequiredID(*req.ID)
+		id, err := req.ID.parse()
 		if err != nil {
 			respondError(c, err.Error())
 			return

@@ -87,11 +87,16 @@ const syncMethodTip = (
 export default function TaskEditor({
   job,
   engines,
+  enginesError,
+  onRetryEngines,
   onClose,
   onSaved,
 }: {
   job: JobItem | null;
   engines: AlistItem[];
+  /** Load error of the engine list; the select would otherwise just be empty. */
+  enginesError?: string;
+  onRetryEngines?: () => void;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -233,6 +238,16 @@ export default function TaskEditor({
                     }}
                   />
                 </Field>
+                {enginesError && (
+                  <div className="inline-error" role="alert">
+                    存储引擎加载失败：{enginesError}
+                    {onRetryEngines && (
+                      <Button size="small" theme="borderless" onClick={onRetryEngines}>
+                        重试
+                      </Button>
+                    )}
+                  </div>
+                )}
                 <div className="form-grid">
                   <Field label="源路径" required>
                     <div className="field-group" role="group">

@@ -678,6 +678,12 @@ func TestJobTaskStartRecoversPanickingSyncWorker(t *testing.T) {
 	testDB := newServiceTaskStatusTestDB(t)
 	oldDB := mapperDBForServiceTest(testDB)
 	defer oldDB()
+	notified := make(chan int, 4)
+	oldQueue := queueTaskNotification
+	queueTaskNotification = func(_ int64, status int, _ map[string]interface{}, _ int, _ float64) {
+		notified <- status
+	}
+	defer func() { queueTaskNotification = oldQueue }()
 
 	client := &JobClient{
 		Job: map[string]interface{}{"enable": 1, "isCron": 2},
@@ -707,6 +713,14 @@ func TestJobTaskStartRecoversPanickingSyncWorker(t *testing.T) {
 	if !strings.Contains(errMsg, "panic") {
 		t.Fatalf("errMsg = %q, want panic details", errMsg)
 	}
+	select {
+	case got := <-notified:
+		if got != taskStatusSystemFailed.Int() {
+			t.Fatalf("notification status = %d, want SystemFailed", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no failure notification queued")
+	}
 }
 
 func newServiceTaskStatusTestDB(t *testing.T) *sql.DB {
@@ -715,6 +729,9 @@ func newServiceTaskStatusTestDB(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatalf("sql.Open() error: %v", err)
 	}
+	// Each connection to ":memory:" is its own empty database; background
+	// readers (failure notification) must share the one holding the tables.
+	testDB.SetMaxOpenConns(1)
 	t.Cleanup(func() {
 		_ = testDB.Close()
 	})

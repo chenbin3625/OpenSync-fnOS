@@ -88,7 +88,55 @@ func isCloudMetadataIP(ip net.IP) bool {
 			return true
 		}
 	}
+	// IPv6 transition prefixes carry an IPv4 address the network translates
+	// to: NAT64 (64:ff9b::a9fe:a9fe) and 6to4 (2002:a9fe:a9fe::) both reach
+	// 169.254.169.254 through a gateway, so the embedded address is checked
+	// against the same list.
+	if embedded := embeddedIPv4(ip); embedded != nil {
+		for _, cidr := range cloudMetadataCIDRs {
+			if cidr.Contains(embedded) {
+				return true
+			}
+		}
+	}
 	return false
+}
+
+var (
+	nat64WellKnownPrefix = mustParseCIDR("64:ff9b::/96")
+	nat64LocalPrefix     = mustParseCIDR("64:ff9b:1::/48")
+	sixToFourPrefix      = mustParseCIDR("2002::/16")
+)
+
+func mustParseCIDR(cidr string) *net.IPNet {
+	_, network, err := net.ParseCIDR(cidr)
+	if err != nil {
+		panic(err)
+	}
+	return network
+}
+
+// embeddedIPv4 returns the IPv4 address encoded in a NAT64 or 6to4 address,
+// or nil for any other address.
+func embeddedIPv4(ip net.IP) net.IP {
+	if ip.To4() != nil {
+		return nil
+	}
+	ip16 := ip.To16()
+	if ip16 == nil {
+		return nil
+	}
+	switch {
+	case nat64WellKnownPrefix.Contains(ip16), nat64LocalPrefix.Contains(ip16):
+		// RFC 6052 /96 layout: the IPv4 address is the last 32 bits. The
+		// local-use /48 is also checked at the /96 position, which is what
+		// translators configured with a /96 out of it use.
+		return net.IPv4(ip16[12], ip16[13], ip16[14], ip16[15]).To4()
+	case sixToFourPrefix.Contains(ip16):
+		// RFC 3056: 2002:VVVV:VVVV::/48.
+		return net.IPv4(ip16[2], ip16[3], ip16[4], ip16[5]).To4()
+	}
+	return nil
 }
 
 // webhookLookupTimeout bounds the early destination check. net.LookupHost had
@@ -566,12 +614,27 @@ func resolveNotifyParams(notify map[string]interface{}) (map[string]interface{},
 		// missing row.
 		return incoming, nil
 	}
+	// A different method means a different kind of credential: a stored
+	// DingTalk secret is not a Bark deviceKey. Switching method (which also
+	// switches the target field compared below) must not inherit anything.
+	if storedMethod, ok := existing["method"]; ok && storedMethod != nil && util.ToInt(storedMethod) != method {
+		return incoming, nil
+	}
 	existingParams, _ := parseNotifyParams(fmt.Sprintf("%v", existing["params"]))
 	// Stored secrets are only merged back when the delivery target is unchanged.
 	// Otherwise a caller could submit {"id":<existing>,"params":{"url":"https://
 	// attacker/hook"}} and have the saved Authorization header merged in, so a
 	// test send (or a PUT) ships the credential to an address of their choosing.
-	if notifyTargetChanged(incoming, existingParams) {
+	compareIncoming, compareExisting := incoming, existingParams
+	if method == 5 {
+		// Bark's empty server means the public default server. Normalising
+		// both sides (for the comparison only) makes "stored empty, incoming
+		// https://api.day.app" an unchanged target, and any other server a
+		// change — instead of an empty stored server never counting as one.
+		compareIncoming = withDefaultBarkServer(incoming)
+		compareExisting = withDefaultBarkServer(existingParams)
+	}
+	if notifyTargetChanged(compareIncoming, compareExisting) {
 		return incoming, nil
 	}
 	for _, key := range notifySecretKeys[method] {
@@ -816,6 +879,11 @@ func EditNotify(notify map[string]interface{}) error {
 	}
 	notify["params"] = string(out)
 	if err := editNotifyRecord(notify); err != nil {
+		// A missing row is the caller's mistake (stale page, deleted elsewhere),
+		// not an internal failure: report it as such.
+		if errors.Is(err, mapper.ErrNotifyNotFound) {
+			return publicError(msg.T(msg.NotifyNotFound))
+		}
 		return fmt.Errorf("edit notify: %w", err)
 	}
 	return nil
@@ -1703,6 +1771,20 @@ func sendLark(client *http.Client, params map[string]interface{}, title, content
 
 // defaultBarkServer is used when a Bark config leaves server empty.
 const defaultBarkServer = "https://api.day.app"
+
+// withDefaultBarkServer returns a shallow copy of params whose empty server is
+// replaced by defaultBarkServer, for comparing delivery targets. params itself
+// is never modified, so the stored value keeps following the default.
+func withDefaultBarkServer(params map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(params)+1)
+	for k, v := range params {
+		out[k] = v
+	}
+	if paramString(out, "server") == "" {
+		out["server"] = defaultBarkServer
+	}
+	return out
+}
 
 // sendBark posts to {server}/push. Bark reports success as code=200, so the
 // shared non-zero check in notifyProviderError would treat every success as a

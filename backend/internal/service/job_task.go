@@ -61,7 +61,7 @@ type JobTask struct {
 	scanDone chan struct{}
 	// drained records that the executor exited because every queued item
 	// finished — not because the task was stopped or its deadline hit.
-	drained atomic.Bool
+	drained       atomic.Bool
 	ScanTotalDirs atomic.Int64
 	ScanDoneDirs  atomic.Int64
 
@@ -189,7 +189,23 @@ func (jt *JobTask) handleWorkerPanic(name string, recovered interface{}) {
 		// records are written after the final status/counters and can even re-arm
 		// the flush timer after the run ended.
 		jt.copyWG.Wait()
+		// The drain or final flush is what panicked, so retry the cleanup it
+		// skipped once, best effort: stop the remote-task monitor and save
+		// the buffered items. A second panic is logged, not propagated.
+		jt.bestEffortSubmitCleanup()
 		jt.finishFailedTask(errMsg)
+	}
+}
+
+func (jt *JobTask) bestEffortSubmitCleanup() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Task %d cleanup after submit panic failed: %v", jt.TaskID, r)
+		}
+	}()
+	jt.stopCopyMonitor()
+	if err := jt.persistRemainingTaskItems(); err != nil {
+		log.Printf("Task %d could not save remaining items after submit panic: %v", jt.TaskID, err)
 	}
 }
 

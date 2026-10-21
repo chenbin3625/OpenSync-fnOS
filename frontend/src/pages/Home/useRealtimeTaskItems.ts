@@ -1,9 +1,17 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { jobGetTaskCurrent } from "../../api/job";
 import { useResource } from "../../lib/hooks";
 import { useClampedPage } from "../../lib/pagination";
-import type { CurrentTaskView, TaskItem } from "../../types";
-import { getRealtimeTaskIdentity, normalizeTaskItemPage } from "./taskRows";
+import type {
+  CurrentTaskView,
+  RealtimeTaskItemPage,
+  TaskItem,
+} from "../../types";
+import {
+  getRealtimeTaskIdentity,
+  normalizeTaskItemPage,
+  realtimeTaskPageMatches,
+} from "./taskRows";
 
 type RealtimeTaskItemsParams = {
   jobId: string;
@@ -16,6 +24,8 @@ type RealtimeTaskPage = {
   key: string;
   rows: TaskItem[];
   total: number;
+  /** The reply did not answer this query (stale task identity, other page). */
+  mismatched?: boolean;
 };
 
 export function useRealtimeTaskItems({
@@ -85,6 +95,17 @@ export function useRealtimeTaskItems({
         },
         { signal },
       );
+      if (
+        response &&
+        !Array.isArray(response) &&
+        "dataList" in response &&
+        !realtimeTaskPageMatches(response as RealtimeTaskItemPage, requestIdentity)
+      ) {
+        // A stale or mismatched reply (the backend switched task identity
+        // under the request) says nothing about this page. Treating it as
+        // total=0 cleared the table and clamped the user back to page 1.
+        return { key: queryKey, rows: [], total: 0, mismatched: true };
+      }
       return {
         key: queryKey,
         ...normalizeTaskItemPage(response, requestIdentity),
@@ -93,7 +114,21 @@ export function useRealtimeTaskItems({
     [enabled, queryKey],
     enabled && Boolean(taskIdentity),
   );
-  const currentPage = resource.data?.key === queryKey ? resource.data : null;
+  // The last page that answered the current query: kept across a mismatched
+  // reply, and across a page change of the same task/tab while it loads, so
+  // the table does not blank out and the pager keeps its position.
+  const lastGood = useRef<RealtimeTaskPage | null>(null);
+  const sameListKey = (key: string) =>
+    key.split(":").filter((_, i) => i !== 3).join(":") ===
+    queryKey.split(":").filter((_, i) => i !== 3).join(":");
+  const fetched = resource.data?.key === queryKey ? resource.data : null;
+  if (fetched && !fetched.mismatched) lastGood.current = fetched;
+  const fallback =
+    lastGood.current && sameListKey(lastGood.current.key) ? lastGood.current : null;
+  const currentPage = fetched && !fetched.mismatched ? fetched : null;
+  const shownPage = currentPage || fallback;
+  // A mismatched reply re-polls; until a matching page arrives the view keeps
+  // showing the previous data as "loading".
   const pendingCurrentPage =
     enabled && Boolean(taskIdentity) && !currentPage && !resource.error;
 
@@ -111,6 +146,8 @@ export function useRealtimeTaskItems({
   }, []);
   // Items leave a status tab while the task runs, so the total shrinks under a
   // page the user left open.
+  // Only a reply that matched this exact query may clamp the page; a stale
+  // one, or the fallback from another page, says nothing about the total.
   useClampedPage(
     tabTaskPage,
     currentPage ? currentPage.total : null,
@@ -120,12 +157,21 @@ export function useRealtimeTaskItems({
   const retryTabTasks = useCallback(() => {
     void resource.refresh();
   }, [resource.refresh]);
+  // A mismatched reply usually means the task identity is being swapped; ask
+  // again shortly (silently) instead of waiting for an unrelated change.
+  const mismatchedKey = fetched?.mismatched ? fetched.key : null;
+  const refreshTabTasks = resource.refresh;
+  useEffect(() => {
+    if (!mismatchedKey) return;
+    const timer = setTimeout(() => void refreshTabTasks(true), 1000);
+    return () => clearTimeout(timer);
+  }, [mismatchedKey, refreshTabTasks]);
 
   return {
     activeTab,
     setActiveTab,
-    tabTaskList: currentPage?.rows || [],
-    tabTaskTotal: currentPage?.total || 0,
+    tabTaskList: shownPage?.rows || [],
+    tabTaskTotal: shownPage?.total || 0,
     tabTaskPage,
     setTabTaskPage,
     pageSize,

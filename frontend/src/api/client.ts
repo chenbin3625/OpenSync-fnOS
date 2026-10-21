@@ -113,6 +113,14 @@ export async function request<T>(
           : {}),
       },
     );
+    // A successful response without a body (204, or an empty 200) carries
+    // no envelope to unwrap; it is a success, not a malformed reply.
+    if (
+      response.ok &&
+      (response.status === 204 || response.headers?.get("Content-Length") === "0")
+    ) {
+      return undefined as T;
+    }
     try {
       result = await response.json();
     } catch (err) {

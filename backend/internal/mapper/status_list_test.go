@@ -24,6 +24,8 @@ func TestParseStatusListSplitsCommaSeparatedEntries(t *testing.T) {
 		{"unknown scalar is not zero", true, []int{}},
 		{"malformed scalar dropped", "abc", []int{}},
 		{"nil", nil, nil},
+		{"duplicates collapsed", []string{"2,2,7", "2"}, []int{2, 7}},
+		{"unknown codes dropped", []string{"2,9,99,-1,10"}, []int{2, 10}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

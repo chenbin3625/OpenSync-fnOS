@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"opensync/internal/mapper"
@@ -31,16 +32,25 @@ func isSQLiteBusy(err error) bool {
 // lock past busy_timeout aborted a healthy sync. Other errors are returned at
 // once, and the retry stops early when the task is stopped or times out.
 func (jt *JobTask) persistWithBusyRetry(items []map[string]interface{}) error {
+	return jt.persistWithBusyRetryCtx(jt.context(), true, items)
+}
+
+// persistWithBusyRetryCtx is the retry loop. stopOnBreak ends it early when
+// the task is stopped: right for writes made while the task runs, wrong for
+// the final flush, which runs precisely because the task stopped (or timed
+// out, cancelling ctx) and is the last chance to save those items. The final
+// flush therefore passes stopOnBreak=false with a cleanup context.
+func (jt *JobTask) persistWithBusyRetryCtx(ctx context.Context, stopOnBreak bool, items []map[string]interface{}) error {
 	err := jobDeps.PersistJobTaskItems(items)
 	for attempt := 0; attempt < len(persistBusyRetryDelays) && isSQLiteBusy(err); attempt++ {
-		if jt.isBreak() {
+		if stopOnBreak && jt.isBreak() {
 			return err
 		}
 		log.Printf("Task %d: database busy while saving %d task items, retrying (%d/%d)",
 			jt.TaskID, len(items), attempt+1, len(persistBusyRetryDelays))
 		timer := time.NewTimer(persistBusyRetryDelays[attempt])
 		select {
-		case <-jt.context().Done():
+		case <-ctx.Done():
 			timer.Stop()
 			return err
 		case <-timer.C:
@@ -57,7 +67,16 @@ func (jt *JobTask) persistRemainingTaskItems() error {
 	// schedulePersistFlush again and wrote to the database after the task had
 	// reached its terminal status, possibly after ShutdownDB closed the handle.
 	jt.sealPersistFlush()
-	if err := jt.flushPersistBuffer(); err != nil {
+	// A stopped or timed-out task has a cancelled context and its break flag
+	// set, which ended the busy retry at once: the burst of Stopped items
+	// written on stop then failed on the first lock contention and the task
+	// was reported as a system failure. The final flush keeps retrying,
+	// bounded by its own cleanup deadline.
+	ctx, cancel := jt.cleanupContext()
+	defer cancel()
+	if err := jt.flushPersistBufferWith(func(items []map[string]interface{}) error {
+		return jt.persistWithBusyRetryCtx(ctx, false, items)
+	}); err != nil {
 		return err
 	}
 	return jt.taskPersistenceError()
@@ -198,6 +217,10 @@ func (jt *JobTask) cancelPersistFlush() {
 }
 
 func (jt *JobTask) flushPersistBuffer() error {
+	return jt.flushPersistBufferWith(jt.persistWithBusyRetry)
+}
+
+func (jt *JobTask) flushPersistBufferWith(persist func([]map[string]interface{}) error) error {
 	// Serialize the write itself. Without this the final flush can observe an
 	// empty buffer while a timer flush is still writing, report success, and
 	// only then have that write fail and push the items back — losing them
@@ -213,19 +236,15 @@ func (jt *JobTask) flushPersistBuffer() error {
 	jt.persistBuffer = jt.persistBuffer[:0]
 	jt.persistBufMu.Unlock()
 
-	if err := jt.persistWithBusyRetry(jobTaskItemsToMaps(items)); err != nil {
+	if err := persist(jobTaskItemsToMaps(items)); err != nil {
 		jt.persistBufMu.Lock()
 		jt.persistBuffer = append(items, jt.persistBuffer...)
 		jt.persistBufMu.Unlock()
 
-		jobID := int64(0)
-		if jt.JobClient != nil {
-			jobID = jt.JobClient.JobID
-		}
 		first := items[0]
 		log.Printf(
 			"Failed to save %d task items for task %d (job %d) first file=%q: %v",
-			len(items), jt.TaskID, jobID, first.FileName, err,
+			len(items), jt.TaskID, jt.jobIDSnapshot(), first.FileName, err,
 		)
 		jt.recordTaskPersistenceError(err)
 		jt.requestBreak()
