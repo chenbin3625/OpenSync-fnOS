@@ -23,8 +23,8 @@ import {
 import * as taskFormModule from "../src/lib/taskForm";
 
 describe("existing synchronization contracts", () => {
-  it("keeps multi-source, multi-target and the two supported synchronization modes", () => {
-    expect(methodNames).toEqual(["增量同步", "全量同步"]);
+  it("keeps copy modes and exposes verified single-target moves", () => {
+    expect(methodNames).toEqual(["增量同步", "全量同步", "移动"]);
     expect(methodOptions.map((method) => method.description).join("\n")).toContain(
       "不会删除目标端多余文件",
     );
@@ -46,6 +46,18 @@ describe("existing synchronization contracts", () => {
         dstPath: form.dstPath,
       });
     }
+  });
+
+  it("rejects multiple move targets while accepting a single target", () => {
+    const form = {
+      ...defaultJobForm(7),
+      remark: "移动",
+      method: 2,
+      srcPath: ["/Source"],
+      dstPath: ["/Backup", "/Archive"],
+    };
+    expect(validateJobForm(form)).toContain("一个目标");
+    expect(validateJobForm({ ...form, dstPath: ["/Backup"] })).toBe("");
   });
 
   it("expands selected source roots by default for folder filtering", () => {
@@ -279,7 +291,7 @@ describe("existing synchronization contracts", () => {
       dstPath: ["/c"],
     });
   });
-  it("preserves the legacy move method when editing (backend still implements it)", () => {
+  it("preserves the move method when editing stored jobs", () => {
     const job = {
       id: 9,
       alistId: 7,

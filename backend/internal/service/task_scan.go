@@ -111,6 +111,12 @@ func (jt *JobTask) sync() {
 	}
 
 	dstPaths := parsePathList(jt.Job["dstPath"])
+	if util.ToInt(jt.Job["method"]) == 2 && len(dstPaths) != 1 {
+		errMsg := "移动模式只允许一个目标目录"
+		jt.CopyHook("", "", "", nil, "", taskStatusFailed, &errMsg, taskItemFile, taskItemTypeTransfer, time.Now().Unix())
+		jt.markScanFinished()
+		return
+	}
 	fullSync := util.ToInt(jt.Job["method"]) == 1
 
 	// Collect all top-level (src, dst) pairs.
@@ -229,6 +235,9 @@ func (jt *JobTask) syncRetryItems() {
 
 func (jt *JobTask) retryTaskItem(item map[string]interface{}) {
 	copyType := taskItemTypeFromValue(item["type"])
+	if copyType == taskItemTypeMove && util.ToInt(jt.Job["method"]) == 2 {
+		copyType = taskItemTypeTransfer
+	}
 	isPath := taskItemObjectFromValue(item["isPath"]) == taskItemPath
 	srcPath := util.StringValue(item["srcPath"])
 	dstPath := util.StringValue(item["dstPath"])
@@ -259,7 +268,7 @@ func (jt *JobTask) retryTaskItem(item map[string]interface{}) {
 		reason := "delete record is not replayed: the next mirror run re-decides deletions from a fresh source scan"
 		log.Printf("Task %d refused to replay delete of %q in %q", jt.TaskID, fileName, dstPath)
 		jt.DelHook(dstPath, fileName, nil, taskStatusFailed, &reason, boolToTaskItemObject(isPath), time.Now().Unix())
-	case taskItemTypeCopy, taskItemTypeMove:
+	case taskItemTypeCopy, taskItemTypeMove, taskItemTypeTransfer:
 		if isPath {
 			jt.retryMkdir(srcPath, dstPath, copyType)
 			return
@@ -387,8 +396,8 @@ func (jt *JobTask) copyFile(srcPath, dstPath, fileName string, fileSize interfac
 	}
 	method := util.ToInt(jt.Job["method"])
 	copyType := taskItemTypeCopy
-	if method >= 2 {
-		copyType = taskItemTypeMove
+	if method == 2 {
+		copyType = taskItemTypeTransfer
 	}
 	jt.queueCopyFile(srcPath, dstPath, fileName, fileSize, copyType)
 }
@@ -746,7 +755,7 @@ func (jt *JobTask) syncWithHave(work scanWork, spec *excludeMatcher) {
 				continue
 			}
 			_, dstVal, exists := dstIndex.find(key, srcIndex)
-			if !exists || fileChanged(srcVal, dstVal) {
+			if util.ToInt(jt.Job["method"]) == 2 || !exists || fileChanged(srcVal, dstVal) {
 				if dstKey, conflict := dstIndex.findDirForFile(key); conflict {
 					// The destination holds a directory under the file's name. A
 					// copy cannot replace it, so report the type conflict instead

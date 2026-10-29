@@ -34,9 +34,7 @@ export function defaultJobForm(alistId?: number) {
   };
 }
 export type JobForm = ReturnType<typeof defaultJobForm>;
-// 0=增量同步、1=全量同步、2=移动。The backend still implements 2 as a move
-// (copy then delete the source), so editing such a job must not silently turn
-// it into a copy: only unknown values fall back to 0.
+// Preserve all supported modes when editing stored jobs.
 const supportedJobMethods = new Set([0, 1, 2]);
 
 export function normalizeJobMethod(method: unknown) {
@@ -196,6 +194,7 @@ export function validateJobFormStep(form: JobForm, step: number) {
       if (!form.alistId) return "请选择存储引擎";
       if (!form.srcPath.length) return "请选择源目录";
       if (!form.dstPath.length) return "请选择目标目录";
+      if (form.method === 2 && form.dstPath.length !== 1) return "移动模式只允许一个目标目录";
       return validateJobPaths(form);
     case 1:
       if (

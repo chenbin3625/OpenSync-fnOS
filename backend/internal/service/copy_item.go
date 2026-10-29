@@ -179,6 +179,9 @@ func (ci *CopyItem) submittedAtUnix() int64 {
 // matching size alone does not prove the copy ran: the destination must also
 // have been written by this submission (verifyDstWrittenSince).
 func (ci *CopyItem) verifyVanishedTaskComplete(runtime copyItemRuntime, client copyItemClient) (bool, error) {
+	if ci.CopyType == taskItemTypeTransfer {
+		return false, errors.New("move copy task disappeared before confirmed completion; source retained")
+	}
 	submittedAt := ci.submittedAtUnix()
 	if ci.CopyType == taskItemTypeMove || submittedAt <= 0 {
 		return ci.verifyDstComplete(runtime, client)
@@ -261,6 +264,15 @@ func (ci *CopyItem) DoIt() {
 		}
 
 		ci.setRunning()
+		var snapshot moveSnapshot
+		if ci.CopyType == taskItemTypeTransfer {
+			var err error
+			snapshot, err = ci.snapshotMove(runtime, client)
+			if err != nil {
+				ci.failMove(runtime, err)
+				break
+			}
+		}
 		submittedAt := time.Now().Unix()
 		ci.setSubmittedAt(submittedAt)
 		taskID, err := ci.startTransfer(runtime.context(), client)
@@ -272,7 +284,7 @@ func (ci *CopyItem) DoIt() {
 			// Look at the server state before deciding to retry.
 			adoptedTaskID, completed := ci.reconcileAmbiguousTransfer(runtime, client, submittedAt)
 			if completed {
-				ci.setProgress(taskStatusSuccess, 100, nil)
+				ci.completeTransfer(runtime, client, snapshot, false)
 				break
 			}
 			if adoptedTaskID != "" {
@@ -330,7 +342,8 @@ func (ci *CopyItem) DoIt() {
 				ci.setFailure(emptyTaskErr)
 				break
 			}
-			ci.setProgress(taskStatusSuccess, 100, nil)
+			ci.completeTransfer(runtime, client, snapshot, false)
+			break
 		} else if ci.status() != taskStatusStopped {
 			runtime.waitForRemoteCopyCompletion(ci)
 			// The monitor normally delivers a terminal state, but when it is
@@ -341,6 +354,10 @@ func (ci *CopyItem) DoIt() {
 			switch ci.status() {
 			case taskStatusRunning, taskStatusWaiting:
 				ci.setStatus(taskStatusStopped)
+			}
+			if ci.status() == taskStatusSuccess && ci.CopyType == taskItemTypeTransfer {
+				ci.completeTransfer(runtime, client, snapshot, true)
+				break
 			}
 		}
 		if ci.status() == taskStatusFailed && attempt < maxRetries {
@@ -462,6 +479,9 @@ func (ci *CopyItem) reconcileAmbiguousTransfer(runtime copyItemRuntime, client c
 		if taskID := ci.matchUndoneTask(tasks); taskID != "" {
 			return taskID, false
 		}
+	}
+	if ci.CopyType == taskItemTypeTransfer {
+		return "", false
 	}
 
 	if ci.CopyType == taskItemTypeMove {

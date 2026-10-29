@@ -18,9 +18,10 @@ const (
 	taskStatusNoSync       taskStatus = 8  // job_task only
 	taskStatusRetrying     taskStatus = 10 // job_task_item only
 
-	taskItemTypeCopy   taskItemType = 0
-	taskItemTypeDelete taskItemType = 1
-	taskItemTypeMove   taskItemType = 2
+	taskItemTypeCopy     taskItemType = 0
+	taskItemTypeDelete   taskItemType = 1
+	taskItemTypeMove     taskItemType = 2
+	taskItemTypeTransfer taskItemType = 3 // Verified copy followed by source removal.
 
 	taskItemFile taskItemObject = 0
 	taskItemPath taskItemObject = 1
