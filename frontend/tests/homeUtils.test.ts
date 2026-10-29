@@ -117,10 +117,10 @@ describe("schedule display", () => {
 });
 
 describe("sync method labels", () => {
-  it("labels the current modes and the legacy move mode", () => {
+  it("labels all supported synchronization modes", () => {
     expect(methodLabel(0)).toBe("增量同步");
     expect(methodLabel(1)).toBe("全量同步");
-    expect(methodLabel(2)).toBe("移动（旧版）");
+    expect(methodLabel(2)).toBe("移动");
     expect(methodLabel(9)).toBe("—");
   });
 });

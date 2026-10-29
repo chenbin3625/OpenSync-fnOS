@@ -37,7 +37,6 @@ import {
   cronFields,
   cronTypeNames,
   formatSchedulePlan,
-  legacyMoveMethodLabel,
   methodOptions,
 } from "./Home/homeUtils";
 import {
@@ -104,13 +103,8 @@ export default function TaskEditor({
     job ? jobToForm(job) : defaultJobForm(engines[0]?.id),
   );
   const fileSizeDrafts = useRef<FileSizeDrafts>({});
+  const methodLabelId = useId();
   const [intervalDraft, setIntervalDraft] = useState<string | null>(null);
-  // Legacy backend method 2 ("move") is not part of the current two-mode UI,
-  // but opening and saving such a job must not silently rewrite it to 0
-  // (incremental copy). Until the user touches the select, keep the stored
-  // value in both the display and the payload.
-  const [methodTouched, setMethodTouched] = useState(false);
-  const legacyMethod = job?.method === 2;
   const isNew = !job;
   const [step, setStep] = useState(0);
   const [activeTab, setActiveTab] = useState("engine");
@@ -140,12 +134,6 @@ export default function TaskEditor({
       return;
     }
     const payload = buildJobPayload(formToSave);
-    if (legacyMethod && !methodTouched && form.method !== 2) {
-      // taskForm's normalizeJobMethod may still have folded 2 to 0; the page
-      // owns the "don't lose the stored mode" guarantee until the user edits
-      // the select.
-      payload.method = 2;
-    }
     void action.run(async () => {
       try {
         await api.saveJob(payload);
@@ -304,7 +292,7 @@ export default function TaskEditor({
                   <Field
                     label={
                       <span className="field-label-with-tip">
-                        同步方式
+                        <span id={methodLabelId}>同步方式</span>
                         <Tooltip content={syncMethodTip} trigger="hover">
                           <span
                             className="field-tip-icon"
@@ -319,25 +307,13 @@ export default function TaskEditor({
                     ariaLabel="同步方式"
                   >
                     <Select
-                      value={
-                        legacyMethod && !methodTouched ? 2 : form.method
-                      }
-                      optionList={[
-                        ...methodOptions.map((method, value) => ({
-                          value,
-                          label: method.name,
-                        })),
-                        ...(legacyMethod || form.method === 2
-                          ? [
-                              {
-                                value: 2,
-                                label: legacyMoveMethodLabel,
-                              },
-                            ]
-                          : []),
-                      ]}
+                      aria-labelledby={methodLabelId}
+                      value={form.method}
+                      optionList={methodOptions.map((method, value) => ({
+                        value,
+                        label: method.name,
+                      }))}
                       onChange={(value) => {
-                        setMethodTouched(true);
                         change("method", Number(value));
                       }}
                     />

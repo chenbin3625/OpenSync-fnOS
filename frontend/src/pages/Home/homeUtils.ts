@@ -42,6 +42,7 @@ export const taskTypeNames: Record<number, string> = {
   0: "复制",
   1: "删除",
   2: "移动",
+  3: "移动（校验后删源）",
 };
 export const methodOptions = [
   {
@@ -54,12 +55,14 @@ export const methodOptions = [
     description:
       "目标目录与源目录保持一致，会删除目标端多余文件；源文件换位置时优先复用目标端相同内容，避免重传。",
   },
+  {
+    name: "移动",
+    description:
+      "复制文件并校验目标大小、源文件未变后删除源文件；仅支持一个目标目录，保留空源目录。需刷新、复制和删除权限，请勿使用指向同一数据的别名目录或同时修改文件。",
+  },
 ];
 export const methodNames = methodOptions.map((method) => method.name);
-/** Legacy backend method 2 is the old "move" mode (taskForm keeps it on save). */
-export const legacyMoveMethodLabel = "移动（旧版）";
 export const methodLabel = (method?: number | null) => {
-  if (method === 2) return legacyMoveMethodLabel;
   return methodNames[Number(method)] ?? "—";
 };
 export const cronTypeNames = ["间隔(分钟)", "Cron", "仅手动"];

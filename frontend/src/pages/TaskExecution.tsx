@@ -713,6 +713,7 @@ function FileDetails({
               { label: "复制/创建", value: 0 },
               { label: "删除", value: 1 },
               { label: "移动", value: 2 },
+              { label: "移动（校验后删源）", value: 3 },
             ],
           },
           {

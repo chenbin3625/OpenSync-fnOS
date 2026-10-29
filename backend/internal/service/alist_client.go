@@ -667,6 +667,7 @@ type FileStat struct {
 	SizeKnown bool
 	Size      int64
 	Modified  int64
+	MD5       string
 }
 
 // FileStatContext returns metadata for dir/name via /api/fs/get. A missing

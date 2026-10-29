@@ -275,6 +275,9 @@ func validateJobInput(job map[string]interface{}, rejectNestedDst bool) error {
 	if method < 0 || method > 2 {
 		return publicError(msg.T(msg.LostPart))
 	}
+	if method == 2 && len(parsePathList(job["dstPath"])) != 1 {
+		return publicError("移动模式只允许一个目标目录")
+	}
 
 	isCron := util.ToInt(job["isCron"])
 	if isCron < 0 || isCron > 2 {
