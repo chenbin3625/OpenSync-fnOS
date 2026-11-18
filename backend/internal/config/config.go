@@ -20,8 +20,9 @@ import (
 
 // ServerConfig holds server configuration
 //
-// The server only listens on the fnOS app socket (or 127.0.0.1:--port in
-// development), so the former bind/port/log_level/console_level/log_save keys
+// The server listens on the fnOS app socket in production. Development mode
+// defaults to 127.0.0.1 and may opt into a trusted LAN host, so the former
+// bind/port/log_level/console_level/log_save keys
 // and the OPENSYNC_TLS_* variables have no effect. They are still tolerated in
 // existing config.ini files (kept verbatim on save) but are no longer parsed
 // or written; see deprecatedConfigKeys.

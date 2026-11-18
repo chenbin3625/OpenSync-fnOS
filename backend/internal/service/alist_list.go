@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -290,7 +291,9 @@ type fileListPage struct {
 	// dropped counts entries whose names are not usable path components. They
 	// are not merged into the result, so a non-zero value means the listing is
 	// incomplete and callers must fail closed instead of syncing it.
-	dropped int
+	dropped     int
+	dataSeen    bool
+	contentSeen bool
 }
 
 func unsafeListedNameError(dropped int) error {
@@ -325,6 +328,7 @@ func (c *AlistClient) fetchFileListPage(ctx context.Context, req alistListReques
 
 func decodeFileListResponse(r io.Reader, limit int64, result FileListResult) (fileListPage, error) {
 	var page fileListPage
+	dataSeen := false
 	dec := json.NewDecoder(&capReader{r: r, limit: limit})
 	if err := consumeDelim(dec, '{'); err != nil {
 		return fileListPage{}, err
@@ -344,12 +348,14 @@ func decodeFileListResponse(r io.Reader, limit int64, result FileListResult) (fi
 				return fileListPage{}, err
 			}
 		case "data":
+			dataSeen = true
 			data, err := decodeFileListData(dec, result)
 			if err != nil {
 				return fileListPage{}, err
 			}
 			page.n, page.total, page.dropped = data.n, data.total, data.dropped
 			page.totalKnown = data.totalKnown
+			page.contentSeen = data.contentSeen
 		default:
 			if err := skipJSONValue(dec); err != nil {
 				return fileListPage{}, err
@@ -359,14 +365,19 @@ func decodeFileListResponse(r io.Reader, limit int64, result FileListResult) (fi
 	if err := consumeDelim(dec, '}'); err != nil {
 		return fileListPage{}, err
 	}
+	page.dataSeen = dataSeen
+	if page.code == http.StatusOK && (!dataSeen || !page.contentSeen) {
+		return fileListPage{}, errors.New("AList list response is missing data")
+	}
 	return page, nil
 }
 
 type fileListData struct {
-	n          int
-	total      int
-	totalKnown bool
-	dropped    int
+	n           int
+	total       int
+	totalKnown  bool
+	dropped     int
+	contentSeen bool
 }
 
 func decodeFileListData(dec *json.Decoder, result FileListResult) (fileListData, error) {
@@ -382,6 +393,7 @@ func decodeFileListData(dec *json.Decoder, result FileListResult) (fileListData,
 	if !ok || delim != '{' {
 		return fileListData{}, fmt.Errorf("AList list data is not an object")
 	}
+	contentSeen := false
 	for dec.More() {
 		key, keyErr := decodeObjectKey(dec)
 		if keyErr != nil {
@@ -389,6 +401,7 @@ func decodeFileListData(dec *json.Decoder, result FileListResult) (fileListData,
 		}
 		switch key {
 		case "content":
+			contentSeen = true
 			data.n, data.dropped, err = decodeFileListContent(dec, result)
 			if err != nil {
 				return fileListData{}, err
@@ -404,6 +417,10 @@ func decodeFileListData(dec *json.Decoder, result FileListResult) (fileListData,
 			}
 		}
 	}
+	if !contentSeen {
+		return data, nil
+	}
+	data.contentSeen = true
 	return data, consumeDelim(dec, '}')
 }
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type SetStateAction } from "react";
 import { getErrorMessage } from "../components/common";
 
 export function useResource<T>(
@@ -10,7 +10,7 @@ export function useResource<T>(
   fetchRef.current = fetcher;
   const abortRef = useRef<AbortController | null>(null);
   const requestRef = useRef(0);
-  const [data, setData] = useState<T | null>(null);
+  const [data, setDataState] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   // Failure of a silent (background/polling) refresh, exposed separately so a
@@ -18,6 +18,11 @@ export function useResource<T>(
   // also written to `error` for backwards compatibility: the realtime view
   // (TaskExecution) relies on `error` to show that notice while data exists.
   const [refreshError, setRefreshError] = useState("");
+  const setData = useCallback((value: SetStateAction<T | null>) => {
+    setDataState(value);
+    setError("");
+    setRefreshError("");
+  }, []);
   const refresh = useCallback(async (silent = false) => {
     if (silent && abortRef.current) return;
     abortRef.current?.abort();
@@ -31,7 +36,7 @@ export function useResource<T>(
     try {
       const result = await fetchRef.current(controller.signal);
       if (!controller.signal.aborted && id === requestRef.current) {
-        setData(result);
+        setDataState(result);
         setError("");
         setRefreshError("");
       }

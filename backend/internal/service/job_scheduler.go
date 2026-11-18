@@ -209,7 +209,9 @@ func buildCronSpec(jobData map[string]interface{}) (string, error) {
 				return "", errors.New(msg.T(msg.CronLost))
 			}
 			parts[i] = val
-			hasValue = true
+			if field != "second" || val != "0" {
+				hasValue = true
+			}
 		}
 	}
 

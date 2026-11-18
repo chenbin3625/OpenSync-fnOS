@@ -57,6 +57,7 @@ type progressHub struct {
 	// mu / framesMu.
 	publishMu   sync.Mutex
 	mu          sync.Mutex
+	stopped     bool
 	framesMu    sync.Mutex
 	subscribers map[int64]map[chan []byte]*progressSubscriber
 	pending     map[int64]struct{}
@@ -114,6 +115,7 @@ func StopJobProgressHub() {
 
 func (h *progressHub) stopAll() {
 	h.mu.Lock()
+	h.stopped = true
 	timers := make([]*time.Timer, 0, len(h.timers))
 	for jobID, timer := range h.timers {
 		timers = append(timers, timer)
@@ -124,6 +126,10 @@ func (h *progressHub) stopAll() {
 	for _, timer := range timers {
 		timer.Stop()
 	}
+	// Wait for an already-running publish. Timer callbacks that have not yet
+	// acquired publishMu observe stopped and return without touching the DB.
+	h.publishMu.Lock()
+	h.publishMu.Unlock()
 	h.framesMu.Lock()
 	h.frames = make(map[int64]progressFrame)
 	h.framesMu.Unlock()
@@ -184,6 +190,10 @@ func (jt *JobTask) notifyProgressNow() {
 
 func (h *progressHub) schedule(jobID int64) {
 	h.mu.Lock()
+	if h.stopped {
+		h.mu.Unlock()
+		return
+	}
 	if len(h.subscribers[jobID]) == 0 {
 		h.mu.Unlock()
 		return
@@ -221,6 +231,12 @@ func (h *progressHub) publish(jobID int64) {
 	// leave the client on the older state.
 	h.publishMu.Lock()
 	defer h.publishMu.Unlock()
+	h.mu.Lock()
+	stopped := h.stopped
+	h.mu.Unlock()
+	if stopped {
+		return
+	}
 	subs := h.subscriberSnapshot(jobID)
 	if len(subs) == 0 {
 		return

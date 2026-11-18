@@ -40,11 +40,21 @@ export function fileSizeToBytes(
   value?: FileSizeInput | null,
   unit?: string | null,
 ): number {
+	return fileSizeInputToBytes(value, unit) ?? 0;
+}
+
+export function fileSizeInputToBytes(
+  value?: FileSizeInput | null,
+  unit?: string | null,
+): number | null {
   const normalized = parseFileSizeInput(value);
-  if (normalized === null || normalized <= 0) return 0;
-  return Math.round(
-    normalized * fileSizeUnitFactors[normalizeFileSizeUnit(unit)],
-  );
+  if (normalized === null) return null;
+  if (normalized <= 0) return 0;
+  const bytes = normalized * fileSizeUnitFactors[normalizeFileSizeUnit(unit)];
+  if (!Number.isFinite(bytes) || bytes < 1 || bytes > Number.MAX_SAFE_INTEGER)
+    return null;
+  const rounded = Math.round(bytes);
+  return Number.isSafeInteger(rounded) ? rounded : null;
 }
 
 export function splitBytesToFileSize(bytes?: number | null): {

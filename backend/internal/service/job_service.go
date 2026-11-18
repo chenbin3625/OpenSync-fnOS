@@ -18,6 +18,8 @@ import (
 var (
 	jobClientList   = make(map[int64]*JobClient)
 	jobClientListMu sync.RWMutex
+	jobClientLoadMu sync.Mutex
+	jobClientLoads  = make(map[int64]*sync.Mutex)
 )
 
 var (
@@ -150,6 +152,24 @@ func taskRetentionCutoff(now time.Time, taskSaveDays int) (int64, bool) {
 
 // GetJobClientByID gets or creates a job client
 func GetJobClientByID(jobID int64) (*JobClient, error) {
+	loadMu := jobClientLoadMutex(jobID)
+	loadMu.Lock()
+	defer loadMu.Unlock()
+	return getJobClientByIDLocked(jobID)
+}
+
+func jobClientLoadMutex(jobID int64) *sync.Mutex {
+	jobClientLoadMu.Lock()
+	defer jobClientLoadMu.Unlock()
+	loadMu := jobClientLoads[jobID]
+	if loadMu == nil {
+		loadMu = &sync.Mutex{}
+		jobClientLoads[jobID] = loadMu
+	}
+	return loadMu
+}
+
+func getJobClientByIDLocked(jobID int64) (*JobClient, error) {
 	jobClientListMu.RLock()
 	client, ok := jobClientList[jobID]
 	jobClientListMu.RUnlock()
@@ -246,18 +266,23 @@ func ValidateJobInput(job map[string]interface{}) error {
 // stored job is still loaded at startup (with a warning) instead of silently
 // dropping out of the scheduler while the task list keeps showing it.
 func validateJobInput(job map[string]interface{}, rejectNestedDst bool) error {
-	if len(parsePathList(job["srcPath"])) == 0 ||
-		len(parsePathList(job["dstPath"])) == 0 ||
+	srcPaths := parsePathList(job["srcPath"])
+	dstPaths := parsePathList(job["dstPath"])
+	if len(srcPaths) == 0 ||
+		len(dstPaths) == 0 ||
 		util.ToInt64(job["alistId"]) <= 0 {
 		return publicError(msg.T(msg.LostPart))
 	}
-	if syncPathsOverlap(parsePathList(job["srcPath"]), parsePathList(job["dstPath"])) {
+	if pathListHasParentSegment(srcPaths) || pathListHasParentSegment(dstPaths) {
+		return publicError(msg.T(msg.LostPart))
+	}
+	if syncPathsOverlap(srcPaths, dstPaths) {
 		return publicError(msg.T(msg.SyncPathOverlap))
 	}
-	if srcSelectionsNested(parsePathList(job["srcPath"])) {
+	if srcSelectionsNested(srcPaths) {
 		return publicError(msg.T(msg.SrcPathNested))
 	}
-	if resolvedDstPathsNested(parsePathList(job["srcPath"]), parsePathList(job["dstPath"])) {
+	if resolvedDstPathsNested(srcPaths, dstPaths) {
 		if rejectNestedDst {
 			return publicError(msg.T(msg.DstPathNested))
 		}
@@ -279,7 +304,14 @@ func validateJobInput(job map[string]interface{}, rejectNestedDst bool) error {
 		return publicError("移动模式只允许一个目标目录")
 	}
 
-	isCron := util.ToInt(job["isCron"])
+	isCron := 0
+	if rawIsCron, exists := job["isCron"]; exists && rawIsCron != nil && rawIsCron != "" {
+		parsed, ok := strictJobInt(rawIsCron)
+		if !ok {
+			return publicError(msg.T(msg.LostPart))
+		}
+		isCron = parsed
+	}
 	if isCron < 0 || isCron > 2 {
 		return publicError(msg.T(msg.LostPart))
 	}
@@ -287,6 +319,35 @@ func validateJobInput(job map[string]interface{}, rejectNestedDst bool) error {
 		return publicError(msg.T(msg.IntervalLost))
 	}
 	return nil
+}
+
+func strictJobInt(value interface{}) (int, bool) {
+	switch v := value.(type) {
+	case int:
+		return v, true
+	case int64:
+		parsed := int(v)
+		return parsed, int64(parsed) == v
+	case float64:
+		if math.IsNaN(v) || math.IsInf(v, 0) || math.Trunc(v) != v || v < math.MinInt64 || v >= float64(1<<63) {
+			return 0, false
+		}
+		parsed := int64(v)
+		asInt := int(parsed)
+		return asInt, int64(asInt) == parsed
+	case json.Number:
+		parsed, err := strconv.ParseInt(string(v), 10, 64)
+		if err != nil {
+			return 0, false
+		}
+		asInt := int(parsed)
+		return asInt, int64(asInt) == parsed
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(v))
+		return parsed, err == nil
+	default:
+		return 0, false
+	}
 }
 
 func normalizeJobFileSizeRange(job map[string]interface{}) error {
@@ -471,7 +532,10 @@ func DoJobManual(jobID int64) error {
 
 // RemoveJobClient deletes a job
 func RemoveJobClient(jobID int64) error {
-	client, err := GetJobClientByID(jobID)
+	loadMu := jobClientLoadMutex(jobID)
+	loadMu.Lock()
+	defer loadMu.Unlock()
+	client, err := getJobClientByIDLocked(jobID)
 	if err != nil {
 		return err
 	}
@@ -605,16 +669,6 @@ func RetryFailedTask(taskID int64) error {
 	}
 	if !client.enabled() {
 		return publicError(msg.T(msg.DisabledJobCannotRun))
-	}
-	if client.isBusy() {
-		return publicError(msg.T(msg.JobRunning))
-	}
-	count, err := jobDeps.CountJobTaskItemsByStatuses(taskID, retryableStatusValues())
-	if err != nil {
-		return fmt.Errorf("count retryable items: %w", err)
-	}
-	if count == 0 {
-		return publicError(msg.T(msg.NoFailedTaskItems))
 	}
 	return client.DoRetryFailedTaskItems(taskID)
 }

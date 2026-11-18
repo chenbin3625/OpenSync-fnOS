@@ -45,8 +45,7 @@ export function RemotePaths({
   engineId,
   value,
   onChange,
-  // 目录选择器当前都是单选；保留 multiple 以便将来多选，但不再有"选父自动选子"
-  // 的隐藏级联（没有任何调用方使用，曾经是死代码）。
+  // 多选只负责保留用户明确勾选的目录，不做“选父自动选子”的隐藏级联。
   multiple = false,
   ariaLabel = "选择引擎目录",
   "aria-labelledby": ariaLabelledBy,

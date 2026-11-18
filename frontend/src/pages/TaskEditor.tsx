@@ -244,7 +244,7 @@ export default function TaskEditor({
                         engineId={form.alistId}
                         value={form.srcPath}
                         onChange={(paths) => change("srcPath", paths)}
-                        multiple={false}
+                        multiple
                         ariaLabel="选择源目录"
                       />
                       <SettingRow
@@ -267,7 +267,7 @@ export default function TaskEditor({
                         engineId={form.alistId}
                         value={form.dstPath}
                         onChange={(paths) => change("dstPath", paths)}
-                        multiple={false}
+                        multiple
                         ariaLabel="选择目标目录"
                       />
                       <SettingRow

@@ -311,7 +311,7 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
                 `nav-link${isActive ? " selected" : ""}`
               }
             >
-              {sections.at(-1)?.icon}
+              {sections[sections.length - 1]?.icon}
               <span className="nav-label">设置</span>
             </NavLink>
             <VersionLink />

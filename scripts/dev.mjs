@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 一键启动本地预览：Go 后端（--dev，仅监听回环）+ Vite 前端开发服务。
+// 一键启动本地预览：Go 后端（--dev，按显式配置监听可信局域网）+ Vite 前端开发服务。
 // 用法：node scripts/dev.mjs  或  npm run dev
 import { spawn } from "node:child_process";
 import { createWriteStream, mkdirSync, writeFileSync } from "node:fs";
@@ -32,7 +32,7 @@ if (argv.includes("--help") || argv.includes("-h")) {
 
   node scripts/dev.mjs [--no-install]
 
-前端 http://127.0.0.1:${FRONTEND_PORT}${BASE_PATH}/  后端 http://127.0.0.1:${BACKEND_PORT}
+前端监听 0.0.0.0:${FRONTEND_PORT}${BASE_PATH}/  后端监听 0.0.0.0:${BACKEND_PORT}
 端口取自 vite.config.ts；改端口请改配置，脚本会自动跟随。
 
   --no-install   缺少 frontend/node_modules 时直接报错，不自动执行 npm ci
@@ -189,7 +189,11 @@ const backend = start(
   "backend",
   "go",
   ["run", "./cmd/server", "--dev", "--port", String(BACKEND_PORT)],
-  { cwd: join(root, "backend"), color: "36" },
+  {
+    cwd: join(root, "backend"),
+    env: { OPENSYNC_DEV_HOST: "0.0.0.0" },
+    color: "36",
+  },
 );
 const frontend = start("frontend", "npm", ["run", "dev"], {
   cwd: join(root, "frontend"),
@@ -239,11 +243,11 @@ console.log("\x1b[32m✓\x1b[0m 前端就绪");
 
 console.log(`
 ────────────────────────────────────────────────────────
-  预览地址   \x1b[1mhttp://127.0.0.1:${FRONTEND_PORT}${BASE_PATH}/\x1b[0m
-  后端接口   http://127.0.0.1:${BACKEND_PORT}${BASE_PATH}/svr/session
+  预览地址   \x1b[1mhttp://<本机局域网地址>:${FRONTEND_PORT}${BASE_PATH}/\x1b[0m
+  后端接口   监听 0.0.0.0:${BACKEND_PORT}${BASE_PATH}/svr/session
   开发数据   ${process.env.OPENSYNC_DATA_DIR || join(root, "backend", "data")}
   日志       ${logDir}
 ────────────────────────────────────────────────────────
-  Ctrl-C 停止前后端。两个服务仅监听 127.0.0.1，请勿对外暴露。
+  Ctrl-C 停止前后端。开发后端关闭 fnOS 鉴权，请仅在可信局域网使用。
 `);
 // 任一服务退出即整体收尾：监听已在 start() 中注册（第 5 节）。

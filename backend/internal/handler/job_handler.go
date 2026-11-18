@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"errors"
 	"opensync/internal/msg"
 	"opensync/internal/service"
@@ -130,6 +131,15 @@ func validateJobFields(req map[string]interface{}) error {
 // leading "..", so the guard stays here as a segment comparison.
 func hasParentPathSegment(value interface{}) bool {
 	switch v := value.(type) {
+	case string:
+		raw := strings.TrimSpace(v)
+		if strings.HasPrefix(raw, "[") {
+			var paths []string
+			if err := json.Unmarshal([]byte(raw), &paths); err == nil {
+				return hasParentPathSegment(paths)
+			}
+		}
+		return pathHasParentSegment(raw)
 	case []string:
 		for _, item := range v {
 			if pathHasParentSegment(item) {
@@ -139,7 +149,7 @@ func hasParentPathSegment(value interface{}) bool {
 		return false
 	case []interface{}:
 		for _, item := range v {
-			if pathHasParentSegment(util.StringValue(item)) {
+			if hasParentPathSegment(item) {
 				return true
 			}
 		}

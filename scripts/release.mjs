@@ -48,7 +48,10 @@ const TOTAL = 6;
 
 // ── 1. 工作区状态 ────────────────────────────────────────────────────────
 step(1, TOTAL, "检查工作区状态");
-const status = capture("git", ["status", "--porcelain"]).stdout || "";
+const gitStatus = capture("git", ["status", "--porcelain"]);
+if (gitStatus.error || gitStatus.status !== 0)
+  throw new Error("无法读取 Git 工作区状态，请在 Git 仓库中执行发布脚本");
+const status = gitStatus.stdout || "";
 const dirty = status
   .split("\n")
   .map((line) => line.trim())
@@ -64,7 +67,10 @@ if (dirty.length > 0) {
     process.exit(1);
   }
 }
-const head = (capture("git", ["rev-parse", "--short", "HEAD"]).stdout || "").trim();
+const headResult = capture("git", ["rev-parse", "--short", "HEAD"]);
+if (headResult.error || headResult.status !== 0)
+  throw new Error("无法读取当前 Git 提交号，已停止发布");
+const head = (headResult.stdout || "").trim();
 console.log(`HEAD ${head}；工作区${dirty.length === 0 ? "干净" : "有改动（--allow-dirty）"}`);
 // 与 CI 同一套版本一致性检查：manifest、两个 package.json、README 必须一致。
 const versionIssues = versionProblems(collectVersions());

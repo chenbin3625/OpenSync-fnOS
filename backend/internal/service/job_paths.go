@@ -49,6 +49,17 @@ func normalizePathListForStorage(value interface{}) string {
 	return encodePathList(parsePathList(value))
 }
 
+func pathListHasParentSegment(paths []string) bool {
+	for _, value := range paths {
+		for _, segment := range strings.FieldsFunc(value, func(r rune) bool { return r == '/' || r == '\\' }) {
+			if segment == ".." {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func syncPathsOverlap(srcPaths, dstPaths []string) bool {
 	for _, src := range srcPaths {
 		for _, dst := range dstPaths {

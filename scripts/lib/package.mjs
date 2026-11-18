@@ -12,7 +12,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { envWithNode, root, run } from "./toolchain.mjs";
 
 /** 两个架构的 Go 交叉编译目标；飞牛 manifest 里 x86/arm 分别声明。 */
@@ -61,7 +61,10 @@ export const buildFrontend = (nodeDir) => {
 };
 
 const resolveFnpack = () => {
-  const candidate = process.env.FNPACK || join(root, ".tools", "fnpack");
+  const candidate = resolve(
+    process.cwd(),
+    process.env.FNPACK || join(root, ".tools", "fnpack"),
+  );
   if (!existsSync(candidate))
     throw new Error(
       `找不到 fnpack：${candidate}\n按 README「飞牛打包」下载官方 fnpack 1.2.3 放到 .tools/fnpack，或用 FNPACK 指定路径。`,
@@ -148,7 +151,7 @@ export const formatBytes = (bytes) => {
 
 /** 写出 dist/SHA256SUMS，可用 shasum -a 256 -c 校验。 */
 export const writeChecksums = (files, version) => {
-  const lines = files.map((file) => `${sha256(file)}  ${file.split("/").pop()}`);
+  const lines = files.map((file) => `${sha256(file)}  ${basename(file)}`);
   const target = join(root, "dist", "SHA256SUMS");
   writeFileSync(
     target,

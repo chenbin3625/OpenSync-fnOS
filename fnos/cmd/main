@@ -83,6 +83,18 @@ status_app() {
     # 找回的进程重新记入 pid 文件，后续 status / stop 不必再扫描。
     { printf '%s\n' "$PID" > "$PID_FILE"; } 2>/dev/null || true
 }
+socket_in_use() {
+    [ -S "$SOCKET" ] || return 1
+    if command -v fuser >/dev/null 2>&1; then
+        [ -n "$(fuser "$SOCKET" 2>/dev/null | tr -d '[:space:]')" ] && return 0
+        return 1
+    fi
+    if command -v ss >/dev/null 2>&1; then
+        ss -lx 2>/dev/null | grep -F -- "$SOCKET" >/dev/null
+        return $?
+    fi
+    return 1
+}
 stop_app() {
     mkdir -p "$TRIM_PKGTMP"
     acquire_lifecycle_lock "$STOP_LOCK_WAIT" '应用正在启动或停止，请稍后重试'
@@ -247,13 +259,34 @@ start_log_rotator() {
             rotate_log_running
         done
     ) 9>&- </dev/null >/dev/null 2>&1 &
-    printf '%s\n' "$!" > "$LOG_ROTATOR_PID_FILE" 2>/dev/null || true
+    local rotator_pid=$! start_time=''
+    if [ -d /proc ] && [ -r "/proc/$rotator_pid/stat" ]; then
+        start_time="$(proc_start_time "$rotator_pid" 2>/dev/null || true)"
+    fi
+    printf '%s %s\n' "$rotator_pid" "$start_time" > "$LOG_ROTATOR_PID_FILE" 2>/dev/null || true
+}
+proc_start_time() {
+    local pid="$1" stat rest
+    [ -r "/proc/$pid/stat" ] || return 1
+    stat="$(cat "/proc/$pid/stat" 2>/dev/null)" || return 1
+    rest="${stat##*) }"
+    set -- $rest
+    [ "$#" -ge 20 ] || return 1
+    printf '%s\n' "${20}"
 }
 stop_log_rotator() {
-    local pid=''
+    local pid='' start_time='' current_start=''
     if [ -f "$LOG_ROTATOR_PID_FILE" ]; then
-        pid="$(head -n 1 "$LOG_ROTATOR_PID_FILE" 2>/dev/null | tr -d '[:space:]')" || pid=''
-        case "$pid" in ''|*[!0-9]*) ;; *) kill "$pid" 2>/dev/null || true ;; esac
+        read -r pid start_time < "$LOG_ROTATOR_PID_FILE" 2>/dev/null || { pid=''; start_time=''; }
+        case "$pid" in
+            ''|*[!0-9]*) ;;
+            *)
+                current_start="$(proc_start_time "$pid" 2>/dev/null || true)"
+                if [ -n "$start_time" ] && [ "$start_time" = "$current_start" ]; then
+                    kill "$pid" 2>/dev/null || true
+                fi
+                ;;
+        esac
         rm -f "$LOG_ROTATOR_PID_FILE"
     fi
 }
@@ -280,8 +313,17 @@ start_app() {
     acquire_lifecycle_lock 0 '应用正在启动，请稍后重试'
     if status_app; then start_log_rotator "$PID"; start_succeeded; return 0; fi
     rotate_log
+    if [ -L "$LOG_FILE" ]; then
+        fail_start '日志文件是符号链接，已拒绝启动以避免写入数据目录之外'
+    fi
     # 服务崩溃或被 kill -9 时 app.sock 会残留；此时已持锁且确认服务未运行，先删除，
     # 否则下面的就绪判断第一轮就会把尚未监听的服务误判为启动成功。
+    if socket_in_use; then
+        fail_start '应用 Socket 仍被进程占用，已拒绝启动以避免重复服务和数据库并发写入'
+    fi
+    if [ -e "$SOCKET" ] && [ ! -S "$SOCKET" ] && [ ! -L "$SOCKET" ]; then
+        fail_start '应用 Socket 路径被普通文件占用，请移除该文件后重试'
+    fi
     if [ -S "$SOCKET" ] || [ -L "$SOCKET" ]; then rm -f "$SOCKET"; fi
     cd "$TRIM_APPDEST"
     # 9>&- ：服务进程不能继承生命周期锁的描述符，否则它会一直持有 flock，

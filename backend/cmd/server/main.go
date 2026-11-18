@@ -128,7 +128,7 @@ func newRouterWithVersionChecker(development bool, allowedOrigins []string, chec
 }
 
 func main() {
-	development := flag.Bool("dev", false, "loopback-only local development mode")
+	development := flag.Bool("dev", false, "local development mode")
 	port := flag.String("port", "8040", "development port")
 	flag.Parse()
 	if *development && os.Getenv("TRIM_APPNAME") != "" {
@@ -254,8 +254,9 @@ func gracefulShutdown(steps shutdownSteps, total, reserve time.Duration) {
 	steps.stopNotify(notifyCtx)
 }
 
-// openListener binds the HTTP listener: loopback TCP in --dev mode, otherwise
-// the fnOS unix socket. It refuses to start when another instance answers on
+// openListener binds the HTTP listener: loopback TCP by default in --dev mode,
+// or OPENSYNC_DEV_HOST when preview access from a trusted LAN is needed;
+// otherwise it uses the fnOS unix socket. It refuses to start when another instance answers on
 // the socket, and replaces a stale socket file left by a crash.
 //
 // An exclusive lock file is taken before the socket/database are touched:
@@ -269,7 +270,11 @@ func gracefulShutdown(steps shutdownSteps, total, reserve time.Duration) {
 // soon as it is bound, so the rename does not race with clients.
 func openListener(development bool, port, destination string) (net.Listener, *socketPublisher, error) {
 	if development {
-		listener, err := net.Listen("tcp", "127.0.0.1:"+port)
+		host := "127.0.0.1"
+		if configuredHost := strings.TrimSpace(os.Getenv("OPENSYNC_DEV_HOST")); configuredHost != "" {
+			host = configuredHost
+		}
+		listener, err := net.Listen("tcp", net.JoinHostPort(host, port))
 		return listener, &socketPublisher{}, err
 	}
 	if destination == "" {

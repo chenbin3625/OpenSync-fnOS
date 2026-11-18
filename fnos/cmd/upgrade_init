@@ -154,6 +154,7 @@ if [ -f "${TRIM_PKGETC}/config.ini" ]; then copy_file "${TRIM_PKGETC}/config.ini
     fail '升级备份失败：无法记录备份位置，已中止升级（请检查磁盘空间）'
 BACKUP_DONE=1
 # 标记“升级后尚未成功启动”：新版本首次启动失败时，main 会在错误信息中给出本备份的
-# 位置。写不进去只影响提示，不影响升级。
-{ printf '%s\n' "$BACKUP" > "$UPGRADE_PENDING"; } 2>/dev/null || true
+# 位置。标记写失败时中止升级，避免把唯一的恢复线索留在不可见状态。
+{ printf '%s\n' "$BACKUP" > "$UPGRADE_PENDING"; } 2>/dev/null || \
+    fail '升级备份已完成，但无法记录升级状态，已中止升级以保留可恢复性'
 printf '%s\n' "升级前数据已备份到 ${BACKUP}"

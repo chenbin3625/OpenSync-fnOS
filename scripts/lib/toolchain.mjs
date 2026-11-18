@@ -65,13 +65,17 @@ export const pickNodeDir = () => {
 
   const candidates = [];
   const seen = new Set();
+  const nodeNames = process.platform === "win32" ? ["node.exe", "node"] : ["node"];
+  const npmNames = process.platform === "win32" ? ["npm.cmd", "npm"] : ["npm"];
   for (const dir of dirs) {
     if (seen.has(dir)) continue;
     seen.add(dir);
-    const node = join(dir, "node");
+    const node = nodeNames.map((name) => join(dir, name)).find(existsSync);
+    const npm = npmNames.map((name) => join(dir, name)).find(existsSync);
     // 目录里必须同时有 npm，否则前置它并不能修好 npm 的运行时。
-    if (!existsSync(node) || !existsSync(join(dir, "npm"))) continue;
-    const version = parseVersion(capture(node, ["-v"]).stdout);
+    if (!node || !npm) continue;
+    const versionResult = capture(node, ["-v"]);
+    const version = versionResult.status === 0 ? parseVersion(versionResult.stdout) : null;
     if (!version) continue;
     candidates.push({ dir, version, text: `v${version.join(".")}` });
   }

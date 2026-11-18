@@ -517,9 +517,23 @@ func (jc *JobClient) DoRetryFailedTaskItems(sourceTaskID int64) error {
 	if !jc.tryMarkDoing() {
 		return publicError(msg.T(msg.JobRunning))
 	}
-	// Claim the source task before the goroutine starts: RemoveTask checks this
-	// claim, so the task cannot disappear while the replay is reading it.
+	if !jc.enabled() {
+		jc.markDone()
+		return publicError(msg.T(msg.DisabledJobCannotRun))
+	}
+	// Claim the source task before counting or starting the goroutine: RemoveTask
+	// checks this claim, so the source cannot disappear between validation and the
+	// replay.
 	jc.setRetrySource(sourceTaskID)
+	count, err := jobDeps.CountJobTaskItemsByStatuses(sourceTaskID, retryableStatusValues())
+	if err != nil {
+		jc.markDone()
+		return fmt.Errorf("count retryable items: %w", err)
+	}
+	if count == 0 {
+		jc.markDone()
+		return publicError(msg.T(msg.NoFailedTaskItems))
+	}
 	go jc.runMarkedJobConfig(sourceTaskID, retryableTaskStatuses)
 	return nil
 }

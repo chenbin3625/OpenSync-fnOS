@@ -6,6 +6,7 @@ import {
 } from "../pages/Home/homeUtils";
 import {
   fileSizeToBytes,
+  fileSizeInputToBytes,
   parseFileSizeInput,
   splitBytesToFileSize,
 } from "../pages/Home/fileSizeUnits";
@@ -235,8 +236,10 @@ export function validateJobFormStep(form: JobForm, step: number) {
       if (minValue === null || maxValue === null) {
         return "文件大小必须是有效的非负数";
       }
-      const min = fileSizeToBytes(form.minFileSize, form.minFileSizeUnit),
-        max = fileSizeToBytes(form.maxFileSize, form.maxFileSizeUnit);
+      const min = fileSizeInputToBytes(form.minFileSize, form.minFileSizeUnit),
+        max = fileSizeInputToBytes(form.maxFileSize, form.maxFileSizeUnit);
+      if (min === null || max === null)
+        return "文件大小换算后必须是 1 字节到安全整数范围内的值";
       if (max > 0 && min > max) return "最大文件大小必须大于等于最小文件大小";
       return "";
     }

@@ -12,7 +12,7 @@
 [![适用平台](https://img.shields.io/badge/%E5%B9%B3%E5%8F%B0-fnOS%20x86%20%7C%20arm64-1677ff)](https://github.com/chenbin3625/OpenSync-fnOS/releases)
 [![许可证](https://img.shields.io/github/license/chenbin3625/OpenSync-fnOS?label=%E8%AE%B8%E5%8F%AF%E8%AF%81)](LICENSE)
 
-当前版本：**v0.0.37**
+当前版本：**v0.0.38**
 
 [下载安装](https://github.com/chenbin3625/OpenSync-fnOS/releases/latest) · [快速上手](#快速上手) · [常见问题](#常见问题)
 
