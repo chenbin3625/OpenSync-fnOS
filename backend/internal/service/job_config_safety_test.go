@@ -49,6 +49,11 @@ func TestRetryFileItemsHonorCurrentConfiguration(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			jt := &JobTask{Job: test.job, Waiting: newCopyQueue()}
 			jt.initRuntime()
+			// Refused records are written through CopyHook, which arms the
+			// debounced persist timer. This test never runs an executor that
+			// would seal it, so stop the timer here; otherwise it fires after
+			// the test and reads jobDeps while another test swaps it.
+			t.Cleanup(jt.cancelPersistFlush)
 			jt.retryTaskItem(test.item)
 			items := jt.Waiting.snapshot()
 			if test.wantQueued {
