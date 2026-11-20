@@ -58,23 +58,54 @@ describe("mock store", () => {
     expect(store.listJobs(1, 20).dataList).toEqual([]);
   });
 
-  it("starts and stops a job through task actions", () => {
+  it("keeps the same history entry when a running task stops", () => {
     const store = createMockStore({
       jobs: [{ id: 7, remark: "可执行任务", enable: 1 }],
     });
 
     expect(store.getCurrentTask(7)).toBeNull();
-    store.runJob(7);
-    const running = store.getCurrentTask(7);
-    expect(running).not.toBeNull();
-    expect(running?.taskId).toBeGreaterThan(0);
+    const running = store.runJob(7);
+    expect(store.getCurrentTask(7)?.taskId).toBe(running.taskId);
+    expect(store.listHistory(7, { statusIn: [1, 2, 4] })).toMatchObject({
+      dataList: [{ id: running.taskId, status: 1 }],
+      count: 1,
+    });
+    expect(store.listHistory(7, { statusIn: [2, 4] }).count).toBe(0);
+    expect(store.removeTaskRecord(running.taskId)).toBe("running");
 
-    store.stopTask(running!.taskId);
+    store.stopTask(running.taskId);
     expect(store.getCurrentTask(7)).toBeNull();
-    expect(store.listHistory(7, { pageNum: 1, pageSize: 20 }).count).toBe(1);
-    expect(
-      store.listHistory(7, { pageNum: 1, pageSize: 20 }).dataList[0].status,
-    ).toBe(4);
+    expect(store.listHistory(7)).toMatchObject({
+      dataList: [{ id: running.taskId, status: 4 }],
+      count: 1,
+    });
+  });
+
+  it("offers a deletion preview for full sync and resolves it by action", () => {
+    const store = createMockStore({
+      jobs: [
+        {
+          id: 8,
+          remark: "全量任务",
+          method: 1,
+          enable: 1,
+          srcPath: ["/Photos"],
+          dstPath: ["/Backup"],
+        },
+      ],
+    });
+    const running = store.runJob(8);
+    expect(running.approval?.deleteCount).toBeGreaterThan(0);
+
+    store.updateJobAction({ taskId: running.taskId, action: "approve" });
+    expect(store.getCurrentTask(8)?.approval).toBeUndefined();
+
+    store.updateJobAction({ taskId: running.taskId, action: "reject" });
+    expect(store.getCurrentTask(8)).toBeNull();
+    expect(store.listHistory(8).dataList[0]).toMatchObject({
+      id: running.taskId,
+      status: 4,
+    });
   });
 
   it("filters history by terminal status and an exclusive end boundary", () => {

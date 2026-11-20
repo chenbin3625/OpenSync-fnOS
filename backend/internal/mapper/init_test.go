@@ -268,7 +268,10 @@ func TestEnsureIndexesCreatesTaskStatusTimeIndex(t *testing.T) {
 	}
 }
 
-func TestMigrateDBTxCreatesJobTaskItemFTS(t *testing.T) {
+// A database created by an earlier release still has the FTS5 index, its
+// triggers and the redundant (taskId, status) index. The 261120 migration must
+// remove all of them without touching the item rows.
+func TestMigrateDBTxDropsLegacyJobTaskItemFTSAndRedundantIndex(t *testing.T) {
 	testDB, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatalf("sql.Open() error: %v", err)
@@ -307,31 +310,46 @@ func TestMigrateDBTxCreatesJobTaskItemFTS(t *testing.T) {
 		VALUES (1, 10, '/src/photos/cat.jpg', '/backup/photos/cat.jpg', 'cat.jpg', 'copy_task_002', 'copy failed')`); err != nil {
 		t.Fatalf("insert existing task item: %v", err)
 	}
+	legacy := []string{
+		`CREATE VIRTUAL TABLE job_task_item_fts USING fts5(
+			fileName, srcPath, dstPath,
+			content='job_task_item', content_rowid='id', tokenize='trigram'
+		)`,
+		`CREATE TRIGGER job_task_item_ai AFTER INSERT ON job_task_item BEGIN
+			INSERT INTO job_task_item_fts(rowid, fileName, srcPath, dstPath)
+			VALUES (new.id, new.fileName, new.srcPath, new.dstPath);
+		END`,
+		"CREATE INDEX idx_job_task_item_task_status ON job_task_item(taskId, status)",
+	}
+	for _, stmt := range legacy {
+		if _, err := testDB.Exec(stmt); err != nil {
+			t.Fatalf("create legacy object: %v\nSQL: %s", err, stmt)
+		}
+	}
 
 	if err := migrateDBTx(testDB, 260606); err != nil {
 		t.Fatalf("migrateDBTx() error: %v", err)
 	}
 
-	if !tableExists(testDB, "job_task_item_fts") {
-		t.Fatalf("expected job_task_item_fts to exist")
+	if tableExists(testDB, "job_task_item_fts") {
+		t.Fatal("job_task_item_fts still exists after the migration")
 	}
-	var rowID int64
-	if err := testDB.QueryRow("SELECT rowid FROM job_task_item_fts WHERE job_task_item_fts MATCH ?", fts5Phrase("cat.jpg")).Scan(&rowID); err != nil {
-		t.Fatalf("query rebuilt fts row: %v", err)
+	var triggerCount int
+	if err := testDB.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'job_task_item_a%'").Scan(&triggerCount); err != nil {
+		t.Fatalf("count triggers: %v", err)
 	}
-	if rowID != 1 {
-		t.Fatalf("rebuilt fts rowid = %d, want 1", rowID)
+	if triggerCount != 0 {
+		t.Fatalf("FTS triggers remaining after migration = %d, want 0", triggerCount)
 	}
-
-	if _, err := testDB.Exec(`INSERT INTO job_task_item(id, taskId, fileName, alistTaskId)
-		VALUES (2, 10, 'movie.mkv', 'move_task_004')`); err != nil {
-		t.Fatalf("insert triggered task item: %v", err)
+	if indexExists(testDB, "idx_job_task_item_task_status") {
+		t.Fatal("redundant idx_job_task_item_task_status still exists after the migration")
 	}
-	if err := testDB.QueryRow("SELECT rowid FROM job_task_item_fts WHERE job_task_item_fts MATCH ?", fts5Phrase("movie.mkv")).Scan(&rowID); err != nil {
-		t.Fatalf("query triggered fts row: %v", err)
+	var rows int
+	if err := testDB.QueryRow("SELECT COUNT(*) FROM job_task_item").Scan(&rows); err != nil {
+		t.Fatalf("count items: %v", err)
 	}
-	if rowID != 2 {
-		t.Fatalf("triggered fts rowid = %d, want 2", rowID)
+	if rows != 1 {
+		t.Fatalf("item rows = %d, want the migration to keep the existing row", rows)
 	}
 }
 

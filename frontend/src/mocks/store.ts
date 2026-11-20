@@ -36,6 +36,7 @@ const defaultSettings: SystemSettings = {
   copyConcurrency: 5,
   scanConcurrency: 16,
   maxRetries: 2,
+  scheduledFullSyncConfirm: 0,
 };
 
 const defaultPaths: Record<string, { name: string }[]> = {
@@ -428,10 +429,12 @@ export class MockStore {
 
   /** Removes one finished task record, mirroring service.RemoveTask. */
   removeTaskRecord(taskId: number): "deleted" | "running" | "missing" {
-    for (const [jobId, records] of this.histories) {
+    for (const task of this.currentTasks.values()) {
+      if (task.taskId === taskId) return "running";
+    }
+    for (const records of this.histories.values()) {
       const index = records.findIndex((record) => record.id === taskId);
       if (index < 0) continue;
-      if (this.currentTasks.get(jobId)?.taskId === taskId) return "running";
       records.splice(index, 1);
       this.taskItems.delete(taskId);
       return "deleted";
@@ -443,7 +446,35 @@ export class MockStore {
     const items = createDemoTaskItems();
     const base = createDemoTaskView(now(), items);
     const taskId = this.nextTaskId++;
-    const task = { ...base, taskId };
+    const job = this.jobs.find((item) => item.id === jobId);
+    const task = {
+      ...base,
+      taskId,
+      approval:
+        job?.method === 1
+          ? {
+              deleteCount: 3,
+              deleteSize: 48 * 1024 * 1024,
+              pathCount: 3,
+              paths: [
+                {
+                  path: "/Backup/Nightly/old-camera",
+                  isPath: true,
+                  count: 2,
+                  size: 48 * 1024 * 1024,
+                  action: "删除",
+                },
+                {
+                  path: "/Backup/Nightly/obsolete.mov",
+                  isPath: false,
+                  count: 1,
+                  size: 0,
+                  action: "删除",
+                },
+              ],
+            }
+          : undefined,
+    };
     this.currentTasks.set(jobId, task);
     this.currentItems.set(jobId, items);
     this.taskItems.set(taskId, items);
@@ -522,6 +553,14 @@ export class MockStore {
   }): void {
     if (input.taskId !== undefined) {
       const taskId = numberValue(input.taskId, 0);
+      if (input.action === "approve" || input.action === "reject") {
+        for (const [jobId, task] of this.currentTasks) {
+          if (task.taskId !== taskId) continue;
+          if (input.action === "reject") this.finishCurrentTask(jobId, 4, taskId);
+          else task.approval = undefined;
+          return;
+        }
+      }
       if (input.action === "stop") this.stopTask(taskId);
       if (input.action === "retry") this.retryTask(taskId);
       return;
@@ -557,6 +596,15 @@ export class MockStore {
     } = {},
   ): PageData<TaskRecord> {
     let records = [...(this.histories.get(jobId) || [])];
+    const current = this.currentTasks.get(jobId);
+    if (current) {
+      records.unshift({
+        id: current.taskId,
+        status: 1,
+        createTime: current.createTime,
+        runTime: current.createTime,
+      });
+    }
     if (params.status !== undefined)
       records = records.filter((record) => record.status === params.status);
     if (params.statusIn?.length)

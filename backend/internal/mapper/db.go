@@ -294,6 +294,12 @@ func sqliteDSN(dbName string) string {
 		return target + sep + pragmas.Encode()
 	}
 	pragmas.Add("_pragma", "journal_mode(WAL)")
+	// modernc.org/sqlite is compiled with SQLITE_DEFAULT_WAL_SYNCHRONOUS=2
+	// (FULL), so every commit fsyncs the WAL. NORMAL keeps the WAL durable
+	// across application crashes and only risks the last commits on an OS
+	// crash/power loss — acceptable for a resumable sync job log, and
+	// measurably faster on small batch writes.
+	pragmas.Add("_pragma", "synchronous(NORMAL)")
 	pragmas.Add("_pragma", "temp_store(MEMORY)")
 	pragmas.Add("_pragma", "cache_size(-16384)")
 	pragmas.Add("_pragma", "mmap_size(67108864)")

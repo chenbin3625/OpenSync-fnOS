@@ -115,29 +115,6 @@ func TestGetJobTaskItemListFiltersByKeywordAcrossAlistTaskID(t *testing.T) {
 	}
 }
 
-func TestGetJobTaskItemListUsesFTSWhenAvailable(t *testing.T) {
-	testDB := setupTaskItemFilterDB(t)
-	if err := installJobTaskItemFTS(testDB, true); err != nil {
-		t.Fatalf("installJobTaskItemFTS() error: %v", err)
-	}
-
-	result, err := GetJobTaskItemList(map[string]interface{}{
-		"taskId":  10,
-		"keyword": "lete_ta",
-	})
-	if err != nil {
-		t.Fatalf("GetJobTaskItemList() error: %v", err)
-	}
-
-	items := result["dataList"].([]map[string]interface{})
-	if len(items) != 1 {
-		t.Fatalf("item count = %d, want 1: %#v", len(items), items)
-	}
-	if items[0]["fileName"] != "movie.mkv" {
-		t.Fatalf("fileName = %v, want movie.mkv", items[0]["fileName"])
-	}
-}
-
 func TestGetJobTaskItemListFiltersByDirectoryAndErrorPresence(t *testing.T) {
 	setupTaskItemFilterDB(t)
 

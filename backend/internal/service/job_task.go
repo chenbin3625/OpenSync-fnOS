@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"opensync/internal/config"
+	"opensync/internal/msg"
 	"opensync/pkg/util"
 	"runtime"
 	"sync"
@@ -58,7 +59,14 @@ type JobTask struct {
 	// The executor waits for it before the final flush: a scan goroutine still
 	// running would append task items and re-arm the flush timer after the
 	// task was finished. Nil for tasks not started through Start (tests).
-	scanDone chan struct{}
+	scanDone                chan struct{}
+	RequireFullSyncApproval bool
+	fullSyncApprovalMu      sync.Mutex
+	fullSyncApproval        *FullSyncApproval
+	fullSyncApprovalCh      chan struct{}
+	fullSyncApproved        bool
+	fullSyncDeleteMu        sync.Mutex
+	fullSyncDeletes         []fullSyncDeleteBatch
 	// drained records that the executor exited because every queued item
 	// finished — not because the task was stopped or its deadline hit.
 	drained       atomic.Bool
@@ -321,6 +329,76 @@ func (jt *JobTask) requestBreak() {
 		if cancel != nil {
 			cancel()
 		}
+		jt.clearFullSyncApproval()
+	}
+}
+
+func (jt *JobTask) setFullSyncApproval(approval *FullSyncApproval) {
+	jt.fullSyncApprovalMu.Lock()
+	jt.fullSyncApproval = approval
+	jt.fullSyncApproved = false
+	jt.fullSyncApprovalCh = make(chan struct{})
+	jt.fullSyncApprovalMu.Unlock()
+	jt.notifyProgressNow()
+}
+
+func (jt *JobTask) fullSyncApprovalSnapshot() *FullSyncApproval {
+	jt.fullSyncApprovalMu.Lock()
+	defer jt.fullSyncApprovalMu.Unlock()
+	if jt.fullSyncApproval == nil {
+		return nil
+	}
+	copy := *jt.fullSyncApproval
+	copy.Paths = append([]FullSyncApprovalPath(nil), jt.fullSyncApproval.Paths...)
+	return &copy
+}
+
+func (jt *JobTask) approveFullSync() error {
+	jt.fullSyncApprovalMu.Lock()
+	if jt.fullSyncApproval == nil || jt.fullSyncApprovalCh == nil {
+		jt.fullSyncApprovalMu.Unlock()
+		return publicError(msg.T(msg.FullSyncPending))
+	}
+	jt.fullSyncApproved = true
+	jt.fullSyncApproval = nil
+	close(jt.fullSyncApprovalCh)
+	jt.fullSyncApprovalCh = nil
+	jt.fullSyncApprovalMu.Unlock()
+	jt.notifyProgressNow()
+	return nil
+}
+
+func (jt *JobTask) clearFullSyncApproval() {
+	jt.fullSyncApprovalMu.Lock()
+	hadApproval := jt.fullSyncApproval != nil
+	jt.fullSyncApproval = nil
+	jt.fullSyncApprovalCh = nil
+	jt.fullSyncApprovalMu.Unlock()
+	if hadApproval {
+		jt.notifyProgressNow()
+	}
+}
+
+func (jt *JobTask) waitForFullSyncApproval() bool {
+	jt.fullSyncApprovalMu.Lock()
+	ch := jt.fullSyncApprovalCh
+	jt.fullSyncApprovalMu.Unlock()
+	if ch == nil {
+		return true
+	}
+	select {
+	case <-ch:
+		jt.fullSyncApprovalMu.Lock()
+		approved := jt.fullSyncApproved
+		jt.fullSyncApproval = nil
+		jt.fullSyncApprovalMu.Unlock()
+		return approved
+	case <-jt.context().Done():
+		jt.fullSyncApprovalMu.Lock()
+		jt.fullSyncApproval = nil
+		jt.fullSyncApprovalCh = nil
+		jt.fullSyncApprovalMu.Unlock()
+		return false
 	}
 }
 
@@ -366,6 +444,9 @@ func (jt *JobTask) finishCopyItem(item *CopyItem) {
 	isPath := item.IsPath
 	createTime := item.CreateTime
 	item.mu.RUnlock()
+	if item.fullWriteFailed != nil && status != taskStatusSuccess {
+		item.fullWriteFailed.Store(true)
+	}
 
 	// Remove the item from Doing before recording its final state: the hook
 	// takes the progress snapshot, and an item that is still in Doing while its

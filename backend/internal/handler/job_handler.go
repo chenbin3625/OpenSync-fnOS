@@ -221,6 +221,10 @@ func UpdateJob(c *gin.Context) {
 			handleServiceVoid(c, func() error { return service.StopTask(taskID) })
 		case "retry":
 			handleServiceVoid(c, func() error { return service.RetryFailedTask(taskID) })
+		case "approve":
+			handleServiceVoid(c, func() error { return service.ApproveFullSyncTask(taskID) })
+		case "reject":
+			handleServiceVoid(c, func() error { return service.RejectFullSyncTask(taskID) })
 		default:
 			respondError(c, msg.T(msg.LostPart))
 		}

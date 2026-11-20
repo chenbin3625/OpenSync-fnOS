@@ -67,8 +67,18 @@ func TestSystemSettingsPatchKeepsOmittedFields(t *testing.T) {
 	if (systemSettingsPatch{}).applyTo(current) != current {
 		t.Fatal("empty patch changed settings")
 	}
-	full := systemSettingsPatch{intPtr(1), intPtr(2), intPtr(3), intPtr(4), intPtr(5)}.applyTo(current)
-	if full != (config.SystemSettings{TaskTimeout: 1, TaskSave: 2, CopyConcurrency: 3, ScanConcurrency: 4, MaxRetries: 5}) {
+	full := systemSettingsPatch{
+		TaskTimeout:              intPtr(1),
+		TaskSave:                 intPtr(2),
+		CopyConcurrency:          intPtr(3),
+		ScanConcurrency:          intPtr(4),
+		MaxRetries:               intPtr(5),
+		ScheduledFullSyncConfirm: intPtr(1),
+	}.applyTo(current)
+	if full != (config.SystemSettings{
+		TaskTimeout: 1, TaskSave: 2, CopyConcurrency: 3,
+		ScanConcurrency: 4, MaxRetries: 5, ScheduledFullSyncConfirm: 1,
+	}) {
 		t.Fatalf("full patch = %+v", full)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -99,17 +100,6 @@ func (jt *JobTask) sync() {
 		return
 	}
 
-	srcPaths := parsePathList(jt.Job["srcPath"])
-	jobExclude := jt.Job["exclude"]
-
-	var spec *excludeMatcher
-	if jobExclude != nil {
-		excludeStr := fmt.Sprintf("%v", jobExclude)
-		if excludeStr != "" {
-			spec = newExcludeMatcher(excludeStr)
-		}
-	}
-
 	dstPaths := parsePathList(jt.Job["dstPath"])
 	if util.ToInt(jt.Job["method"]) == 2 && len(dstPaths) != 1 {
 		errMsg := "移动模式只允许一个目标目录"
@@ -117,9 +107,12 @@ func (jt *JobTask) sync() {
 		jt.markScanFinished()
 		return
 	}
-	fullSync := util.ToInt(jt.Job["method"]) == 1
+	jt.runScanPhases(jt.configuredScanWorks(dstPaths), util.ToInt(jt.Job["method"]) == 1)
+	jt.markScanFinished()
+}
 
-	// Collect all top-level (src, dst) pairs.
+func (jt *JobTask) configuredScanWorks(dstPaths []string) []scanWork {
+	srcPaths := parsePathList(jt.Job["srcPath"])
 	var works []scanWork
 	for _, srcItem := range srcPaths {
 		srcItem = normalizeDirPath(srcItem)
@@ -136,7 +129,14 @@ func (jt *JobTask) sync() {
 			})
 		}
 	}
+	return works
+}
 
+func (jt *JobTask) runScanPhases(works []scanWork, fullSync bool) {
+	var spec *excludeMatcher
+	if exclude := util.StringValue(jt.Job["exclude"]); exclude != "" {
+		spec = newExcludeMatcher(exclude)
+	}
 	// Two phases. The first destination of every source refreshes the source
 	// listing; the other destinations reuse it (listDir's useCache), so they
 	// may only start once those scans have returned. Starting every pair at
@@ -151,11 +151,76 @@ func (jt *JobTask) sync() {
 			laterWorks = append(laterWorks, work)
 		}
 	}
+	if fullSync {
+		jt.runFullSyncPhases(firstDstWorks, laterWorks, spec)
+		return
+	}
 	jt.runScanRoots(firstDstWorks, spec, fullSync)
 	if !jt.isBreak() {
 		jt.runScanRoots(laterWorks, spec, fullSync)
 	}
-	jt.markScanFinished()
+}
+
+func (jt *JobTask) runFullSyncPhases(firstDstWorks, laterWorks []scanWork, spec *excludeMatcher) {
+	plans := jt.buildFullSyncPlans(firstDstWorks, spec)
+	if !jt.isBreak() {
+		plans = append(plans, jt.buildFullSyncPlans(laterWorks, spec)...)
+	}
+	if jt.isBreak() || len(plans) == 0 {
+		return
+	}
+	if jt.RequireFullSyncApproval {
+		var approved bool
+		plans, approved = jt.confirmFullSyncPlans(plans, func() []*fullSyncPlan {
+			fresh := jt.buildFullSyncPlans(firstDstWorks, spec)
+			if !jt.isBreak() {
+				fresh = append(fresh, jt.buildFullSyncPlans(laterWorks, spec)...)
+			}
+			return fresh
+		})
+		if !approved {
+			return
+		}
+	}
+	jt.executeFullSyncPlans(plans)
+}
+
+func (jt *JobTask) buildFullSyncPlans(works []scanWork, spec *excludeMatcher) []*fullSyncPlan {
+	plans := make([]*fullSyncPlan, len(works))
+	var wg sync.WaitGroup
+	for i, work := range works {
+		i, work := i, work
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			plans[i] = jt.buildFullSyncPlan(work, spec)
+		}()
+	}
+	wg.Wait()
+	result := make([]*fullSyncPlan, 0, len(plans))
+	for _, plan := range plans {
+		if plan != nil {
+			result = append(result, plan)
+		}
+	}
+	return result
+}
+
+func (jt *JobTask) executeFullSyncPlans(plans []*fullSyncPlan) {
+	var wg sync.WaitGroup
+	for _, plan := range plans {
+		if jt.isBreak() {
+			break
+		}
+		plan := plan
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer jt.recoverWorkerPanic("full-sync execute", nil)
+			jt.executeFullSyncPlan(plan)
+		}()
+	}
+	wg.Wait()
 }
 
 // runScanRoots runs top-level pairs concurrently so independent source and
@@ -188,6 +253,7 @@ func (jt *JobTask) markScanFinished() {
 }
 
 func (jt *JobTask) syncRetryItems() {
+	defer jt.markScanFinished()
 	statuses := taskStatusValues(jt.RetryStatuses...)
 	// Snapshot how many items the source task advertises before replaying. A
 	// concurrent deletion of the source task's history makes
@@ -195,13 +261,57 @@ func (jt *JobTask) syncRetryItems() {
 	// look exactly like "everything was retried" — no error, no log, and a task
 	// status that claimed the failures were fixed.
 	expected, countErr := jobDeps.CountJobTaskItemsByStatuses(jt.RetrySourceTaskID, statuses)
+	method := util.ToInt(jt.Job["method"])
+	dstPaths := parsePathList(jt.Job["dstPath"])
+	var roots []scanWork
+	if method != 2 || len(dstPaths) == 1 {
+		roots = jt.configuredScanWorks(dstPaths)
+	}
+	rescan := make(map[scanWork]struct{})
+	if len(roots) > 0 {
+		err := jobDeps.ForEachJobTaskItemsByStatuses(jt.RetrySourceTaskID, statuses, retryTaskItemBatchSize, func(items []map[string]interface{}) error {
+			for _, item := range items {
+				if jt.isBreak() || jt.context().Err() != nil {
+					return errScanAborted
+				}
+				if work, ok := retryDirectoryRoot(roots, item, method == 2); ok {
+					rescan[work] = struct{}{}
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			if !errors.Is(err, errScanAborted) {
+				errMsg := err.Error()
+				jt.CopyHook("", "", "", nil, "", taskStatusFailed, &errMsg, taskItemPath, taskItemTypeCopy, time.Now().Unix())
+			}
+			return
+		}
+	}
 	replayed := 0
 	err := jobDeps.ForEachJobTaskItemsByStatuses(jt.RetrySourceTaskID, statuses, retryTaskItemBatchSize, func(items []map[string]interface{}) error {
+	itemsLoop:
 		for _, item := range items {
-			if jt.isBreak() {
+			if jt.isBreak() || jt.context().Err() != nil {
 				return errScanAborted
 			}
 			replayed++
+			if len(rescan) > 0 {
+				if taskItemObjectFromValue(item["isPath"]) == taskItemPath {
+					if work, ok := retryDirectoryRoot(roots, item, method == 2); ok {
+						if _, planned := rescan[work]; planned {
+							continue
+						}
+					}
+				} else if taskItemTypeFromValue(item["type"]) != taskItemTypeDelete {
+					dstPath := util.StringValue(item["dstPath"])
+					for work := range rescan {
+						if dstPath != "" && syncPathContains(work.DstPath, dstPath) {
+							continue itemsLoop
+						}
+					}
+				}
+			}
 			func() {
 				defer func() {
 					if r := recover(); r != nil {
@@ -229,8 +339,51 @@ func (jt *JobTask) syncRetryItems() {
 			jt.RetrySourceTaskID, replayed, expected)
 		log.Printf("Task %d %s", jt.TaskID, errMsg)
 		jt.CopyHook("", "", "", nil, "", taskStatusFailed, &errMsg, taskItemPath, taskItemTypeCopy, time.Now().Unix())
+		return
 	}
-	jt.markScanFinished()
+	if err == nil && len(rescan) > 0 {
+		works := make([]scanWork, 0, len(rescan))
+		seenSources := make(map[string]struct{})
+		for _, work := range roots {
+			if _, planned := rescan[work]; planned {
+				_, seen := seenSources[work.SrcPath]
+				work.FirstDst = !seen
+				seenSources[work.SrcPath] = struct{}{}
+				works = append(works, work)
+			}
+		}
+		jt.runScanPhases(works, method == 1)
+	}
+}
+
+func retryDirectoryRoot(roots []scanWork, item map[string]interface{}, move bool) (scanWork, bool) {
+	if taskItemObjectFromValue(item["isPath"]) != taskItemPath {
+		return scanWork{}, false
+	}
+	copyType := taskItemTypeFromValue(item["type"])
+	if copyType != taskItemTypeCopy && copyType != taskItemTypeMove && copyType != taskItemTypeTransfer {
+		return scanWork{}, false
+	}
+	if move != (copyType == taskItemTypeMove || copyType == taskItemTypeTransfer) {
+		return scanWork{}, false
+	}
+	srcPath := util.StringValue(item["srcPath"])
+	dstPath := util.StringValue(item["dstPath"])
+	if srcPath == "" && dstPath == "" {
+		return scanWork{}, false
+	}
+	var match scanWork
+	found := false
+	for _, work := range roots {
+		if (srcPath != "" && !syncPathContains(work.SrcPath, srcPath)) || (dstPath != "" && !syncPathContains(work.DstPath, dstPath)) {
+			continue
+		}
+		if found {
+			return scanWork{}, false
+		}
+		match, found = work, true
+	}
+	return match, found
 }
 
 func (jt *JobTask) retryTaskItem(item map[string]interface{}) {
@@ -270,23 +423,15 @@ func (jt *JobTask) retryTaskItem(item map[string]interface{}) {
 		jt.DelHook(dstPath, fileName, nil, taskStatusFailed, &reason, boolToTaskItemObject(isPath), time.Now().Unix())
 	case taskItemTypeCopy, taskItemTypeMove, taskItemTypeTransfer:
 		if isPath {
-			jt.retryMkdir(srcPath, dstPath, copyType)
+			errMsg := "目录失败记录无法与当前同步配置唯一匹配，请重新执行同步任务"
+			jt.CopyHook(srcPath, dstPath, fileName, nil, "", taskStatusFailed, &errMsg, taskItemPath, copyType, time.Now().Unix())
 			return
 		}
-		jt.queueCopyFile(srcPath, dstPath, fileName, fileSize, copyType)
+		jt.queueCopyFile(srcPath, dstPath, fileName, fileSize, copyType, nil)
 	default:
 		errMsg := fmt.Sprintf("unsupported retry task type: %d", copyType)
 		jt.CopyHook(srcPath, dstPath, fileName, fileSize, "", taskStatusFailed, &errMsg, boolToTaskItemObject(isPath), copyType, time.Now().Unix())
 	}
-}
-
-func (jt *JobTask) retryMkdir(srcPath, dstPath string, copyType taskItemType) {
-	if dstPath == "" {
-		errMsg := "missing destination path for directory retry"
-		jt.CopyHook(srcPath, dstPath, "", nil, "", taskStatusFailed, &errMsg, taskItemPath, copyType, time.Now().Unix())
-		return
-	}
-	jt.mkdirAndRecord(srcPath, dstPath, copyType)
 }
 
 func (jt *JobTask) mkdirAndRecord(srcPath, dstPath string, copyType taskItemType) taskStatus {
@@ -394,19 +539,22 @@ func (jt *JobTask) copyFile(srcPath, dstPath, fileName string, fileSize interfac
 	if jt.isBreak() {
 		return
 	}
-	method := util.ToInt(jt.Job["method"])
-	copyType := taskItemTypeCopy
-	if method == 2 {
-		copyType = taskItemTypeTransfer
-	}
-	jt.queueCopyFile(srcPath, dstPath, fileName, fileSize, copyType)
+	jt.queueCopyFile(srcPath, dstPath, fileName, fileSize, jt.scanCopyType(), nil)
 }
 
-func (jt *JobTask) queueCopyFile(srcPath, dstPath, fileName string, fileSize interface{}, copyType taskItemType) {
+func (jt *JobTask) scanCopyType() taskItemType {
+	if util.ToInt(jt.Job["method"]) == 2 {
+		return taskItemTypeTransfer
+	}
+	return taskItemTypeCopy
+}
+
+func (jt *JobTask) queueCopyFile(srcPath, dstPath, fileName string, fileSize interface{}, copyType taskItemType, fullWriteFailed *atomic.Bool) {
 	if jt.isBreak() {
 		return
 	}
 	ci := newCopyItem(jt, jt.AlistClient, srcPath, dstPath, fileName, fileSize, copyType)
+	ci.fullWriteFailed = fullWriteFailed
 	if !jt.Waiting.pushWait(jt.context(), ci) {
 		ci.setStatus(taskStatusStopped)
 		jt.CopyHook(ci.SrcPath, ci.DstPath, ci.FileName, ci.FileSize, ci.AlistTaskID,
@@ -471,7 +619,7 @@ func (jt *JobTask) delFile(path, fileName string, size interface{}) taskStatus {
 	}
 
 	var delSize interface{}
-	if !isPath {
+	if !isPath && util.ToInt64(size) >= 0 {
 		delSize = size
 	}
 	jt.DelHook(path, fileName, delSize, status, errMsg, boolToTaskItemObject(isPath), createTime)
@@ -506,9 +654,11 @@ func (jt *JobTask) queueDelFile(path, fileName string, size interface{}, isPath 
 	}
 }
 
-func (jt *JobTask) listDir(path string, firstDst bool, spec *excludeMatcher, rootPath string, isSrc bool) (FileListResult, error) {
+func (jt *JobTask) listDir(path string, firstDst bool, spec *excludeMatcher, rootPath string, isSrc bool, pairedPath ...string) (FileListResult, error) {
 	var useCache int
 	switch {
+	case jt.hasRetrySource():
+		useCache = 0
 	case isSrc && util.ToInt(jt.Job["method"]) == 1:
 		// A mirror run derives its deletes from this listing, so a stale
 		// server-side cache would delete newly added files or recreate removed
@@ -562,7 +712,7 @@ func (jt *JobTask) listDir(path string, firstDst bool, spec *excludeMatcher, roo
 		if !isSrc && isAlistObjectNotFound(err) && sameListedDir(path, rootPath) {
 			return nil, err
 		}
-		jt.recordScanFailure(isSrc, path, err)
+		jt.recordScanFailure(isSrc, path, err, pairedPath...)
 		return nil, err
 	}
 
@@ -613,14 +763,23 @@ func excludeMatchPath(rootPath, currentPath, name string) string {
 
 // recordScanFailure records one failed path item for a directory that could not
 // be listed (or created).
-func (jt *JobTask) recordScanFailure(isSrc bool, path string, err error) {
+func (jt *JobTask) recordScanFailure(isSrc bool, path string, err error, pairedPath ...string) {
 	srcOrDst := msg.T(msg.Src)
 	if !isSrc {
 		srcOrDst = msg.T(msg.Dst)
 	}
 	errMsg := msg.ScanError(srcOrDst, err.Error())
 	log.Printf("%s", errMsg)
-	jt.CopyHook(pathIfTrue(isSrc, path), pathIfTrue(!isSrc, path), "", nil, "", taskStatusFailed, &errMsg, taskItemPath, taskItemTypeCopy, time.Now().Unix())
+	srcPath := pathIfTrue(isSrc, path)
+	dstPath := pathIfTrue(!isSrc, path)
+	if len(pairedPath) > 0 {
+		if isSrc {
+			dstPath = pairedPath[0]
+		} else {
+			srcPath = pairedPath[0]
+		}
+	}
+	jt.CopyHook(srcPath, dstPath, "", nil, "", taskStatusFailed, &errMsg, taskItemPath, jt.scanCopyType(), time.Now().Unix())
 }
 
 // sameListedDir reports whether path is the root the caller listed for, which is
@@ -645,12 +804,12 @@ func (jt *JobTask) listSrcAndDst(srcPath, dstPath string, spec *excludeMatcher, 
 	go func() {
 		defer wg.Done()
 		defer jt.recoverWorkerPanic("source scan", &srcErr)
-		srcFiles, srcErr = jt.listDir(srcPath, firstDst, spec, srcRootPath, true)
+		srcFiles, srcErr = jt.listDir(srcPath, firstDst, spec, srcRootPath, true, dstPath)
 	}()
 	go func() {
 		defer wg.Done()
 		defer jt.recoverWorkerPanic("destination scan", &dstErr)
-		dstFiles, dstErr = jt.listDir(dstPath, firstDst, spec, dstRootPath, false)
+		dstFiles, dstErr = jt.listDir(dstPath, firstDst, spec, dstRootPath, false, srcPath)
 	}()
 	wg.Wait()
 
@@ -664,7 +823,7 @@ func (jt *JobTask) listSrcAndDst(srcPath, dstPath string, spec *excludeMatcher, 
 		if !jt.ensureDstDirAfterListError(dstPath, dstErr) {
 			return nil, nil, dstErr
 		}
-		dstFiles, dstErr = jt.listDir(dstPath, firstDst, spec, dstRootPath, false)
+		dstFiles, dstErr = jt.listDir(dstPath, firstDst, spec, dstRootPath, false, srcPath)
 		if dstErr != nil {
 			return nil, nil, dstErr
 		}
@@ -819,7 +978,7 @@ func (jt *JobTask) syncWithHave(work scanWork, spec *excludeMatcher) {
 func (jt *JobTask) recordScanConflict(srcPath, dstPath, fileName string, isPath bool, reason string) {
 	errMsg := fmt.Sprintf("scan conflict: %s", reason)
 	log.Printf("Task %d %s (src %q, dst %q)", jt.TaskID, errMsg, srcPath, dstPath)
-	jt.CopyHook(srcPath, dstPath, fileName, nil, "", taskStatusFailed, &errMsg, boolToTaskItemObject(isPath), taskItemTypeCopy, time.Now().Unix())
+	jt.CopyHook(srcPath, dstPath, fileName, nil, "", taskStatusFailed, &errMsg, boolToTaskItemObject(isPath), jt.scanCopyType(), time.Now().Unix())
 }
 
 // findDirForFile reports the destination *directory* that occupies the path of a
@@ -858,13 +1017,13 @@ func (jt *JobTask) syncWithoutHave(work scanWork, spec *excludeMatcher) {
 		return
 	}
 
-	status := jt.mkdirAndRecord(work.SrcPath, work.DstPath, taskItemTypeCopy)
+	status := jt.mkdirAndRecord(work.SrcPath, work.DstPath, jt.scanCopyType())
 	if status != taskStatusSuccess {
 		jt.finishScanWork()
 		return
 	}
 
-	srcFiles, err := jt.listDir(work.SrcPath, work.FirstDst, spec, work.SrcRootPath, true)
+	srcFiles, err := jt.listDir(work.SrcPath, work.FirstDst, spec, work.SrcRootPath, true, work.DstPath)
 	if err != nil {
 		jt.finishScanWork()
 		return
@@ -899,6 +1058,9 @@ func (jt *JobTask) syncWithoutHave(work scanWork, spec *excludeMatcher) {
 func jobAllowsFileSize(job map[string]interface{}, size int64) bool {
 	minSize := util.ToInt64(job["minFileSize"])
 	maxSize := util.ToInt64(job["maxFileSize"])
+	if size < 0 {
+		return minSize == 0 && maxSize == 0
+	}
 	if minSize > 0 && size < minSize {
 		return false
 	}

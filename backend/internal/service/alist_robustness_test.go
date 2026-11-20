@@ -184,6 +184,38 @@ func TestCopyMoveUseLongOperationClient(t *testing.T) {
 	}
 }
 
+func TestCreateEmptyFileContextUsesPutWithoutSourceDownload(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/api/fs/put" {
+			t.Fatalf("request = %s %s, want PUT /api/fs/put", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("File-Path"); got != "%2Fdst%2F%E7%A9%BA@zod.txt" {
+			t.Fatalf("File-Path = %q, want escaped destination path", got)
+		}
+		if got := r.Header.Get("Content-Type"); got != "application/octet-stream" {
+			t.Fatalf("Content-Type = %q, want application/octet-stream", got)
+		}
+		if got := r.Header.Get("Overwrite"); got != "true" {
+			t.Fatalf("Overwrite = %q, want true", got)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		if len(body) != 0 {
+			t.Fatalf("request body length = %d, want 0", len(body))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"code":200,"message":"success","data":null}`)
+	}))
+	defer server.Close()
+
+	client := &AlistClient{URL: server.URL, client: server.Client()}
+	if err := client.CreateEmptyFileContext(context.Background(), "/dst/", "空@zod.txt"); err != nil {
+		t.Fatalf("CreateEmptyFileContext() error: %v", err)
+	}
+}
+
 func TestProtocolTripperRoutesLongOperationsToLongTransport(t *testing.T) {
 	var shortHits, longHits atomic.Int32
 	tripper := newProtocolTripper(roundTripFunc(func(r *http.Request) (*http.Response, error) {

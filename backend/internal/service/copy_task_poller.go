@@ -16,6 +16,12 @@ const (
 	pollIntervalIdle         = 2930 * time.Millisecond
 	activeWatchThresholdSecs = 3
 
+	// newWatchFirstPollDelay gives AList a moment to register a freshly
+	// submitted task before the first per-task TaskInfo call. The undone-list
+	// fast path is checked immediately, so already-finished transfers do not
+	// pay this delay.
+	newWatchFirstPollDelay = 100 * time.Millisecond
+
 	// defaultCopyPollErrorWindow is how long TaskInfo may fail transiently
 	// before a copy item is failed. It has to outlast an AList restart (often
 	// 10s+): failing items after a few seconds made every in-flight transfer
@@ -59,6 +65,10 @@ type copyTaskWatch struct {
 	// nextPollAt defers the next TaskInfo call for this watch (exponential
 	// backoff while errors persist) without slowing down the other watches.
 	nextPollAt time.Time
+	// firstPollAt is when a newly tracked watch becomes eligible for its first
+	// per-task TaskInfo call. The monitor clears it after the settle delay,
+	// even if the task is still in the undone list.
+	firstPollAt time.Time
 }
 
 func (watch *copyTaskWatch) closeDone() {
@@ -129,10 +139,11 @@ func (m *copyTaskMonitor) track(ci *CopyItem) {
 	}
 
 	watch := &copyTaskWatch{
-		ci:       ci,
-		taskID:   taskID,
-		copyType: ci.CopyType,
-		done:     make(chan struct{}),
+		ci:          ci,
+		taskID:      taskID,
+		copyType:    ci.CopyType,
+		done:        make(chan struct{}),
+		firstPollAt: time.Now().Add(newWatchFirstPollDelay),
 	}
 
 	abortSelf := false
@@ -200,9 +211,18 @@ func (m *copyTaskMonitor) loop() {
 			}
 		}
 
-		if !m.waitForPollInterval() {
+		if !m.waitForPollInterval(active) {
 			m.abortAll(m.jt.context().Err())
 			return
+		}
+
+		// Re-snapshot: with small files, copies finish and track new watches
+		// inside one poll interval. The watches collected before the sleep are
+		// stale by now, and checking them made every new transfer wait a full
+		// interval (2.9s when nobody is watching) before its first poll.
+		active = m.snapshotWatches()
+		if len(active) == 0 {
+			continue
 		}
 
 		undoneByType := m.fetchUndoneByType(active)
@@ -211,13 +231,17 @@ func (m *copyTaskMonitor) loop() {
 				m.abortWatch(watch, nil)
 				continue
 			}
+			settling := !watch.firstPollAt.IsZero() && time.Now().Before(watch.firstPollAt)
+			if !settling {
+				watch.firstPollAt = time.Time{}
+			}
 			taskInfo, ok := undoneByType[watch.copyType][watch.taskID]
 			if ok {
 				watch.resetTransientErrors()
 				m.applyTaskInfo(watch, taskInfo)
 				continue
 			}
-			if !watch.nextPollAt.IsZero() && copyPollNow().Before(watch.nextPollAt) {
+			if settling || (!watch.nextPollAt.IsZero() && copyPollNow().Before(watch.nextPollAt)) {
 				continue
 			}
 			m.pollTaskInfo(watch)
@@ -241,7 +265,7 @@ func (m *copyTaskMonitor) snapshotWatches() []*copyTaskWatch {
 	return active
 }
 
-func (m *copyTaskMonitor) waitForPollInterval() bool {
+func (m *copyTaskMonitor) waitForPollInterval(active []*copyTaskWatch) bool {
 	cuTime := time.Now().Unix()
 	var sleepFor time.Duration
 	if cuTime-m.jt.lastWatchingUnix() < activeWatchThresholdSecs {
@@ -249,13 +273,30 @@ func (m *copyTaskMonitor) waitForPollInterval() bool {
 	} else {
 		sleepFor = pollIntervalIdle
 	}
+	// Newly tracked watches get their first check after a short settle delay
+	// instead of the full interval.
+	now := time.Now()
+	for _, watch := range active {
+		if watch.firstPollAt.IsZero() {
+			continue
+		}
+		if d := watch.firstPollAt.Sub(now); d < sleepFor {
+			sleepFor = d
+		}
+	}
+	if sleepFor < 0 {
+		sleepFor = 0
+	}
 	// Observe stopCh as well as the task context: stop() is called once the
 	// executor has drained, and sleeping through the poll interval made task
-	// shutdown wait up to 2.9s before the loop noticed.
+	// shutdown wait up to 2.9s before the loop noticed. watchAdded interrupts
+	// the sleep so a transfer that finished mid-interval is checked at once.
 	timer := time.NewTimer(sleepFor)
 	defer timer.Stop()
 	select {
 	case <-timer.C:
+		return true
+	case <-m.watchAdded:
 		return true
 	case <-m.stopCh:
 		return false

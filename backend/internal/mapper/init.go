@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const currentVersion = 260922
+const currentVersion = 261120
 
 // InitSQL initializes the database schema and runs migrations
 func InitSQL() {
@@ -94,7 +94,6 @@ func InitSQL() {
 			)`,
 		}
 
-		stmts = append(stmts, jobTaskItemFTSStatements(false)...)
 		stmts = append(stmts,
 
 			`CREATE TABLE notify(
@@ -123,9 +122,6 @@ func InitSQL() {
 			log.Fatalf("Failed to commit database initialization: %v", err)
 		}
 		ensureIndexes(db)
-		if err := ensureJobTaskItemFTSHealth(db); err != nil {
-			log.Fatalf("Failed to verify the task item search index: %v", err)
-		}
 		if err := migrateStoredCredentials(db); err != nil {
 			log.Fatalf("Failed to initialize credential encryption: %v", err)
 		}
@@ -155,17 +151,6 @@ func InitSQL() {
 		}
 	}
 	ensureIndexes(db)
-	// A previous migration may have skipped the FTS table or its triggers (the
-	// guards used to swallow query errors), which silently stops keyword search
-	// from seeing new rows. Repair it instead of serving a stale index.
-	if err := ensureJobTaskItemFTSHealth(db); err != nil {
-		log.Fatalf("Failed to verify the task item search index: %v", err)
-	}
-	// Databases created by earlier releases carry an update trigger that
-	// re-indexes on every status write; narrow it to the indexed columns.
-	if err := upgradeJobTaskItemFTSUpdateTrigger(db); err != nil {
-		log.Fatalf("Failed to upgrade the task item search trigger: %v", err)
-	}
 	if err := migrateStoredCredentials(db); err != nil {
 		log.Fatalf("Failed to migrate stored credentials: %v", err)
 	}
@@ -221,7 +206,9 @@ func ensureIndexes(db *sql.DB) {
 		"CREATE INDEX IF NOT EXISTS idx_job_task_status_job ON job_task(status, jobId)",
 		"CREATE INDEX IF NOT EXISTS idx_job_task_effective_time ON job_task(COALESCE(NULLIF(runTime, 0), createTime), id)",
 		"CREATE INDEX IF NOT EXISTS idx_job_task_item_task_time ON job_task_item(taskId, createTime DESC, id DESC)",
-		"CREATE INDEX IF NOT EXISTS idx_job_task_item_task_status ON job_task_item(taskId, status)",
+		// idx_job_task_item_task_status(taskId, status) is a strict prefix of
+		// the status_time index, so it only added write cost.
+		"DROP INDEX IF EXISTS idx_job_task_item_task_status",
 		"CREATE INDEX IF NOT EXISTS idx_job_task_item_task_status_time ON job_task_item(taskId, status, createTime DESC, id DESC)",
 		// The time suffix lets type/object-filtered detail pages stream rows in
 		// create order without scanning every item for the task and sorting the
@@ -265,60 +252,6 @@ func sqliteObjectExists(q rowQuerier, objectType, name string) (bool, error) {
 
 func dbTableExists(db *sql.DB, table string) (bool, error) {
 	return sqliteObjectExists(db, "table", table)
-}
-
-// jobTaskItemFTSTriggers are the three triggers that keep the external-content
-// FTS index in sync with job_task_item. A virtual table without them accepts
-// queries but silently stops indexing new rows.
-var jobTaskItemFTSTriggers = []string{"job_task_item_ai", "job_task_item_ad", "job_task_item_au"}
-
-// ftsObjectsHealthy reports whether the FTS table and all sync triggers exist.
-func ftsObjectsHealthy(q rowQuerier) (bool, error) {
-	exists, err := sqliteObjectExists(q, "table", "job_task_item_fts")
-	if err != nil || !exists {
-		return false, err
-	}
-	for _, trigger := range jobTaskItemFTSTriggers {
-		exists, err := sqliteObjectExists(q, "trigger", trigger)
-		if err != nil || !exists {
-			return false, err
-		}
-	}
-	return true, nil
-}
-
-// ensureJobTaskItemFTSHealth repairs an incomplete full-text index. Older
-// builds could skip the FTS migration statements when a guard query failed
-// (a missing table, or a missing trigger, does not break anything else, so the
-// omission went unnoticed and keyword search silently missed rows forever).
-// Repairing is a one-off full rebuild; on a healthy database it is a few
-// sqlite_master lookups.
-func ensureJobTaskItemFTSHealth(db *sql.DB) error {
-	itemExists, err := dbTableExists(db, "job_task_item")
-	if err != nil {
-		return err
-	}
-	if !itemExists {
-		return nil
-	}
-	healthy, err := ftsObjectsHealthy(db)
-	if err != nil {
-		return err
-	}
-	if healthy {
-		return nil
-	}
-	log.Printf("WARNING: the task item search index is incomplete; rebuilding job_task_item_fts")
-	return retryOnBusy(func() error {
-		return runTxOn(db, nil, func(tx *sql.Tx) error {
-			for _, stmt := range rebuildJobTaskItemFTSStatements() {
-				if _, err := tx.Exec(stmt); err != nil {
-					return fmt.Errorf("rebuild task item search index: %w\nSQL: %s", err, stmt)
-				}
-			}
-			return nil
-		})
-	})
 }
 
 // legacyScanIntervalUpdate is the only data migration whose meaning depends on
@@ -390,9 +323,6 @@ func migrationStatements(fromVersion int64) []string {
 			"ALTER TABLE job DROP COLUMN end_date",
 		)
 	}
-	if fromVersion < 260611 {
-		stmts = append(stmts, jobTaskItemFTSStatements(true)...)
-	}
 	if fromVersion < 260612 {
 		stmts = append(stmts, "ALTER TABLE user_list ADD COLUMN recoveryKey text")
 	}
@@ -401,9 +331,6 @@ func migrationStatements(fromVersion int64) []string {
 		// Python implementation; scheduling now uses the dedicated isCron +
 		// second/minute/hour/day/month/day_of_week fields.
 		stmts = append(stmts, "ALTER TABLE job DROP COLUMN cron")
-	}
-	if fromVersion >= 260611 && fromVersion < 260614 {
-		stmts = append(stmts, rebuildJobTaskItemFTSStatements()...)
 	}
 	if fromVersion < 260920 {
 		// Migrate version tracking from user_list to dedicated schema_version table,
@@ -425,96 +352,24 @@ func migrationStatements(fromVersion int64) []string {
 			"ALTER TABLE notify ADD COLUMN lastSendError text DEFAULT NULL",
 		)
 	}
+	if fromVersion < 261120 {
+		// Keyword search no longer uses FTS5. The trigram index over
+		// fileName/srcPath/dstPath was not scoped to a task: with the OR'd LIKE
+		// terms SQLite scanned the task's items anyway, so the index only added
+		// write work (three triggers) and about 45% to the database size.
+		// Dropping the triggers first also stops existing rows from being
+		// re-indexed; the table itself is removed in the same transaction.
+		stmts = append(stmts,
+			"DROP TRIGGER IF EXISTS job_task_item_ai",
+			"DROP TRIGGER IF EXISTS job_task_item_ad",
+			"DROP TRIGGER IF EXISTS job_task_item_au",
+			"DROP TABLE IF EXISTS job_task_item_fts",
+			// Superseded by idx_job_task_item_task_status_time, which has the
+			// same (taskId, status) prefix.
+			"DROP INDEX IF EXISTS idx_job_task_item_task_status",
+		)
+	}
 	stmts = append(stmts, fmt.Sprintf("UPDATE schema_version SET version=%d", currentVersion))
-	return stmts
-}
-
-type sqlExecer interface {
-	Exec(query string, args ...interface{}) (sql.Result, error)
-}
-
-func installJobTaskItemFTS(exec sqlExecer, rebuild bool) error {
-	for _, stmt := range jobTaskItemFTSStatements(rebuild) {
-		if _, err := exec.Exec(stmt); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func rebuildJobTaskItemFTSStatements() []string {
-	stmts := []string{
-		"DROP TRIGGER IF EXISTS job_task_item_ai",
-		"DROP TRIGGER IF EXISTS job_task_item_ad",
-		"DROP TRIGGER IF EXISTS job_task_item_au",
-		"DROP TABLE IF EXISTS job_task_item_fts",
-	}
-	return append(stmts, jobTaskItemFTSStatements(true)...)
-}
-
-// jobTaskItemFTSUpdateTrigger re-indexes a row only when an indexed column
-// changes. Status/progress/errMsg updates would otherwise rewrite the FTS
-// entry for every item on every state transition.
-const jobTaskItemFTSUpdateTrigger = `CREATE TRIGGER IF NOT EXISTS job_task_item_au AFTER UPDATE OF fileName, srcPath, dstPath ON job_task_item BEGIN
-			INSERT INTO job_task_item_fts(job_task_item_fts, rowid, fileName, srcPath, dstPath)
-			VALUES ('delete', old.id, old.fileName, old.srcPath, old.dstPath);
-			INSERT INTO job_task_item_fts(rowid, fileName, srcPath, dstPath)
-			VALUES (new.id, new.fileName, new.srcPath, new.dstPath);
-		END`
-
-// upgradeJobTaskItemFTSUpdateTrigger replaces a job_task_item_au trigger that
-// fires on every UPDATE (as created by earlier releases) with the
-// column-scoped one. It needs no schema version bump: it inspects the stored
-// trigger SQL, so it is idempotent and an older binary still finds a trigger
-// with the name it expects.
-func upgradeJobTaskItemFTSUpdateTrigger(db *sql.DB) error {
-	var stored sql.NullString
-	err := db.QueryRow("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='job_task_item_au'").Scan(&stored)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if strings.Contains(strings.ToUpper(stored.String), "AFTER UPDATE OF") {
-		return nil
-	}
-	return retryOnBusy(func() error {
-		return runTxOn(db, nil, func(tx *sql.Tx) error {
-			if _, err := tx.Exec("DROP TRIGGER IF EXISTS job_task_item_au"); err != nil {
-				return err
-			}
-			_, err := tx.Exec(jobTaskItemFTSUpdateTrigger)
-			return err
-		})
-	})
-}
-
-func jobTaskItemFTSStatements(rebuild bool) []string {
-	stmts := []string{
-		`CREATE VIRTUAL TABLE IF NOT EXISTS job_task_item_fts USING fts5(
-			fileName,
-			srcPath,
-			dstPath,
-			content='job_task_item',
-			content_rowid='id',
-			tokenize='trigram'
-		)`,
-	}
-	if rebuild {
-		stmts = append(stmts, "INSERT INTO job_task_item_fts(job_task_item_fts) VALUES('rebuild')")
-	}
-	stmts = append(stmts,
-		`CREATE TRIGGER IF NOT EXISTS job_task_item_ai AFTER INSERT ON job_task_item BEGIN
-			INSERT INTO job_task_item_fts(rowid, fileName, srcPath, dstPath)
-			VALUES (new.id, new.fileName, new.srcPath, new.dstPath);
-		END`,
-		`CREATE TRIGGER IF NOT EXISTS job_task_item_ad AFTER DELETE ON job_task_item BEGIN
-			INSERT INTO job_task_item_fts(job_task_item_fts, rowid, fileName, srcPath, dstPath)
-			VALUES ('delete', old.id, old.fileName, old.srcPath, old.dstPath);
-		END`,
-		jobTaskItemFTSUpdateTrigger,
-	)
 	return stmts
 }
 
@@ -650,51 +505,9 @@ func shouldSkipMigrationStatement(insp schemaInspector, stmt string, legacySpeed
 	case "ALTER TABLE job DROP COLUMN end_date":
 		has, err := insp.tableHasColumn("job", "end_date")
 		return !has, err
-	case `CREATE VIRTUAL TABLE IF NOT EXISTS job_task_item_fts USING fts5(
-			fileName,
-			srcPath,
-			dstPath,
-			content='job_task_item',
-			content_rowid='id',
-			tokenize='trigram'
-		)`:
-		exists, err := insp.tableExists("job_task_item")
-		return !exists, err
-	case "INSERT INTO job_task_item_fts(job_task_item_fts) VALUES('rebuild')":
-		exists, err := insp.tableExists("job_task_item_fts")
-		return !exists, err
-	case `CREATE TRIGGER IF NOT EXISTS job_task_item_ai AFTER INSERT ON job_task_item BEGIN
-			INSERT INTO job_task_item_fts(rowid, fileName, srcPath, dstPath)
-			VALUES (new.id, new.fileName, new.srcPath, new.dstPath);
-		END`:
-		return skipTriggerWithoutTables(insp)
-	case `CREATE TRIGGER IF NOT EXISTS job_task_item_ad AFTER DELETE ON job_task_item BEGIN
-			INSERT INTO job_task_item_fts(job_task_item_fts, rowid, fileName, srcPath, dstPath)
-			VALUES ('delete', old.id, old.fileName, old.srcPath, old.dstPath);
-		END`:
-		return skipTriggerWithoutTables(insp)
-	case jobTaskItemFTSUpdateTrigger:
-		return skipTriggerWithoutTables(insp)
 	default:
 		return false, nil
 	}
-}
-
-// skipTriggerWithoutTables skips an FTS trigger when either table it needs is
-// absent (legacy databases that do not have the item table yet).
-func skipTriggerWithoutTables(insp schemaInspector) (bool, error) {
-	itemExists, err := insp.tableExists("job_task_item")
-	if err != nil {
-		return false, err
-	}
-	if !itemExists {
-		return true, nil
-	}
-	ftsExists, err := insp.tableExists("job_task_item_fts")
-	if err != nil {
-		return false, err
-	}
-	return !ftsExists, nil
 }
 
 func parseAlterTableAddColumn(stmt string) (string, string, bool) {

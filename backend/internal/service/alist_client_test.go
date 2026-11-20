@@ -39,6 +39,25 @@ func TestFileListEntryUnmarshalAcceptsNumericModifiedString(t *testing.T) {
 	}
 }
 
+func TestFileListEntryDistinguishesUnknownAndEmptySize(t *testing.T) {
+	for _, test := range []struct {
+		raw  string
+		want int64
+	}{
+		{`{"name":"file.txt"}`, -1},
+		{`{"name":"file.txt","size":null}`, -1},
+		{`{"name":"file.txt","size":0}`, 0},
+	} {
+		var entry FileListEntry
+		if err := json.Unmarshal([]byte(test.raw), &entry); err != nil {
+			t.Fatal(err)
+		}
+		if size := entry.metadata().Size; size != test.want {
+			t.Errorf("size for %s = %d, want %d", test.raw, size, test.want)
+		}
+	}
+}
+
 func TestFileListEntryMetadataUsesHashInfoMD5(t *testing.T) {
 	entry := FileListEntry{
 		Name: "video.mkv",

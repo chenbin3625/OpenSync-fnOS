@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"embed"
 	"errors"
@@ -24,6 +26,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -113,7 +116,7 @@ func newRouterWithVersionChecker(development bool, allowedOrigins []string, chec
 		if !strings.HasPrefix(name, "assets/") && path.Ext(name) == "" {
 			name = "index.html"
 		}
-		data, err := fs.ReadFile(files, name)
+		asset, err := loadStaticAsset(files, name)
 		if err != nil {
 			c.Status(404)
 			return
@@ -122,9 +125,80 @@ func newRouterWithVersionChecker(development bool, allowedOrigins []string, chec
 		if contentType == "" {
 			contentType = "application/octet-stream"
 		}
-		c.Data(200, contentType, data)
+		// Vite fingerprints files under assets/, so they can be cached forever.
+		// Everything else (index.html above all) must be revalidated on each
+		// load, otherwise an app update keeps serving the previous bundle.
+		if strings.HasPrefix(name, "assets/") {
+			c.Header("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			c.Header("Cache-Control", "no-cache")
+		}
+		c.Header("Vary", "Accept-Encoding")
+		if isCompressible(contentType) && len(asset.data) > 1024 && acceptsGzip(c.Request) {
+			if gz := asset.gzipped(); gz != nil {
+				c.Header("Content-Encoding", "gzip")
+				c.Data(200, contentType, gz)
+				return
+			}
+		}
+		c.Data(200, contentType, asset.data)
 	})
 	return r
+}
+
+// staticAsset caches an embedded file and its gzip variant. The embedded web
+// bundle is immutable for the lifetime of the process, so the cache needs no
+// invalidation and is bounded by the number of files in the embed FS.
+type staticAsset struct {
+	data []byte
+	once sync.Once
+	gz   []byte
+}
+
+var staticAssets sync.Map // name -> *staticAsset
+
+func loadStaticAsset(files fs.FS, name string) (*staticAsset, error) {
+	if cached, ok := staticAssets.Load(name); ok {
+		return cached.(*staticAsset), nil
+	}
+	data, err := fs.ReadFile(files, name)
+	if err != nil {
+		return nil, err
+	}
+	asset := &staticAsset{data: data}
+	actual, _ := staticAssets.LoadOrStore(name, asset)
+	return actual.(*staticAsset), nil
+}
+
+func (a *staticAsset) gzipped() []byte {
+	a.once.Do(func() {
+		var buf bytes.Buffer
+		writer := gzip.NewWriter(&buf)
+		if _, err := writer.Write(a.data); err != nil {
+			return
+		}
+		if err := writer.Close(); err != nil {
+			return
+		}
+		a.gz = buf.Bytes()
+	})
+	return a.gz
+}
+
+func isCompressible(contentType string) bool {
+	return strings.HasPrefix(contentType, "text/") ||
+		strings.Contains(contentType, "javascript") ||
+		contentType == "application/json" ||
+		contentType == "image/svg+xml"
+}
+
+func acceptsGzip(request *http.Request) bool {
+	for _, encoding := range strings.Split(request.Header.Get("Accept-Encoding"), ",") {
+		if strings.TrimSpace(strings.SplitN(encoding, ";", 2)[0]) == "gzip" {
+			return true
+		}
+	}
+	return false
 }
 
 func main() {

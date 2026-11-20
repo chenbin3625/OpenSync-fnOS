@@ -33,6 +33,7 @@ import { useAction, useResource } from "../lib/hooks";
 import { resolveJobSelection, resolveTaskTab } from "../lib/taskForm";
 import {
   formatDuration,
+  formatSize,
   formatSchedule,
   formatSchedulePlan,
   getJobName,
@@ -40,7 +41,7 @@ import {
   parseJobPathList,
 } from "./Home/homeUtils";
 import { formatTimestamp } from "../utils/date";
-import type { AlistItem, JobItem, TaskRecord } from "../types";
+import type { AlistItem, FullSyncApproval, JobItem, TaskRecord } from "../types";
 
 const Realtime = lazy(() =>
   import("./TaskExecution").then((module) => ({ default: module.Realtime })),
@@ -96,6 +97,12 @@ export default function Tasks() {
     [selected?.id],
   );
   const hasCurrentTask = !!currentTask.data;
+  const approvalVisible = !!currentTask.data?.approval;
+  const hadApproval = useRef(false);
+  useEffect(() => {
+    if (approvalVisible && !hadApproval.current) Toast.destroyAll();
+    hadApproval.current = approvalVisible;
+  }, [approvalVisible]);
   const refreshCurrentTask = currentTask.refresh;
   // The current task was fetched once, so a run started here or by the
   // scheduler never enabled the realtime tab or flipped 启动/停止. The realtime
@@ -184,6 +191,35 @@ export default function Tasks() {
     });
   return (
     <div className="page task-page">
+      {selected && currentTask.data?.approval && (
+        <FullSyncApprovalModal
+          approval={currentTask.data.approval}
+          taskId={currentTask.data.taskId}
+          busy={actions.busy}
+          onApprove={() =>
+            actions.run(async () => {
+              try {
+                await api.taskAction(currentTask.data!.taskId, "approve");
+                Toast.success("已确认执行");
+                await refreshJobs();
+              } catch (err) {
+                errorToast(err);
+              }
+            })
+          }
+          onReject={() =>
+            actions.run(async () => {
+              try {
+                await api.taskAction(currentTask.data!.taskId, "reject");
+                Toast.success("已取消执行");
+                await refreshJobs();
+              } catch (err) {
+                errorToast(err);
+              }
+            })
+          }
+        />
+      )}
       <Header
         title="任务管理"
         tabs={
@@ -387,7 +423,12 @@ export default function Tasks() {
                 )}
                 {tab === "history" && (
                   <Suspense fallback={<LazyPaneFallback />}>
-                    <History key={selected.id} jobId={selected.id} />
+                    <History
+                      key={selected.id}
+                      jobId={selected.id}
+                      currentTaskId={currentTask.data?.taskId}
+                      onOpenRealtime={() => update({ tab: "realtime" })}
+                    />
                   </Suspense>
                 )}
               </div>
@@ -427,6 +468,83 @@ function LazyPaneFallback() {
     <div className="state-panel">
       <Spin size="large" />
     </div>
+  );
+}
+
+function FullSyncApprovalModal({
+  approval,
+  taskId,
+  busy,
+  onApprove,
+  onReject,
+}: {
+  approval: FullSyncApproval;
+  taskId: number;
+  busy: boolean;
+  onApprove: () => Promise<unknown>;
+  onReject: () => Promise<unknown>;
+}) {
+  const visiblePaths = approval.paths || [];
+  const remaining = Math.max(0, approval.pathCount - visiblePaths.length);
+  return (
+    <Modal
+      visible
+      width={520}
+      className="fnos-confirm full-sync-approval-modal"
+      centered
+      closable={!busy}
+      closeOnEsc={!busy}
+      maskClosable={!busy}
+      onCancel={onReject}
+      title="确认全量同步"
+      footer={
+        <div className="editor-actions">
+          <Button onClick={onReject} disabled={busy}>
+            取消执行
+          </Button>
+          <Button
+            type="danger"
+            theme="solid"
+            loading={busy}
+            onClick={onApprove}
+          >
+            确认并继续
+          </Button>
+        </div>
+      }
+    >
+      <div className="full-sync-approval">
+        <p className="full-sync-approval-lead">
+          {approval.deleteCount > 0
+            ? `本次同步预计会删除目标端 ${approval.deleteCount} 个文件或目录${
+                approval.deleteSize > 0
+                  ? `（${formatSize(approval.deleteSize)}）`
+                  : ""
+              }。`
+            : "本次同步会调整目标端文件位置，文件内容会保留。"}
+        </p>
+        <p className="field-hint">
+          下面列出部分目标端路径；移动项会保留文件内容，只清理目标端旧位置。
+        </p>
+        <div className="full-sync-approval-list" role="list">
+          {visiblePaths.map((item) => (
+            <div className="full-sync-approval-item" role="listitem" key={`${item.action}:${item.path}`}>
+              <span className={item.action === "删除" ? "task-tag task-tag--danger" : "task-tag"}>
+                {item.action}
+              </span>
+              <span className="mono">{item.path}</span>
+              <span className="muted">
+                {item.isPath
+                  ? `${item.count} 项${item.size > 0 ? ` · ${formatSize(item.size)}` : ""}`
+                  : formatSize(item.size)}
+              </span>
+            </div>
+          ))}
+        </div>
+        {remaining > 0 && <div className="field-hint">还有 {remaining} 个路径未展开。</div>}
+        <div className="field-hint">任务 #{taskId} 已暂停，确认后才会开始写入和删除。</div>
+      </div>
+    </Modal>
   );
 }
 

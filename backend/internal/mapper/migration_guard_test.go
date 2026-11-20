@@ -49,7 +49,7 @@ func TestMigrationGuardReturnsQueryErrors(t *testing.T) {
 		"ALTER TABLE job ADD COLUMN remark text",
 		"ALTER TABLE job DROP COLUMN cron",
 		"ALTER TABLE job RENAME COLUMN speed TO useCacheT",
-		"INSERT INTO job_task_item_fts(job_task_item_fts) VALUES('rebuild')",
+		"ALTER TABLE job DROP COLUMN year",
 	} {
 		if _, err := shouldSkipMigrationStatement(insp, stmt, false); err == nil {
 			t.Fatalf("shouldSkipMigrationStatement(%q) error = nil after the transaction finished, want a guard error", stmt)

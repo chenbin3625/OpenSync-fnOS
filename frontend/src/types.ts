@@ -24,6 +24,7 @@ export interface SystemSettings {
   copyConcurrency: number;
   scanConcurrency: number;
   maxRetries: number;
+  scheduledFullSyncConfirm: number;
 }
 
 export interface AlistItem {
@@ -103,9 +104,25 @@ export interface ScanProgress {
   totalDirs: number;
 }
 
+export interface FullSyncApprovalPath {
+  path: string;
+  isPath: boolean;
+  count: number;
+  size: number;
+  action: "删除" | "移动" | string;
+}
+
+export interface FullSyncApproval {
+  deleteCount: number;
+  deleteSize: number;
+  pathCount: number;
+  paths: FullSyncApprovalPath[];
+}
+
 export interface CurrentTaskData {
   taskId: number;
   scanFinish: boolean;
+  approval?: FullSyncApproval | null;
   scan?: ScanProgress;
   doingTask?: TaskItem[];
   doingPatch?: TaskItem[];

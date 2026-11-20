@@ -1,4 +1,4 @@
-import { useId, useRef, useState, type MutableRefObject } from "react";
+import { useEffect, useId, useRef, useState, type MutableRefObject } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import { Form } from "@douyinfe/semi-ui/lib/es/form";
 import Input from "@douyinfe/semi-ui/lib/es/input";
@@ -113,6 +113,19 @@ export default function TaskEditor({
   const activePanel = isNew
     ? taskEditorTabs[step].key
     : activeTab;
+  // Panels stay mounted once visited: switching tabs used to unmount them, so
+  // every return to the engine/folder tab re-fetched its directory trees and
+  // dropped the tree's expansion state.
+  const [visitedPanels, setVisitedPanels] = useState<string[]>([activePanel]);
+  useEffect(() => {
+    setVisitedPanels((previous) =>
+      previous.includes(activePanel) ? previous : [...previous, activePanel],
+    );
+  }, [activePanel]);
+  const panelMounted = (panel: string) =>
+    panel === activePanel || visitedPanels.includes(panel);
+  const panelStyle = (panel: string) =>
+    panel === activePanel ? undefined : { display: "none" };
   const nextStep = () => {
     const validation = validateJobFormStep(form, step);
     if (validation) {
@@ -196,8 +209,8 @@ export default function TaskEditor({
             </Tabs>
           )}
           <div className="task-editor-step">
-            {activePanel === "engine" && (
-              <div className="form-section">
+            {panelMounted("engine") && (
+              <div className="form-section" style={panelStyle("engine")}>
                 <Field label="任务名称" required>
                   <Input
                     value={form.remark}
@@ -286,8 +299,8 @@ export default function TaskEditor({
                 </div>
               </div>
             )}
-            {activePanel === "sync" && (
-              <div className="form-section">
+            {panelMounted("sync") && (
+              <div className="form-section" style={panelStyle("sync")}>
                 <div className="form-grid">
                   <Field
                     label={
@@ -366,8 +379,8 @@ export default function TaskEditor({
                 </div>
               </div>
             )}
-            {activePanel === "filter" && (
-              <div className="form-section">
+            {panelMounted("filter") && (
+              <div className="form-section" style={panelStyle("filter")}>
                 <div className="file-size-filters" role="group" aria-label="文件大小过滤">
                   {(["min", "max"] as const).map((kind) => (
                     <FileSizeFilterRow
@@ -391,8 +404,8 @@ export default function TaskEditor({
                 </Field>
               </div>
             )}
-            {activePanel === "folder" && (
-              <div className="form-section">
+            {panelMounted("folder") && (
+              <div className="form-section" style={panelStyle("folder")}>
                 <Field
                   label="文件夹过滤"
                   hint="仅针对源目录，勾选要忽略的子文件夹"

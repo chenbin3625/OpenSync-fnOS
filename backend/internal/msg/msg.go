@@ -41,6 +41,7 @@ const (
 	DisabledJobCannotRun    = "DisabledJobCannotRun"
 	CannotDisableManualJob  = "CannotDisableManualJob"
 	TaskNotRunningStop      = "TaskNotRunningStop"
+	FullSyncPending         = "FullSyncPending"
 	NoFailedTaskItems       = "NoFailedTaskItems"
 	NotifyTestMsg           = "NotifyTestMsg"
 	NotifyURLInvalid        = "NotifyURLInvalid"
@@ -56,6 +57,7 @@ const (
 	SettingsCopyConcurrency = "SettingsCopyConcurrency"
 	SettingsScanConcurrency = "SettingsScanConcurrency"
 	SettingsMaxRetries      = "SettingsMaxRetries"
+	SettingsSchedConfirm    = "SettingsSchedConfirm"
 	InternalError           = "InternalError"
 	RequestTooLarge         = "RequestTooLarge"
 	SSEConnLimit            = "SSEConnLimit"
@@ -121,6 +123,7 @@ var translations = map[string]map[string]string{
 		DisabledJobCannotRun:    "禁用的作业不能运行",
 		CannotDisableManualJob:  "不可禁用仅手动任务",
 		TaskNotRunningStop:      "任务未在运行中，无法停止",
+		FullSyncPending:         "全量同步当前不在待确认状态",
 		NoFailedTaskItems:       "没有可重试的未完成项",
 		NotifyTestMsg:           "这是一条由您自己发送的OpenSync测试消息，当你看到这条消息，说明你的配置是正确可用的。",
 		NotifyURLInvalid:        "Webhook URL必须是有效的 HTTP 或 HTTPS URL",
@@ -136,6 +139,7 @@ var translations = map[string]map[string]string{
 		SettingsCopyConcurrency: "操作并发数",
 		SettingsScanConcurrency: "扫描并发数",
 		SettingsMaxRetries:      "最大重试次数",
+		SettingsSchedConfirm:    "定时全量同步删除确认",
 		InternalError:           "操作失败，请检查引擎连接或查看服务日志",
 		RequestTooLarge:         "请求内容过大",
 		SSEConnLimit:            "连接数已达上限，请关闭其他页面后重试",
@@ -190,6 +194,7 @@ var translations = map[string]map[string]string{
 		DisabledJobCannotRun:    "Disabled jobs cannot be run",
 		CannotDisableManualJob:  "Cannot disable manual-only jobs",
 		TaskNotRunningStop:      "Task is not running and cannot be stopped",
+		FullSyncPending:         "The full sync is not waiting for approval",
 		NoFailedTaskItems:       "No failed items available to retry",
 		NotifyTestMsg:           "This is a test message sent by OpenSync. If you see this, your configuration is working correctly.",
 		NotifyURLInvalid:        "Webhook URL must be a valid HTTP or HTTPS URL",
@@ -205,6 +210,7 @@ var translations = map[string]map[string]string{
 		SettingsCopyConcurrency: "Copy concurrency",
 		SettingsScanConcurrency: "Scan concurrency",
 		SettingsMaxRetries:      "Max retries",
+		SettingsSchedConfirm:    "Scheduled full-sync deletion confirmation",
 		InternalError:           "Operation failed, please check engine connection or view service logs",
 		RequestTooLarge:         "Request body too large",
 		SSEConnLimit:            "Connection limit reached, please close other pages and try again",

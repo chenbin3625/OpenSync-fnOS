@@ -130,6 +130,17 @@ func (c *AlistClient) startRequest(ctx context.Context, method, apiPath string, 
 		}
 		body = bytes.NewReader(jsonData)
 	}
+	headers := make(http.Header)
+	if body != nil {
+		headers.Set("Content-Type", "application/json")
+	}
+	return c.startRequestBody(ctx, method, apiPath, body, params, headers)
+}
+
+func (c *AlistClient) startRequestBody(ctx context.Context, method, apiPath string, body io.Reader, params map[string]string, headers http.Header) (*http.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	reqURL, err := c.requestURL(apiPath, params)
 	if err != nil {
@@ -140,8 +151,10 @@ func (c *AlistClient) startRequest(ctx context.Context, method, apiPath string, 
 	if err != nil {
 		return nil, errors.New(msg.T(msg.AddressIncorrect))
 	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+	for key, values := range headers {
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
 	}
 	if c.Token != "" {
 		req.Header.Set("Authorization", c.Token)
@@ -494,7 +507,7 @@ func (e *FileListEntry) UnmarshalJSON(data []byte) error {
 	var raw struct {
 		Name     string          `json:"name"`
 		IsDir    bool            `json:"is_dir"`
-		Size     int64           `json:"size"`
+		Size     *int64          `json:"size"`
 		Modified json.RawMessage `json:"modified"`
 		HashInfo json.RawMessage `json:"hash_info"`
 		Hashinfo string          `json:"hashinfo"`
@@ -502,7 +515,11 @@ func (e *FileListEntry) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
-	e.Name, e.IsDir, e.Size, e.Modified, e.Hashinfo = raw.Name, raw.IsDir, raw.Size, parseModified(raw.Modified), raw.Hashinfo
+	e.Name, e.IsDir, e.Modified, e.Hashinfo = raw.Name, raw.IsDir, parseModified(raw.Modified), raw.Hashinfo
+	e.Size = -1
+	if raw.Size != nil {
+		e.Size = *raw.Size
+	}
 	if len(raw.HashInfo) > 0 && string(raw.HashInfo) != "null" {
 		e.HashInfo = raw.HashInfo
 	}
@@ -713,6 +730,33 @@ func (c *AlistClient) MkdirContext(ctx context.Context, path string, scanInterva
 	}
 	_, err := c.PostContext(ctx, "/api/fs/mkdir", alistPathRequest{Path: path}, nil)
 	return err
+}
+
+// CreateEmptyFileContext writes a known zero-byte file without asking the
+// storage driver to download the source through /api/fs/copy.
+func (c *AlistClient) CreateEmptyFileContext(ctx context.Context, dir, name string) error {
+	filePath := strings.TrimRight(dir, "/") + "/" + name
+	resp, err := c.startRequestBody(ctx, http.MethodPut, "/api/fs/put", http.NoBody, nil, http.Header{
+		"Content-Type": []string{"application/octet-stream"},
+		"File-Path":    []string{url.PathEscape(filePath)},
+		"Overwrite":    []string{"true"},
+	})
+	if err != nil {
+		return err
+	}
+	defer closeBody(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return c.httpStatusError(resp)
+	}
+	body, err := readAllWithLimit(resp.Body, alistDeps.MaxResponseBytes)
+	if err != nil {
+		return err
+	}
+	var result alistResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return err
+	}
+	return c.checkAlistCode(result.Code, result.Message)
 }
 
 // validateRemoveRequest is the last line of defence before /api/fs/remove.

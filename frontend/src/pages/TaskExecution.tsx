@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { memo, useEffect, useId, useMemo, useRef, useState } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import DatePicker from "@douyinfe/semi-ui/lib/es/datePicker";
 import Input from "@douyinfe/semi-ui/lib/es/input";
@@ -29,7 +29,7 @@ import {
   confirmStopTask,
   errorToast,
 } from "../components/common";
-import { useAction, useResource } from "../lib/hooks";
+import { useAction, useMediaQuery, useResource } from "../lib/hooks";
 import { historyRangeParams } from "../lib/historyFilters";
 import { useClampedPage } from "../lib/pagination";
 import { useRealtimeTask } from "./Home/useRealtimeTask";
@@ -53,6 +53,8 @@ const statusTabs = [
   { key: 7, label: "失败", count: "fail" },
   { key: -1, label: "其他", count: "other" },
 ] as const;
+
+const historyStatuses = [1, 2, 3, 4, 5, 6, 7, 8];
 
 const fileTableWidths = {
   name: 360,
@@ -212,7 +214,15 @@ export function Realtime({
   );
 }
 
-export function History({ jobId }: { jobId: number }) {
+export function History({
+  jobId,
+  currentTaskId,
+  onOpenRealtime,
+}: {
+  jobId: number;
+  currentTaskId?: number;
+  onOpenRealtime: () => void;
+}) {
   const [page, setPage] = useState(1),
     [size, setSize] = useState(10);
   const [status, setStatus] = useState<number | undefined>(),
@@ -228,12 +238,13 @@ export function History({ jobId }: { jobId: number }) {
           pageNum: page,
           pageSize: size,
           status,
+          statusIn: status === undefined ? historyStatuses : undefined,
           keyword,
           ...historyRangeParams(range),
         },
         signal,
       ),
-    [jobId, page, size, status, keyword, range],
+    [jobId, page, size, status, keyword, range, currentTaskId],
   );
   const action = useAction();
   const rows = resource.data?.dataList || [];
@@ -251,34 +262,44 @@ export function History({ jobId }: { jobId: number }) {
         errorToast(error);
       }
     });
-  const controls = (record: TaskRecord) => (
-    <div className="row-actions">
-      <IconButton
-        label="查看执行明细"
-        icon={<IconEyeOpenedStroked aria-hidden="true" />}
-        onClick={() => setDetail(record.id)}
-      />
-      <IconButton
-        label="重试未完成项"
-        icon={<IconRefresh aria-hidden="true" />}
-        disabled={action.busy}
-        onClick={() => retry(record)}
-      />
-      <IconButton
-        label="删除执行记录"
-        icon={<IconDeleteStroked aria-hidden="true" />}
-        danger
-        onClick={() =>
-          confirmDelete("删除此执行记录？", () =>
-            action.run(async () => {
-              await api.deleteTask(record.id);
-              await resource.refresh(true);
-            }),
-          )
-        }
-      />
-    </div>
-  );
+  const controls = (record: TaskRecord) =>
+    record.status === 1 ? (
+      <Button
+        size="small"
+        theme="borderless"
+        disabled={record.id !== currentTaskId}
+        onClick={onOpenRealtime}
+      >
+        查看实时进度
+      </Button>
+    ) : (
+      <div className="row-actions">
+        <IconButton
+          label="查看执行明细"
+          icon={<IconEyeOpenedStroked aria-hidden="true" />}
+          onClick={() => setDetail(record.id)}
+        />
+        <IconButton
+          label="重试未完成项"
+          icon={<IconRefresh aria-hidden="true" />}
+          disabled={action.busy}
+          onClick={() => retry(record)}
+        />
+        <IconButton
+          label="删除执行记录"
+          icon={<IconDeleteStroked aria-hidden="true" />}
+          danger
+          onClick={() =>
+            confirmDelete("删除此执行记录？", () =>
+              action.run(async () => {
+                await api.deleteTask(record.id);
+                await resource.refresh(true);
+              }),
+            )
+          }
+        />
+      </div>
+    );
   return (
     <div className="history-view flex-column">
       <div className="filter-bar">
@@ -325,7 +346,7 @@ export function History({ jobId }: { jobId: number }) {
           value={status === undefined ? "all" : String(status)}
           optionList={[
             { label: "全部状态", value: "all" },
-            ...[2, 3, 4, 5, 6, 7, 8].map((value) => ({
+            ...historyStatuses.map((value) => ({
               value: String(value),
               label: taskRecordStatusNames[value],
             })),
@@ -387,7 +408,7 @@ export function History({ jobId }: { jobId: number }) {
             {
               title: "耗时",
               render: (_, record) =>
-                record.runTime && record.createTime
+                record.status !== 1 && record.runTime && record.createTime
                   ? formatDuration(record.runTime - record.createTime)
                   : "—",
             },
@@ -420,7 +441,7 @@ export function History({ jobId }: { jobId: number }) {
               </div>
               <div className="record-footer">
                 <span className="muted">
-                  {record.runTime && record.createTime
+                  {record.status !== 1 && record.runTime && record.createTime
                     ? formatDuration(record.runTime - record.createTime)
                     : "—"}
                 </span>
@@ -459,110 +480,124 @@ export function fileRowKey(record?: TaskItem): string {
     .join("\u0000");
 }
 
-export function FileTable({
+export const FileTable = memo(function FileTable({
   rows,
   loading = false,
 }: {
   rows: TaskItem[];
   loading?: boolean;
 }) {
+  // The columns are static; building them inline on every render re-created the
+  // render closures that Semi feeds into every cell.
+  // Render only the layout that is visible: CSS hid one of the two, but React
+  // still built a table and a card list for every row on every update.
+  const isMobile = useMediaQuery("(max-width: 640px)");
+  const columns = useMemo(
+    () => [
+      {
+        title: "文件 / 目录",
+        width: fileTableWidths.name,
+        className: "file-col-name",
+        render: (_: unknown, record: TaskItem) => (
+          <div className="file-name">
+            <Tooltip content={getTaskDisplayName(record)} position="topLeft">
+              <strong>{getTaskDisplayName(record)}</strong>
+            </Tooltip>
+            <Tooltip
+              content={record.dstPath || record.srcPath || "—"}
+              position="topLeft"
+            >
+              <span className="mono muted">
+                {record.dstPath || record.srcPath || "—"}
+              </span>
+            </Tooltip>
+          </div>
+        ),
+      },
+      {
+        title: "大小",
+        width: fileTableWidths.size,
+        className: "file-col-size",
+        render: (_: unknown, record: TaskItem) =>
+          record.isPath ? "目录" : formatSize(record.fileSize || 0),
+      },
+      {
+        title: "操作",
+        width: fileTableWidths.action,
+        className: "file-col-action",
+        render: (_: unknown, record: TaskItem) => {
+          const name = taskTypeNames[record.type || 0] || "—";
+          const cls = record.type === 1 ? "task-tag task-tag--danger" : "task-tag";
+          return <span className={cls}>{name}</span>;
+        },
+      },
+      {
+        title: "状态",
+        width: fileTableWidths.status,
+        className: "file-col-status",
+        render: (_: unknown, record: TaskItem) => {
+          // 运行中：展示实时进度
+          if (record.status === 1) {
+            const pct = taskProgressPercent(record.progress);
+            return (
+              <div className="file-progress">
+                <span className="file-progress-pct">{pct}%</span>
+                <Progress
+                  percent={pct}
+                  showInfo={false}
+                  strokeColor="var(--accent)"
+                />
+              </div>
+            );
+          }
+          // 其他状态：展示状态标签 + 错误提示图标
+          return (
+            <Status
+              status={record.status}
+              label={taskItemStatusNames[record.status]}
+              error={record.errMsg}
+            />
+          );
+        },
+      },
+    ],
+    [],
+  );
   return (
     <>
-      <div className="desktop-data">
-        <Table<TaskItem>
-          className="file-table"
-          dataSource={rows}
-          loading={loading}
-          rowKey={fileRowKey}
-          pagination={false}
-          empty={<EmptyState />}
-          columns={[
-            {
-              title: "文件 / 目录",
-              width: fileTableWidths.name,
-              className: "file-col-name",
-              render: (_, record) => (
-                <div className="file-name">
-                  <Tooltip content={getTaskDisplayName(record)} position="topLeft">
-                    <strong>
-                      {getTaskDisplayName(record)}
-                    </strong>
-                  </Tooltip>
-                  <Tooltip content={record.dstPath || record.srcPath || "—"} position="topLeft">
-                    <span className="mono muted">
-                      {record.dstPath || record.srcPath || "—"}
-                    </span>
-                  </Tooltip>
-                </div>
-              ),
-            },
-            {
-              title: "大小",
-              width: fileTableWidths.size,
-              className: "file-col-size",
-              render: (_, record) =>
-                record.isPath ? "目录" : formatSize(record.fileSize || 0),
-            },
-            {
-              title: "操作",
-              width: fileTableWidths.action,
-              className: "file-col-action",
-              render: (_, record) => {
-                const name = taskTypeNames[record.type || 0] || "—";
-                const cls = record.type === 1 ? "task-tag task-tag--danger" : "task-tag";
-                return <span className={cls}>{name}</span>;
-              },
-            },
-            {
-              title: "状态",
-              width: fileTableWidths.status,
-              className: "file-col-status",
-              render: (_: unknown, record: TaskItem) => {
-                // 运行中：展示实时进度
-                if (record.status === 1) {
-                  const pct = taskProgressPercent(record.progress);
-                  return (
-                    <div className="file-progress">
-                      <span className="file-progress-pct">{pct}%</span>
-                      <Progress
-                        percent={pct}
-                        showInfo={false}
-                        strokeColor="var(--accent)"
-                      />
-                    </div>
-                  );
-                }
-                // 其他状态：展示状态标签 + 错误提示图标
-                return (
-                  <Status
-                    status={record.status}
-                    label={taskItemStatusNames[record.status]}
-                    error={record.errMsg}
-                  />
-                );
-              },
-            },
-          ]}
-        />
-      </div>
-      <div className="mobile-data">
-        {loading ? (
-          // Loading only: errors are rendered (with retry) by the caller, so
-          // no dead "重试" button is wired to a no-op here.
-          <div className="state-panel">
-            <Spin size="large" />
-          </div>
-        ) : !rows.length ? (
-          <EmptyState />
-        ) : (
-          rows.map((record) => (
-            <MobileFileRecord key={fileRowKey(record)} record={record} />
-          ))
-        )}
-      </div>
+      {!isMobile && (
+        <div className="desktop-data">
+          <Table<TaskItem>
+            className="file-table"
+            dataSource={rows}
+            loading={loading}
+            rowKey={fileRowKey}
+            pagination={false}
+            empty={<EmptyState />}
+            columns={columns}
+          />
+        </div>
+      )}
+      {isMobile && (
+        <div className="mobile-data">
+          {loading ? (
+            // Loading only: errors are rendered (with retry) by the caller, so
+            // no dead "重试" button is wired to a no-op here.
+            <div className="state-panel">
+              <Spin size="large" />
+            </div>
+          ) : !rows.length ? (
+            <EmptyState />
+          ) : (
+            rows.map((record) => (
+              <MobileFileRecord key={fileRowKey(record)} record={record} />
+            ))
+          )}
+        </div>
+      )}
     </>
   );
-}
+});
 
 function MobileFileRecord({ record }: { record: TaskItem }) {
   const [open, setOpen] = useState(false);
@@ -658,10 +693,6 @@ function FileDetails({
         signal,
       ),
     [taskId, page, size, type, object, hasError, keyword],
-    // No polling: History lists only terminal tasks (statusIn 2..8), so a
-    // finished record's item list can never change. Re-fetching it every 3s was
-    // pure load on the NAS and the AList box behind it.
-    false,
   );
   useClampedPage(
     page,

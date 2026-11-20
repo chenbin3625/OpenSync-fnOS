@@ -1,8 +1,11 @@
 package main
 
 import (
+	"compress/gzip"
 	"context"
 	"errors"
+	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -281,6 +284,62 @@ func TestGracefulShutdownReservesBudgetForNotifications(t *testing.T) {
 
 	if notifyBudget < reserve-50*time.Millisecond {
 		t.Fatalf("notify budget = %s, want about %s reserved after jobs used their share", notifyBudget, reserve)
+	}
+}
+
+func TestStaticAssetsSendCacheHeadersAndGzip(t *testing.T) {
+	r := newRouter(false, nil)
+
+	// index.html is not fingerprinted and must be revalidated so an update is
+	// picked up on the next load.
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/app/opensync/", nil))
+	if w.Code != 200 {
+		t.Fatalf("index status = %d", w.Code)
+	}
+	if got := w.Header().Get("Cache-Control"); got != "no-cache" {
+		t.Fatalf("index Cache-Control = %q, want no-cache", got)
+	}
+	if w.Body.Len() == 0 {
+		t.Fatal("empty index.html")
+	}
+
+	// Fingerprinted assets are immutable.
+	files, err := fs.Sub(webFiles, "web")
+	if err != nil {
+		t.Fatalf("fs.Sub: %v", err)
+	}
+	matches, err := fs.Glob(files, "assets/*.js")
+	if err != nil || len(matches) == 0 {
+		t.Fatalf("no built assets found: %v", err)
+	}
+	asset := matches[0]
+	plain := httptest.NewRecorder()
+	r.ServeHTTP(plain, httptest.NewRequest("GET", "/app/opensync/"+asset, nil))
+	if plain.Code != 200 {
+		t.Fatalf("asset status = %d", plain.Code)
+	}
+	if got := plain.Header().Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
+		t.Fatalf("asset Cache-Control = %q", got)
+	}
+
+	compressed := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/app/opensync/"+asset, nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	r.ServeHTTP(compressed, req)
+	if got := compressed.Header().Get("Content-Encoding"); got != "gzip" {
+		t.Fatalf("Content-Encoding = %q, want gzip", got)
+	}
+	reader, err := gzip.NewReader(compressed.Body)
+	if err != nil {
+		t.Fatalf("gzip.NewReader: %v", err)
+	}
+	decoded, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read gzip body: %v", err)
+	}
+	if string(decoded) != plain.Body.String() {
+		t.Fatal("gzip body does not match the plain asset")
 	}
 }
 

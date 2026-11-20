@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Input from "@douyinfe/semi-ui/lib/es/input";
+import Switch from "@douyinfe/semi-ui/lib/es/switch";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import { IconSaveStroked } from "@douyinfe/semi-icons";
 import { api } from "../api/client";
@@ -37,6 +38,15 @@ const fields = [
     tip: "单个文件操作失败后的最大重试次数",
   },
   {
+    key: "scheduledFullSyncConfirm",
+    label: "定时全量删除确认",
+    min: 0,
+    max: 1,
+    unit: "",
+    kind: "switch",
+    tip: "开启后，定时全量同步在删除目标端文件前暂停并等待确认；手动执行在删除或移动前始终会确认",
+  },
+  {
     key: "taskTimeout",
     label: "任务超时",
     min: 0,
@@ -63,6 +73,7 @@ const cardGroups = [
       "scanConcurrency",
       "maxRetries",
       "taskTimeout",
+      "scheduledFullSyncConfirm",
     ] as const,
   },
   {
@@ -127,18 +138,29 @@ export default function Settings() {
       variant="compact"
       tip={field.tip}
     >
-      <div className="numeric-setting">
-        <Input
+      {"kind" in field && field.kind === "switch" ? (
+        <Switch
           aria-label={field.label}
-          inputMode="numeric"
-          value={form![field.key]}
+          checked={form![field.key] === "1"}
           disabled={action.busy}
-          onChange={(value) => {
-            setForm((f) => f && { ...f, [field.key]: value });
+          onChange={(checked) => {
+            setForm((f) => f && { ...f, [field.key]: checked ? "1" : "0" });
           }}
         />
-        <span>{field.unit}</span>
-      </div>
+      ) : (
+        <div className="numeric-setting">
+          <Input
+            aria-label={field.label}
+            inputMode="numeric"
+            value={form![field.key]}
+            disabled={action.busy}
+            onChange={(value) => {
+              setForm((f) => f && { ...f, [field.key]: value });
+            }}
+          />
+          <span>{field.unit}</span>
+        </div>
+      )}
     </SettingRow>
   );
   // 每个分组渲染成一张大卡片，条目靠间距区分，不用图标和小卡片分组。

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"testing"
 )
@@ -15,6 +16,9 @@ type removeRecorder struct {
 	mu         sync.Mutex
 	removes    []string
 	failRemove bool
+	listings   map[string]string
+	copySize   int64
+	failCopy   bool
 }
 
 func (rec *removeRecorder) server(t *testing.T) *httptest.Server {
@@ -22,6 +26,31 @@ func (rec *removeRecorder) server(t *testing.T) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
+		case "/api/fs/list":
+			var req alistListRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Errorf("decode list request: %v", err)
+				return
+			}
+			if data, ok := rec.listings[req.Path]; ok {
+				_, _ = fmt.Fprintf(w, `{"code":200,"data":%s}`, data)
+				return
+			}
+			t.Errorf("unexpected list path %q", req.Path)
+		case "/api/fs/copy":
+			if rec.copySize == 0 {
+				t.Error("unexpected copy request")
+			} else if rec.failCopy {
+				_, _ = w.Write([]byte(`{"code":401,"message":"unauthorized","data":null}`))
+			} else {
+				_, _ = w.Write([]byte(`{"code":200,"data":{"tasks":[]}}`))
+			}
+		case "/api/fs/get":
+			if rec.copySize == 0 {
+				t.Error("unexpected get request")
+			} else {
+				_, _ = fmt.Fprintf(w, `{"code":200,"data":{"size":%d}}`, rec.copySize)
+			}
 		case "/api/fs/mkdir":
 			_, _ = w.Write([]byte(`{"code":200,"message":"ok","data":{}}`))
 		case "/api/fs/remove":
@@ -244,6 +273,7 @@ func TestSafetyValveAllowsSmallDirectoryDelete(t *testing.T) {
 
 	jt := deleteSafetyTask(t, server.URL, server.Client())
 	jt.executeFullSyncPlan(plan)
+	jt.runFullSyncDeletes()
 	if calls := rec.calls(); len(calls) != 1 || calls[0] != "/dst/old" {
 		t.Fatalf("remove calls = %#v, want /dst/old (151 of 452 entries is under the ratio)", calls)
 	}
@@ -374,7 +404,7 @@ func TestFullSyncKeepsDeleteThatCollidesWithWrittenName(t *testing.T) {
 			restorePersist := stubPersistJobTaskItems(t, &persisted, nil)
 			defer restorePersist()
 
-			rec := &removeRecorder{}
+			rec := &removeRecorder{copySize: 10}
 			server := rec.server(t)
 			defer server.Close()
 
@@ -392,13 +422,16 @@ func TestFullSyncKeepsDeleteThatCollidesWithWrittenName(t *testing.T) {
 			jt := deleteSafetyTask(t, server.URL, server.Client())
 			jt.executeFullSyncPlan(plan)
 
-			// The unrelated extra file is still deleted; the colliding ones are not.
-			if calls := rec.calls(); len(calls) != 1 || calls[0] != "/dst/stale.txt" {
-				t.Fatalf("remove calls = %#v, want only /dst/stale.txt", calls)
-			}
 			waiting := jt.Waiting.snapshot()
 			if len(waiting) != 2 {
 				t.Fatalf("queued = %d, want both copies of %q", len(waiting), tc.srcName)
+			}
+			jt.markScanFinished()
+			jt.runCopyExecutor()
+			jt.drainCopyExecutor()
+			jt.runFullSyncDeletes()
+			if calls := rec.calls(); len(calls) != 1 || calls[0] != "/dst/stale.txt" {
+				t.Fatalf("remove calls = %#v, want only /dst/stale.txt", calls)
 			}
 		})
 	}
@@ -468,6 +501,7 @@ func TestFullSyncSkipsDeletesUnderEmptySourceSubtree(t *testing.T) {
 
 		jt := deleteSafetyTask(t, server.URL, server.Client())
 		jt.executeFullSyncPlan(plan)
+		jt.runFullSyncDeletes()
 		if calls := rec.calls(); len(calls) != 0 {
 			t.Fatalf("remove calls = %#v, want none under a suspicious empty source directory", calls)
 		}
@@ -509,10 +543,97 @@ func TestFullSyncSkipsDeletesUnderEmptySourceSubtree(t *testing.T) {
 
 		jt := deleteSafetyTask(t, server.URL, server.Client())
 		jt.executeFullSyncPlan(plan)
+		jt.runFullSyncDeletes()
 		if calls := rec.calls(); len(calls) != 99 {
 			t.Fatalf("remove calls = %d, want 99: a small directory is ordinary mirror cleanup", len(calls))
 		}
 	})
+}
+
+func TestFullSyncCleanupRequiresSuccessfulWrites(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		failCopy bool
+		cancel   bool
+		want     []string
+	}{
+		{name: "success", want: []string{"/dst/old.txt"}},
+		{name: "failed copy", failCopy: true},
+		{name: "canceled before cleanup", cancel: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			pinCopyTestDeps(t)
+			rec := &removeRecorder{copySize: 1, failCopy: test.failCopy}
+			server := rec.server(t)
+			defer server.Close()
+			var persisted []map[string]interface{}
+			defer stubPersistJobTaskItems(t, &persisted, nil)()
+			jt := deleteSafetyTask(t, server.URL, server.Client())
+			src := &fullSyncSnapshot{root: "/src/", dirs: map[string]FileListResult{"": {"new.txt": {Size: 1}}}}
+			dst := &fullSyncSnapshot{root: "/dst/", dirs: map[string]FileListResult{"": {"old.txt": {Size: 1}}}}
+			plan := newFullSyncPlan(src, dst, nil)
+			plan.build(jt.Job)
+			jt.executeFullSyncPlan(plan)
+			if calls := rec.calls(); len(calls) != 0 {
+				t.Fatalf("removed while copy was still queued: %v", calls)
+			}
+			jt.markScanFinished()
+			jt.runCopyExecutor()
+			jt.drainCopyExecutor()
+			if test.cancel {
+				jt.requestBreak()
+			}
+			jt.runFullSyncDeletes()
+			if calls := rec.calls(); !slices.Equal(calls, test.want) {
+				t.Fatalf("remove calls = %v, want %v", calls, test.want)
+			}
+			if test.failCopy {
+				if err := jt.flushPersistBuffer(); err != nil {
+					t.Fatal(err)
+				}
+				if len(persisted) != 2 || persisted[1]["type"] != taskItemTypeDelete.Int() || persisted[1]["status"] != taskStatusFailed.Int() {
+					t.Fatalf("expected failed copy and skipped cleanup, got %v", persisted)
+				}
+			}
+		})
+	}
+}
+
+func TestFullSyncPreservesExcludedTargetDescendants(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		source  string
+		removes []string
+	}{
+		{"extra directory", `{"content":[],"total":0}`, []string{"/dst/old/nested/junk.txt", "/dst/old/junk.bin"}},
+		{"type conflict", `{"content":[{"name":"old","size":7}],"total":1}`, nil},
+		{"type conflict under a case alias", `{"content":[{"name":"OLD","size":7}],"total":1}`, nil},
+		{"excluded file under a case alias", `{"content":[{"name":"TINY.DAT","size":7}],"total":1}`, []string{"/dst/old/nested/junk.txt", "/dst/old/junk.bin"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rec := &removeRecorder{listings: map[string]string{
+				"/src/":            test.source,
+				"/dst/":            `{"content":[{"name":"old","is_dir":true},{"name":"tiny.dat","size":1}],"total":2}`,
+				"/dst/old/":        `{"content":[{"name":"nested","is_dir":true},{"name":"private","is_dir":true},{"name":"tiny.bin","size":1},{"name":"junk.bin","size":7}],"total":4}`,
+				"/dst/old/nested/": `{"content":[{"name":"keep.tmp","size":7},{"name":"junk.txt","size":7}],"total":2}`,
+			}}
+			server := rec.server(t)
+			defer server.Close()
+			var persisted []map[string]interface{}
+			defer stubPersistJobTaskItems(t, &persisted, nil)()
+			jt := scanTestTask(t, server.URL, server.Client(), map[string]interface{}{
+				"method": 1, "srcPath": "/src/", "dstPath": "/dst/", "exclude": "*.tmp\nprivate/", "minFileSize": 2,
+			})
+			jt.sync()
+			jt.runFullSyncDeletes()
+			if calls := rec.calls(); !slices.Equal(calls, test.removes) {
+				t.Fatalf("remove calls = %v, want %v", calls, test.removes)
+			}
+			if waiting := jt.Waiting.snapshot(); len(waiting) != 0 {
+				t.Fatalf("queued %d writes, want none", len(waiting))
+			}
+		})
+	}
 }
 
 // The reverse type conflict (source directory, destination file) must remove the

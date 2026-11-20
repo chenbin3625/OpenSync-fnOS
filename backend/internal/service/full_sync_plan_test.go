@@ -161,6 +161,7 @@ func TestFullSyncPlanExecutesDestinationMoveBeforeDeletingOldTree(t *testing.T) 
 	})
 
 	jt.sync()
+	jt.runFullSyncDeletes()
 	if err := jt.flushPersistBuffer(); err != nil {
 		t.Fatalf("flushPersistBuffer() error: %v", err)
 	}
@@ -168,11 +169,8 @@ func TestFullSyncPlanExecutesDestinationMoveBeforeDeletingOldTree(t *testing.T) 
 		t.Fatal("sync did not mark scanning complete")
 	}
 
-	// Extra deletes are executed synchronously (consecutive failure threshold);
-	// the waiting queue should be empty and the remove call should appear in the
-	// server calls list.
 	if waiting := jt.Waiting.snapshot(); len(waiting) != 0 {
-		t.Fatalf("waiting items = %d, want 0 (deletes are synchronous now)", len(waiting))
+		t.Fatalf("waiting items = %d, want 0", len(waiting))
 	}
 	wantCalls := []string{
 		"mkdir:/dst/new/",
@@ -246,6 +244,9 @@ func TestFullSyncPlanPreservesOldTreeWhenDestinationMoveFails(t *testing.T) {
 	})
 
 	jt.executeFullSyncPlan(plan)
+	if len(jt.fullSyncDeletes) != 0 {
+		t.Fatalf("staged %d delete batches despite the failed relocation", len(jt.fullSyncDeletes))
+	}
 	if err := jt.flushPersistBuffer(); err != nil {
 		t.Fatalf("flushPersistBuffer() error: %v", err)
 	}
@@ -344,7 +345,7 @@ func TestFullSyncPlanStillDeletesUnmatchedDestinationFileWithSizeFilter(t *testi
 	}
 	dst := &fullSyncSnapshot{
 		root: "/dst/",
-		dirs: map[string]FileListResult{"": {"orphan.txt": {Size: 500 * 1024}}},
+		dirs: map[string]FileListResult{"": {"orphan.txt": {Size: 2 * 1024 * 1024}}},
 	}
 	plan := newFullSyncPlan(src, dst, nil)
 	plan.build(map[string]interface{}{

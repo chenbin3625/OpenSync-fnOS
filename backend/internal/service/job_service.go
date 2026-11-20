@@ -655,6 +655,46 @@ func StopTask(taskID int64) error {
 	return nil
 }
 
+func ApproveFullSyncTask(taskID int64) error {
+	job, err := mapper.GetJobByTaskID(taskID)
+	if err != nil {
+		if err := publicErrorIf(err, msg.T(msg.JobNotFound)); err != nil {
+			return err
+		}
+	}
+	client, err := GetJobClientByID(util.ToInt64(job["id"]))
+	if err != nil {
+		return err
+	}
+	task := client.currentTask()
+	if task == nil || task.TaskID != taskID {
+		return publicError(msg.T(msg.FullSyncPending))
+	}
+	return task.approveFullSync()
+}
+
+func RejectFullSyncTask(taskID int64) error {
+	job, err := mapper.GetJobByTaskID(taskID)
+	if err != nil {
+		if err := publicErrorIf(err, msg.T(msg.JobNotFound)); err != nil {
+			return err
+		}
+	}
+	client, err := GetJobClientByID(util.ToInt64(job["id"]))
+	if err != nil {
+		return err
+	}
+	task := client.currentTask()
+	if task == nil || task.TaskID != taskID {
+		return publicError(msg.T(msg.FullSyncPending))
+	}
+	if task.fullSyncApprovalSnapshot() == nil {
+		return publicError(msg.T(msg.FullSyncPending))
+	}
+	task.requestBreak()
+	return nil
+}
+
 // RetryFailedTask replays the non-success items of a historical task.
 func RetryFailedTask(taskID int64) error {
 	job, err := mapper.GetJobByTaskID(taskID)

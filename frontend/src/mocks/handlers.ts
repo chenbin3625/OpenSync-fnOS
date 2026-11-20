@@ -33,6 +33,7 @@ const systemSettingRanges: Record<string, { name: string; min: number; max: numb
   copyConcurrency: { name: "操作并发数", min: 1, max: 100 },
   scanConcurrency: { name: "扫描并发数", min: 1, max: 50 },
   maxRetries: { name: "失败重试次数", min: 0, max: 10 },
+  scheduledFullSyncConfirm: { name: "定时全量同步删除确认", min: 0, max: 1 },
   taskTimeout: { name: "任务超时时间", min: 0, max: 8760 },
   taskSave: { name: "历史任务保留", min: 0, max: 3650 },
 };
@@ -236,7 +237,10 @@ export const handlers = [
     const body = await readBody(request);
     if (!body) return fail("请求内容无效");
     if (body.taskId !== undefined) {
-      if (typeof body.action !== "string" || !["stop", "retry"].includes(body.action))
+      if (
+        typeof body.action !== "string" ||
+        !["stop", "retry", "approve", "reject"].includes(body.action)
+      )
         return fail("缺少必要参数");
     } else if (body.pause === undefined) {
       // Manual run: an empty body used to fall through and run every job.

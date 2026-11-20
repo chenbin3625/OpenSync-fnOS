@@ -60,22 +60,47 @@ export function useResource<T>(
   useEffect(() => {
     setData(null);
     void refresh();
-    const interval = poll
-      ? setInterval(() => {
-          if (document.visibilityState !== "hidden") void refresh(true);
-        }, 3000)
-      : undefined;
     return () => {
       abortRef.current?.abort();
       abortRef.current = null;
       requestRef.current++;
-      clearInterval(interval);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [depsKey, poll, refresh]);
+  }, [depsKey, refresh]);
+  // Polling is a separate effect: tying it to the fetch effect made a poll
+  // toggle (the realtime stream disconnecting/reconnecting) clear the table and
+  // refetch, so the view flashed even though the data had not changed.
+  useEffect(() => {
+    if (!poll) return;
+    const interval = setInterval(() => {
+      if (document.visibilityState !== "hidden") void refresh(true);
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [poll, refresh]);
   // setData is for callers that fetch outside the hook (the manual
   // "检查更新" request) and must publish the result without a second round trip.
   return { data, loading, error, refreshError, refresh, setData };
+}
+
+/** Tracks a CSS media query, e.g. useMediaQuery("(max-width: 640px)"). */
+export function useMediaQuery(query: string) {
+  const [matches, setMatches] = useState(
+    () =>
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia(query).matches,
+  );
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return;
+    }
+    const media = window.matchMedia(query);
+    const update = () => setMatches(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, [query]);
+  return matches;
 }
 
 /** Returned when a run was dropped because another action was still in flight. */

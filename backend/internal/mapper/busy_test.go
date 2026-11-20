@@ -242,9 +242,6 @@ func TestDeleteJobRemovesItemsInBatches(t *testing.T) {
 	if n := countRows(t, testDB, "SELECT COUNT(*) FROM job_task_item WHERE taskId=3"); n != 4 {
 		t.Fatalf("items of the other job = %d, want 4", n)
 	}
-	if n := countRows(t, testDB, "SELECT COUNT(*) FROM job_task_item_fts WHERE job_task_item_fts MATCH 'file'"); n != 4 {
-		t.Fatalf("fts rows = %d, want only the other job's 4", n)
-	}
 }
 
 func TestDeleteJobTaskByTaskIDRemovesItemsInBatches(t *testing.T) {

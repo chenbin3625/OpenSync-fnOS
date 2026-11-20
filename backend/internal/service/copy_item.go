@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -35,6 +36,11 @@ type copyItemClient interface {
 	TaskUndoneListContext(context.Context, taskItemType) ([]map[string]interface{}, error)
 	DeleteFileContext(context.Context, string, []string, int) error
 	FileExistsContext(context.Context, string, string) (bool, error)
+}
+
+type copyItemEmptyFileClient interface {
+	moveStatClient
+	CreateEmptyFileContext(context.Context, string, string) error
 }
 
 // copyItemStatClient is optionally implemented by clients that can return
@@ -67,11 +73,15 @@ type CopyItem struct {
 	// copy only counts as done if the destination was written since then.
 	submittedAt int64
 
-	runtime copyItemRuntime
-	client  copyItemClient
+	runtime         copyItemRuntime
+	client          copyItemClient
+	fullWriteFailed *atomic.Bool
 }
 
 func newCopyItem(runtime copyItemRuntime, client copyItemClient, srcPath, dstPath, fileName string, fileSize interface{}, copyType taskItemType) *CopyItem {
+	if util.ToInt64(fileSize) < 0 {
+		fileSize = nil
+	}
 	return &CopyItem{
 		SrcPath:    srcPath,
 		DstPath:    dstPath,
@@ -107,7 +117,7 @@ func (ci *CopyItem) setTaskID(taskID string) {
 }
 
 func (ci *CopyItem) setFailure(err error) {
-	errMsg := err.Error()
+	errMsg := redactSensitiveError(err.Error())
 	ci.mu.Lock()
 	ci.Status = taskStatusFailed
 	ci.Progress = 0
@@ -125,7 +135,7 @@ func (ci *CopyItem) setRunning() {
 }
 
 func (ci *CopyItem) setRetrying(err error) {
-	errMsg := err.Error()
+	errMsg := redactSensitiveError(err.Error())
 	ci.mu.Lock()
 	ci.Status = taskStatusRetrying
 	ci.Progress = 0
@@ -135,6 +145,10 @@ func (ci *CopyItem) setRetrying(err error) {
 }
 
 func (ci *CopyItem) setProgress(status taskStatus, progress float64, errMsg *string) {
+	if errMsg != nil {
+		redacted := redactSensitiveError(*errMsg)
+		errMsg = &redacted
+	}
 	ci.mu.Lock()
 	if ci.Status == taskStatusStopped && status != taskStatusStopped {
 		// Stopped is terminal for a watch: abortWatch (user stop / task
@@ -207,6 +221,8 @@ func (ci *CopyItem) progress() float64 {
 }
 
 func (ci *CopyItem) countableWaitSize() int64 {
+	ci.mu.RLock()
+	defer ci.mu.RUnlock()
 	if ci.CopyType == taskItemTypeDelete || ci.FileSize == nil {
 		return 0
 	}
@@ -384,6 +400,20 @@ func (ci *CopyItem) startTransfer(ctx context.Context, client copyItemClient) (s
 	case taskItemTypeMove:
 		return client.MoveFileContext(ctx, ci.SrcPath, ci.DstPath, ci.FileName)
 	default:
+		if size, known := ci.expectedSize(); known && size == 0 {
+			if emptyClient, ok := client.(copyItemEmptyFileClient); ok {
+				interval := util.ToInt(ci.copyRuntime().jobConfig()["scanIntervalS"])
+				source, err := emptyClient.FreshFileStatContext(ctx, ci.SrcPath, ci.FileName, interval)
+				if err == nil && source.Exists && !source.IsDir && source.SizeKnown && source.Size >= 0 {
+					if source.Size == 0 {
+						return "", emptyClient.CreateEmptyFileContext(ctx, ci.DstPath, ci.FileName)
+					}
+					ci.mu.Lock()
+					ci.FileSize = source.Size
+					ci.mu.Unlock()
+				}
+			}
+		}
 		return client.CopyFileContext(ctx, ci.SrcPath, ci.DstPath, ci.FileName)
 	}
 }
@@ -631,6 +661,12 @@ func (ci *CopyItem) errorMessage() string {
 	return *ci.ErrMsg
 }
 
+var sensitiveErrorQueryPattern = regexp.MustCompile(`(?i)([?&](?:tempauth|sig|token|access_token|authorization)=)[^&\s<>"']+`)
+
+func redactSensitiveError(message string) string {
+	return sensitiveErrorQueryPattern.ReplaceAllString(message, "$1****")
+}
+
 // verifyDstComplete checks whether the destination holds the transferred file.
 // Used when the AList task record has vanished (404) or the copy/move response
 // was lost, to decide whether the transfer actually completed. Copies run with
@@ -663,6 +699,8 @@ func (ci *CopyItem) verifyDstComplete(runtime copyItemRuntime, client copyItemCl
 
 // expectedSize returns the source size recorded when the item was queued.
 func (ci *CopyItem) expectedSize() (int64, bool) {
+	ci.mu.RLock()
+	defer ci.mu.RUnlock()
 	if ci.FileSize == nil {
 		return 0, false
 	}

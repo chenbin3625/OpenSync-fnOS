@@ -37,9 +37,8 @@ func TestShouldVacuumRequiresAbsoluteAndRelativeThreshold(t *testing.T) {
 	}
 }
 
-// newRetentionTestDB builds the job_task/job_task_item schema including the FTS
-// table and its triggers, so deletes pay the same per-row trigger cost as in
-// production.
+// newRetentionTestDB builds the job_task/job_task_item schema used by the
+// retention cleanup.
 func newRetentionTestDB(t *testing.T, dsn string) *sql.DB {
 	t.Helper()
 	testDB, err := sql.Open("sqlite", dsn)
@@ -67,7 +66,6 @@ func newRetentionTestDB(t *testing.T, dsn string) *sql.DB {
 			progress real
 		)`,
 	}
-	stmts = append(stmts, jobTaskItemFTSStatements(false)...)
 	for _, stmt := range stmts {
 		if _, err := testDB.Exec(stmt); err != nil {
 			t.Fatalf("exec %q: %v", stmt, err)
@@ -127,10 +125,6 @@ func TestDeleteJobTasksByIDsRemovesAllItemsInSmallBatches(t *testing.T) {
 	}
 	if n := countRows(t, testDB, "SELECT COUNT(*) FROM job_task_item WHERE taskId=4"); n != 9 {
 		t.Fatalf("items of kept task = %d, want 9", n)
-	}
-	// The FTS delete trigger fired for every removed row.
-	if n := countRows(t, testDB, "SELECT COUNT(*) FROM job_task_item_fts WHERE job_task_item_fts MATCH 'file'"); n != 9 {
-		t.Fatalf("fts rows = %d, want only the kept task's 9", n)
 	}
 }
 

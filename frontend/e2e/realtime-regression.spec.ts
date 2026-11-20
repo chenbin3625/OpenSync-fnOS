@@ -1159,6 +1159,116 @@ test("history load errors stay visible and can be retried", async ({ page }) => 
   await expect(page.getByText("历史记录加载失败", { exact: true })).toHaveCount(0);
 });
 
+test("history follows a running execution and links to its live progress", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(globalThis, "ReadableStream", { value: undefined });
+    Object.defineProperty(globalThis, "EventSource", { value: undefined });
+  });
+  const activeTask = {
+    taskId: 102,
+    scanFinish: true,
+    createTime: 1_700_000_100,
+    duration: 1,
+    num: { wait: 0, running: 1, success: 0, fail: 0, other: 0 },
+    size: { wait: 0, running: 1, success: 0, fail: 0, other: 0 },
+  };
+  let runStatus: number | null = null;
+
+  await page.route("**/app/opensync/svr/**", async (route) => {
+    const url = new URL(route.request().url());
+    const success = (data: unknown) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ code: 200, data, msg: "" }),
+      });
+    if (url.pathname.endsWith("/session"))
+      return success({ uid: 1, development: false, version: "test" });
+    if (url.pathname.endsWith("/alist")) return success([]);
+    if (url.pathname.endsWith("/job") && url.searchParams.has("current")) {
+      if (runStatus !== 1) return success(null);
+      return success(
+        url.searchParams.has("status")
+          ? realtimePage(url, activeTask, [])
+          : activeTask,
+      );
+    }
+    if (url.pathname.endsWith("/job") && url.searchParams.has("id")) {
+      const records = [{ id: 101, status: 2, createTime: 1_700_000_000 }];
+      if (runStatus !== null) {
+        records.unshift({
+          id: activeTask.taskId,
+          status: runStatus,
+          createTime: activeTask.createTime,
+        });
+      }
+      const status = url.searchParams.get("status");
+      const statusIn = url.searchParams.getAll("statusIn");
+      const dataList = records.filter((record) =>
+        status !== null
+          ? String(record.status) === status
+          : !statusIn.length || statusIn.includes(String(record.status)),
+      );
+      return success({ dataList, count: dataList.length });
+    }
+    if (url.pathname.endsWith("/job")) {
+      return success({
+        dataList: [
+          {
+            id: 1,
+            enable: 1,
+            remark: "历史和实时任务",
+            srcPath: '["/src"]',
+            dstPath: '["/dst"]',
+            alistId: 1,
+            method: 0,
+            interval: 0,
+            isCron: 2,
+          },
+        ],
+        count: 1,
+      });
+    }
+    return success(null);
+  });
+
+  await page.goto("/app/opensync/tasks?jobId=1&tab=history");
+  const history = page.locator(".history-view");
+  const details = history.getByRole("button", {
+    name: "查看执行明细",
+    exact: true,
+  });
+  const progress = history.getByRole("button", {
+    name: "查看实时进度",
+    exact: true,
+  });
+  await expect(details).toHaveCount(1);
+
+  runStatus = 1;
+  await expect(progress).toBeEnabled();
+  await expect(
+    history.getByText("运行中", { exact: true }).filter({ visible: true }),
+  ).toBeVisible();
+  await expect(
+    history.getByRole("button", { name: "删除执行记录" }),
+  ).toHaveCount(1);
+  await history.getByRole("combobox", { name: "执行状态" }).click();
+  await page.getByRole("option", { name: /运行中$/ }).click();
+  await expect(details).toHaveCount(0);
+  await progress.click();
+  await expect(page).toHaveURL(/jobId=1&tab=realtime$/);
+  await expect(
+    page.getByRole("heading", { name: "正在同步", exact: true }),
+  ).toBeVisible();
+
+  await page.getByRole("tab", { name: "历史任务", exact: true }).click();
+  await expect(progress).toBeEnabled();
+  runStatus = 2;
+  await expect(details).toHaveCount(2);
+  await expect(progress).toHaveCount(0);
+});
+
 test("completed execution details omit file status filtering", async ({ page }) => {
   const detailRequests: string[] = [];
   await page.route("**/app/opensync/svr/**", async (route) => {

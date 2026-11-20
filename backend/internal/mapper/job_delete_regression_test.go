@@ -8,16 +8,12 @@ import (
 	"time"
 )
 
-// newDeletionFixture builds job/job_task/job_task_item (plus the FTS index and
-// triggers the production schema has) with one job, one cached-count task and
-// two items.
+// newDeletionFixture builds job/job_task/job_task_item with one job, one
+// cached-count task and two items.
 func newDeletionFixture(t *testing.T) *sql.DB {
 	t.Helper()
 	db := newFileTestDB(t)
 	createJobSchema(t, db)
-	if err := installJobTaskItemFTS(db, true); err != nil {
-		t.Fatalf("install FTS: %v", err)
-	}
 	mustExec(t, db, `INSERT INTO job(id, remark, srcPath, dstPath, alistId) VALUES(1, 'job', '/src', '/dst', 1)`)
 	mustExec(t, db, `INSERT INTO job_task(id, jobId, status, taskNum) VALUES(10, 1, 2, '{"allNum":2}')`)
 	mustExec(t, db, `INSERT INTO job_task_item(id, taskId, srcPath, dstPath, isPath, fileName, type, status, createTime)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -38,6 +39,42 @@ func newCopyMonitorWatch(client copyItemClient, opts ...func(*CopyItem)) (*copyT
 	}
 	monitor.watches[monitor.watchKey(watch.taskID, watch.copyType)] = watch
 	return monitor, watch
+}
+
+type runningUndoneTestClient struct {
+	copyItemTestClient
+	polled chan struct{}
+}
+
+func (client *runningUndoneTestClient) TaskUndoneListContext(ctx context.Context, _ taskItemType) ([]map[string]interface{}, error) {
+	select {
+	case client.polled <- struct{}{}:
+		return []map[string]interface{}{{"id": "task-1", "state": 1}}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func TestCopyMonitorRestoresPollIntervalForRunningWatch(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		client := &runningUndoneTestClient{polled: make(chan struct{})}
+		monitor, watch := newCopyMonitorWatch(client)
+		watch.firstPollAt = time.Now().Add(newWatchFirstPollDelay)
+		monitor.wg.Add(1)
+		go monitor.loop()
+		defer monitor.stop()
+		defer monitor.jt.cancel()
+		select {
+		case <-client.polled:
+		case <-time.After(2 * newWatchFirstPollDelay):
+			t.Fatal("new watch was not polled after the settle delay")
+		}
+		select {
+		case <-client.polled:
+			t.Fatal("running watch polled again before the normal interval")
+		case <-time.After(pollIntervalActive / 2):
+		}
+	})
 }
 
 func TestCopyMonitorPollTaskInfo404MarksSuccessWhenDstExists(t *testing.T) {

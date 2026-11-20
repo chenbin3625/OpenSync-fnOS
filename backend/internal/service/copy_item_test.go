@@ -44,6 +44,7 @@ func (copyItemTestRuntime) notifyProgressChange() {}
 
 type copyItemTestClient struct {
 	copyCalls     int
+	emptyCalls    int
 	moveCalls     int
 	deleteCalls   int
 	cancelCalls   int
@@ -78,6 +79,11 @@ func (c *copyItemTestClient) transferResult() (string, error) {
 func (c *copyItemTestClient) CopyFileContext(context.Context, string, string, string) (string, error) {
 	c.copyCalls++
 	return c.transferResult()
+}
+
+func (c *copyItemTestClient) CreateEmptyFileContext(context.Context, string, string) error {
+	c.emptyCalls++
+	return nil
 }
 
 func (c *copyItemTestClient) MoveFileContext(context.Context, string, string, string) (string, error) {
@@ -180,6 +186,57 @@ func TestCopyItemUsesMoveAPIForMoveItems(t *testing.T) {
 	}
 	if client.deleteCalls != 0 {
 		t.Fatalf("deleteCalls = %d, want 0 because AList move already removes source", client.deleteCalls)
+	}
+}
+
+type emptyCopyItemTestClient struct {
+	copyItemTestClient
+	source FileStat
+}
+
+func (client *emptyCopyItemTestClient) FreshFileStatContext(context.Context, string, string, int) (FileStat, error) {
+	return client.source, nil
+}
+
+func TestCopyItemUsesEmptyFileAPIOnlyForVerifiedEmptySource(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		queuedSize int64
+		source     FileStat
+		emptyCalls int
+	}{
+		{"verified zero", 0, FileStat{Exists: true, SizeKnown: true}, 1},
+		{"unknown listing size", -1, FileStat{Exists: true, SizeKnown: true, Size: 42}, 0},
+		{"unverified zero", 0, FileStat{Exists: true}, 0},
+		{"source grew", 0, FileStat{Exists: true, SizeKnown: true, Size: 42}, 0},
+		{"source disappeared", 0, FileStat{}, 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := &emptyCopyItemTestClient{copyItemTestClient: copyItemTestClient{fileExists: true}, source: test.source}
+			item := newCopyItem(copyItemTestRuntime{}, client, "/src", "/dst", "file.txt", test.queuedSize, taskItemTypeCopy)
+			item.DoIt()
+			if client.emptyCalls != test.emptyCalls || client.copyCalls != 1-test.emptyCalls {
+				t.Fatalf("empty/copy calls = %d/%d, want %d/%d", client.emptyCalls, client.copyCalls, test.emptyCalls, 1-test.emptyCalls)
+			}
+			if status := item.status(); status != taskStatusSuccess {
+				t.Fatalf("status = %d, want success", status)
+			}
+		})
+	}
+}
+
+func TestCopyItemRedactsSensitiveURLQueryValues(t *testing.T) {
+	item := newCopyItem(copyItemTestRuntime{}, &copyItemTestClient{}, "/src", "/dst", "file.txt", int64(1), taskItemTypeCopy)
+	item.setFailure(errors.New("http request [https://example.test/file?tempauth=SECRET&sig=SIG&name=file.txt] failed"))
+
+	if item.ErrMsg == nil {
+		t.Fatal("ErrMsg = nil, want redacted error")
+	}
+	if strings.Contains(*item.ErrMsg, "SECRET") || strings.Contains(*item.ErrMsg, "SIG") {
+		t.Fatalf("ErrMsg leaked sensitive query values: %q", *item.ErrMsg)
+	}
+	if !strings.Contains(*item.ErrMsg, "tempauth=****") || !strings.Contains(*item.ErrMsg, "sig=****") {
+		t.Fatalf("ErrMsg = %q, want masked query values", *item.ErrMsg)
 	}
 }
 

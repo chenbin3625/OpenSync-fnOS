@@ -19,6 +19,7 @@ func (jt *JobTask) taskSubmit() {
 	// copies, the remote-task monitor and the flush timer running past the
 	// end of the task and dropping whatever was still buffered.
 	jt.drainCopyExecutor()
+	jt.runFullSyncDeletes()
 	persistErr := jt.persistRemainingTaskItems()
 	jt.finishSubmittedTask(persistErr)
 }
@@ -222,6 +223,12 @@ func (jt *JobTask) finishCopySlot() {
 	jt.copySlotMu.Lock()
 	jt.copyInFlight--
 	jt.copySlotMu.Unlock()
+	// Wake the executor instead of letting it sleep out the 500ms ticker:
+	// waiting for the tick after every completion capped small-file copies at
+	// one batch per tick even when the next items were already queued.
+	if jt.Waiting != nil {
+		jt.Waiting.signal()
+	}
 }
 
 // isDrained reports that the executor exited because all work completed.

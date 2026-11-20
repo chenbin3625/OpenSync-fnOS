@@ -22,11 +22,12 @@ func GetSystemConfig(c *gin.Context) {
 // timeout and retention to "unlimited"/"off" and failed range checks for the
 // concurrency fields.
 type systemSettingsPatch struct {
-	TaskTimeout     *int `json:"taskTimeout"`
-	TaskSave        *int `json:"taskSave"`
-	CopyConcurrency *int `json:"copyConcurrency"`
-	ScanConcurrency *int `json:"scanConcurrency"`
-	MaxRetries      *int `json:"maxRetries"`
+	TaskTimeout              *int `json:"taskTimeout"`
+	TaskSave                 *int `json:"taskSave"`
+	CopyConcurrency          *int `json:"copyConcurrency"`
+	ScanConcurrency          *int `json:"scanConcurrency"`
+	MaxRetries               *int `json:"maxRetries"`
+	ScheduledFullSyncConfirm *int `json:"scheduledFullSyncConfirm"`
 }
 
 // applyTo overlays the provided fields on the current settings.
@@ -41,6 +42,7 @@ func (p systemSettingsPatch) applyTo(current config.SystemSettings) config.Syste
 		{p.CopyConcurrency, &next.CopyConcurrency},
 		{p.ScanConcurrency, &next.ScanConcurrency},
 		{p.MaxRetries, &next.MaxRetries},
+		{p.ScheduledFullSyncConfirm, &next.ScheduledFullSyncConfirm},
 	} {
 		if field.src != nil {
 			*field.dst = *field.src

@@ -9,9 +9,7 @@ import (
 	"opensync/pkg/util"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
-	"unicode/utf8"
 )
 
 // List queries order by createTime DESC, id DESC. createTime is second-grained
@@ -975,52 +973,15 @@ func EmptyJobTaskCounts() map[string]interface{} {
 	}
 }
 
+// taskItemKeywordFilter builds the keyword predicate for a task-scoped item
+// query. It intentionally uses LIKE only: the previous FTS5 trigram index was
+// not scoped to the task, and the OR with the LIKE terms forced SQLite to scan
+// every item of the task anyway, so the index cost ~45% of the database and a
+// trigger write on every insert without making common searches faster.
 func taskItemKeywordFilter(keyword string) (string, []interface{}) {
 	like := "%" + escapeLike(keyword) + "%"
-	if taskItemFTSAvailable() && utf8.RuneCountInString(keyword) >= 3 {
-		return ` AND (
-			id IN (SELECT rowid FROM job_task_item_fts WHERE job_task_item_fts MATCH ?)
-			OR alistTaskId LIKE ? ESCAPE '\'
-			OR errMsg LIKE ? ESCAPE '\'
-		)`, []interface{}{fts5Phrase(keyword), like, like}
-	}
 	return " AND (fileName LIKE ? ESCAPE '\\' OR srcPath LIKE ? ESCAPE '\\' OR dstPath LIKE ? ESCAPE '\\' OR alistTaskId LIKE ? ESCAPE '\\' OR errMsg LIKE ? ESCAPE '\\')",
 		[]interface{}{like, like, like, like, like}
-}
-
-// taskItemFTSAvailable reports whether keyword search may rely on the FTS
-// index. The table alone is not enough: without the AFTER INSERT/DELETE/UPDATE
-// triggers the index silently stops tracking new rows, and a MATCH then misses
-// items the LIKE fallback would have found. The check therefore requires the
-// virtual table and all sync triggers, and only caches a *successful*
-// introspection.
-func taskItemFTSAvailable() bool {
-	handle := GetDB()
-	ftsAvailability.mu.Lock()
-	defer ftsAvailability.mu.Unlock()
-	if ftsAvailability.known && ftsAvailability.db == handle {
-		return ftsAvailability.ok
-	}
-	ok, err := ftsObjectsHealthy(handle)
-	if err != nil {
-		log.Printf("Failed to inspect the task item search index; keyword search falls back to LIKE: %v", err)
-		return false
-	}
-	ftsAvailability.db = handle
-	ftsAvailability.known = true
-	ftsAvailability.ok = ok
-	return ok
-}
-
-var ftsAvailability struct {
-	mu    sync.Mutex
-	db    *sql.DB
-	known bool
-	ok    bool
-}
-
-func fts5Phrase(s string) string {
-	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
 
 func escapeLike(s string) string {

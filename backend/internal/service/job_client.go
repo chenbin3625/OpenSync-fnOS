@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"opensync/internal/config"
 	"opensync/internal/mapper"
 	"opensync/internal/msg"
 	"opensync/pkg/util"
@@ -399,13 +400,17 @@ func NewJobClient(job map[string]interface{}, isInit bool) (*JobClient, error) {
 }
 
 func (jc *JobClient) runMarkedJob() {
-	jc.runMarkedJobConfig(0, nil)
+	jc.runMarkedJobConfig(0, nil, false)
+}
+
+func (jc *JobClient) runMarkedManualJob() {
+	jc.runMarkedJobConfig(0, nil, true)
 }
 
 // runMarkedJobConfig starts a task. With sourceTaskID > 0 it replays the source
 // task's items whose status is in statuses (retry-failed); otherwise it runs a
 // fresh full scan.
-func (jc *JobClient) runMarkedJobConfig(sourceTaskID int64, statuses []taskStatus) {
+func (jc *JobClient) runMarkedJobConfig(sourceTaskID int64, statuses []taskStatus, manual bool) {
 	taskID := int64(0)
 	defer func() {
 		if r := recover(); r != nil {
@@ -466,6 +471,8 @@ func (jc *JobClient) runMarkedJobConfig(sourceTaskID int64, statuses []taskStatu
 		task.RetrySourceTaskID = sourceTaskID
 		task.RetryStatuses = append([]taskStatus(nil), statuses...)
 	}
+	task.RequireFullSyncApproval = manual ||
+		(sourceTaskID == 0 && config.GetConfig().Server.ScheduledFullSyncConfirm == 1)
 	jc.setCurrentTask(task)
 	task.Start()
 }
@@ -483,7 +490,7 @@ func (jc *JobClient) DoJob() {
 		}
 		jc.waitUntilIdle(10 * time.Second)
 	}
-	jc.runMarkedJob()
+	jc.runMarkedManualJob()
 }
 
 // DoScheduled executes a scheduled job once, skipping if the previous run is still active.
@@ -504,7 +511,7 @@ func (jc *JobClient) DoManual() error {
 	if !jc.tryMarkDoing() {
 		return publicError(msg.T(msg.JobRunning))
 	}
-	go jc.runMarkedJob()
+	go jc.runMarkedManualJob()
 	return nil
 }
 
@@ -534,7 +541,7 @@ func (jc *JobClient) DoRetryFailedTaskItems(sourceTaskID int64) error {
 		jc.markDone()
 		return publicError(msg.T(msg.NoFailedTaskItems))
 	}
-	go jc.runMarkedJobConfig(sourceTaskID, retryableTaskStatuses)
+	go jc.runMarkedJobConfig(sourceTaskID, retryableTaskStatuses, false)
 	return nil
 }
 

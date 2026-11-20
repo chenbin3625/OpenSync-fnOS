@@ -160,22 +160,45 @@ export async function request<T>(
 // 500 == backend/internal/mapper.MaxPageSize (mapper/db.go). The backend clamps
 // larger values silently, so keep this in sync with that constant: a larger
 // value here would silently stop after the first 500 rows.
-async function requestAllJobs(signal?: AbortSignal) {
+async function fetchAllJobs() {
   const pageSize = 500;
   const first = await request<PageData<JobItem>>("/job", {
     params: { pageNum: 1, pageSize },
-    signal,
   });
   const dataList = [...first.dataList];
   const pageCount = Math.ceil(first.count / pageSize);
   for (let page = 2; page <= pageCount; page += 1) {
     const next = await request<PageData<JobItem>>("/job", {
       params: { pageNum: page, pageSize },
-      signal,
     });
     dataList.push(...next.dataList);
   }
   return { dataList, count: first.count };
+}
+
+// The shell sidebar and the Tasks page both load the full job list on mount
+// and again on every `opensync:jobs-changed` event. Sharing one short-lived
+// request (and the in-flight promise) removed the duplicate initial fetch
+// without making the two lists diverge.
+const jobsCacheTTL = 5000;
+let jobsCache: { at: number; promise: ReturnType<typeof fetchAllJobs> } | null =
+  null;
+
+function invalidateJobsCache() {
+  jobsCache = null;
+}
+
+function requestAllJobs(_signal?: AbortSignal) {
+  const now = Date.now();
+  if (!jobsCache || now - jobsCache.at > jobsCacheTTL) {
+    const promise = fetchAllJobs();
+    const entry = { at: now, promise };
+    jobsCache = entry;
+    promise.catch(() => {
+      if (jobsCache === entry) jobsCache = null;
+    });
+  }
+  return jobsCache.promise;
 }
 
 /**
@@ -221,13 +244,25 @@ export const api = {
     request("/alist/test", { method: "POST", params: { id } }),
   jobMenu: (signal?: AbortSignal) => requestAllJobs(signal),
   saveJob: (data: unknown, signal?: AbortSignal) =>
-    request("/job", { method: "POST", data, signal }),
-  jobAction: (data: unknown) => request("/job", { method: "PUT", data }),
+    request("/job", { method: "POST", data, signal }).then((result) => {
+      invalidateJobsCache();
+      return result;
+    }),
+  jobAction: (data: unknown) =>
+    request("/job", { method: "PUT", data }).then((result) => {
+      invalidateJobsCache();
+      return result;
+    }),
   // RemoveJobClient waits up to 2 minutes for a running task to stop before it
   // deletes the row (backend/internal/service/job_service.go), so this call
   // must outlive the default 90s request timeout.
   deleteJob: (id: number) =>
-    request("/job", { method: "DELETE", params: { id }, timeoutMs: 130000 }),
+    request("/job", { method: "DELETE", params: { id }, timeoutMs: 130000 }).then(
+      (result) => {
+        invalidateJobsCache();
+        return result;
+      },
+    ),
   current: (id: number, signal?: AbortSignal) =>
     requestCurrentTask<CurrentTaskData | null>({ id }, signal),
   history: (
@@ -248,7 +283,7 @@ export const api = {
       params: { taskId, ...params },
       signal,
     }),
-  taskAction: (taskId: number, action: "stop" | "retry") =>
+  taskAction: (taskId: number, action: "stop" | "retry" | "approve" | "reject") =>
     request("/job", {
       method: "PUT",
       data: { taskId: String(taskId), action },

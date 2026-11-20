@@ -43,7 +43,11 @@ func (c *AlistClient) FileListApiContext(ctx context.Context, path string, useCa
 		Page:    1,
 		PerPage: alistDeps.FileListPageSize,
 	}
-	result := make(FileListResult, alistDeps.FileListPageSize)
+	// Do not preallocate a full page: the snapshot keeps every directory map
+	// alive for the whole scan, and hinting 500 entries allocated ~56KB even
+	// for empty or tiny directories. Map growth is amortized for the rare
+	// multi-page listing.
+	result := make(FileListResult)
 	// The rate limiter is applied per request inside fetchFileListPage: every
 	// page is a separate AList request, so limiting only the first one let a
 	// multi-page listing bypass scanInterval entirely.
