@@ -1,4 +1,11 @@
-import { useEffect, useId, useRef, useState, type MutableRefObject } from "react";
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type MutableRefObject,
+} from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import { Form } from "@douyinfe/semi-ui/lib/es/form";
 import Input from "@douyinfe/semi-ui/lib/es/input";
@@ -27,7 +34,6 @@ import {
   parseExcludeFolders,
   systemDirFilterGroups,
   updateExcludeFolders,
-  validateJobForm,
   validateJobFormStep,
   isExcludePatternEnabled,
   updateExcludePatterns,
@@ -126,6 +132,12 @@ export default function TaskEditor({
     panel === activePanel || visitedPanels.includes(panel);
   const panelStyle = (panel: string) =>
     panel === activePanel ? undefined : { display: "none" };
+  // 标签栏/步骤条固定在顶部，只有下方内容区滚动。切换标签或步骤时回到内容
+  // 顶部，否则会停在上一个面板的滚动位置。
+  const scrollRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = 0;
+  }, [activePanel]);
   const nextStep = () => {
     const validation = validateJobFormStep(form, step);
     if (validation) {
@@ -141,9 +153,16 @@ export default function TaskEditor({
       minFileSize: fileSizeDrafts.current.minFileSize ?? form.minFileSize,
       maxFileSize: fileSizeDrafts.current.maxFileSize ?? form.maxFileSize,
     };
-    const validation = validateJobForm(formToSave);
-    if (validation) {
-      Toast.warning(validation);
+    // 按步骤顺序校验（与 validateJobForm 一致），同时记下出错的步骤：错误项
+    // 可能在当前没打开的标签里，只弹提示会让人找不到要改哪里。
+    const errors = taskEditorSteps.map((_, index) =>
+      validateJobFormStep(formToSave, index),
+    );
+    const invalidStep = errors.findIndex(Boolean);
+    if (invalidStep >= 0) {
+      Toast.warning(errors[invalidStep]);
+      if (isNew) setStep(invalidStep);
+      else setActiveTab(taskEditorTabs[invalidStep].key);
       return;
     }
     const payload = buildJobPayload(formToSave);
@@ -167,14 +186,20 @@ export default function TaskEditor({
       onClose={onClose}
       onSave={save}
       dirty={dirty}
+      className="task-editor-modal"
       footer={({ close }) => (
-        <div className={`editor-actions${isNew ? " task-editor-actions" : ""}`}>
+        <div className="editor-actions">
           {isNew && step > 0 && (
-            <Button onClick={previousStep} disabled={action.busy}>
+            <Button
+              type="tertiary"
+              className="editor-actions-start"
+              onClick={previousStep}
+              disabled={action.busy}
+            >
               上一步
             </Button>
           )}
-          <Button onClick={close} disabled={action.busy}>
+          <Button type="tertiary" onClick={close} disabled={action.busy}>
             取消
           </Button>
           <Button
@@ -188,27 +213,42 @@ export default function TaskEditor({
         </div>
       )}
     >
-      <Form onSubmit={isNew && !lastStep ? nextStep : save} className="editor-form">
+      <Form
+        onSubmit={isNew && !lastStep ? nextStep : save}
+        className="editor-form task-editor-form"
+      >
         <fieldset disabled={action.busy}>
           {isNew ? (
-            <div className="task-editor-stepbar">
-              <h3>{taskEditorSteps[step]}</h3>
-              <div className="task-editor-count" aria-label="当前步骤">
-                步骤 <strong>{step + 1}</strong> / {taskEditorSteps.length}
+            <div className="task-editor-nav task-editor-nav--steps">
+              <div className="task-editor-stepbar">
+                <h3>{taskEditorSteps[step]}</h3>
+                <div className="task-editor-count" aria-label="当前步骤">
+                  步骤 <strong>{step + 1}</strong> / {taskEditorSteps.length}
+                </div>
+              </div>
+              {/* 分隔线兼作进度条；步数已由上面的文字读出，这里不再重复播报 */}
+              <div className="task-editor-progress" aria-hidden="true">
+                <span
+                  style={{
+                    width: `${((step + 1) / taskEditorSteps.length) * 100}%`,
+                  }}
+                />
               </div>
             </div>
           ) : (
-            <Tabs
-              type="line"
-              activeKey={activeTab}
-              onChange={(key) => setActiveTab(key)}
-            >
-              {taskEditorTabs.map((tab) => (
-                <Tabs.TabPane tab={tab.label} itemKey={tab.key} key={tab.key} />
-              ))}
-            </Tabs>
+            <div className="task-editor-nav">
+              <Tabs
+                type="line"
+                activeKey={activeTab}
+                onChange={(key) => setActiveTab(key)}
+              >
+                {taskEditorTabs.map((tab) => (
+                  <Tabs.TabPane tab={tab.label} itemKey={tab.key} key={tab.key} />
+                ))}
+              </Tabs>
+            </div>
           )}
-          <div className="task-editor-step">
+          <div className="task-editor-step" ref={scrollRef}>
             {panelMounted("engine") && (
               <div className="form-section" style={panelStyle("engine")}>
                 <Field label="任务名称" required>
@@ -414,9 +454,9 @@ export default function TaskEditor({
                       visible Field label associated with the tree region. */}
                   <div className="field-group" role="group">
                     <ExcludeTree
-                    engineId={form.alistId}
-                    srcPaths={form.srcPath}
-                    excludedPaths={parseExcludeFolders(form.exclude)}
+                      engineId={form.alistId}
+                      srcPaths={form.srcPath}
+                      excludedPaths={parseExcludeFolders(form.exclude)}
                       onChange={(folders) =>
                         change(
                           "exclude",

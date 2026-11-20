@@ -205,7 +205,9 @@ func TestCopyItemUsesEmptyFileAPIOnlyForVerifiedEmptySource(t *testing.T) {
 		source     FileStat
 		emptyCalls int
 	}{
-		{"verified zero", 0, FileStat{Exists: true, SizeKnown: true}, 1},
+		{"verified zero with empty digest", 0, FileStat{Exists: true, SizeKnown: true, MD5: emptyFileMD5}, 1},
+		{"zero without digest falls back to copy", 0, FileStat{Exists: true, SizeKnown: true}, 0},
+		{"zero with a non-empty digest falls back to copy", 0, FileStat{Exists: true, SizeKnown: true, MD5: strings.Repeat("a", 32)}, 0},
 		{"unknown listing size", -1, FileStat{Exists: true, SizeKnown: true, Size: 42}, 0},
 		{"unverified zero", 0, FileStat{Exists: true}, 0},
 		{"source grew", 0, FileStat{Exists: true, SizeKnown: true, Size: 42}, 0},

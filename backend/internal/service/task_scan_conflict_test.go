@@ -765,7 +765,7 @@ func TestRetryReportsSourceTaskItemsLostWhileReplaying(t *testing.T) {
 
 	jt := &JobTask{
 		TaskID:            5,
-		Job:               map[string]interface{}{},
+		Job:               map[string]interface{}{"srcPath": "/src/", "dstPath": "/dst/"},
 		RetrySourceTaskID: 99,
 		RetryStatuses:     []taskStatus{taskStatusFailed},
 	}

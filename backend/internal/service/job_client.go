@@ -238,6 +238,16 @@ func (jc *JobClient) configSnapshot() (int64, map[string]interface{}, *Scheduler
 	return jc.JobID, cloneJobConfig(jc.Job), jc.Scheduler
 }
 
+// nextRunTime reports when the scheduler will next fire this job. ok is false
+// when the job is manual-only, disabled, paused, or has no scheduler.
+func (jc *JobClient) nextRunTime() (time.Time, bool) {
+	scheduler := jc.schedulerSnapshot()
+	if scheduler == nil {
+		return time.Time{}, false
+	}
+	return scheduler.Next()
+}
+
 func (jc *JobClient) schedulerSnapshot() *Scheduler {
 	jc.mu.Lock()
 	defer jc.mu.Unlock()

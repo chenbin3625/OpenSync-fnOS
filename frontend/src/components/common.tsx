@@ -14,10 +14,16 @@ import Modal from "@douyinfe/semi-ui/lib/es/modal";
 import Spin from "@douyinfe/semi-ui/lib/es/spin";
 import Tag from "@douyinfe/semi-ui/lib/es/tag";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
-import { actionSkipped } from "../lib/hooks";
 import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
-import { IconAlertTriangle, IconRefresh, IconCrossStroked, IconMoreStroked, IconHelpCircleStroked } from "@douyinfe/semi-icons";
+import {
+  IconAlertTriangle,
+  IconCrossStroked,
+  IconHelpCircleStroked,
+  IconMoreStroked,
+  IconRefresh,
+} from "@douyinfe/semi-icons";
 import { getHost } from "../lib/host";
+import { actionSkipped } from "../lib/hooks";
 
 export function getErrorMessage(error: unknown, fallback = "操作失败"): string {
   return error instanceof Error ? error.message : fallback;
@@ -340,7 +346,7 @@ function ErrorReason({ error }: { error: string }) {
     </Tooltip>
   );
 }
-function confirmAction({
+export function confirmAction({
   title,
   content,
   okText,
@@ -484,7 +490,7 @@ export function Editor({
         ) : (
           footer ?? (
             <div className="editor-actions">
-              <Button onClick={close} disabled={busy}>
+              <Button type="tertiary" onClick={close} disabled={busy}>
                 取消
               </Button>
               <Button

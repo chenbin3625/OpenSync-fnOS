@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"time"
 )
 
 // removeRecorder is an AList stub that answers mkdir/remove and records every
@@ -604,16 +605,20 @@ func TestFullSyncPreservesExcludedTargetDescendants(t *testing.T) {
 		name    string
 		source  string
 		removes []string
+		writes  []string
 	}{
-		{"extra directory", `{"content":[],"total":0}`, []string{"/dst/old/nested/junk.txt", "/dst/old/junk.bin"}},
-		{"type conflict", `{"content":[{"name":"old","size":7}],"total":1}`, nil},
-		{"type conflict under a case alias", `{"content":[{"name":"OLD","size":7}],"total":1}`, nil},
-		{"excluded file under a case alias", `{"content":[{"name":"TINY.DAT","size":7}],"total":1}`, []string{"/dst/old/nested/junk.txt", "/dst/old/junk.bin"}},
+		{"extra directory", `{"content":[{"name":"keep.txt","size":2}],"total":1}`, []string{"/dst/old/nested/junk.txt", "/dst/old/junk.bin"}, nil},
+		{"type conflict", `{"content":[{"name":"old","size":7},{"name":"keep.txt","size":2}],"total":2}`, nil, nil},
+		{"type conflict under a case alias", `{"content":[{"name":"OLD","size":7},{"name":"keep.txt","size":2}],"total":2}`, nil, nil},
+		// The destination copy is outside the size range, but the source file is
+		// in range: the filter decides what is copied, so it replaces it. The
+		// excluded descendants below old/ are still kept.
+		{"excluded file under a case alias", `{"content":[{"name":"TINY.DAT","size":7},{"name":"keep.txt","size":2}],"total":2}`, []string{"/dst/old/nested/junk.txt", "/dst/old/junk.bin"}, []string{"TINY.DAT"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			rec := &removeRecorder{listings: map[string]string{
 				"/src/":            test.source,
-				"/dst/":            `{"content":[{"name":"old","is_dir":true},{"name":"tiny.dat","size":1}],"total":2}`,
+				"/dst/":            `{"content":[{"name":"old","is_dir":true},{"name":"tiny.dat","size":1},{"name":"keep.txt","size":2}],"total":3}`,
 				"/dst/old/":        `{"content":[{"name":"nested","is_dir":true},{"name":"private","is_dir":true},{"name":"tiny.bin","size":1},{"name":"junk.bin","size":7}],"total":4}`,
 				"/dst/old/nested/": `{"content":[{"name":"keep.tmp","size":7},{"name":"junk.txt","size":7}],"total":2}`,
 			}}
@@ -629,8 +634,13 @@ func TestFullSyncPreservesExcludedTargetDescendants(t *testing.T) {
 			if calls := rec.calls(); !slices.Equal(calls, test.removes) {
 				t.Fatalf("remove calls = %v, want %v", calls, test.removes)
 			}
-			if waiting := jt.Waiting.snapshot(); len(waiting) != 0 {
-				t.Fatalf("queued %d writes, want none", len(waiting))
+			waiting := jt.Waiting.snapshot()
+			names := make([]string, 0, len(waiting))
+			for _, item := range waiting {
+				names = append(names, item.FileName)
+			}
+			if !slices.Equal(names, test.writes) {
+				t.Fatalf("queued writes = %v, want %v", names, test.writes)
 			}
 		})
 	}
@@ -668,5 +678,113 @@ func TestFullSyncReplacesDestinationFileWithSourceDirectory(t *testing.T) {
 	waiting := jt.Waiting.snapshot()
 	if len(waiting) != 1 || waiting[0].DstPath != "/dst/media/" || waiting[0].FileName != "f.txt" {
 		t.Fatalf("queued copies = %#v, want the file copied into the new directory", waiting)
+	}
+}
+
+// A failed listing must no longer abort the whole mirror run. Entries proven by
+// the listings that succeeded are still copied, but every destructive action is
+// deferred to a complete run: an entry that looks "extra" may live in the part
+// of the tree that could not be read.
+func TestFullSyncIncompleteScanCopiesWithoutDeleting(t *testing.T) {
+	deps := *jobDeps
+	deps.ScanListRetryDelay = func(int) time.Duration { return 0 }
+	restoreDeps := SetJobDepsForTest(&deps)
+	defer restoreDeps()
+	var persisted []map[string]interface{}
+	restorePersist := stubPersistJobTaskItems(t, &persisted, nil)
+	defer restorePersist()
+
+	var mu sync.Mutex
+	var removes []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		var body struct {
+			Path string `json:"path"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		switch r.URL.Path {
+		case "/api/fs/list":
+			switch body.Path {
+			case "/src/":
+				_, _ = w.Write([]byte(`{"code":200,"data":{"total":2,"content":[{"name":"keep.txt","size":1},{"name":"sub","is_dir":true}]}}`))
+			case "/src/sub/":
+				_, _ = w.Write([]byte(`{"code":500,"message":"driver exploded","data":null}`))
+			case "/dst/":
+				_, _ = w.Write([]byte(`{"code":200,"data":{"total":1,"content":[{"name":"old.txt","size":1}]}}`))
+			default:
+				t.Errorf("unexpected list path %q", body.Path)
+				_, _ = w.Write([]byte(`{"code":200,"data":{"total":0,"content":[]}}`))
+			}
+		case "/api/fs/mkdir":
+			_, _ = w.Write([]byte(`{"code":200,"data":{}}`))
+		case "/api/fs/remove":
+			mu.Lock()
+			removes = append(removes, body.Path)
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"code":200,"data":{}}`))
+		default:
+			t.Errorf("unexpected request %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	jt := scanTestTask(t, server.URL, server.Client(), map[string]interface{}{
+		"method": 1, "srcPath": "/src/", "dstPath": "/dst/", "scanIntervalT": 0,
+	})
+	jt.sync()
+	jt.runFullSyncDeletes()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(removes) != 0 {
+		t.Fatalf("remove calls = %v, want none for an incomplete scan", removes)
+	}
+	waiting := jt.Waiting.snapshot()
+	if len(waiting) != 1 || waiting[0].FileName != "keep.txt" || waiting[0].DstPath != "/dst/" {
+		t.Fatalf("queued copies = %#v, want the scanned file copied", waiting)
+	}
+	if err := jt.flushPersistBuffer(); err != nil {
+		t.Fatal(err)
+	}
+	guardFound := false
+	for _, item := range persisted {
+		if item["type"] == taskItemTypeDelete.Int() && item["status"] == taskStatusFailed.Int() && item["fileName"] == "" {
+			guardFound = true
+		}
+	}
+	if !guardFound {
+		t.Fatalf("persisted = %#v, want a guard record for the skipped cleanup", persisted)
+	}
+}
+
+// One failed write must not freeze cleanup for the whole destination root, but
+// it must still protect every delete that could remove the last copy of what
+// that write was meant to produce.
+func TestFullSyncWriteFailureBlocksOnlyRelatedDeletes(t *testing.T) {
+	failures := &fullSyncWriteFailures{}
+	failures.record("/dst/a/", "Report.PDF", int64(42), taskStatusFailed)
+
+	for _, test := range []struct {
+		name string
+		item fullSyncDelete
+		want bool
+	}{
+		{"same directory", fullSyncDelete{dir: "/dst/a", name: "other.txt", metadata: FileMetadata{Size: 1}}, true},
+		{"subdirectory", fullSyncDelete{dir: "/dst/a/sub", name: "other.txt", metadata: FileMetadata{Size: 1}}, true},
+		{"the failed directory itself", fullSyncDelete{dir: "/dst", name: "a", subtree: "a/"}, true},
+		{"same name under another directory", fullSyncDelete{dir: "/dst/b", name: "report.pdf", metadata: FileMetadata{Size: 1}}, true},
+		{"same size under another directory", fullSyncDelete{dir: "/dst/b", name: "other.bin", metadata: FileMetadata{Size: 42}}, true},
+		{"unrelated entry", fullSyncDelete{dir: "/dst/b", name: "other.bin", metadata: FileMetadata{Size: 7}}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := failures.blocks(test.item); got != test.want {
+				t.Fatalf("blocks(%+v) = %v, want %v", test.item, got, test.want)
+			}
+		})
+	}
+
+	var empty fullSyncWriteFailures
+	if empty.blocks(fullSyncDelete{dir: "/dst/a", name: "Report.PDF"}) {
+		t.Fatal("no recorded failure must not block any delete")
 	}
 }

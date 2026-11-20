@@ -20,6 +20,8 @@ type AlistDeps struct {
 // JobDeps groups the external dependencies used by the job / task layer.
 type JobDeps struct {
 	GetEnableJobList              func() ([]map[string]interface{}, error)
+	GetJobListAll                 func() ([]map[string]interface{}, error)
+	LastJobTaskCreateTime         func(int64) (int64, error)
 	PersistJobTaskItems           func([]map[string]interface{}) error
 	ForEachJobTaskItemsByStatuses func(int64, []int, int, func([]map[string]interface{}) error) error
 	CountJobTaskItemsByStatuses   func(int64, []int) (int64, error)
@@ -62,6 +64,8 @@ func newDefaultAlistDeps() *AlistDeps {
 func newDefaultJobDeps() *JobDeps {
 	return &JobDeps{
 		GetEnableJobList:              mapper.GetEnableJobList,
+		GetJobListAll:                 mapper.GetJobListAll,
+		LastJobTaskCreateTime:         mapper.GetLastJobTaskCreateTime,
 		PersistJobTaskItems:           mapper.AddJobTaskItemMany,
 		ForEachJobTaskItemsByStatuses: mapper.ForEachJobTaskItemsByStatuses,
 		CountJobTaskItemsByStatuses:   mapper.CountJobTaskItemsByStatuses,

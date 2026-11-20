@@ -23,7 +23,6 @@ import {
   errorToast,
 } from "../components/common";
 import { useAction, useEditorForm, useResource } from "../lib/hooks";
-
 import {
   buildNotifyParams,
   channelNames,
@@ -94,15 +93,13 @@ export default function Notifications() {
       <Header
         title="通知配置"
         actions={
-          <>
-            <Button
-              theme="solid"
-              icon={<IconPlusStroked aria-hidden="true" />}
-              onClick={() => setEditing(null)}
-            >
-              添加通知
-            </Button>
-          </>
+          <Button
+            theme="solid"
+            icon={<IconPlusStroked aria-hidden="true" />}
+            onClick={() => setEditing(null)}
+          >
+            添加通知
+          </Button>
         }
       />
       <LoadState
@@ -235,15 +232,17 @@ function NotificationEditor({
       onClose={onClose}
       onSave={() => submit(false)}
       footer={({ close }) => (
-        <div className="editor-actions task-editor-actions">
+        <div className="editor-actions">
           <Button
+            type="tertiary"
+            className="editor-actions-start"
             icon={<IconSendStroked aria-hidden="true" />}
             disabled={action.busy}
             onClick={() => submit(true)}
           >
             发送测试通知
           </Button>
-          <Button onClick={close} disabled={action.busy}>
+          <Button type="tertiary" onClick={close} disabled={action.busy}>
             取消
           </Button>
           <Button

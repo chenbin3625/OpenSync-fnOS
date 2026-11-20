@@ -39,6 +39,18 @@ func TestFileChangedFallsBackToModifiedTime(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "no digest and mtime within tolerance is unchanged",
+			src:  FileMetadata{Size: 10, Modified: 102},
+			dst:  FileMetadata{Size: 10, Modified: 100},
+			want: false,
+		},
+		{
+			name: "no digest and mtime beyond tolerance is changed",
+			src:  FileMetadata{Size: 10, Modified: 103},
+			dst:  FileMetadata{Size: 10, Modified: 100},
+			want: true,
+		},
+		{
 			name: "no digest and equal mtime is unchanged",
 			src:  FileMetadata{Size: 10, Modified: 100},
 			dst:  FileMetadata{Size: 10, Modified: 100},

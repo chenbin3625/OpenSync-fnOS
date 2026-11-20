@@ -10,7 +10,6 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -54,6 +53,11 @@ type copyItemStatClient interface {
 // makes when the probe itself keeps erroring.
 const maxTransientPollErrors = 3
 
+// emptyFileMD5 is the MD5 digest every empty payload has. It is the only
+// positive evidence that a driver-reported zero size really means an empty
+// file rather than an unreadable size.
+const emptyFileMD5 = "d41d8cd98f00b204e9800998ecf8427e"
+
 type CopyItem struct {
 	mu          sync.RWMutex
 	SrcPath     string
@@ -75,7 +79,7 @@ type CopyItem struct {
 
 	runtime         copyItemRuntime
 	client          copyItemClient
-	fullWriteFailed *atomic.Bool
+	fullWriteFailed *fullSyncWriteFailures
 }
 
 func newCopyItem(runtime copyItemRuntime, client copyItemClient, srcPath, dstPath, fileName string, fileSize interface{}, copyType taskItemType) *CopyItem {
@@ -288,6 +292,18 @@ func (ci *CopyItem) DoIt() {
 				ci.failMove(runtime, err)
 				break
 			}
+			if snapshot.targetIdentical {
+				// The destination already holds this exact file. Re-copying it
+				// could overwrite a destination that another writer changed
+				// after the snapshot, so only the verified source removal runs.
+				ci.setProgress(taskStatusRunning, 99, nil)
+				if err := ci.removeVerifiedMoveSource(runtime, client, snapshot, true); err != nil {
+					ci.failMove(runtime, err)
+					break
+				}
+				ci.setProgress(taskStatusSuccess, 100, nil)
+				break
+			}
 		}
 		submittedAt := time.Now().Unix()
 		ci.setSubmittedAt(submittedAt)
@@ -406,11 +422,20 @@ func (ci *CopyItem) startTransfer(ctx context.Context, client copyItemClient) (s
 				source, err := emptyClient.FreshFileStatContext(ctx, ci.SrcPath, ci.FileName, interval)
 				if err == nil && source.Exists && !source.IsDir && source.SizeKnown && source.Size >= 0 {
 					if source.Size == 0 {
-						return "", emptyClient.CreateEmptyFileContext(ctx, ci.DstPath, ci.FileName)
+						// A zero size alone is not proof of an empty file: some
+						// drivers report 0 for files whose size they cannot
+						// read. Creating an empty destination then would mark a
+						// real file as synced (and, in move mode, let the real
+						// source be deleted). Only the empty-file digest is
+						// positive evidence; without it, copy normally.
+						if source.MD5 == emptyFileMD5 {
+							return "", emptyClient.CreateEmptyFileContext(ctx, ci.DstPath, ci.FileName)
+						}
+					} else {
+						ci.mu.Lock()
+						ci.FileSize = source.Size
+						ci.mu.Unlock()
 					}
-					ci.mu.Lock()
-					ci.FileSize = source.Size
-					ci.mu.Unlock()
 				}
 			}
 		}

@@ -253,7 +253,7 @@ func TestSafeMoveNoTaskIDDoesNotTrustUnchangedSameSizeTarget(t *testing.T) {
 }
 
 func TestSafeMoveLegacyMoveRetryUsesVerifiedTransfer(t *testing.T) {
-	jt := &JobTask{Job: map[string]interface{}{"method": 2}, Waiting: newCopyQueue()}
+	jt := &JobTask{Job: map[string]interface{}{"method": 2, "srcPath": "/src/", "dstPath": "/dst/"}, Waiting: newCopyQueue()}
 	jt.initRuntime()
 	jt.retryTaskItem(map[string]interface{}{"type": 2, "srcPath": "/src", "dstPath": "/dst", "fileName": "legacy.txt", "fileSize": 10})
 	items := jt.Waiting.snapshot()
@@ -426,4 +426,48 @@ func TestSafeMoveHTTPWithRealFiles(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A move must never overwrite a different same-named destination file: the
+// destination copy is not the file being moved, and replacing it destroys it.
+func TestSafeMoveRejectsDifferentDestinationFileWithoutOverwriting(t *testing.T) {
+	for name, target := range map[string]FileStat{
+		"different digest":    {Exists: true, SizeKnown: true, Size: 10, Modified: 100, MD5: strings.Repeat("b", 32)},
+		"same size no digest": {Exists: true, SizeKnown: true, Size: 10, Modified: 55},
+		"different size":      {Exists: true, SizeKnown: true, Size: 9, Modified: 100},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pinCopyTestDeps(t)
+			c := newSafeMoveTestClient()
+			c.source.MD5 = strings.Repeat("a", 32)
+			c.before = target
+			item := runSafeMoveTest(c, copyItemTestRuntime{})
+			if item.status() != taskStatusFailed || c.copyCalls != 0 || c.removes != 0 {
+				t.Fatalf("status=%d copy=%d removes=%d; different destination must not be overwritten", item.status(), c.copyCalls, c.removes)
+			}
+		})
+	}
+}
+
+func TestSafeMoveSkipsCopyWhenDestinationIsIdentical(t *testing.T) {
+	t.Run("matching digest", func(t *testing.T) {
+		pinCopyTestDeps(t)
+		c := newSafeMoveTestClient()
+		c.source.MD5 = strings.Repeat("a", 32)
+		c.before = FileStat{Exists: true, SizeKnown: true, Size: 10, Modified: 55, MD5: strings.Repeat("a", 32)}
+		item := runSafeMoveTest(c, copyItemTestRuntime{})
+		if item.status() != taskStatusSuccess || c.copyCalls != 0 || c.removes != 1 {
+			t.Fatalf("status=%d copy=%d removes=%d; identical destination only needs the source removal", item.status(), c.copyCalls, c.removes)
+		}
+	})
+
+	t.Run("matching modification time", func(t *testing.T) {
+		pinCopyTestDeps(t)
+		c := newSafeMoveTestClient()
+		c.before = FileStat{Exists: true, SizeKnown: true, Size: 10, Modified: c.source.Modified}
+		item := runSafeMoveTest(c, copyItemTestRuntime{})
+		if item.status() != taskStatusSuccess || c.copyCalls != 0 || c.removes != 1 {
+			t.Fatalf("status=%d copy=%d removes=%d; same size and mtime identify the earlier move", item.status(), c.copyCalls, c.removes)
+		}
+	})
 }

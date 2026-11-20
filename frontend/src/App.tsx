@@ -21,16 +21,17 @@ import {
 } from "react-router-dom";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Spin from "@douyinfe/semi-ui/lib/es/spin";
+import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import {
   IconBellStroked,
   IconCloudStroked,
   IconFolderStroked,
+  IconRefresh,
   IconServerStroked,
   IconSettingStroked,
   IconTreeTriangleDown,
   IconTreeTriangleRight,
 } from "@douyinfe/semi-icons";
-import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import { api, sessionExpiredEvent } from "./api/client";
 import { errorToast } from "./components/common";
 import { VersionContext, VersionLink } from "./components/VersionLink";
@@ -364,7 +365,12 @@ function Workspace() {
       <div className="session-error">
         <img src="/app/opensync/favicon.svg" alt="OpenSync" />
         <p className="inline-error">{session.error}</p>
-        <Button onClick={() => void session.refresh()}>重试</Button>
+        <Button
+          icon={<IconRefresh aria-hidden="true" />}
+          onClick={() => void session.refresh()}
+        >
+          重试
+        </Button>
       </div>
     );
   if (!session.data)

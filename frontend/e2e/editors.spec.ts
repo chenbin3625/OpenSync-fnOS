@@ -416,7 +416,7 @@ test("settings uses plain inputs, validates limits and keeps backend units", asy
   await expect(timeout).toBeVisible();
   await expect(
     page.locator(".settings-card-body .setting-row .field-tip-icon"),
-  ).toHaveCount(5);
+  ).toHaveCount(6);
   await page.getByLabel("任务超时说明", { exact: true }).hover();
   await expect(
     page.getByText("单个任务运行超过该时长后自动标记为超时", { exact: true }),

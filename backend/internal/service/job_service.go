@@ -253,6 +253,9 @@ func CleanJobInput(job map[string]interface{}) error {
 	if err := normalizeJobFileSizeRange(job); err != nil {
 		return err
 	}
+	// Persisted after srcPath/dstPath are normalized: this is what keeps the
+	// destination layout stable when the source selection is edited later.
+	ensureJobDstMap(job)
 	return nil
 }
 
@@ -282,7 +285,7 @@ func validateJobInput(job map[string]interface{}, rejectNestedDst bool) error {
 	if srcSelectionsNested(srcPaths) {
 		return publicError(msg.T(msg.SrcPathNested))
 	}
-	if resolvedDstPathsNested(srcPaths, dstPaths) {
+	if resolvedDstPathsNestedForJob(job) {
 		if rejectNestedDst {
 			return publicError(msg.T(msg.DstPathNested))
 		}
@@ -317,6 +320,43 @@ func validateJobInput(job map[string]interface{}, rejectNestedDst bool) error {
 	}
 	if isCron == 0 && util.ToInt(job["interval"]) <= 0 {
 		return publicError(msg.T(msg.IntervalLost))
+	}
+	return nil
+}
+
+// validateJobDestinationConflicts rejects a job whose resolved destination
+// roots overlap another job's on the same engine. Two jobs writing (and, in
+// mirror mode, deleting) one destination subtree silently destroy each other's
+// files; the per-job checks could not see this.
+func validateJobDestinationConflicts(job map[string]interface{}) error {
+	alistID := util.ToInt64(job["alistId"])
+	if alistID <= 0 {
+		return nil
+	}
+	jobID := util.ToInt64(job["id"])
+	mine := resolvedDstPathsForJob(job)
+	if len(mine) == 0 {
+		return nil
+	}
+	loadJobs := mapper.GetJobListAll
+	if jobDeps != nil && jobDeps.GetJobListAll != nil {
+		loadJobs = jobDeps.GetJobListAll
+	}
+	jobs, err := loadJobs()
+	if err != nil {
+		return fmt.Errorf("load jobs for destination conflict check: %w", err)
+	}
+	for _, other := range jobs {
+		if util.ToInt64(other["id"]) == jobID || util.ToInt64(other["alistId"]) != alistID {
+			continue
+		}
+		for _, otherDst := range resolvedDstPathsForJob(other) {
+			for _, dst := range mine {
+				if syncPathContains(dst, otherDst) || syncPathContains(otherDst, dst) {
+					return publicError(msg.JobDstConflict(otherDst))
+				}
+			}
+		}
 	}
 	return nil
 }
@@ -408,11 +448,25 @@ func nonNegativeFileSize(value interface{}) (int64, error) {
 
 // AddJobClient creates a new job client
 func AddJobClient(job map[string]interface{}, isInit bool) error {
+	// A row loaded from a pre-migration database has no stored mapping yet.
+	// Freeze the layout it has been using before this run's computed mapping
+	// could change on the first edit.
+	needsPersistedDstMap := isInit && jobDstMapRaw(job["dstMap"]) == ""
 	if err := CleanJobInput(job); err != nil {
 		return err
 	}
+	if needsPersistedDstMap {
+		if err := mapper.UpdateJob(job); err != nil {
+			log.Printf("Failed to persist the initial destination mapping of job %v: %v", job["id"], err)
+		}
+	}
 	if err := validateJobInput(job, !isInit); err != nil {
 		return err
+	}
+	if !isInit {
+		if err := validateJobDestinationConflicts(job); err != nil {
+			return err
+		}
 	}
 	if !isInit {
 		// Interactive add: validate that the engine exists and hold the
@@ -440,10 +494,20 @@ func AddJobClient(job map[string]interface{}, isInit bool) error {
 // EditJobClient updates an existing job client
 func EditJobClient(job map[string]interface{}) error {
 	jobID := util.ToInt64(job["id"])
+	if job["dstMap"] == nil && jobID > 0 {
+		// The edit form does not send the mapping. It must survive the edit, or
+		// every remaining source would be re-mapped by the new source set.
+		if previous, err := mapper.GetJobByID(jobID); err == nil {
+			job["dstMap"] = previous["dstMap"]
+		}
+	}
 	if err := CleanJobInput(job); err != nil {
 		return err
 	}
 	if err := ValidateJobInput(job); err != nil {
+		return err
+	}
+	if err := validateJobDestinationConflicts(job); err != nil {
 		return err
 	}
 	client, err := GetJobClientByID(jobID)
@@ -721,7 +785,36 @@ func GetJobList(params map[string]interface{}) (map[string]interface{}, error) {
 	if err := publicErrorIf(err, msg.T(msg.ListTooLarge)); err != nil {
 		return nil, err
 	}
+	addJobNextRunTimes(result)
 	return result, nil
+}
+
+// addJobNextRunTimes adds the real next run time of every scheduled job. The
+// list page used to show only the schedule rule ("every 60 minutes"), which
+// hid when the job would actually run next, especially after a restart.
+func addJobNextRunTimes(result map[string]interface{}) {
+	rows, ok := result["dataList"].([]map[string]interface{})
+	if !ok || len(rows) == 0 {
+		return
+	}
+	clients := make(map[int64]*JobClient, len(rows))
+	jobClientListMu.RLock()
+	for _, row := range rows {
+		jobID := util.ToInt64(row["id"])
+		if client, exists := jobClientList[jobID]; exists {
+			clients[jobID] = client
+		}
+	}
+	jobClientListMu.RUnlock()
+	for _, row := range rows {
+		next := int64(0)
+		if client := clients[util.ToInt64(row["id"])]; client != nil {
+			if nextTime, scheduled := client.nextRunTime(); scheduled {
+				next = nextTime.Unix()
+			}
+		}
+		row["nextRunTime"] = next
+	}
 }
 
 // GetJobCurrent returns real-time task progress

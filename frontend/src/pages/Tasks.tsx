@@ -1,10 +1,11 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import Button from "@douyinfe/semi-ui/lib/es/button";
-import Switch from "@douyinfe/semi-ui/lib/es/switch";
 import Modal from "@douyinfe/semi-ui/lib/es/modal";
 import Spin from "@douyinfe/semi-ui/lib/es/spin";
+import Switch from "@douyinfe/semi-ui/lib/es/switch";
 import Tabs from "@douyinfe/semi-ui/lib/es/tabs";
+import Tag from "@douyinfe/semi-ui/lib/es/tag";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
 import {
@@ -24,6 +25,7 @@ import {
   Header,
   Info,
   LoadState,
+  confirmAction,
   confirmDelete,
   confirmStopTask,
   errorToast,
@@ -33,6 +35,7 @@ import { useAction, useResource } from "../lib/hooks";
 import { resolveJobSelection, resolveTaskTab } from "../lib/taskForm";
 import {
   formatDuration,
+  formatNextRun,
   formatSize,
   formatSchedule,
   formatSchedulePlan,
@@ -247,13 +250,13 @@ export default function Tasks() {
         }
         actions={
           tab === "overview" ? (
-              <Button
-                theme="solid"
-                icon={<IconPlusStroked aria-hidden="true" />}
-                onClick={() => setEditor({ open: true, job: null })}
-              >
-                新建任务
-              </Button>
+            <Button
+              theme="solid"
+              icon={<IconPlusStroked aria-hidden="true" />}
+              onClick={() => setEditor({ open: true, job: null })}
+            >
+              新建任务
+            </Button>
           ) : undefined
         }
       />
@@ -363,13 +366,11 @@ export default function Tasks() {
                         // The backend PauseJob stops the running task as well;
                         // asking first avoids killing an in-progress sync as a
                         // side effect of "just disable the schedule".
-                        Modal.confirm({
+                        confirmAction({
                           title: "停用任务并中止当前执行？",
                           content:
                             "关闭开关会同时中止正在进行的同步，已完成的文件不会撤销。",
                           okText: "停用并中止",
-                          cancelText: "取消",
-                          okButtonProps: { type: "danger" },
                           onOk: () =>
                             actions.run(async () => {
                               try {
@@ -499,7 +500,7 @@ function FullSyncApprovalModal({
       title="确认全量同步"
       footer={
         <div className="editor-actions">
-          <Button onClick={onReject} disabled={busy}>
+          <Button type="tertiary" onClick={onReject} disabled={busy}>
             取消执行
           </Button>
           <Button
@@ -529,9 +530,13 @@ function FullSyncApprovalModal({
         <div className="full-sync-approval-list" role="list">
           {visiblePaths.map((item) => (
             <div className="full-sync-approval-item" role="listitem" key={`${item.action}:${item.path}`}>
-              <span className={item.action === "删除" ? "task-tag task-tag--danger" : "task-tag"}>
+              <Tag
+                size="small"
+                type="light"
+                color={item.action === "删除" ? "red" : "blue"}
+              >
                 {item.action}
-              </span>
+              </Tag>
               <span className="mono">{item.path}</span>
               <span className="muted">
                 {item.isPath
@@ -647,7 +652,6 @@ function Overview({
                 }
                 type={running ? "danger" : "tertiary"}
                 theme="borderless"
-                size="small"
                 disabled={busy || (!running && !enabled)}
                 onClick={running ? onStop : onRun}
               />
@@ -677,7 +681,7 @@ function Overview({
           </div>
           <div className="flow-node flow-next">
             <div className="flow-name">下次执行</div>
-            <div className="flow-sub">{formatSchedule(job)}</div>
+            <div className="flow-sub">{formatNextRun(job)}</div>
           </div>
         </div>
         <div className="overview-sections">

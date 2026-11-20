@@ -92,6 +92,7 @@ func (jt *JobTask) updateTaskStatus() (taskStatus, map[string]interface{}, int, 
 		return 0, nil, 0, fmt.Errorf("count task items: %w", err)
 	}
 	failOrOtherNum := util.ToInt(taskNum["failNum"]) + util.ToInt(taskNum["otherNum"])
+	successNum := util.ToInt(taskNum["successNum"])
 	allNum := util.ToInt(taskNum["allNum"])
 	ctxErr := jt.context().Err()
 	if jt.isDrained() {
@@ -99,7 +100,7 @@ func (jt *JobTask) updateTaskStatus() (taskStatus, map[string]interface{}, int, 
 		// during the final flush is not a timeout of the sync itself.
 		ctxErr = nil
 	}
-	status := finalTaskStatus(jt.isBreak(), ctxErr, allNum, failOrOtherNum)
+	status := finalTaskStatus(jt.isBreak(), ctxErr, allNum, successNum, failOrOtherNum)
 	duration := taskDuration(jt.CreateTime)
 	taskNum["duration"] = duration
 	taskNum["scanFinish"] = jt.ScanFinish.Load()
@@ -108,7 +109,7 @@ func (jt *JobTask) updateTaskStatus() (taskStatus, map[string]interface{}, int, 
 	return status, taskNum, duration, finishJobTaskStatus(jt.TaskID, status, nil, taskNum)
 }
 
-func finalTaskStatus(isBreak bool, ctxErr error, allNum, failOrOtherNum int) taskStatus {
+func finalTaskStatus(isBreak bool, ctxErr error, allNum, successNum, failOrOtherNum int) taskStatus {
 	if isBreak {
 		return taskStatusStopped
 	}
@@ -116,6 +117,12 @@ func finalTaskStatus(isBreak bool, ctxErr error, allNum, failOrOtherNum int) tas
 		return taskStatusTimeout
 	}
 	if failOrOtherNum > 0 {
+		// A run in which not a single item succeeded is a failure, not a
+		// partial success; the notification title and the task list used to
+		// report "Partial Success" for a task where everything failed.
+		if successNum == 0 && failOrOtherNum == allNum {
+			return taskStatusFailed
+		}
 		return taskStatusPartialFail
 	}
 	if allNum == 0 {

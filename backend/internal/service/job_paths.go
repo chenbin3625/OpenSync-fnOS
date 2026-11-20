@@ -166,3 +166,157 @@ func cleanPathList(paths []string) []string {
 	}
 	return cleaned
 }
+
+// jobDstMapVersion tags the persisted destination mapping. Entries are reused
+// only for the same destination-list base; any other change recomputes them.
+const jobDstMapVersion = 1
+
+// jobDstMap stores the resolved destination root of every selected (source,
+// destination) pair, so the mapping stays stable when sources are added or
+// removed. Without it, adding one source changes the common parent and silently
+// re-maps every other source: the next run copies them to new directories and,
+// in mirror mode, treats the old directories as extra and deletes them.
+type jobDstMap struct {
+	Version int               `json:"version"`
+	Base    []string          `json:"base"`
+	Map     map[string]string `json:"map"`
+}
+
+func jobDstMapKey(srcRoot, dstRoot string) string {
+	return normalizeDirPath(srcRoot) + "\x00" + normalizeDirPath(dstRoot)
+}
+
+func jobDstMapRaw(value interface{}) string {
+	switch v := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(v)
+	case []byte:
+		return strings.TrimSpace(string(v))
+	default:
+		return strings.TrimSpace(fmt.Sprintf("%v", v))
+	}
+}
+
+func parseStoredJobDstMap(value interface{}) *jobDstMap {
+	raw := jobDstMapRaw(value)
+	if raw == "" {
+		return nil
+	}
+	var stored jobDstMap
+	if err := json.Unmarshal([]byte(raw), &stored); err != nil {
+		return nil
+	}
+	if stored.Version != jobDstMapVersion || stored.Map == nil {
+		return nil
+	}
+	return &stored
+}
+
+func jobDstBaseEquals(stored []string, current []string) bool {
+	if len(stored) != len(current) {
+		return false
+	}
+	for i := range stored {
+		if normalizeDirPath(stored[i]) != normalizeDirPath(current[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// ensureJobDstMap computes and stores destination roots for all selected pairs.
+// Existing entries survive edits as long as the destination list is unchanged;
+// only new pairs are computed. The stored map records the destination list it
+// was built for, so changing the destinations deliberately re-maps everything.
+func ensureJobDstMap(job map[string]interface{}) {
+	srcPaths := parsePathList(job["srcPath"])
+	dstPaths := parsePathList(job["dstPath"])
+	if len(srcPaths) == 0 || len(dstPaths) == 0 {
+		job["dstMap"] = nil
+		return
+	}
+	base := make([]string, len(dstPaths))
+	for i, dstItem := range dstPaths {
+		base[i] = normalizeDirPath(dstItem)
+	}
+	reuse := map[string]string(nil)
+	if stored := parseStoredJobDstMap(job["dstMap"]); stored != nil && jobDstBaseEquals(stored.Base, base) {
+		reuse = stored.Map
+	}
+	next := make(map[string]string, len(srcPaths)*len(dstPaths))
+	for _, srcItem := range srcPaths {
+		srcDir := normalizeDirPath(srcItem)
+		for _, dstItem := range dstPaths {
+			dstDir := normalizeDirPath(dstItem)
+			key := jobDstMapKey(srcDir, dstDir)
+			if value, ok := reuse[key]; ok && syncPathContains(dstDir, value) {
+				next[key] = normalizeDirPath(value)
+				continue
+			}
+			next[key] = dstPathForSrcSelection(dstDir, srcDir, srcPaths)
+		}
+	}
+	encoded, err := json.Marshal(jobDstMap{Version: jobDstMapVersion, Base: base, Map: next})
+	if err != nil {
+		job["dstMap"] = nil
+		return
+	}
+	job["dstMap"] = string(encoded)
+}
+
+// jobDstForSrc resolves the destination root of one (source, destination) pair.
+// It uses the persisted mapping when it covers the pair and falls back to the
+// selection-based algorithm for jobs saved before the map existed. A pair whose
+// destination is no longer configured resolves to "", so callers cannot act on
+// a path outside the current job definition.
+func jobDstForSrc(job map[string]interface{}, srcRoot, dstRoot string) string {
+	configured := false
+	for _, item := range parsePathList(job["dstPath"]) {
+		if normalizeDirPath(item) == normalizeDirPath(dstRoot) {
+			configured = true
+			break
+		}
+	}
+	if !configured {
+		return ""
+	}
+	if stored := parseStoredJobDstMap(job["dstMap"]); stored != nil {
+		// The stored value is only trusted while it stays inside the
+		// destination it was derived from; a damaged or hand-edited row must
+		// not send writes to an unrelated path.
+		if value, ok := stored.Map[jobDstMapKey(srcRoot, dstRoot)]; ok && value != "" && syncPathContains(dstRoot, value) {
+			return normalizeDirPath(value)
+		}
+	}
+	return dstPathForSrcSelection(dstRoot, srcRoot, parsePathList(job["srcPath"]))
+}
+
+// resolvedDstPathsForJob returns the destination root of every top-level
+// (source, destination) pair of a job, using its persisted mapping.
+func resolvedDstPathsForJob(job map[string]interface{}) []string {
+	srcPaths := parsePathList(job["srcPath"])
+	dstPaths := parsePathList(job["dstPath"])
+	resolved := make([]string, 0, len(srcPaths)*len(dstPaths))
+	for _, srcItem := range srcPaths {
+		for _, dstItem := range dstPaths {
+			resolved = append(resolved, jobDstForSrc(job, srcItem, dstItem))
+		}
+	}
+	return resolved
+}
+
+// resolvedDstPathsNestedForJob reports whether one resolved destination root of
+// the job contains another.
+func resolvedDstPathsNestedForJob(job map[string]interface{}) bool {
+	resolved := resolvedDstPathsForJob(job)
+	for i := range resolved {
+		for j := i + 1; j < len(resolved); j++ {
+			if syncPathContains(resolved[i], resolved[j]) || syncPathContains(resolved[j], resolved[i]) {
+				return true
+			}
+		}
+	}
+	return false
+}

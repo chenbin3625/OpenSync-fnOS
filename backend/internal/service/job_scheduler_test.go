@@ -209,3 +209,59 @@ func TestSchedulerRejectsOutOfRangeCronField(t *testing.T) {
 		t.Fatal("AddJob() accepted an out-of-range cron field")
 	}
 }
+
+func TestIntervalScheduleAnchorsToLastRun(t *testing.T) {
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+
+	// Overdue: the last run was 90 minutes ago with a 60-minute interval.
+	schedule := newIntervalSchedule(60*time.Minute, now.Add(-90*time.Minute))
+	if got := schedule.Next(now); !got.Equal(now.Add(intervalCatchUpDelay)) {
+		t.Fatalf("overdue Next() = %v, want a catch-up run in %v", got, intervalCatchUpDelay)
+	}
+	if got := schedule.Next(now.Add(intervalCatchUpDelay)); !got.Equal(now.Add(intervalCatchUpDelay + time.Hour)) {
+		t.Fatalf("Next() after catch-up = %v, want one interval later", got)
+	}
+
+	// Not overdue: the next run keeps the original cadence.
+	schedule = newIntervalSchedule(60*time.Minute, now.Add(-10*time.Minute))
+	if got := schedule.Next(now); !got.Equal(now.Add(50 * time.Minute)) {
+		t.Fatalf("anchored Next() = %v, want 50 minutes from now", got)
+	}
+	if got := schedule.Next(now.Add(50 * time.Minute)); !got.Equal(now.Add(110 * time.Minute)) {
+		t.Fatalf("follow-up Next() = %v, want one interval later", got)
+	}
+
+	// Never run: one interval from now, as before.
+	schedule = newIntervalSchedule(60*time.Minute, time.Time{})
+	if got := schedule.Next(now); !got.Equal(now.Add(time.Hour)) {
+		t.Fatalf("first-run Next() = %v, want one interval from now", got)
+	}
+}
+
+func TestSchedulerUsesLastRunTimeFromDeps(t *testing.T) {
+	last := time.Now().Add(-30 * time.Minute).Truncate(time.Second)
+	oldDeps := jobDeps
+	jobDeps = &JobDeps{
+		LastJobTaskCreateTime: func(jobID int64) (int64, error) {
+			if jobID != 7 {
+				t.Fatalf("job id = %d, want 7", jobID)
+			}
+			return last.Unix(), nil
+		},
+	}
+	defer func() { jobDeps = oldDeps }()
+
+	s := NewScheduler()
+	defer s.Stop()
+	if err := s.AddJob(0, map[string]interface{}{"id": 7, "interval": 60, "enable": 1}, func() {}); err != nil {
+		t.Fatalf("AddJob() error: %v", err)
+	}
+	next, ok := s.Next()
+	if !ok {
+		t.Fatal("Next() = not scheduled, want an entry")
+	}
+	want := last.Add(60 * time.Minute)
+	if next.Sub(want) > time.Second || want.Sub(next) > time.Second {
+		t.Fatalf("Next() = %v, want %v (last run + one interval)", next, want)
+	}
+}

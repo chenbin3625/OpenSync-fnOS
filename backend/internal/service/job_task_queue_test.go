@@ -895,26 +895,38 @@ func TestFinishSuccessfulTaskReleasesJobBeforeSlowNotifications(t *testing.T) {
 }
 
 func TestFinalTaskStatusUsesTimeoutWhenContextDeadlineExceeded(t *testing.T) {
-	if status := finalTaskStatus(false, context.DeadlineExceeded, 0, 0); status != taskStatusTimeout {
+	if status := finalTaskStatus(false, context.DeadlineExceeded, 0, 0, 0); status != taskStatusTimeout {
 		t.Fatalf("finalTaskStatus() = %d, want timeout status 5", status)
 	}
 }
 
 func TestFinalTaskStatusKeepsManualBreakAsStopped(t *testing.T) {
-	if status := finalTaskStatus(true, context.DeadlineExceeded, 0, 0); status != taskStatusStopped {
+	if status := finalTaskStatus(true, context.DeadlineExceeded, 0, 0, 0); status != taskStatusStopped {
 		t.Fatalf("finalTaskStatus() = %d, want stopped status 4", status)
 	}
 }
 
 func TestFinalTaskStatusUsesNoSyncWhenNothingWasQueued(t *testing.T) {
-	if status := finalTaskStatus(false, nil, 0, 0); status != taskStatusNoSync {
+	if status := finalTaskStatus(false, nil, 0, 0, 0); status != taskStatusNoSync {
 		t.Fatalf("finalTaskStatus() = %d, want no-sync status 8", status)
 	}
 }
 
 func TestFinalTaskStatusUsesSuccessWhenItemsCompleted(t *testing.T) {
-	if status := finalTaskStatus(false, nil, 3, 0); status != taskStatusSuccess {
+	if status := finalTaskStatus(false, nil, 3, 3, 0); status != taskStatusSuccess {
 		t.Fatalf("finalTaskStatus() = %d, want success status 2", status)
+	}
+}
+
+func TestFinalTaskStatusUsesFailedWhenEveryItemFailed(t *testing.T) {
+	if status := finalTaskStatus(false, nil, 3, 0, 3); status != taskStatusFailed {
+		t.Fatalf("finalTaskStatus() = %d, want failed status 7", status)
+	}
+}
+
+func TestFinalTaskStatusUsesPartialWhenSomeItemsSucceeded(t *testing.T) {
+	if status := finalTaskStatus(false, nil, 3, 1, 2); status != taskStatusPartialFail {
+		t.Fatalf("finalTaskStatus() = %d, want partial status 3", status)
 	}
 }
 
@@ -1050,7 +1062,7 @@ func TestSyncRetryItemsReadsRetrySourceInBatches(t *testing.T) {
 
 	jt := &JobTask{
 		TaskID:            123,
-		Job:               map[string]interface{}{},
+		Job:               map[string]interface{}{"srcPath": "/src/", "dstPath": "/dst/"},
 		RetrySourceTaskID: 55,
 		RetryStatuses:     []taskStatus{taskStatusFailed},
 		Waiting:           newCopyQueue(),
@@ -1066,8 +1078,10 @@ func TestSyncRetryItemsReadsRetrySourceInBatches(t *testing.T) {
 	if items[0].FileName != "one.txt" || items[1].FileName != "two.txt" || items[2].FileName != "three.txt" {
 		t.Fatalf("queued file names = %q, %q, %q; want one/two/three", items[0].FileName, items[1].FileName, items[2].FileName)
 	}
-	if got := batchSizes; len(got) != 2 || got[0] != 2 || got[1] != 1 {
-		t.Fatalf("batch sizes = %v, want [2 1]", got)
+	// The retry source is read twice: once to find directory records that need a
+	// rescan, then to replay the items. Both passes must use the same batching.
+	if got := batchSizes; len(got) != 4 || got[0] != 2 || got[1] != 1 || got[2] != 2 || got[3] != 1 {
+		t.Fatalf("batch sizes = %v, want [2 1 2 1]", got)
 	}
 	if !jt.ScanFinish.Load() {
 		t.Fatalf("ScanFinish = false, want true after retry source is exhausted")

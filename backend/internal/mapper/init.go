@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const currentVersion = 261120
+const currentVersion = 261121
 
 // InitSQL initializes the database schema and runs migrations
 func InitSQL() {
@@ -63,6 +63,7 @@ func InitSQL() {
 				exclude text DEFAULT NULL,
 				minFileSize integer DEFAULT 0,
 				maxFileSize integer DEFAULT 0,
+				dstMap text DEFAULT NULL,
 				createTime integer DEFAULT (strftime('%s', 'now')),
 				UNIQUE (srcPath, dstPath, alistId)
 			)`,
@@ -331,6 +332,13 @@ func migrationStatements(fromVersion int64) []string {
 		// Python implementation; scheduling now uses the dedicated isCron +
 		// second/minute/hour/day/month/day_of_week fields.
 		stmts = append(stmts, "ALTER TABLE job DROP COLUMN cron")
+	}
+	if fromVersion < 261121 {
+		// Persisted per-source destination mapping. Without it, adding or
+		// removing one source re-maps every remaining source, moving their
+		// data on the destination and letting a mirror run delete the old
+		// location.
+		stmts = append(stmts, "ALTER TABLE job ADD COLUMN dstMap text DEFAULT NULL")
 	}
 	if fromVersion < 260920 {
 		// Migrate version tracking from user_list to dedicated schema_version table,

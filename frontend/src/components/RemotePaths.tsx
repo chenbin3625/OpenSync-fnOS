@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Highlight from "@douyinfe/semi-ui/lib/es/highlight";
+import Tag from "@douyinfe/semi-ui/lib/es/tag";
 import TreeSelect, {
   type RenderSelectedItem,
+  type RenderSelectedItemInMultiple,
 } from "@douyinfe/semi-ui/lib/es/treeSelect";
-import { IconRefresh } from "@douyinfe/semi-icons";
+import { IconFolderStroked, IconRefresh } from "@douyinfe/semi-icons";
 import type { TreeNodeData } from "@douyinfe/semi-ui/lib/es/tree/interface";
 import { buildPathTreeData } from "../pages/Home/homeUtils";
 import { useAsyncTree } from "../lib/useAsyncTree";
@@ -114,11 +116,31 @@ export function RemotePaths({
     [],
   );
 
+  // 自己渲染标签而不是交给 Semi 包一层白色 Tag：这样能带上类名和文件夹图标，
+  // “+N” 悬浮层里的标签（挂在 body 下）也能用同一套样式。
+  const renderSelectedTag: RenderSelectedItemInMultiple = (node, { onClose }) => {
+    const path = String(node.value ?? node.key);
+    return {
+      isRenderInTag: false,
+      content: (
+        <Tag
+          key={path}
+          className="remote-paths-tag"
+          size="large"
+          prefixIcon={<IconFolderStroked aria-hidden="true" />}
+          // 与 Semi 自带标签一致：选择框禁用时不能删除
+          closable={Boolean(engineId)}
+          onClose={onClose}
+          // 标签聚焦后按 Delete / Backspace 可移除，读屏需要知道是哪个目录
+          aria-label={`已选目录 ${path}`}
+        >
+          <SelectedPath path={path} />
+        </Tag>
+      ),
+    };
+  };
   const renderSelectedItem: RenderSelectedItem = multiple
-    ? (node: TreeNodeData) => ({
-        isRenderInTag: true,
-        content: <SelectedPath path={String(node.value ?? node.key)} />,
-      })
+    ? renderSelectedTag
     : (node: TreeNodeData) => (
         <SelectedPath path={String(node.value ?? node.key)} />
       );
@@ -168,12 +190,16 @@ export function RemotePaths({
         dropdownClassName="remote-paths-dropdown"
         dropdownStyle={{ maxWidth: "calc(100vw - 32px)" }}
         maxTagCount={multiple ? 2 : undefined}
+        // 超出 2 个时悬停 “+N” 查看其余目录，不必展开目录树去找
+        showRestTagsPopover={multiple}
+        restTagsPopoverProps={{ className: "remote-paths-rest-popover" }}
         showClear
       />
       {loadFailed && (
         <Button
           className="remote-paths-retry"
           size="small"
+          theme="borderless"
           icon={<IconRefresh aria-hidden="true" />}
           loading={refreshing}
           onClick={() => void refresh()}

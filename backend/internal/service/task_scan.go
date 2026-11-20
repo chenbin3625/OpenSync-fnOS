@@ -10,7 +10,6 @@ import (
 	"path"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -118,7 +117,7 @@ func (jt *JobTask) configuredScanWorks(dstPaths []string) []scanWork {
 		srcItem = normalizeDirPath(srcItem)
 		for i, dstItem := range dstPaths {
 			dstItem = normalizeDirPath(dstItem)
-			resolvedDstPath := dstPathForSrcSelection(dstItem, srcItem, srcPaths)
+			resolvedDstPath := jt.dstRootFor(srcItem, dstItem)
 			works = append(works, scanWork{
 				SrcPath:     srcItem,
 				DstPath:     resolvedDstPath,
@@ -170,15 +169,24 @@ func (jt *JobTask) runFullSyncPhases(firstDstWorks, laterWorks []scanWork, spec 
 		return
 	}
 	if jt.RequireFullSyncApproval {
-		var approved bool
-		plans, approved = jt.confirmFullSyncPlans(plans, func() []*fullSyncPlan {
+		planned := plans
+		var result fullSyncApprovalResult
+		plans, result = jt.confirmFullSyncPlans(plans, func() []*fullSyncPlan {
 			fresh := jt.buildFullSyncPlans(firstDstWorks, spec)
 			if !jt.isBreak() {
 				fresh = append(fresh, jt.buildFullSyncPlans(laterWorks, spec)...)
 			}
 			return fresh
 		})
-		if !approved {
+		switch result {
+		case fullSyncApprovalGranted:
+			// plans is the freshly rescanned set.
+		case fullSyncApprovalTimedOut:
+			for _, plan := range planned {
+				jt.executeFullSyncPlan(plan.withoutDestructive())
+			}
+			return
+		default:
 			return
 		}
 	}
@@ -427,11 +435,81 @@ func (jt *JobTask) retryTaskItem(item map[string]interface{}) {
 			jt.CopyHook(srcPath, dstPath, fileName, nil, "", taskStatusFailed, &errMsg, taskItemPath, copyType, time.Now().Unix())
 			return
 		}
+		// The stored paths and type are a snapshot of the configuration at the
+		// time of the original run. Replaying them after the job was edited
+		// could write outside the current destination or — for a move-type
+		// record — delete a source the current job no longer moves. The next
+		// regular run re-decides the work from the current configuration.
+		if !jt.retryItemMatchesConfiguration(copyType, srcPath, dstPath) || !isSafeListedName(fileName) {
+			errMsg := "任务配置已变更，无法安全重试该记录，请重新执行同步任务"
+			log.Printf("Task %d refused to replay %q in %q as type %d under the current job configuration", jt.TaskID, fileName, dstPath, copyType)
+			jt.CopyHook(srcPath, dstPath, fileName, fileSize, "", taskStatusFailed, &errMsg, taskItemFile, copyType, time.Now().Unix())
+			return
+		}
 		jt.queueCopyFile(srcPath, dstPath, fileName, fileSize, copyType, nil)
 	default:
 		errMsg := fmt.Sprintf("unsupported retry task type: %d", copyType)
 		jt.CopyHook(srcPath, dstPath, fileName, fileSize, "", taskStatusFailed, &errMsg, boolToTaskItemObject(isPath), copyType, time.Now().Unix())
 	}
+}
+
+// retryItemMatchesConfiguration reports whether a stored (type, srcPath,
+// dstPath) triple can still be replayed under the current job configuration.
+// Source/destination containment is checked against the configured roots (with
+// the same per-source destination mapping the run uses), and the type has to
+// still mean the same operation: a Transfer record only replays while the job
+// is in move mode, and a destination relocation only in mirror mode.
+func (jt *JobTask) retryItemMatchesConfiguration(copyType taskItemType, srcPath, dstPath string) bool {
+	if srcPath == "" || dstPath == "" {
+		return false
+	}
+	srcPaths := parsePathList(jt.Job["srcPath"])
+	dstPaths := parsePathList(jt.Job["dstPath"])
+	if len(srcPaths) == 0 || len(dstPaths) == 0 {
+		return false
+	}
+	method := util.ToInt(jt.Job["method"])
+	switch copyType {
+	case taskItemTypeTransfer:
+		// A move record copies first and then removes the source, so both
+		// paths must still belong to the current move configuration.
+		if method != 2 {
+			return false
+		}
+	case taskItemTypeMove:
+		// Relocation records move entries inside the destination tree.
+		if method != 1 {
+			return false
+		}
+		for _, dstRoot := range dstPaths {
+			dstRoot = normalizeDirPath(dstRoot)
+			if syncPathContains(dstRoot, srcPath) && syncPathContains(dstRoot, dstPath) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, srcRoot := range srcPaths {
+		srcRoot = normalizeDirPath(srcRoot)
+		if !syncPathContains(srcRoot, srcPath) {
+			continue
+		}
+		for _, dstRoot := range dstPaths {
+			dstRoot = normalizeDirPath(dstRoot)
+			resolved := jt.dstRootFor(srcRoot, dstRoot)
+			if syncPathContains(resolved, dstPath) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// dstRootFor resolves the destination root of one (source, destination)
+// selection pair. It uses the job's persisted mapping so adding or removing a
+// source does not re-map the sources that stay.
+func (jt *JobTask) dstRootFor(srcRoot, dstRoot string) string {
+	return jobDstForSrc(jt.Job, srcRoot, dstRoot)
 }
 
 func (jt *JobTask) mkdirAndRecord(srcPath, dstPath string, copyType taskItemType) taskStatus {
@@ -549,7 +627,7 @@ func (jt *JobTask) scanCopyType() taskItemType {
 	return taskItemTypeCopy
 }
 
-func (jt *JobTask) queueCopyFile(srcPath, dstPath, fileName string, fileSize interface{}, copyType taskItemType, fullWriteFailed *atomic.Bool) {
+func (jt *JobTask) queueCopyFile(srcPath, dstPath, fileName string, fileSize interface{}, copyType taskItemType, fullWriteFailed *fullSyncWriteFailures) {
 	if jt.isBreak() {
 		return
 	}
@@ -1092,10 +1170,19 @@ func fileChanged(srcVal, dstVal interface{}) bool {
 	// is newer (or equal) is left alone, so a copy whose mtime the driver set to
 	// the transfer time does not re-copy on every run.
 	if src.Modified > 0 && dst.Modified > 0 {
-		return src.Modified > dst.Modified
+		// Storage clocks and FAT-style filesystems round modification times to
+		// two seconds, so a difference within that window is not evidence of a
+		// change; requiring a strictly newer second re-copied the same file on
+		// every run.
+		return src.Modified > dst.Modified+fileModifiedTolerance
 	}
 	return false
 }
+
+// fileModifiedTolerance is the largest mtime difference (in seconds) that is
+// treated as clock granularity rather than a change. FAT32 stores times with a
+// two-second resolution and network storages commonly round to the second.
+const fileModifiedTolerance = 2
 
 // isMD5Digest reports whether value looks like a real MD5 hex digest. AList
 // normalizes case but does not validate the shape.

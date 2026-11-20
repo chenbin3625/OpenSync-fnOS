@@ -297,6 +297,12 @@ export const formatSize = (bytes: number) => {
 
 export const getJobName = (job: JobItem) => job.remark || `同步任务 #${job.id}`;
 
+export const formatNextRun = (job: JobItem) => {
+  if (job.isCron === 2) return "仅手动触发";
+  if (!job.nextRunTime || job.nextRunTime <= 0) return formatSchedule(job);
+  return new Date(job.nextRunTime * 1000).toLocaleString("zh-CN", { hour12: false });
+};
+
 export const formatSchedule = (job: JobItem) => {
   if (job.isCron === 0) return `每 ${job.interval} 分钟`;
   if (job.isCron === 1) {

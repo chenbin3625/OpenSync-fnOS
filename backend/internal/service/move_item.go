@@ -17,6 +17,11 @@ type moveStatClient interface {
 type moveSnapshot struct {
 	source FileStat
 	target FileStat
+	// targetIdentical is set when the destination already holds exactly this
+	// file (an earlier interrupted run or an independent copy). The copy is
+	// skipped then: copying again would overwrite a destination file that may
+	// have changed after it was verified.
+	targetIdentical bool
 }
 
 func validMoveMD5(value string) string {
@@ -119,10 +124,35 @@ func (ci *CopyItem) snapshotMove(runtime copyItemRuntime, client copyItemClient)
 	if target.Exists && target.IsDir {
 		return moveSnapshot{}, errors.New("move destination is a directory; source retained")
 	}
+	identical := false
+	if target.Exists {
+		// A move never overwrites a different destination file: the source is
+		// the only copy the user asked to move, and replacing an unrelated
+		// destination file would destroy it. Only an exact match may proceed
+		// (then the copy is skipped and just the verified source removal runs).
+		if !target.SizeKnown || target.Size != source.Size {
+			return moveSnapshot{}, errors.New("move destination already holds a different file; source retained")
+		}
+		sourceMD5, targetMD5 := validMoveMD5(source.MD5), validMoveMD5(target.MD5)
+		switch {
+		case sourceMD5 != "" && targetMD5 != "":
+			if sourceMD5 != targetMD5 {
+				return moveSnapshot{}, errors.New("move destination already holds a different file; source retained")
+			}
+			identical = true
+		case source.Modified > 0 && target.Modified > 0 && source.Modified == target.Modified:
+			// Without hashes, an identical modification time plus an identical
+			// size is the strongest evidence available that this is the same
+			// file written by an earlier move attempt.
+			identical = true
+		default:
+			return moveSnapshot{}, errors.New("move destination holds a same-size file that cannot be verified as identical; source retained")
+		}
+	}
 	if runtime.isBreak() || runtime.context().Err() != nil {
 		return moveSnapshot{}, context.Canceled
 	}
-	return moveSnapshot{source: source, target: target}, nil
+	return moveSnapshot{source: source, target: target, targetIdentical: identical}, nil
 }
 
 func (ci *CopyItem) failMove(runtime copyItemRuntime, err error) {

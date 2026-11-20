@@ -114,7 +114,7 @@ export default function Settings() {
         value < field.min ||
         value > field.max
       ) {
-        Toast.error(`${field.label}请输入 ${field.min}–${field.max} 的整数`);
+        Toast.warning(`${field.label}请输入 ${field.min}–${field.max} 的整数`);
         return;
       }
       values[field.key] = value;

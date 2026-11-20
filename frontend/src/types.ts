@@ -59,6 +59,8 @@ export interface JobItem {
   minFileSize?: number;
   maxFileSize?: number;
   createTime?: number;
+  /** Next scheduled run (unix seconds); 0 or absent when not scheduled. */
+  nextRunTime?: number;
 }
 
 export interface TreeNode {

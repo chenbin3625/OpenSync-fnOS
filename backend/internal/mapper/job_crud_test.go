@@ -31,6 +31,7 @@ const testJobDDL = `CREATE TABLE job(
 	exclude text DEFAULT NULL,
 	minFileSize integer DEFAULT 0,
 	maxFileSize integer DEFAULT 0,
+	dstMap text DEFAULT NULL,
 	createTime integer DEFAULT (strftime('%s', 'now'))
 )`
 

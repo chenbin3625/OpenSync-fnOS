@@ -189,19 +189,8 @@ export function ExcludeTree({
           disabled={!engineId}
           onClick={() => void refresh()}
         >
-          刷新目录
+          {loadFailed ? "重试" : "刷新目录"}
         </Button>
-        {loadFailed && (
-          <Button
-            size="small"
-            theme="borderless"
-            icon={<IconRefresh aria-hidden="true" />}
-            loading={refreshing}
-            onClick={() => void refresh()}
-          >
-            重试加载
-          </Button>
-        )}
       </div>
     </div>
   );

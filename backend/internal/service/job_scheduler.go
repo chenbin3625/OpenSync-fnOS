@@ -18,6 +18,46 @@ import (
 const defaultSchedulerTimeZone = "Asia/Shanghai"
 const schedulerStopTimeout = 5 * time.Second
 
+// intervalCatchUpDelay is how soon an overdue interval job runs after startup.
+// The delay avoids starting every overdue job in the same second right after a
+// restart (and after the engine becomes reachable).
+const intervalCatchUpDelay = time.Minute
+
+// intervalSchedule anchors a fixed-interval job to its last run instead of the
+// moment the scheduler was created. @every restarts its countdown whenever the
+// process restarts or the job is edited, so a job with a 24h interval could be
+// postponed indefinitely by frequent restarts and never catch up. When the
+// computed time is already in the past, the job runs once shortly after
+// scheduling and then keeps the interval; missed intervals are not replayed one
+// by one.
+type intervalSchedule struct {
+	interval time.Duration
+	next     time.Time
+	first    bool
+}
+
+func newIntervalSchedule(interval time.Duration, lastRun time.Time) *intervalSchedule {
+	schedule := &intervalSchedule{interval: interval, first: true}
+	if !lastRun.IsZero() && interval > 0 {
+		schedule.next = lastRun.Add(interval)
+	}
+	return schedule
+}
+
+// Next implements cron.Schedule.
+func (schedule *intervalSchedule) Next(t time.Time) time.Time {
+	if schedule.first {
+		schedule.first = false
+		if !schedule.next.IsZero() {
+			if schedule.next.After(t) {
+				return schedule.next
+			}
+			return t.Add(intervalCatchUpDelay)
+		}
+	}
+	return t.Add(schedule.interval)
+}
+
 // stopCronWithTimeout stops a cron scheduler and waits up to schedulerStopTimeout.
 func stopCronWithTimeout(c *cron.Cron, label string) {
 	ctx := c.Stop()
@@ -150,8 +190,8 @@ func (s *Scheduler) addJobLocked(isCron int, jobData map[string]interface{}, fn 
 		if interval <= 0 {
 			return 0, errors.New(msg.T(msg.IntervalLost))
 		}
-		spec := fmt.Sprintf("@every %dm", interval)
-		return s.cron.AddFunc(spec, fn)
+		schedule := newIntervalSchedule(time.Duration(interval)*time.Minute, s.lastRunTime(jobData))
+		return s.cron.Schedule(schedule, cron.FuncJob(fn)), nil
 	}
 	spec, err := buildCronSpec(jobData)
 	if err != nil {
@@ -166,6 +206,39 @@ func (s *Scheduler) addJobLocked(isCron int, jobData map[string]interface{}, fn 
 	}
 	log.Printf("Built cron spec: %q", spec)
 	return entryID, nil
+}
+
+// lastRunTime returns the start time of the job's most recent task (zero when
+// it never ran or the lookup fails).
+func (s *Scheduler) lastRunTime(jobData map[string]interface{}) time.Time {
+	jobID := util.ToInt64(jobData["id"])
+	if jobID <= 0 || jobDeps == nil || jobDeps.LastJobTaskCreateTime == nil {
+		return time.Time{}
+	}
+	unix, err := jobDeps.LastJobTaskCreateTime(jobID)
+	if err != nil {
+		log.Printf("Failed to read the last run time of job %d; scheduling from now: %v", jobID, err)
+		return time.Time{}
+	}
+	if unix <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(unix, 0)
+}
+
+// Next reports when the scheduled entry will next run. ok is false for manual
+// jobs, disabled jobs, or a stopped scheduler.
+func (s *Scheduler) Next() (time.Time, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cron == nil || s.entryID == 0 {
+		return time.Time{}, false
+	}
+	entry := s.cron.Entry(s.entryID)
+	if entry.ID == 0 || entry.Next.IsZero() {
+		return time.Time{}, false
+	}
+	return entry.Next, true
 }
 
 // Stop shuts down the scheduler

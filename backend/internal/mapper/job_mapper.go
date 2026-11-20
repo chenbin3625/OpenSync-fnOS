@@ -49,6 +49,21 @@ func GetJobByID(jobID int64) (map[string]interface{}, error) {
 	return rst[0], nil
 }
 
+// GetLastJobTaskCreateTime returns the start time of the most recent task of a
+// job, or 0 when it has never run. Used to anchor fixed-interval scheduling to
+// the last run instead of process start.
+func GetLastJobTaskCreateTime(jobID int64) (int64, error) {
+	var createTime int64
+	err := GetDB().QueryRow(
+		`SELECT IFNULL(MAX(createTime), 0) FROM job_task WHERE jobId=?`,
+		jobID,
+	).Scan(&createTime)
+	if err != nil {
+		return 0, err
+	}
+	return createTime, nil
+}
+
 // GetJobByTaskID gets job by task ID
 func GetJobByTaskID(taskID int64) (map[string]interface{}, error) {
 	rst, err := FetchAllToTable(
@@ -71,14 +86,14 @@ func AddJob(job map[string]interface{}) (int64, error) {
 	id, err := ExecuteInsert(
 		`INSERT INTO job (enable, remark, srcPath, dstPath, alistId, useCacheT, scanIntervalT, useCacheS, scanIntervalS,
 		 method, interval, isCron, month, day, day_of_week, hour, minute, second, exclude,
-		 minFileSize, maxFileSize)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 minFileSize, maxFileSize, dstMap)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		job["enable"], job["remark"], job["srcPath"], job["dstPath"], job["alistId"],
 		job["useCacheT"], job["scanIntervalT"], job["useCacheS"], job["scanIntervalS"],
 		job["method"], job["interval"], job["isCron"],
 		job["month"], job["day"], job["day_of_week"],
 		job["hour"], job["minute"], job["second"], job["exclude"],
-		job["minFileSize"], job["maxFileSize"],
+		job["minFileSize"], job["maxFileSize"], job["dstMap"],
 	)
 	if err != nil && strings.Contains(strings.ToLower(err.Error()), "unique constraint failed") {
 		// job has UNIQUE(srcPath, dstPath, alistId); surface the duplicate as a
@@ -101,13 +116,13 @@ func UpdateJob(job map[string]interface{}) error {
 	affected, err := executeUpdateAffected(
 		`UPDATE job SET enable=?, remark=?, srcPath=?, dstPath=?, alistId=?, useCacheT=?, scanIntervalT=?,
 		 useCacheS=?, scanIntervalS=?, method=?, interval=?, isCron=?, month=?, day=?,
-		 day_of_week=?, hour=?, minute=?, second=?, exclude=?, minFileSize=?, maxFileSize=? WHERE id=?`,
+		 day_of_week=?, hour=?, minute=?, second=?, exclude=?, minFileSize=?, maxFileSize=?, dstMap=? WHERE id=?`,
 		job["enable"], job["remark"], job["srcPath"], job["dstPath"], job["alistId"],
 		job["useCacheT"], job["scanIntervalT"], job["useCacheS"], job["scanIntervalS"],
 		job["method"], job["interval"], job["isCron"],
 		job["month"], job["day"], job["day_of_week"],
 		job["hour"], job["minute"], job["second"], job["exclude"],
-		job["minFileSize"], job["maxFileSize"],
+		job["minFileSize"], job["maxFileSize"], job["dstMap"],
 		jobID,
 	)
 	if err != nil {

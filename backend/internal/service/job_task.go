@@ -379,26 +379,61 @@ func (jt *JobTask) clearFullSyncApproval() {
 	}
 }
 
-func (jt *JobTask) waitForFullSyncApproval() bool {
+// fullSyncApprovalWait bounds how long a run waits for operator confirmation.
+// Without a bound a forgotten confirmation dialog blocked the whole job forever:
+// copies were not started, later scheduled runs were skipped, and nothing told
+// the operator. The timeout does not delete anything: the run continues with
+// the non-destructive part of the plan and records why cleanup was skipped.
+var fullSyncApprovalWait = 30 * time.Minute
+
+type fullSyncApprovalResult int
+
+const (
+	fullSyncApprovalGranted fullSyncApprovalResult = iota
+	fullSyncApprovalRejected
+	fullSyncApprovalTimedOut
+)
+
+func (jt *JobTask) waitForFullSyncApproval() fullSyncApprovalResult {
 	jt.fullSyncApprovalMu.Lock()
 	ch := jt.fullSyncApprovalCh
 	jt.fullSyncApprovalMu.Unlock()
 	if ch == nil {
-		return true
+		return fullSyncApprovalGranted
 	}
+	timer := time.NewTimer(fullSyncApprovalWait)
+	defer timer.Stop()
 	select {
 	case <-ch:
 		jt.fullSyncApprovalMu.Lock()
 		approved := jt.fullSyncApproved
 		jt.fullSyncApproval = nil
 		jt.fullSyncApprovalMu.Unlock()
-		return approved
+		if approved {
+			return fullSyncApprovalGranted
+		}
+		return fullSyncApprovalRejected
+	case <-timer.C:
+		jt.fullSyncApprovalMu.Lock()
+		pending := jt.fullSyncApprovalCh == ch
+		if pending {
+			jt.fullSyncApproval = nil
+			jt.fullSyncApprovalCh = nil
+		}
+		jt.fullSyncApprovalMu.Unlock()
+		if !pending {
+			// A decision landed between the timer and the lock.
+			return fullSyncApprovalGranted
+		}
+		log.Printf("Task %d full-sync approval timed out after %s; continuing with copies only", jt.TaskID, fullSyncApprovalWait)
+		jt.notifyProgressNow()
+		return fullSyncApprovalTimedOut
 	case <-jt.context().Done():
 		jt.fullSyncApprovalMu.Lock()
 		jt.fullSyncApproval = nil
 		jt.fullSyncApprovalCh = nil
 		jt.fullSyncApprovalMu.Unlock()
-		return false
+		return fullSyncApprovalRejected
 	}
 }
 
@@ -444,8 +479,8 @@ func (jt *JobTask) finishCopyItem(item *CopyItem) {
 	isPath := item.IsPath
 	createTime := item.CreateTime
 	item.mu.RUnlock()
-	if item.fullWriteFailed != nil && status != taskStatusSuccess {
-		item.fullWriteFailed.Store(true)
+	if item.fullWriteFailed != nil {
+		item.fullWriteFailed.record(dstPath, fileName, fileSize, status)
 	}
 
 	// Remove the item from Doing before recording its final state: the hook

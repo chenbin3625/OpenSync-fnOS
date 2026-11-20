@@ -377,14 +377,14 @@ test("primary surface, cards and controls use consistent radii and full width", 
   const pageBox = await page.locator(".page").boundingBox();
   const sectionBox = await section.boundingBox();
   expect(sectionBox!.width).toBeGreaterThan(pageBox!.width - 60);
-  // 五个设置项合并成两张分组卡片，条目不再各自成卡。
+  // 六个设置项合并成两张分组卡片，条目不再各自成卡。
   await expect(page.locator(".settings-card")).toHaveCount(2);
   await expect(page.locator(".settings-card").first()).toHaveCSS(
     "border-top-width",
     "1px",
   );
   const rows = page.locator(".settings-card-body .setting-row");
-  await expect(rows).toHaveCount(5);
+  await expect(rows).toHaveCount(6);
   await expect(page.locator(".settings-card .settings-card")).toHaveCount(0);
   // 分组标题不带图标，卡片内部也不画分隔线。
   await expect(page.locator(".settings-card .item-symbol")).toHaveCount(0);

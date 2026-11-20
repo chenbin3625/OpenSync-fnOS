@@ -9,6 +9,8 @@
   letter-spacing: 0;
   --shell-bg: #f3f3f3;
   --accent: #0066ff;
+  --accent-hover: #0059df;
+  --accent-active: #004dc2;
   --surface: #fff;
   --surface-soft: #f7f8fa;
   --line: #e6e6e6;
@@ -19,17 +21,6 @@
   --danger-light: #ffecef;
   --switch-bg: #dedede;
   --switch-bg-hover: #d4d4d4;
-  --semi-color-primary: var(--accent);
-  --semi-color-primary-hover: #0059df;
-  --semi-color-primary-active: #004dc2;
-  --semi-color-primary-light-default: #edf3ff;
-  --semi-color-bg-0: var(--surface);
-  --semi-color-bg-1: var(--surface-soft);
-  --semi-color-border: var(--border-control);
-  --semi-color-focus-border: var(--accent);
-  --semi-color-text-2: var(--muted);
-  --semi-border-radius-small: var(--radius);
-  --semi-border-radius-medium: var(--radius);
   --radius: 8px;
   --control-height: 36px;
   --font-size-body: 14px;
@@ -37,7 +28,6 @@
   --font-size-nav: 14px;
   --font-size-section-title: 16px;
   --font-size-page-title: 16px;
-  --font-size-metric: 17px;
   --font-size-modal-title: 18px;
   --success: #30a46c;
   --warning: #f5a623;
@@ -54,6 +44,8 @@ body[theme-mode="dark"] {
   background: #1b1c20;
   --shell-bg: #1b1c20;
   --accent: #6aa7ff;
+  --accent-hover: #85b8ff;
+  --accent-active: #afd0ff;
   --surface: #232429;
   --surface-soft: #2e3036;
   --line: #41444d;
@@ -64,20 +56,32 @@ body[theme-mode="dark"] {
   --danger-light: #4a2b31;
   --switch-bg: #555965;
   --switch-bg-hover: #686c77;
-  --semi-color-primary: var(--accent);
-  --semi-color-primary-hover: #85b8ff;
-  --semi-color-primary-active: #afd0ff;
-  --semi-color-primary-light-default: var(--selected);
-  --semi-color-bg-0: var(--surface);
+  /* 暗色下表格行与分隔线用主题色，亮色沿用 Semi 默认的白底与浅灰线（与参考稿一致） */
   --semi-color-bg-1: var(--surface-soft);
   --semi-color-border: var(--border-control);
-  --semi-color-focus-border: var(--accent);
-  --semi-color-text-2: var(--muted);
   --success: #48c78e;
   --warning: #f4b25d;
   --danger-hover: #ff9396;
   --mask-bg: rgba(10, 11, 14, 0.65);
   --shadow-modal: 0 16px 48px rgba(0, 0, 0, 0.4);
+}
+/* Semi 把主题变量声明在 body 上（见 _base/base.css），写在 :root 的同名值会被
+   body 覆盖，所以换肤必须落在 body 上；暗色再写一份 body[theme-mode="dark"]
+   才能压过 Semi 的暗色规则。这样亮色不会出现「Semi 蓝」与主色并存的两种蓝，
+   危险色也不会和 --danger 不是同一个红。 */
+body,
+body[theme-mode="dark"] {
+  --semi-color-primary: var(--accent);
+  --semi-color-primary-hover: var(--accent-hover);
+  --semi-color-primary-active: var(--accent-active);
+  --semi-color-primary-light-default: var(--selected);
+  --semi-color-danger: var(--danger);
+  --semi-color-danger-hover: var(--danger-hover);
+  --semi-color-danger-active: var(--danger-hover);
+  --semi-color-danger-light-default: var(--danger-light);
+  --semi-color-bg-0: var(--surface);
+  --semi-color-focus-border: var(--accent);
+  --semi-color-text-2: var(--muted);
 }
 body[theme-mode="dark"] .semi-button-primary.semi-button-solid,
 body[theme-mode="dark"] .mobile-job-chip.active {
@@ -463,6 +467,12 @@ h3 {
   object-fit: contain;
   mix-blend-mode: multiply;
 }
+/* 插图是不透明白底的灰线稿：亮色靠 multiply 让白底融进背景，暗色下同一张图会
+   被压成背景色。暗色反过来取负片再用 screen 叠加，白底消失、线条变成浅灰。 */
+body[theme-mode="dark"] .fnos-empty img {
+  mix-blend-mode: screen;
+  filter: invert(1) brightness(2);
+}
 .fnos-empty .semi-empty-content {
   margin-top: 18px;
 }
@@ -563,7 +573,7 @@ h3 {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 20px 20px 16px;
+  padding: 20px 24px 16px;
 }
 .overview-head h2 {
   min-width: 0;
@@ -571,9 +581,6 @@ h3 {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.overview-head .semi-button {
-  margin-left: auto;
 }
 .overview-head-actions {
   display: flex;
@@ -586,8 +593,7 @@ h3 {
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) minmax(0, 1fr);
   align-items: start;
   gap: 16px;
-  padding: 0 20px 20px;
-  border-bottom: 1px solid var(--line);
+  padding: 0 24px 20px;
 }
 .flow-node {
   display: grid;
@@ -804,11 +810,9 @@ body .semi-modal-mask {
   height: 36px;
   min-width: 88px;
 }
-.editor-actions .semi-button:not(.semi-button-primary):not(.semi-button-danger),
-.editor-form > .semi-button:not(.semi-button-primary):not(.semi-button-danger) {
-  background: var(--surface);
-  border: 1px solid var(--border-control);
-  color: var(--semi-color-text-0);
+/* 次要操作（上一步、发送测试通知）靠左，取消/保存固定在右侧 */
+.editor-actions .editor-actions-start {
+  margin-right: auto;
 }
 .editor-modal .semi-input-wrapper,
 .editor-modal .semi-select,
@@ -843,6 +847,14 @@ body .semi-modal-mask {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  min-width: 0;
+}
+/* 路径选择框与下方缓存开关是一组：留出间距，不再上下贴住 */
+.field-group {
+  display: grid;
+  /* minmax(0, …)：否则列宽会被不换行的长路径撑开，选择框伸出弹窗 */
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
   min-width: 0;
 }
 .field > label {
@@ -926,17 +938,111 @@ body .semi-modal-mask {
 .remote-paths-node {
   white-space: nowrap;
 }
-/* 桌面端下拉宽度可以大于选择框，长目录名少滚动 */
-@media (min-width: 768px) {
-  .remote-paths-dropdown {
-    width: 480px;
-  }
+/* 下拉与选择框同宽。原来桌面端固定 480px，比 454px 的任务弹窗还宽，下拉会
+   伸出弹窗右侧。Semi 只按选择框宽度设置行内 min-width，弹层仍会被长目录名
+   撑宽；width: 0 让宽度落到这个 min-width 上，长目录名在列表里横向滚动，
+   悬停可看完整路径。 */
+.remote-paths-dropdown {
+  width: 0;
 }
 .remote-paths-toolbar {
   display: flex;
   justify-content: flex-end;
   padding: 4px 8px;
   border-top: 1px solid var(--semi-color-fill-0);
+}
+/* 已选目录标签：浅主色底 + 主色文字，与其他标签一致；
+   悬浮层（+N）里的标签挂在 body 下，所以不限定在 .remote-paths 内。 */
+.remote-paths-tag.semi-tag {
+  max-width: 100%;
+  min-width: 0;
+  height: 24px;
+  padding: 0 4px 0 8px;
+  gap: 4px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: var(--semi-color-primary-light-default);
+  color: var(--accent);
+  font-size: var(--font-size-small);
+  font-weight: 500;
+  line-height: 22px;
+}
+.remote-paths-tag .semi-tag-prefix-icon {
+  padding-right: 0;
+}
+.remote-paths-tag .semi-tag-prefix-icon .semi-icon {
+  font-size: 14px;
+}
+.remote-paths-tag .semi-tag-content {
+  min-width: 0;
+  justify-content: flex-start;
+}
+.remote-paths-tag .semi-tag-close {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border-radius: 4px;
+  color: inherit;
+  opacity: 0.6;
+}
+.remote-paths-tag .semi-tag-close:hover {
+  opacity: 1;
+  background: var(--semi-color-fill-0);
+}
+.remote-paths-tag .semi-tag-close .semi-icon {
+  font-size: 12px;
+}
+/* 选择框里 Semi 给标签加了 1px 2px 外边距，统一成 4px 间隔。标签固定单行：
+   放不下时先压缩父路径，再省略目录名，选择框高度不随选中数量跳动。 */
+.remote-paths .semi-tree-select-selection {
+  min-width: 0;
+}
+.remote-paths .semi-tree-select-multiple .semi-tree-select-selection {
+  padding-left: 6px;
+}
+/* 占位文字与其他输入框一样距左边 12px */
+.remote-paths .semi-tree-select-multiple .semi-tree-select-selection-placeholder {
+  padding-left: 6px;
+}
+.remote-paths .semi-tree-select-selection .semi-tag-group {
+  flex-wrap: nowrap;
+  min-width: 0;
+  max-width: 100%;
+}
+.remote-paths .semi-tree-select-selection .semi-tag {
+  flex: 0 1 auto;
+  margin: 0 4px 0 0;
+}
+/* 父路径在主色标签里减淡显示，层级仍可分辨 */
+.remote-paths-tag .remote-paths-selected-parent {
+  color: inherit;
+  opacity: 0.65;
+}
+/* “+N” 与标签同高、不参与压缩，悬停可查看其余目录。Tag 默认色也是
+   grey-light，所以排除目录标签本身。 */
+.remote-paths .semi-tag-grey-light:not(.remote-paths-tag) {
+  flex: 0 0 auto;
+  height: 24px;
+  padding: 0 6px;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-size: var(--font-size-small);
+  font-weight: 500;
+  cursor: default;
+}
+.remote-paths-rest-popover .semi-popover-content {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  max-width: min(360px, calc(100vw - 32px));
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 8px;
+}
+.remote-paths-rest-popover .remote-paths-tag.semi-tag {
+  margin: 0;
 }
 /* 选择框内路径：父路径从左侧省略，最后一级目录名完整显示 */
 .remote-paths-selected {
@@ -965,12 +1071,12 @@ body .semi-modal-mask {
 }
 /* 文件夹过滤树 */
 .exclude-tree {
-  border: 1px solid var(--line);
+  border: 1px solid var(--border-control);
   border-radius: var(--radius);
   max-height: 280px;
   overflow-y: auto;
   padding: 8px;
-  background: var(--surface-soft);
+  background: var(--surface);
 }
 .exclude-tree .semi-tree {
   background: transparent;
@@ -1107,13 +1213,14 @@ body .semi-modal-mask {
 }
 .file-type-add .semi-button {
   min-width: 78px;
+  height: var(--control-height);
 }
 .system-dir-groups {
   display: grid;
-  border: 1px solid var(--line);
+  border: 1px solid var(--border-control);
   border-radius: var(--radius);
   overflow: hidden;
-  background: var(--surface-soft);
+  background: var(--surface);
 }
 .system-dir-group {
   display: grid;
@@ -1163,12 +1270,6 @@ body .semi-modal-mask {
 .task-editor-count strong {
   color: var(--accent);
 }
-.task-editor-actions {
-  align-items: center;
-}
-.task-editor-actions > .semi-button:first-child {
-  margin-right: auto;
-}
 .task-editor-step {
   min-height: 0;
   padding-top: 8px;
@@ -1176,6 +1277,106 @@ body .semi-modal-mask {
 .task-editor-step .form-section {
   padding-top: 0;
   border-top: 0;
+}
+/* 任务弹窗：标签栏 / 步骤条固定在顶部，只有下方内容区滚动。
+   高度固定（不超过视口），切换标签时弹窗不再忽高忽低；内容短于这个高度时
+   留白，超出时出现滚动条。 */
+.task-editor-modal .semi-modal-body {
+  display: flex;
+  flex-direction: column;
+  height: min(calc(100dvh - 196px), 520px);
+  max-height: none;
+  padding: 0;
+  overflow: hidden;
+}
+.task-editor-form {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.task-editor-form > fieldset {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.task-editor-nav {
+  flex: 0 0 auto;
+  padding: 0 24px;
+}
+.task-editor-nav--steps {
+  padding-top: 4px;
+}
+.task-editor-nav .semi-tabs-content {
+  display: none;
+}
+/* Semi 的 tabs.css 随懒加载页面后注入，同优先级会覆盖这里，所以选择器多带
+   一层类名。标签始终单行，窄屏放不下时横向滑动（同执行记录的标签栏）。 */
+.task-editor-nav .semi-tabs-bar.semi-tabs-bar-line {
+  display: flex;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  border-bottom: 1px solid var(--line);
+}
+.task-editor-nav .semi-tabs-bar.semi-tabs-bar-line::-webkit-scrollbar {
+  display: none;
+}
+.task-editor-nav .semi-tabs-bar .semi-tabs-tab {
+  flex: 0 0 auto;
+}
+.task-editor-nav .semi-tabs-bar-line .semi-tabs-tab-active {
+  border-bottom: 2px solid var(--accent) !important;
+}
+/* 新建任务：步骤条下的分隔线兼作进度条 */
+.task-editor-progress {
+  height: 2px;
+  margin-top: 12px;
+  border-radius: 1px;
+  background: var(--line);
+  overflow: hidden;
+}
+.task-editor-progress > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+/* 滚动条贴弹窗右边缘、宽 6px，并始终预留位置（scrollbar-gutter），
+   内容右缘与标签栏对齐，切换到需要滚动的标签时内容也不会左右跳。 */
+.task-editor-form .task-editor-step {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 20px 18px 4px 24px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+.task-editor-form .task-editor-step::-webkit-scrollbar {
+  width: 6px;
+}
+.task-editor-form .task-editor-step::-webkit-scrollbar-thumb {
+  border-radius: 3px;
+  background: var(--border-control);
+}
+.task-editor-form .task-editor-step::-webkit-scrollbar-track {
+  background: transparent;
+}
+/* 不支持 ::-webkit-scrollbar 的浏览器（Firefox）用标准属性。Chromium 里一旦
+   设置了标准属性就会忽略上面的 6px 定制，所以只在这里设置。 */
+@supports not selector(::-webkit-scrollbar) {
+  .task-editor-form .task-editor-step {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-control) transparent;
+  }
+}
+/* 内容区固定高度后，底部按钮栏用分隔线和滚动内容分开 */
+.task-editor-modal .semi-modal-footer {
+  border-top: 1px solid var(--line);
+  padding-top: 16px;
 }
 .setting-row {
   display: flex;
@@ -1368,19 +1569,6 @@ body .semi-modal-mask {
 .semi-table-tbody > tr > td {
   padding: 8px 12px;
 }
-.task-tag {
-  display: inline-block;
-  padding: 1px 8px;
-  border-radius: 4px;
-  font-size: var(--font-size-small);
-  font-weight: 500;
-  background: var(--semi-color-primary-light-default);
-  color: var(--accent);
-}
-.task-tag--danger {
-  background: var(--danger-light);
-  color: var(--danger);
-}
 .file-progress {
   display: flex;
   flex-direction: column;
@@ -1486,10 +1674,6 @@ body .semi-modal-mask {
   justify-content: space-between;
   gap: 8px;
   margin-top: 6px;
-}
-.file-record summary {
-  list-style: none;
-  cursor: pointer;
 }
 .file-record .semi-progress {
   margin-top: 12px;
@@ -1695,6 +1879,9 @@ body .semi-modal-mask {
     gap: 8px;
     padding: 0 16px 12px;
   }
+  .info-section {
+    padding: 16px;
+  }
   .flow-arrow {
     justify-self: start;
     transform: rotate(90deg);
@@ -1707,6 +1894,7 @@ body .semi-modal-mask {
   .notification-item {
     flex-wrap: wrap;
     gap: 8px;
+    padding: 20px 16px;
   }
   .item-list .row-actions {
     margin-left: auto;
@@ -1737,6 +1925,28 @@ body .semi-modal-mask {
   }
   .editor-modal .semi-modal-footer {
     padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
+  }
+  /* 弹窗是 flex 子项，默认不会窄于内容的最小宽度；单行标签栏在 320px 宽的
+     屏幕上会把弹窗撑出右边缘。允许收缩到屏幕宽度，标签栏自己横向滑动。 */
+  .task-editor-modal .semi-modal {
+    min-width: 0;
+  }
+  /* 手机上任务弹窗全屏：内容区占满标题和按钮之间的高度 */
+  .task-editor-modal .semi-modal-body {
+    height: auto;
+    min-height: 0;
+    padding: 0;
+  }
+  .task-editor-nav {
+    padding: 0 16px;
+  }
+  /* 收窄标签间距，390px 宽的手机上四个标签一行放得下；更窄时横向滑动 */
+  .task-editor-nav .semi-tabs-bar-line.semi-tabs-bar-top .semi-tabs-tab:not(:last-of-type) {
+    margin-right: 20px;
+  }
+  .task-editor-form .task-editor-step {
+    padding: 16px 16px 4px;
+    scrollbar-gutter: auto;
   }
   .editor-modal .semi-modal-close {
     top: 14px;
@@ -1959,12 +2169,6 @@ body .semi-modal-mask {
 .semi-tree-option-switcher:hover {
   background: var(--surface-soft);
 }
-.task-tab-content,
-.overview,
-.item-list {
-  max-width: none;
-}
-
 /* Keep compact controls consistent with fnOS's outlined icon treatment. */
 .semi-icon,
 .semi-button .semi-icon,
@@ -2037,17 +2241,17 @@ body .semi-modal-mask {
   text-align: left;
   white-space: pre-wrap;
   word-break: break-word;
-  border-radius: 6px;
+  border-radius: var(--radius);
   background: var(--semi-color-fill-0);
   color: var(--semi-color-text-1);
-  font-size: 12px;
+  font-size: var(--font-size-small);
 }
 .app-error-boundary button {
   padding: 8px 20px;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius);
   background: var(--semi-color-primary);
   color: #fff;
   cursor: pointer;
-  font-size: 14px;
+  font-size: var(--font-size-body);
 }

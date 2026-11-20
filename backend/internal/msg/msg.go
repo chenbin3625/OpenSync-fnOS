@@ -79,6 +79,8 @@ const (
 	FmtMirrorDeleteGuard       = "FmtMirrorDeleteGuard"
 	FmtUnsafeDeleteTarget      = "FmtUnsafeDeleteTarget"
 	FmtScanError               = "FmtScanError"
+	FmtJobDstConflict          = "FmtJobDstConflict"
+	FmtFullSyncApprovalTimeout = "FmtFullSyncApprovalTimeout"
 	FmtAlistFailCodeReason     = "FmtAlistFailCodeReason"
 	FmtNotifyError             = "FmtNotifyError"
 	FmtSettingsRangeError      = "FmtSettingsRangeError"
@@ -157,6 +159,8 @@ var translations = map[string]map[string]string{
 		FmtMirrorDeleteGuard:       "为防止误删，已跳过本次全量同步的删除阶段：%s。请确认来源目录可正常列举后重试",
 		FmtUnsafeDeleteTarget:      "已拒绝删除 %q（位于 %q）：名称不是单个文件或目录",
 		FmtScanError:               "%s目录扫描失败，原因为: %s",
+		FmtJobDstConflict:          "目标目录 %s 已被其他同步任务使用，两个任务会互相覆盖或删除对方写入的文件，请调整目标目录",
+		FmtFullSyncApprovalTimeout: "全量同步确认等待超时，本次只执行了新增和更新，未删除目标端多余文件；请确认后手动执行一次全量同步",
 		FmtAlistFailCodeReason:     "AList返回%d错误，原因为：%s",
 		FmtNotifyError:             "发送通知过程中失败，原因为：%s",
 		FmtSettingsRangeError:      "%s必须在%d到%d之间",
@@ -228,6 +232,8 @@ var translations = map[string]map[string]string{
 		FmtMirrorDeleteGuard:       "To prevent accidental deletion, the delete phase of this full sync was skipped: %s. Please verify the source directory can be listed correctly and try again",
 		FmtUnsafeDeleteTarget:      "Refused to delete %q in %q: the name is not a single file or directory",
 		FmtScanError:               "%s directory scan failed: %s",
+		FmtJobDstConflict:          "Destination directory %s is already used by another sync job; the two jobs would overwrite or delete each other's files, please adjust the destination",
+		FmtFullSyncApprovalTimeout: "Full sync approval timed out; this run only copied new and changed files and deleted nothing. Review the plan and run a full sync again",
 		FmtAlistFailCodeReason:     "AList returned error %d: %s",
 		FmtNotifyError:             "Notification failed: %s",
 		FmtSettingsRangeError:      "%s must be between %d and %d",
@@ -307,6 +313,17 @@ func UnsafeDeleteTarget(fileName, dir string) string {
 
 func ScanError(srcOrDst, reason string) string {
 	return fmt.Sprintf(T(FmtScanError), srcOrDst, reason)
+}
+
+// JobDstConflict reports a destination root shared with another job.
+func JobDstConflict(path string) string {
+	return fmt.Sprintf(T(FmtJobDstConflict), path)
+}
+
+// FullSyncApprovalTimeout reports that a full sync ran copies only because the
+// destructive plan was never confirmed.
+func FullSyncApprovalTimeout() string {
+	return T(FmtFullSyncApprovalTimeout)
 }
 
 func AlistFailCodeReason(code int, message string) string {

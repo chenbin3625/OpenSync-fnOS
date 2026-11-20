@@ -52,8 +52,8 @@ func approvalTestTask(t *testing.T, rec *removeRecorder) *JobTask {
 
 func TestFullSyncWaitsForApprovalBeforeDeleting(t *testing.T) {
 	rec := &removeRecorder{listings: map[string]string{
-		"/src/": `{"total":0,"content":[]}`,
-		"/dst/": `{"total":1,"content":[{"name":"old.txt","is_dir":false,"size":12}]}`,
+		"/src/": `{"total":1,"content":[{"name":"keep.txt","is_dir":false,"size":1}]}`,
+		"/dst/": `{"total":2,"content":[{"name":"keep.txt","is_dir":false,"size":1},{"name":"old.txt","is_dir":false,"size":12}]}`,
 	}}
 	jt := approvalTestTask(t, rec)
 	done := make(chan struct{})
@@ -81,8 +81,8 @@ func TestFullSyncWaitsForApprovalBeforeDeleting(t *testing.T) {
 
 func TestFullSyncRejectKeepsDestinationUntouched(t *testing.T) {
 	rec := &removeRecorder{listings: map[string]string{
-		"/src/": `{"total":0,"content":[]}`,
-		"/dst/": `{"total":1,"content":[{"name":"old.txt","is_dir":false,"size":12}]}`,
+		"/src/": `{"total":1,"content":[{"name":"keep.txt","is_dir":false,"size":1}]}`,
+		"/dst/": `{"total":2,"content":[{"name":"keep.txt","is_dir":false,"size":1},{"name":"old.txt","is_dir":false,"size":12}]}`,
 	}}
 	jt := approvalTestTask(t, rec)
 	done := make(chan struct{})
@@ -102,8 +102,8 @@ func TestFullSyncRejectKeepsDestinationUntouched(t *testing.T) {
 
 func TestFullSyncRepromptsWhenPlanChangesAfterApproval(t *testing.T) {
 	rec := &removeRecorder{listings: map[string]string{
-		"/src/": `{"total":0,"content":[]}`,
-		"/dst/": `{"total":1,"content":[{"name":"old.txt","is_dir":false,"size":12}]}`,
+		"/src/": `{"total":1,"content":[{"name":"keep.txt","is_dir":false,"size":1}]}`,
+		"/dst/": `{"total":2,"content":[{"name":"keep.txt","is_dir":false,"size":1},{"name":"old.txt","is_dir":false,"size":12}]}`,
 	}}
 	jt := approvalTestTask(t, rec)
 	done := make(chan struct{})
@@ -116,7 +116,7 @@ func TestFullSyncRepromptsWhenPlanChangesAfterApproval(t *testing.T) {
 	if first.DeleteCount != 1 {
 		t.Fatalf("first approval = %+v, want one delete", first)
 	}
-	rec.listings["/dst/"] = `{"total":2,"content":[{"name":"old.txt","is_dir":false,"size":12},{"name":"new.txt","is_dir":false,"size":8}]}`
+	rec.listings["/dst/"] = `{"total":3,"content":[{"name":"keep.txt","is_dir":false,"size":1},{"name":"old.txt","is_dir":false,"size":12},{"name":"new.txt","is_dir":false,"size":8}]}`
 	if err := jt.approveFullSync(); err != nil {
 		t.Fatalf("first approveFullSync() error: %v", err)
 	}
@@ -137,9 +137,9 @@ func TestFullSyncRepromptsWhenPlanChangesAfterApproval(t *testing.T) {
 
 func TestFullSyncApprovalCombinesAllDestinationRoots(t *testing.T) {
 	rec := &removeRecorder{listings: map[string]string{
-		"/src/":     `{"total":0,"content":[]}`,
-		"/one-dst/": `{"total":1,"content":[{"name":"a.txt","is_dir":false,"size":1}]}`,
-		"/two-dst/": `{"total":1,"content":[{"name":"b.txt","is_dir":false,"size":2}]}`,
+		"/src/":     `{"total":1,"content":[{"name":"keep.txt","is_dir":false,"size":1}]}`,
+		"/one-dst/": `{"total":2,"content":[{"name":"keep.txt","is_dir":false,"size":1},{"name":"a.txt","is_dir":false,"size":1}]}`,
+		"/two-dst/": `{"total":2,"content":[{"name":"keep.txt","is_dir":false,"size":1},{"name":"b.txt","is_dir":false,"size":2}]}`,
 	}}
 	deps := *jobDeps
 	deps.ScanListRetryDelay = func(int) time.Duration { return 0 }
@@ -208,5 +208,38 @@ func TestFullSyncApprovalPreviewBoundedPaths(t *testing.T) {
 	want := fullSyncApprovalPathLimit + 5
 	if approval.PathCount != want || len(approval.Paths) != fullSyncApprovalPathLimit {
 		t.Fatalf("preview paths = %d/%d, want %d of %d", len(approval.Paths), approval.PathCount, fullSyncApprovalPathLimit, want)
+	}
+}
+
+// A forgotten confirmation must not block the job forever. On timeout the safe
+// half of the plan still runs (copies and new directories), while every
+// destructive action is skipped for a later, explicitly approved run.
+func TestFullSyncApprovalTimeoutRunsCopiesWithoutDeleting(t *testing.T) {
+	oldWait := fullSyncApprovalWait
+	fullSyncApprovalWait = 20 * time.Millisecond
+	defer func() { fullSyncApprovalWait = oldWait }()
+
+	rec := &removeRecorder{listings: map[string]string{
+		"/src/": `{"total":2,"content":[{"name":"keep.txt","is_dir":false,"size":1},{"name":"new.txt","is_dir":false,"size":3}]}`,
+		"/dst/": `{"total":2,"content":[{"name":"keep.txt","is_dir":false,"size":1},{"name":"old.txt","is_dir":false,"size":12}]}`,
+	}}
+	jt := approvalTestTask(t, rec)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		jt.sync()
+	}()
+	waitForSyncExit(t, done)
+	jt.runFullSyncDeletes()
+
+	if calls := rec.calls(); len(calls) != 0 {
+		t.Fatalf("remove calls after an approval timeout = %#v, want none", calls)
+	}
+	waiting := jt.Waiting.snapshot()
+	if len(waiting) != 1 || waiting[0].FileName != "new.txt" {
+		t.Fatalf("queued copies = %#v, want new.txt copied despite the timeout", waiting)
+	}
+	if approval := jt.fullSyncApprovalSnapshot(); approval != nil {
+		t.Fatalf("approval still pending after timeout: %+v", approval)
 	}
 }
