@@ -1,31 +1,14 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Tree from "@douyinfe/semi-ui/lib/es/tree";
 import type { TreeNodeData } from "@douyinfe/semi-ui/lib/es/tree/interface";
 import { IconRefresh } from "@douyinfe/semi-icons";
 import {
+  applyExcludeTreeCheck,
+  buildExcludeCheckedKeys,
   initialExcludeExpandedKeys,
-  normalizeExcludeRootPath,
 } from "../lib/excludeTree";
 import { useAsyncTree } from "../lib/useAsyncTree";
-
-/**
- * 将绝对路径转为相对于某个 srcPath 的目录过滤路径。
- * 例如 srcPath="/data", abs="/data/photos/raw" → "photos/raw/"
- */
-function toRelative(srcPath: string, abs: string): string {
-  const root = normalizeExcludeRootPath(srcPath);
-  let rel = abs.startsWith(root + "/")
-    ? abs.slice(root.length + 1)
-    : root === "/"
-      ? abs.slice(1)
-      : abs.startsWith(root)
-      ? abs.slice(root.length)
-      : abs;
-  rel = rel.replace(/^\/+/, "");
-  if (!rel.endsWith("/")) rel += "/";
-  return rel;
-}
 
 export function ExcludeTree({
   id,
@@ -47,6 +30,7 @@ export function ExcludeTree({
   const [loadFailed, setLoadFailed] = useState(false);
   const onLoaded = useCallback(() => setLoadFailed(false), []);
   const onError = useCallback(() => setLoadFailed(true), []);
+  const lastClickedKeyRef = useRef<string | null>(null);
   const srcKey = srcPaths.join(",");
   // 刷新/重试必须从源目录根节点开始；从 "/" 开始会把已展开的子目录全部当成已删除而折叠
   const rootKeys = useMemo(
@@ -99,44 +83,22 @@ export function ExcludeTree({
   }, [engineId, srcPaths.join(",")]);
 
   // 将 excludedPaths 相对路径转换为绝对 key 用于勾选
-  const checkedKeys = excludedPaths.flatMap((rel) => {
-    const clean = rel.replace(/^\/+/, "").replace(/\/+$/, "");
-    if (!clean) return [];
-    return srcPaths.map((sp) => {
-      const root = normalizeExcludeRootPath(sp);
-      return root === "/" ? "/" + clean : root + "/" + clean;
-    });
-  });
+  const checkedKeys = useMemo(
+    () => buildExcludeCheckedKeys(srcPaths, excludedPaths),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [srcKey, excludedPaths],
+  );
 
   const handleCheck = useCallback(
     (keys: unknown) => {
       const checked = (Array.isArray(keys) ? keys : []).map(String);
-      // 将绝对路径转为相对路径去重
-      const relSet = new Set<string>();
-      for (const abs of checked) {
-        for (const sp of srcPaths) {
-          const root = normalizeExcludeRootPath(sp);
-          if (abs === root) continue;
-          if (
-            (root === "/" && abs.startsWith("/")) ||
-            abs.startsWith(root + "/")
-          ) {
-            relSet.add(toRelative(sp, abs));
-            break;
-          }
-        }
-      }
-      // 去重：父目录已选中时移除子目录路径，只保留最顶层
-      const sorted = Array.from(relSet).sort();
-      const deduped: string[] = [];
-      for (const p of sorted) {
-        if (!deduped.some((ancestor) => p.startsWith(ancestor))) {
-          deduped.push(p);
-        }
-      }
-      onChange(deduped);
+      const clickedKey = lastClickedKeyRef.current;
+      lastClickedKeyRef.current = null;
+      onChange(
+        applyExcludeTreeCheck(srcPaths, excludedPaths, checked, clickedKey),
+      );
     },
-    [srcPaths, onChange],
+    [srcPaths, excludedPaths, onChange],
   );
 
   if (!engineId || !srcPaths.length) {
@@ -166,7 +128,11 @@ export function ExcludeTree({
           treeData={treeData}
           multiple
           checkRelation="related"
+          autoMergeValue={false}
           value={checkedKeys}
+          onSelect={(selectedKey) => {
+            lastClickedKeyRef.current = String(selectedKey);
+          }}
           onChange={handleCheck}
           loadData={loadData}
           // 受控 loadedKeys，让加载失败的节点可以重新请求；与 RemotePaths 一致

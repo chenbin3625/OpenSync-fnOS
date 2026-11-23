@@ -161,9 +161,25 @@ test("returning to the app shortly after a check does not check again", async ({
     hasUpdate: false,
   }, 200, "0.0.26", () => checks++);
   await page.goto("/app/opensync/settings");
-  await expect.poll(() => checks).toBe(2);
-  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
-  await expect.poll(() => checks).toBe(2);
+  await expect(
+    entry(page).getByRole("link", { name: "GitHub 当前版本 v0.0.26" }),
+  ).toBeVisible();
+  await expect.poll(() => checks).toBeGreaterThanOrEqual(1);
+  const initialChecks = checks;
+  await page.evaluate(async () => {
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "hidden",
+    });
+    document.dispatchEvent(new Event("visibilitychange"));
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "visible",
+    });
+    document.dispatchEvent(new Event("visibilitychange"));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  });
+  expect(checks).toBe(initialChecks);
 });
 
 test("local development build displays dev without a version prefix", async ({ page }) => {

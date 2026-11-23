@@ -4,9 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // ConvertBytes converts bytes to human-readable string
@@ -167,13 +169,45 @@ func StringValue(v interface{}) string {
 // otherwise use the URL as an SSRF primitive). Callers must keep this input
 // administrator-only.
 func ValidateHTTPURL(rawURL, errMsg string) error {
-	u, err := url.Parse(strings.TrimSpace(rawURL))
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		return errors.New(errMsg)
+	}
+	for _, r := range trimmed {
+		if r < 0x20 || r == 0x7f || unicode.IsSpace(r) {
+			return errors.New(errMsg)
+		}
+	}
+	u, err := url.Parse(trimmed)
 	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil {
 		return errors.New(errMsg)
 	}
 	scheme := strings.ToLower(u.Scheme)
 	if scheme != "http" && scheme != "https" {
 		return errors.New(errMsg)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return errors.New(errMsg)
+	}
+	if strings.HasPrefix(u.Host, "[") && strings.HasSuffix(u.Host, "]") {
+		if net.ParseIP(host) == nil {
+			return errors.New(errMsg)
+		}
+		return nil
+	}
+	if strings.Contains(u.Host, ":") {
+		h, portStr, err := net.SplitHostPort(u.Host)
+		if err != nil || h == "" || portStr == "" {
+			return errors.New(errMsg)
+		}
+		if strings.HasPrefix(u.Host, "[") && net.ParseIP(h) == nil {
+			return errors.New(errMsg)
+		}
+		port, err := strconv.Atoi(portStr)
+		if err != nil || port < 1 || port > 65535 {
+			return errors.New(errMsg)
+		}
 	}
 	return nil
 }

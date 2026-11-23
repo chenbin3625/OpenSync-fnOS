@@ -72,13 +72,13 @@ describe("mock HTTP handlers", () => {
   it("mirrors the backend notification contract", async () => {
     resetMockStore({ notifications: [] });
 
-    // The real handler answers HTTP 200 with code 500 for missing `enable`.
+    // The real handler answers HTTP 400 with code 500 for missing `enable`.
     const missingEnable = await fetch(`${apiUrl}/notify`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ notify: { method: 1, params: {} } }),
     });
-    expect(missingEnable.status).toBe(200);
+    expect(missingEnable.status).toBe(400);
     expect(await json<{ code: number; msg: string }>(missingEnable)).toMatchObject({
       code: 500,
       msg: "缺少必要参数",

@@ -985,9 +985,13 @@ func (plan *fullSyncPlan) approvalPreview() *FullSyncApproval {
 	relocatedCounts := make(map[string]int, len(relocations))
 	relocatedSizes := make(map[string]int64, len(relocations))
 	for _, relocation := range relocations {
-		consumed[relocation.source.deleteRoot] = struct{}{}
+		if relocation.source.deleteRoot == relocation.source.object {
+			consumed[relocation.source.deleteRoot] = struct{}{}
+		}
 		relocatedCounts[relocation.source.deleteRoot]++
-		relocatedSizes[relocation.source.deleteRoot] += relocation.source.metadata.Size
+		if relocation.source.metadata.Size > 0 {
+			relocatedSizes[relocation.source.deleteRoot] += relocation.source.metadata.Size
+		}
 	}
 	preview := &FullSyncApproval{}
 	var signatureParts []string
@@ -1597,11 +1601,14 @@ func fullSyncPathBlocked(value string, blocked map[string]struct{}) bool {
 	// Walk ancestors upward: O(depth) instead of O(len(blocked)).
 	for {
 		parent := path.Dir(value)
-		if parent == value || parent == "." || parent == "/" {
+		if parent == value {
 			break
 		}
 		if _, ok := blocked[parent]; ok {
 			return true
+		}
+		if parent == "." || parent == "/" {
+			break
 		}
 		value = parent
 	}

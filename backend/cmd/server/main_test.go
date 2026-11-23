@@ -434,3 +434,84 @@ func TestBodyLimitMiddlewareAnswers413ForChunkedBody(t *testing.T) {
 		t.Fatalf("body = %s, want the 413 envelope", w.Body.String())
 	}
 }
+
+// stopServer hitting its budget must force-close the server and leave the rest
+// of the non-notify phase budget for stopJobs, and stopRetention must run
+// before stopJobs.
+func TestGracefulShutdownSeparatesServerAndJobsBudgets(t *testing.T) {
+	const total = 450 * time.Millisecond
+	const reserve = 150 * time.Millisecond
+	var order []string
+	var jobsBudget time.Duration
+	gracefulShutdown(shutdownSteps{
+		cancelRequests: func() { order = append(order, "cancelRequests") },
+		stopServer: func(ctx context.Context) error {
+			order = append(order, "stopServer")
+			<-ctx.Done()
+			return ctx.Err()
+		},
+		closeServer:   func() error { order = append(order, "closeServer"); return nil },
+		stopRetention: func() { order = append(order, "stopRetention") },
+		stopJobs: func(ctx context.Context) {
+			order = append(order, "stopJobs")
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				t.Error("jobs context has no deadline")
+				return
+			}
+			jobsBudget = time.Until(deadline)
+		},
+		stopNotify:      func(context.Context) { order = append(order, "stopNotify") },
+		stopNotifyTests: func(context.Context) { order = append(order, "stopNotifyTests") },
+	}, total, reserve)
+
+	wantOrder := []string{"cancelRequests", "stopServer", "closeServer", "stopRetention", "stopJobs", "stopNotify", "stopNotifyTests"}
+	if !reflect.DeepEqual(order, wantOrder) {
+		t.Fatalf("order = %v, want %v", order, wantOrder)
+	}
+	// phaseBudget = 300ms, serverBudget = 100ms, so stopJobs gets ~200ms.
+	if jobsBudget < 120*time.Millisecond {
+		t.Fatalf("jobs budget after server timeout = %s, want >= 120ms", jobsBudget)
+	}
+}
+
+// discard must unlink its socket while still holding the startup lock, so a
+// second instance waiting on the lock never races with the old discard.
+func TestSocketPublisherDiscardUnlinksBeforeReleasingLock(t *testing.T) {
+	dir := shortSocketDir(t)
+	socket := filepath.Join(dir, "app.sock")
+	listener, publish, err := openListener(false, "", dir)
+	if err != nil {
+		t.Fatalf("openListener() error: %v", err)
+	}
+	if err := publish.commit(); err != nil {
+		listener.Close()
+		publish.discard()
+		t.Fatalf("commit() error: %v", err)
+	}
+	// While publish holds its lock, a second acquireStartupLock must fail.
+	if _, err := acquireStartupLock(dir); !errors.Is(err, errServiceAlreadyRunning) {
+		listener.Close()
+		publish.discard()
+		t.Fatalf("acquireStartupLock while publisher active = %v, want errServiceAlreadyRunning", err)
+	}
+	listener.Close()
+	publish.discard()
+	if _, err := os.Lstat(socket); !os.IsNotExist(err) {
+		t.Fatalf("socket still exists after discard: %v", err)
+	}
+	// Idempotent second discard must not touch a newly opened instance's socket.
+	l2, p2, err := openListener(false, "", dir)
+	if err != nil {
+		t.Fatalf("second openListener() error: %v", err)
+	}
+	defer l2.Close()
+	defer p2.discard()
+	if err := p2.commit(); err != nil {
+		t.Fatalf("second commit() error: %v", err)
+	}
+	publish.discard()
+	if _, err := os.Lstat(socket); err != nil {
+		t.Fatalf("second instance socket removed by stale discard: %v", err)
+	}
+}

@@ -440,17 +440,28 @@ test("settings uses plain inputs, validates limits and keeps backend units", asy
   await expect(
     page.getByRole("button", { name: "还原", exact: true }),
   ).toHaveCount(0);
+  let saveRequests = 0;
+  await page.route("**/app/opensync/svr/system/config", async (route) => {
+    if (route.request().method() === "PUT") saveRequests += 1;
+    await route.continue();
+  });
   await timeout.fill("abc");
   await save.click();
-  await expect(
-    page.getByText("任务超时请输入 0–8760 的整数", { exact: true }),
-  ).toBeVisible();
+  const warningToast = page
+    .locator(".semi-toast-content")
+    .filter({ hasText: "任务超时请输入 0–8760 的整数" });
+  await expect(warningToast).toHaveCount(1);
+  await expect(warningToast).toBeVisible();
+  const closeToast = page.locator(".semi-toast-close-button").first();
+  if (await closeToast.isVisible()) {
+    await closeToast.click();
+  }
+  await expect(warningToast).toHaveCount(0, { timeout: 6000 });
   await timeout.fill("8761");
-  // 前一次校验错误 Toast 仍覆盖在保存按钮上，强制点击以继续验证第二条提示。
-  await save.click({ force: true });
-  await expect(
-    page.getByText("任务超时请输入 0–8760 的整数", { exact: true }).first(),
-  ).toBeVisible();
+  await save.click();
+  await expect(warningToast).toHaveCount(1);
+  await expect(warningToast).toBeVisible();
+  expect(saveRequests).toBe(0);
   await page.reload();
   await expect(timeout).toHaveValue(original);
   await expect(page.getByText("小时", { exact: true })).toBeVisible();

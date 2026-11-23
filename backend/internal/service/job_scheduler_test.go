@@ -1,6 +1,7 @@
 package service
 
 import (
+	"math"
 	"testing"
 	"time"
 )
@@ -263,5 +264,52 @@ func TestSchedulerUsesLastRunTimeFromDeps(t *testing.T) {
 	want := last.Add(60 * time.Minute)
 	if next.Sub(want) > time.Second || want.Sub(next) > time.Second {
 		t.Fatalf("Next() = %v, want %v (last run + one interval)", next, want)
+	}
+}
+
+func TestValidateJobInputRejectsOverflowingInterval(t *testing.T) {
+	for _, badInterval := range []interface{}{
+		0, -1, maxJobIntervalMinutes + 1, int64(200000000), int64(math.MaxInt64), "abc", 1.5,
+	} {
+		job := map[string]interface{}{
+			"srcPath":  []string{"/src"},
+			"dstPath":  []string{"/dst"},
+			"alistId":  int64(1),
+			"method":   0,
+			"isCron":   0,
+			"interval": badInterval,
+		}
+		if err := ValidateJobInput(job); err == nil {
+			t.Fatalf("ValidateJobInput() accepted invalid/overflowing interval %#v", badInterval)
+		}
+	}
+}
+
+func TestSchedulerRejectsOverflowingInterval(t *testing.T) {
+	s := NewScheduler()
+	defer s.Stop()
+
+	err := s.AddJob(0, map[string]interface{}{
+		"enable":   1,
+		"isCron":   0,
+		"interval": maxJobIntervalMinutes + 1,
+	}, func() {})
+	if err == nil {
+		t.Fatal("AddJob() accepted interval exceeding maxJobIntervalMinutes")
+	}
+}
+
+func TestIntervalScheduleGuardsNonPositiveDuration(t *testing.T) {
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+
+	for _, s := range []*intervalSchedule{
+		newIntervalSchedule(0, time.Time{}),
+		newIntervalSchedule(-5*time.Minute, now.Add(-time.Minute)),
+		{interval: -time.Second},
+	} {
+		next := s.Next(now)
+		if !next.After(now) {
+			t.Fatalf("Next(%v) = %v, must strictly advance past now", now, next)
+		}
 	}
 }

@@ -13,13 +13,20 @@ async function bootstrap() {
   // shipping inside the go:embed payload and relying on VITE_DATA_MODE being
   // unset at runtime.
   if (import.meta.env.DEV && isMockApiMode()) {
-    const { worker } = await import("./mocks/browser");
-    await worker.start({
-      onUnhandledRequest: "error",
-      serviceWorker: {
-        url: `${import.meta.env.BASE_URL}mockServiceWorker.js`,
-      },
-    });
+    try {
+      const { worker } = await import("./mocks/browser");
+      await worker.start({
+        onUnhandledRequest: "error",
+        serviceWorker: {
+          url: `${import.meta.env.BASE_URL}mockServiceWorker.js`,
+        },
+      });
+    } catch (err) {
+      console.warn(
+        "MSW worker failed to start; continuing without mock service worker.",
+        err,
+      );
+    }
   }
 
   createRoot(document.getElementById("root")!).render(

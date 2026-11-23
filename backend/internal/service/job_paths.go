@@ -5,9 +5,10 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"unicode"
 )
 
-func parsePathList(value interface{}) []string {
+func parseRawPathList(value interface{}) []string {
 	switch v := value.(type) {
 	case nil:
 		return nil
@@ -19,21 +20,37 @@ func parsePathList(value interface{}) []string {
 		if strings.HasPrefix(raw, "[") {
 			var paths []string
 			if err := json.Unmarshal([]byte(raw), &paths); err == nil {
-				return cleanPathList(paths)
+				return trimNonEmptyPaths(paths)
 			}
 		}
-		return cleanPathList([]string{raw})
+		return trimNonEmptyPaths([]string{raw})
 	case []string:
-		return cleanPathList(v)
+		return trimNonEmptyPaths(v)
 	case []interface{}:
 		paths := make([]string, 0, len(v))
 		for _, item := range v {
 			paths = append(paths, fmt.Sprintf("%v", item))
 		}
-		return cleanPathList(paths)
+		return trimNonEmptyPaths(paths)
 	default:
-		return cleanPathList([]string{fmt.Sprintf("%v", v)})
+		return trimNonEmptyPaths([]string{fmt.Sprintf("%v", v)})
 	}
+}
+
+func trimNonEmptyPaths(paths []string) []string {
+	out := make([]string, 0, len(paths))
+	for _, item := range paths {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func parsePathList(value interface{}) []string {
+	return cleanPathList(parseRawPathList(value))
 }
 
 func encodePathList(paths []string) string {
@@ -49,12 +66,37 @@ func normalizePathListForStorage(value interface{}) string {
 	return encodePathList(parsePathList(value))
 }
 
+func pathHasParentSegment(value string) bool {
+	for _, segment := range strings.FieldsFunc(value, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if segment == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+func pathHasUnsafeChars(value string) bool {
+	for _, r := range value {
+		if r == '\\' || r == '\x00' || unicode.IsControl(r) {
+			return true
+		}
+	}
+	return false
+}
+
 func pathListHasParentSegment(paths []string) bool {
 	for _, value := range paths {
-		for _, segment := range strings.FieldsFunc(value, func(r rune) bool { return r == '/' || r == '\\' }) {
-			if segment == ".." {
-				return true
-			}
+		if pathHasParentSegment(value) {
+			return true
+		}
+	}
+	return false
+}
+
+func pathListHasUnsafeChars(paths []string) bool {
+	for _, value := range paths {
+		if pathHasUnsafeChars(value) {
+			return true
 		}
 	}
 	return false
@@ -135,13 +177,25 @@ func resolvedDstPathsNested(srcPaths, dstPaths []string) bool {
 // at worst reject a genuinely distinct pair on a case-sensitive backend, which
 // is the safe direction for a check whose failure mode is deleting files.
 func syncPathContains(parent, candidate string) bool {
-	parent = strings.ToLower(path.Clean(strings.TrimSpace(parent)))
-	candidate = strings.ToLower(path.Clean(strings.TrimSpace(candidate)))
+	parent = strings.TrimSpace(parent)
+	candidate = strings.TrimSpace(candidate)
+	if parent == "" || candidate == "" {
+		return false
+	}
+	if pathHasParentSegment(parent) || pathHasParentSegment(candidate) ||
+		pathHasUnsafeChars(parent) || pathHasUnsafeChars(candidate) {
+		return false
+	}
+	parent = strings.ToLower(path.Clean(parent))
+	candidate = strings.ToLower(path.Clean(candidate))
+	if parent == "." || candidate == "." {
+		return false
+	}
 	if parent == candidate {
 		return true
 	}
 	if parent == "/" {
-		return true
+		return strings.HasPrefix(candidate, "/")
 	}
 	return strings.HasPrefix(candidate, parent+"/")
 }
@@ -157,7 +211,12 @@ func cleanPathList(paths []string) []string {
 		if item == "" {
 			continue
 		}
-		key := path.Clean(item)
+		key := item
+		// Never let path.Clean collapse ".." or normalize backslashes before
+		// validation can reject traversal or unsafe path characters.
+		if !pathHasParentSegment(item) && !pathHasUnsafeChars(item) {
+			key = path.Clean(item)
+		}
 		if _, dup := seen[key]; dup {
 			continue
 		}

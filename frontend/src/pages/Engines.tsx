@@ -15,6 +15,7 @@ import {
   Header,
   IconButton,
   LoadState,
+  ResourceCard,
   confirmDelete,
   errorToast,
 } from "../components/common";
@@ -56,46 +57,48 @@ export default function Engines() {
       >
         <div className="item-list">
           {engines.data?.map((engine) => (
-            <div className="engine-item card-base" key={engine.id}>
-              <div className="item-content">
-                <h2>{engine.remark || engine.userName || `引擎 #${engine.id}`}</h2>
-                <div className="mono muted">{engine.url}</div>
-                <div className="item-meta">
-                  账号 {engine.userName || "—"}
-                </div>
-              </div>
-              <div className="row-actions">
-                <IconButton
-                  label={testingId === engine.id ? "测试中…" : "测试引擎"}
-                  icon={<IconChainStroked aria-hidden="true" />}
-                  disabled={testingId !== null}
-                  onClick={() => testEngine(engine.id)}
-                />
-                <IconButton
-                  label="编辑引擎"
-                  icon={<IconEditStroked aria-hidden="true" />}
-                  onClick={() => setEditing(engine)}
-                />
-                <IconButton
-                  label="删除引擎"
-                  icon={<IconDeleteStroked aria-hidden="true" />}
-                  danger
-                  onClick={() =>
-                    confirmDelete(
-                      "删除此存储引擎？",
-                      () =>
-                        action.run(async () => {
-                          await api.deleteEngine(engine.id);
-                          // Silent: the card list must not flash to a spinner
-                          // after the confirm dialog has already closed.
-                          await engines.refresh(true);
-                        }),
-                      "关联同步任务需先删除；引擎中的文件不会被删除。",
-                    )
-                  }
-                />
-              </div>
-            </div>
+            <ResourceCard
+              key={engine.id}
+              className="engine-item"
+              title={engine.remark || engine.userName || `引擎 #${engine.id}`}
+              subtitle={engine.url}
+              meta={
+                <div className="item-meta">账号 {engine.userName || "—"}</div>
+              }
+              actions={
+                <>
+                  <IconButton
+                    label={testingId === engine.id ? "测试中…" : "测试引擎"}
+                    icon={<IconChainStroked aria-hidden="true" />}
+                    disabled={testingId !== null}
+                    onClick={() => testEngine(engine.id)}
+                  />
+                  <IconButton
+                    label="编辑引擎"
+                    icon={<IconEditStroked aria-hidden="true" />}
+                    onClick={() => setEditing(engine)}
+                  />
+                  <IconButton
+                    label="删除引擎"
+                    icon={<IconDeleteStroked aria-hidden="true" />}
+                    danger
+                    onClick={() =>
+                      confirmDelete(
+                        "删除此存储引擎？",
+                        () =>
+                          action.run(async () => {
+                            await api.deleteEngine(engine.id);
+                            // Silent: the card list must not flash to a spinner
+                            // after the confirm dialog has already closed.
+                            await engines.refresh(true);
+                          }),
+                        "关联同步任务需先删除；引擎中的文件不会被删除。",
+                      )
+                    }
+                  />
+                </>
+              }
+            />
           ))}
         </div>
       </LoadState>
@@ -112,6 +115,7 @@ export default function Engines() {
     </div>
   );
 }
+
 function EngineEditor({
   engine,
   onClose,

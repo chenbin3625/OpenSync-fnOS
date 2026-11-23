@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"math"
 	"net/http"
 	"opensync/internal/model"
 	"opensync/internal/msg"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -51,7 +53,10 @@ func strictInt64(value interface{}) (int64, bool) {
 	case int64:
 		return v, true
 	case float64:
-		if v != math.Trunc(v) || math.IsInf(v, 0) || math.IsNaN(v) || v > math.MaxInt64 || v < math.MinInt64 {
+		// 2^63 is exactly representable as float64 and is one past math.MaxInt64,
+		// whereas float64(math.MaxInt64) rounds up to 2^63 and would wrap to MinInt64.
+		const maxInt64Exclusive = float64(1 << 63)
+		if math.IsNaN(v) || math.IsInf(v, 0) || v != math.Trunc(v) || v < math.MinInt64 || v >= maxInt64Exclusive {
 			return 0, false
 		}
 		return int64(v), true
@@ -137,7 +142,50 @@ func bindJSON(c *gin.Context, target interface{}) bool {
 		respondError(c, msg.T(msg.LostPart))
 		return false
 	}
+	if isNilMapTarget(target) {
+		respondError(c, msg.T(msg.LostPart))
+		return false
+	}
 	return true
+}
+
+func bindJSONStrict(c *gin.Context, target interface{}) bool {
+	if c.Request == nil || c.Request.Body == nil {
+		respondError(c, msg.T(msg.LostPart))
+		return false
+	}
+	dec := json.NewDecoder(c.Request.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(target); err != nil {
+		if isBodyTooLargeError(err) {
+			respondBodyTooLarge(c)
+			return false
+		}
+		respondError(c, msg.T(msg.LostPart))
+		return false
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		if isBodyTooLargeError(err) {
+			respondBodyTooLarge(c)
+			return false
+		}
+		respondError(c, msg.T(msg.LostPart))
+		return false
+	}
+	if isNilMapTarget(target) {
+		respondError(c, msg.T(msg.LostPart))
+		return false
+	}
+	return true
+}
+
+func isNilMapTarget(target interface{}) bool {
+	v := reflect.ValueOf(target)
+	if v.Kind() != reflect.Ptr || v.IsNil() {
+		return false
+	}
+	elem := v.Elem()
+	return elem.Kind() == reflect.Map && elem.IsNil()
 }
 
 func handleService(c *gin.Context, fn func() (interface{}, error)) {

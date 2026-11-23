@@ -14,20 +14,39 @@ export function applyTheme(theme: "light" | "dark") {
  * browser on mobile, new tab on desktop); a plain browser or a broken bridge
  * falls back to window.open so the link still works.
  */
+export function safeExternalURL(raw?: string | null): string | null {
+  const trimmed = typeof raw === "string" ? raw.trim() : "";
+  if (!trimmed) return null;
+  try {
+    const parsed = new URL(trimmed);
+    if (
+      (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+      !parsed.hostname
+    ) {
+      return null;
+    }
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
 export async function openExternalURL(url: string) {
+  const safe = safeExternalURL(url);
+  if (!safe) return;
   const host = getHost();
   // isStandaloneWeb is known synchronously (set in the TrimApp constructor), so
   // a plain browser can open the tab inside the click gesture instead of after
   // an await, where popup blockers would reject it.
   if (host.isStandaloneWeb) {
-    window.open(url, "_blank", "noopener,noreferrer");
+    window.open(safe, "_blank", "noopener,noreferrer");
     return;
   }
   try {
     await host.ready();
-    await host.openURL(url);
+    await host.openURL(safe);
   } catch {
-    window.open(url, "_blank", "noopener,noreferrer");
+    window.open(safe, "_blank", "noopener,noreferrer");
   }
 }
 

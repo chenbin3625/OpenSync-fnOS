@@ -2,18 +2,23 @@
 // build.mjs 与 release.mjs 共用这里的实现，避免两条打包路径产生差异。
 import { createHash } from "node:crypto";
 import {
+  closeSync,
   cpSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
+  openSync,
   readFileSync,
   readdirSync,
   renameSync,
   rmSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { envWithNode, root, run } from "./toolchain.mjs";
+import { parseManifestVersion, SEMVER_PATTERN } from "./version.mjs";
 
 /** 两个架构的 Go 交叉编译目标；飞牛 manifest 里 x86/arm 分别声明。 */
 export const ARCHES = ["amd64", "arm64"];
@@ -22,6 +27,81 @@ const PLATFORM = { amd64: "x86", arm64: "arm" };
 
 /** 打包前需要剔除的构建产物之外的杂项（macOS 会在目录里留下这些文件）。 */
 const JUNK = new Set([".DS_Store"]);
+
+const isProcessAlive = (pid) => {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== "ESRCH";
+  }
+};
+
+/** 串行化打包过程，避免并发构建同时改写 backend/cmd/server/web 或 dist 产物。 */
+export const withBuildLock = (fn, lockDir = join(root, "dist")) => {
+  mkdirSync(lockDir, { recursive: true });
+  const lockPath = join(lockDir, ".build.lock");
+  let acquired = false;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const fd = openSync(lockPath, "wx");
+      try {
+        writeFileSync(
+          fd,
+          JSON.stringify({ pid: process.pid, startedAt: Date.now() }),
+        );
+      } finally {
+        closeSync(fd);
+      }
+      acquired = true;
+      break;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      let existingPid = null;
+      try {
+        existingPid = Number(
+          JSON.parse(readFileSync(lockPath, "utf8")).pid,
+        );
+      } catch {
+        existingPid = null;
+      }
+      if (!isProcessAlive(existingPid)) {
+        rmSync(lockPath, { force: true });
+        continue;
+      }
+      throw new Error(
+        `已有另一个打包进程正在运行（PID ${existingPid}），请等待其完成后重试`,
+      );
+    }
+  }
+  if (!acquired) {
+    throw new Error("无法获取打包锁，请稍后重试");
+  }
+  const release = () => {
+    if (!acquired) return;
+    acquired = false;
+    try {
+      const current = JSON.parse(readFileSync(lockPath, "utf8"));
+      if (current?.pid === process.pid) unlinkSync(lockPath);
+    } catch {
+      /* 已清理或不存在 */
+    }
+  };
+  const onSignal = (signal) => {
+    release();
+    process.kill(process.pid, signal);
+  };
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
+  try {
+    return fn();
+  } finally {
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
+    release();
+  }
+};
 
 const copyTemplate = (from, to) => {
   for (const entry of readdirSync(from, { withFileTypes: true })) {
@@ -54,9 +134,11 @@ export const requireNodeModules = (nodeDir, { install = true } = {}) => {
 
 export const buildFrontend = (nodeDir) => {
   requireNodeModules(nodeDir);
+  // 强制覆盖 VITE_DATA_MODE，防止宿主环境变量中的 VITE_DATA_MODE=mock
+  // 把 mockServiceWorker.js 打进生产发布包。
   run("npm", ["run", "build"], {
     cwd: join(root, "frontend"),
-    env: envWithNode(nodeDir),
+    env: { ...envWithNode(nodeDir), VITE_DATA_MODE: "real" },
   });
 };
 
@@ -74,10 +156,7 @@ const resolveFnpack = () => {
 
 /** 从 fnos/manifest 读取版本号，用于发布产物命名与追溯。 */
 export const readVersion = () =>
-  (
-    /^version=(.+)$/m.exec(readFileSync(join(root, "fnos", "manifest"), "utf8")) ||
-    []
-  )[1];
+  parseManifestVersion(readFileSync(join(root, "fnos", "manifest"), "utf8"));
 
 /** 组装单个架构的 fpk，返回产物路径。 */
 export const buildPackage = (arch, { nodeDir } = {}) => {
@@ -86,50 +165,60 @@ export const buildPackage = (arch, { nodeDir } = {}) => {
   // appVersion="undefined" from a manifest typo, and a release that reports the
   // wrong version cannot be matched to its source.
   const version = readVersion();
-  if (!version || !/^\d+\.\d+\.\d+$/.test(version))
+  if (!version || !SEMVER_PATTERN.test(version))
     throw new Error(
       `fnos/manifest 缺少有效的 version=（当前：${version || "空"}），无法注入应用版本`,
     );
-  const pack = join(root, "dist", `opensync-${arch}`);
-  // 先清空，避免上一次构建的残留文件被打进包。
-  rmSync(pack, { recursive: true, force: true });
-  mkdirSync(pack, { recursive: true });
-  copyTemplate(join(root, "fnos"), pack);
-  cpSync(join(root, "LICENSE"), join(pack, "LICENSE"));
-  const manifest = readFileSync(join(pack, "manifest"), "utf8").replace(
-    /^platform=.+$/m,
-    `platform=${PLATFORM[arch]}`,
-  );
-  writeFileSync(join(pack, "manifest"), manifest);
-
-  mkdirSync(join(pack, "app", "server"), { recursive: true });
-  run(
-    "go",
-    [
-      "build",
-      "-trimpath",
-      // VCS stamping embeds the commit and a dirty flag, so the same source
-      // produced different binaries from different checkouts. -trimpath alone
-      // does not remove it.
-      "-buildvcs=false",
-      `-ldflags=-s -w -X main.appVersion=${version}`,
-      "-o",
-      join(pack, "app", "server", "opensync"),
-      "./cmd/server",
-    ],
-    {
-      cwd: join(root, "backend"),
-      env: { GOOS: "linux", GOARCH: arch, CGO_ENABLED: "0" },
-    },
-  );
-
-  const fpk = join(root, "dist", `opensync-${arch}.fpk`);
+  const distDir = join(root, "dist");
+  mkdirSync(distDir, { recursive: true });
+  const stage = mkdtempSync(join(distDir, `.stage-${arch}-`));
+  const pack = join(stage, `opensync-${arch}`);
+  const fpk = join(distDir, `opensync-${arch}.fpk`);
+  // 清理旧的残留暂存目录或目标 fpk，避免失败后留下半成品/旧包。
+  rmSync(join(distDir, `opensync-${arch}`), { recursive: true, force: true });
   rmSync(fpk, { force: true });
-  run(resolveFnpack(), ["build", "--directory", pack], {
-    cwd: join(root, "dist"),
-  });
-  renameSync(join(root, "dist", "opensync.fpk"), fpk);
-  return fpk;
+  try {
+    mkdirSync(pack, { recursive: true });
+    copyTemplate(join(root, "fnos"), pack);
+    cpSync(join(root, "LICENSE"), join(pack, "LICENSE"));
+    const manifest = readFileSync(join(pack, "manifest"), "utf8")
+      .replace(/\r\n/g, "\n")
+      .replace(/\r/g, "\n")
+      .replace(/^platform=.+$/m, `platform=${PLATFORM[arch]}`);
+    writeFileSync(join(pack, "manifest"), manifest);
+
+    mkdirSync(join(pack, "app", "server"), { recursive: true });
+    run(
+      "go",
+      [
+        "build",
+        "-trimpath",
+        // VCS stamping embeds the commit and a dirty flag, so the same source
+        // produced different binaries from different checkouts. -trimpath alone
+        // does not remove it.
+        "-buildvcs=false",
+        `-ldflags=-s -w -X main.appVersion=${version}`,
+        "-o",
+        join(pack, "app", "server", "opensync"),
+        "./cmd/server",
+      ],
+      {
+        cwd: join(root, "backend"),
+        env: { GOOS: "linux", GOARCH: arch, CGO_ENABLED: "0" },
+      },
+    );
+
+    run(resolveFnpack(), ["build", "--directory", pack], {
+      cwd: stage,
+    });
+    renameSync(join(stage, "opensync.fpk"), fpk);
+    return fpk;
+  } catch (error) {
+    rmSync(fpk, { force: true });
+    throw error;
+  } finally {
+    rmSync(stage, { recursive: true, force: true });
+  }
 };
 
 export const sha256 = (file) =>

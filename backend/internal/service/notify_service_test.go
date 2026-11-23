@@ -13,6 +13,7 @@ import (
 	"opensync/internal/msg"
 	"opensync/pkg/util"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -278,13 +279,24 @@ func TestValidateNotifyParamsAcceptsHTTPWebhook(t *testing.T) {
 
 func TestSendWebhookCustomBodyEscapesPlaceholderValues(t *testing.T) {
 	var got map[string]interface{}
+	handlerErr := make(chan error, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
-			t.Fatalf("read request body: %v", err)
+			select {
+			case handlerErr <- err:
+			default:
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+			return
 		}
 		if err := json.Unmarshal(body, &got); err != nil {
-			t.Fatalf("request body is invalid JSON: %v\n%s", err, string(body))
+			select {
+			case handlerErr <- err:
+			default:
+			}
+			w.WriteHeader(http.StatusBadRequest)
+			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -296,6 +308,11 @@ func TestSendWebhookCustomBodyEscapesPlaceholderValues(t *testing.T) {
 	}, `title "quoted"`, `content with "quotes"`)
 	if err != nil {
 		t.Fatalf("sendWebhook() error = %v, want escaped JSON body", err)
+	}
+	select {
+	case err := <-handlerErr:
+		t.Fatalf("handler error: %v", err)
+	default:
 	}
 
 	want := `title "quoted": content with "quotes"`
@@ -593,9 +610,9 @@ func TestEditNotifyAllowsReenteredSecretsOnChangedTarget(t *testing.T) {
 // A test send is the other network entry point; it must not send a placeholder
 // and must not let a changed target inherit a stored device key.
 func TestTestNotifyRejectsPlaceholdersOnChangedTarget(t *testing.T) {
-	var hits int
+	var hits atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits++
+		hits.Add(1)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
@@ -609,17 +626,17 @@ func TestTestNotifyRejectsPlaceholdersOnChangedTarget(t *testing.T) {
 		},
 	})
 	wantPublicError(t, err)
-	if hits != 0 {
-		t.Fatalf("test send reached the changed target %d times", hits)
+	if got := hits.Load(); got != 0 {
+		t.Fatalf("test send reached the changed target %d times", got)
 	}
 }
 
 // Bark stores its target in server and allows omitting it. A stored row without
 // a server must not merge the existing deviceKey into a caller-supplied server.
 func TestTestNotifyBarkDoesNotShipDeviceKeyToNewServer(t *testing.T) {
-	var hits int
+	var hits atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits++
+		hits.Add(1)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
@@ -633,7 +650,7 @@ func TestTestNotifyBarkDoesNotShipDeviceKeyToNewServer(t *testing.T) {
 		},
 	})
 	wantPublicError(t, err)
-	if hits != 0 {
+	if hits.Load() != 0 {
 		t.Fatalf("device key was sent to the caller-provided server")
 	}
 }
@@ -641,22 +658,25 @@ func TestTestNotifyBarkDoesNotShipDeviceKeyToNewServer(t *testing.T) {
 func TestNotifyTargetChangedFailsClosed(t *testing.T) {
 	cases := []struct {
 		name     string
+		method   int
 		incoming map[string]interface{}
 		existing map[string]interface{}
 		want     bool
 	}{
-		{"unchanged url", map[string]interface{}{"url": "https://same.example/hook"}, map[string]interface{}{"url": "https://same.example/hook"}, false},
-		{"changed url", map[string]interface{}{"url": "https://new.example/hook"}, map[string]interface{}{"url": "https://same.example/hook"}, true},
-		{"masked url round-trip", map[string]interface{}{"url": "https://same.example/hook?token=****"}, map[string]interface{}{"url": "https://same.example/hook"}, false},
-		{"absent incoming url", map[string]interface{}{}, map[string]interface{}{"url": "https://same.example/hook"}, false},
-		{"stored target missing", map[string]interface{}{"server": "https://attacker.example"}, map[string]interface{}{"deviceKey": "k"}, true},
-		{"wecom corp changed", map[string]interface{}{"corpid": "corp-b"}, map[string]interface{}{"corpid": "corp-a"}, true},
-		{"wecom corp unchanged", map[string]interface{}{"corpid": "corp-a"}, map[string]interface{}{"corpid": "corp-a"}, false},
+		{"unchanged url", 0, map[string]interface{}{"url": "https://same.example/hook"}, map[string]interface{}{"url": "https://same.example/hook"}, false},
+		{"changed url", 0, map[string]interface{}{"url": "https://new.example/hook"}, map[string]interface{}{"url": "https://same.example/hook"}, true},
+		{"masked url round-trip", 0, map[string]interface{}{"url": "https://same.example/hook?token=****"}, map[string]interface{}{"url": "https://same.example/hook"}, false},
+		{"absent incoming url", 0, map[string]interface{}{}, map[string]interface{}{"url": "https://same.example/hook"}, false},
+		{"stored target missing", 5, map[string]interface{}{"server": "https://attacker.example"}, map[string]interface{}{"deviceKey": "k"}, true},
+		{"bark ignores decoy url field", 5, map[string]interface{}{"url": "https://same.bark.example", "server": "https://attacker.example"}, map[string]interface{}{"server": "https://same.bark.example", "deviceKey": "k"}, true},
+		{"wecom corp changed", 3, map[string]interface{}{"corpid": "corp-b"}, map[string]interface{}{"corpid": "corp-a"}, true},
+		{"wecom corp unchanged", 3, map[string]interface{}{"corpid": "corp-a"}, map[string]interface{}{"corpid": "corp-a"}, false},
+		{"unknown method fails closed", 99, map[string]interface{}{"url": "https://same.example/hook"}, map[string]interface{}{"url": "https://same.example/hook"}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := notifyTargetChanged(tc.incoming, tc.existing); got != tc.want {
-				t.Fatalf("notifyTargetChanged(%#v, %#v) = %v, want %v", tc.incoming, tc.existing, got, tc.want)
+			if got := notifyTargetChanged(tc.method, tc.incoming, tc.existing); got != tc.want {
+				t.Fatalf("notifyTargetChanged(%d, %#v, %#v) = %v, want %v", tc.method, tc.incoming, tc.existing, got, tc.want)
 			}
 		})
 	}
@@ -713,7 +733,10 @@ func TestValidateNotifyParamsRejectsUnsendableWebhookPayload(t *testing.T) {
 		wantOK bool
 	}{
 		{"valid template", base(map[string]interface{}{"body": `{"text":"{title}"}`}), true},
-		{"empty template", base(map[string]interface{}{"body": "  "}), true},
+		{"empty template", base(map[string]interface{}{"body": ""}), false},
+		{"whitespace template", base(map[string]interface{}{"body": "  "}), false},
+		{"array template", base(map[string]interface{}{"body": `["a","b"]`}), false},
+		{"null template", base(map[string]interface{}{"body": `null`}), false},
 		{"broken template", base(map[string]interface{}{"body": `{"n":{title}}`}), false},
 		{"object body not normalised", base(map[string]interface{}{"body": map[string]interface{}{"text": "x"}}), false},
 		{"string headers", base(map[string]interface{}{"headers": "Authorization: x"}), false},
@@ -741,5 +764,122 @@ func TestSendNotifyRejectsLegacyRedactedRow(t *testing.T) {
 	var public model.PublicError
 	if !errors.As(err, &public) {
 		t.Fatalf("error = %T %v, want model.PublicError", err, err)
+	}
+}
+
+func TestTestNotifyBarkRejectsURLDecoyBypass(t *testing.T) {
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	stubStoredNotifyParams(t, `{"server":"https://good.bark.example","deviceKey":"REAL-DEVICE-KEY"}`)
+
+	err := TestNotify(map[string]interface{}{
+		"id": 9, "method": 5,
+		"params": map[string]interface{}{
+			"url":       "https://good.bark.example",
+			"server":    server.URL,
+			"deviceKey": "****-KEY",
+		},
+	})
+	wantPublicError(t, err)
+	if hits.Load() != 0 {
+		t.Fatalf("device key was sent to attacker server despite url decoy")
+	}
+}
+
+func TestAddNewNotifyRejectsEmptyAndArrayWebhookBody(t *testing.T) {
+	for name, body := range map[string]interface{}{
+		"empty string": "",
+		"whitespace":   "   ",
+		"json array":   []interface{}{"a", "b"},
+		"array string": `["a"]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			add, _ := stubNotifyWrites(t)
+			_, err := AddNewNotify(map[string]interface{}{
+				"method": 0, "enable": 1,
+				"params": map[string]interface{}{
+					"url":  "https://example.test/hook",
+					"body": body,
+				},
+			})
+			wantPublicError(t, err)
+			if add.called {
+				t.Fatal("invalid webhook body was persisted")
+			}
+		})
+	}
+}
+
+func TestNotifyMutationsRequireExplicitValidMethod(t *testing.T) {
+	for _, badMethod := range []interface{}{nil, "", "abc", 1.5, true, -1, 99} {
+		add, _ := stubNotifyWrites(t)
+		req := map[string]interface{}{
+			"enable": 1,
+			"params": map[string]interface{}{"url": "https://example.test/hook"},
+		}
+		if badMethod != nil {
+			req["method"] = badMethod
+		}
+		if _, err := AddNewNotify(req); err == nil {
+			t.Fatalf("AddNewNotify(method=%#v) = nil, want error", badMethod)
+		} else {
+			wantPublicError(t, err)
+		}
+		if add.called {
+			t.Fatalf("AddNewNotify(method=%#v) persisted config", badMethod)
+		}
+
+		stubStoredNotifyParams(t, `{"url":"https://example.test/hook"}`)
+		editReq := map[string]interface{}{
+			"id": 7, "enable": 1,
+			"params": map[string]interface{}{"url": "https://example.test/hook"},
+		}
+		if badMethod != nil {
+			editReq["method"] = badMethod
+		}
+		if err := EditNotify(editReq); err == nil {
+			t.Fatalf("EditNotify(method=%#v) = nil, want error", badMethod)
+		} else {
+			wantPublicError(t, err)
+		}
+
+		testReq := map[string]interface{}{
+			"params": map[string]interface{}{"url": "https://example.test/hook"},
+		}
+		if badMethod != nil {
+			testReq["method"] = badMethod
+		}
+		if err := TestNotify(testReq); err == nil {
+			t.Fatalf("TestNotify(method=%#v) = nil, want error", badMethod)
+		} else {
+			wantPublicError(t, err)
+		}
+
+		if sent, err := sendNotify(testReq, "t", "c", false); sent || err == nil {
+			t.Fatalf("sendNotify(method=%#v) = %v, %v; want error", badMethod, sent, err)
+		} else {
+			wantPublicError(t, err)
+		}
+	}
+}
+
+func TestValidateNotifyParamsRejectsEmptyHostAndInvalidPort(t *testing.T) {
+	for _, badURL := range []string{
+		"http://:8080/hook",
+		"https://[]:8443/hook",
+		"https://example.test:0/hook",
+		"https://example.test:65536/hook",
+		"https://example.test:/hook",
+	} {
+		if err := validateNotifyParams(0, map[string]interface{}{"url": badURL}); err == nil {
+			t.Fatalf("validateNotifyParams(0, %q) = nil, want error", badURL)
+		}
+		if err := validateNotifyParams(2, map[string]interface{}{"url": badURL}); err == nil {
+			t.Fatalf("validateNotifyParams(2, %q) = nil, want error", badURL)
+		}
 	}
 }

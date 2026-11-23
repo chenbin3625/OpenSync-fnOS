@@ -3,7 +3,7 @@ set -eu
 umask 077
 
 fail() {
-    if [ -n "${TRIM_TEMP_LOGFILE:-}" ]; then printf '%s\n' "$1" > "$TRIM_TEMP_LOGFILE"; fi
+    if [ -n "${TRIM_TEMP_LOGFILE:-}" ]; then { printf '%s\n' "$1" > "$TRIM_TEMP_LOGFILE"; } 2>/dev/null || true; fi
     printf '%s\n' "$1" >&2
     exit 1
 }
@@ -84,14 +84,43 @@ status_app() {
     { printf '%s\n' "$PID" > "$PID_FILE"; } 2>/dev/null || true
 }
 socket_in_use() {
-    [ -S "$SOCKET" ] || return 1
-    if command -v fuser >/dev/null 2>&1; then
-        [ -n "$(fuser "$SOCKET" 2>/dev/null | tr -d '[:space:]')" ] && return 0
+    [ -S "$SOCKET" ] && [ ! -L "$SOCKET" ] || return 1
+    if command -v flock >/dev/null 2>&1 && [ -f "${TRIM_APPDEST}/.app.lock" ]; then
+        local lock_rc=0
+        flock -E 11 -n "${TRIM_APPDEST}/.app.lock" true 2>/dev/null || lock_rc=$?
+        [ "$lock_rc" -eq 11 ] && return 0
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c '
+import errno, socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(1)
+try:
+    s.connect(sys.argv[1])
+except OSError as e:
+    if e.errno in (errno.ECONNREFUSED, errno.ENOENT):
+        sys.exit(1)
+    sys.exit(0)
+finally:
+    s.close()
+' "$SOCKET" 2>/dev/null
+        return $?
+    fi
+    if command -v curl >/dev/null 2>&1; then
+        local curl_rc=0
+        curl --unix-socket "$SOCKET" --connect-timeout 1 --max-time 1 -s -o /dev/null http://localhost/app/opensync/svr/session 2>/dev/null || curl_rc=$?
+        [ "$curl_rc" -ne 7 ] && return 0
         return 1
     fi
+    if command -v socat >/dev/null 2>&1; then
+        socat -T 1 -u OPEN:/dev/null "UNIX-CONNECT:$SOCKET" >/dev/null 2>&1 && return 0
+        return 1
+    fi
+    if command -v fuser >/dev/null 2>&1; then
+        [ -n "$(fuser "$SOCKET" 2>/dev/null | tr -d '[:space:]')" ] && return 0
+    fi
     if command -v ss >/dev/null 2>&1; then
-        ss -lx 2>/dev/null | grep -F -- "$SOCKET" >/dev/null
-        return $?
+        ss -lx 2>/dev/null | grep -F -- "$SOCKET" >/dev/null && return 0
     fi
     return 1
 }
@@ -232,7 +261,7 @@ rotate_log() {
 # 服务运行期间不能 mv app.log：服务持有旧 inode，重命名后日志会继续写进 .1。
 # 这里用 copy-truncate：把内容复制到 .1 后清空原文件，追加写不受影响。
 rotate_log_running() {
-    local size index
+    local size index tmp_log=''
     [ -f "$LOG_FILE" ] && [ ! -L "$LOG_FILE" ] || return 0
     size="$({ wc -c < "$LOG_FILE"; } 2>/dev/null | tr -d '[:space:]')" || return 0
     case "$size" in ''|*[!0-9]*) return 0 ;; esac
@@ -240,12 +269,28 @@ rotate_log_running() {
     rm -f "${LOG_FILE}.${LOG_KEEP}" || return 0
     index=$((LOG_KEEP - 1))
     while [ "$index" -ge 1 ]; do
-        if [ -e "${LOG_FILE}.${index}" ]; then
+        if [ -L "${LOG_FILE}.${index}" ]; then
+            rm -f "${LOG_FILE}.${index}" || return 0
+        elif [ -f "${LOG_FILE}.${index}" ]; then
             mv -f "${LOG_FILE}.${index}" "${LOG_FILE}.$((index + 1))" || return 0
         fi
         index=$((index - 1))
     done
-    cp -f "$LOG_FILE" "${LOG_FILE}.1" || return 0
+    if command -v mktemp >/dev/null 2>&1; then
+        tmp_log="$(mktemp "${LOG_FILE}.1.XXXXXX" 2>/dev/null)" || return 0
+    else
+        tmp_log="${LOG_FILE}.1.tmp.$$"
+        [ ! -e "$tmp_log" ] && [ ! -L "$tmp_log" ] || return 0
+    fi
+    if ! cp -P "$LOG_FILE" "$tmp_log" 2>/dev/null; then
+        rm -f "$tmp_log"
+        return 0
+    fi
+    if [ -L "${LOG_FILE}.1" ] || [ -e "${LOG_FILE}.1" ]; then
+        rm -f "${LOG_FILE}.1" || { rm -f "$tmp_log"; return 0; }
+    fi
+    mv -f "$tmp_log" "${LOG_FILE}.1" || { rm -f "$tmp_log"; return 0; }
+    [ -f "$LOG_FILE" ] && [ ! -L "$LOG_FILE" ] || return 0
     : > "$LOG_FILE"
 }
 # 看护进程只做日志轮转，服务退出后自动结束。9>&- 必须保留：否则它继承
@@ -253,40 +298,124 @@ rotate_log_running() {
 start_log_rotator() {
     local service_pid="$1"
     stop_log_rotator
-    (
+    export LOG_FILE LOG_MAX_BYTES LOG_KEEP LOG_CHECK_INTERVAL
+    export -f rotate_log_running
+    local rotator_script='
+        service_pid="$1"
+        sleep_pid=""
+        cleanup_rotator() {
+            [ -n "$sleep_pid" ] && kill "$sleep_pid" 2>/dev/null || true
+            exit 0
+        }
+        trap cleanup_rotator TERM INT HUP
         while kill -0 "$service_pid" 2>/dev/null; do
-            sleep "$LOG_CHECK_INTERVAL"
+            sleep "$LOG_CHECK_INTERVAL" &
+            sleep_pid=$!
+            wait "$sleep_pid" 2>/dev/null || true
+            sleep_pid=""
+            kill -0 "$service_pid" 2>/dev/null || break
             rotate_log_running
         done
-    ) 9>&- </dev/null >/dev/null 2>&1 &
+    '
+    if command -v setsid >/dev/null 2>&1; then
+        setsid bash -c "$rotator_script" opensync-log-rotator "$service_pid" "$LOG_FILE" 9>&- </dev/null >/dev/null 2>&1 &
+    else
+        bash -c "$rotator_script" opensync-log-rotator "$service_pid" "$LOG_FILE" 9>&- </dev/null >/dev/null 2>&1 &
+    fi
     local rotator_pid=$! start_time=''
     if [ -d /proc ] && [ -r "/proc/$rotator_pid/stat" ]; then
         start_time="$(proc_start_time "$rotator_pid" 2>/dev/null || true)"
     fi
     printf '%s %s\n' "$rotator_pid" "$start_time" > "$LOG_ROTATOR_PID_FILE" 2>/dev/null || true
 }
-proc_start_time() {
-    local pid="$1" stat rest
+proc_stat_field() {
+    local pid="$1" field="$2" stat rest
     [ -r "/proc/$pid/stat" ] || return 1
     stat="$(cat "/proc/$pid/stat" 2>/dev/null)" || return 1
     rest="${stat##*) }"
     set -- $rest
-    [ "$#" -ge 20 ] || return 1
-    printf '%s\n' "${20}"
+    [ "$#" -ge "$field" ] || return 1
+    shift $((field - 1))
+    printf '%s\n' "$1"
+}
+proc_state() {
+    proc_stat_field "$1" 1
+}
+proc_ppid() {
+    proc_stat_field "$1" 2
+}
+proc_pgid() {
+    proc_stat_field "$1" 3
+}
+proc_start_time() {
+    proc_stat_field "$1" 20
+}
+is_rotator_process() {
+    local pid="$1" saved_start="$2" current_start='' arg has_marker=0 has_log=0 cmdline
+    case "$pid" in ''|*[!0-9]*|0|1) return 1 ;; esac
+    kill -0 "$pid" 2>/dev/null || return 1
+    if [ -d /proc ]; then
+        [ "$(proc_state "$pid" 2>/dev/null || true)" != "Z" ] || return 1
+        current_start="$(proc_start_time "$pid" 2>/dev/null || true)"
+        if [ -n "$saved_start" ] && [ "$saved_start" != "$current_start" ]; then
+            return 1
+        fi
+        if [ -r "/proc/$pid/cmdline" ]; then
+            while IFS= read -r arg || [ -n "$arg" ]; do
+                if [ "$arg" = "opensync-log-rotator" ]; then has_marker=1; fi
+                if [ "$arg" = "$LOG_FILE" ]; then has_log=1; fi
+            done < <({ tr '\0' '\n' < "/proc/$pid/cmdline"; } 2>/dev/null || true)
+            [ "$has_marker" = 1 ] && [ "$has_log" = 1 ]
+            return $?
+        fi
+        [ -n "$saved_start" ]
+        return $?
+    fi
+    cmdline="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+    case "$cmdline" in *opensync-log-rotator*) return 0 ;; esac
+    return 1
+}
+list_child_pids() {
+    local parent="$1" entry cpid cppid
+    [ -d /proc ] || return 0
+    for entry in /proc/[0-9]*; do
+        cpid="${entry#/proc/}"
+        [ "$cpid" != "$parent" ] || continue
+        cppid="$(proc_ppid "$cpid" 2>/dev/null || true)"
+        if [ "$cppid" = "$parent" ]; then
+            printf '%s\n' "$cpid"
+        fi
+    done
 }
 stop_log_rotator() {
-    local pid='' start_time='' current_start=''
+    local pid='' start_time='' pgid='' my_pgid='' children='' cpid wait_count=0
     if [ -f "$LOG_ROTATOR_PID_FILE" ]; then
         read -r pid start_time < "$LOG_ROTATOR_PID_FILE" 2>/dev/null || { pid=''; start_time=''; }
-        case "$pid" in
-            ''|*[!0-9]*) ;;
-            *)
-                current_start="$(proc_start_time "$pid" 2>/dev/null || true)"
-                if [ -n "$start_time" ] && [ "$start_time" = "$current_start" ]; then
-                    kill "$pid" 2>/dev/null || true
+        if is_rotator_process "$pid" "$start_time"; then
+            children="$(list_child_pids "$pid" || true)"
+            pgid="$(proc_pgid "$pid" 2>/dev/null || true)"
+            my_pgid="$(proc_pgid "$$" 2>/dev/null || true)"
+            if [ -n "$pgid" ] && [ "$pgid" = "$pid" ] && [ "$pgid" != "$my_pgid" ]; then
+                kill -TERM -- "-$pgid" 2>/dev/null || true
+            fi
+            kill -TERM "$pid" 2>/dev/null || true
+            for cpid in $children; do
+                kill -TERM "$cpid" 2>/dev/null || true
+            done
+            while [ "$wait_count" -lt 10 ] && is_rotator_process "$pid" "$start_time"; do
+                sleep 0.1 2>/dev/null || sleep 1
+                wait_count=$((wait_count + 1))
+            done
+            if is_rotator_process "$pid" "$start_time"; then
+                if [ -n "$pgid" ] && [ "$pgid" = "$pid" ] && [ "$pgid" != "$my_pgid" ]; then
+                    kill -KILL -- "-$pgid" 2>/dev/null || true
                 fi
-                ;;
-        esac
+                kill -KILL "$pid" 2>/dev/null || true
+                for cpid in $children; do
+                    kill -KILL "$cpid" 2>/dev/null || true
+                done
+            fi
+        fi
         rm -f "$LOG_ROTATOR_PID_FILE"
     fi
 }
@@ -307,11 +436,10 @@ start_succeeded() {
     return 0
 }
 start_app() {
-    if status_app; then start_log_rotator "$PID"; start_succeeded; return 0; fi
-    [ -x "$BIN" ] || fail_start '应用服务文件缺失，请重新安装对应架构的安装包'
     mkdir -p "$TRIM_PKGVAR" "$TRIM_PKGETC" "$TRIM_PKGTMP"
     acquire_lifecycle_lock 0 '应用正在启动，请稍后重试'
     if status_app; then start_log_rotator "$PID"; start_succeeded; return 0; fi
+    [ -x "$BIN" ] || fail_start '应用服务文件缺失，请重新安装对应架构的安装包'
     rotate_log
     if [ -L "$LOG_FILE" ]; then
         fail_start '日志文件是符号链接，已拒绝启动以避免写入数据目录之外'
@@ -331,9 +459,42 @@ start_app() {
     GIN_MODE=release "$BIN" >> "$LOG_FILE" 2>&1 9>&- &
     local pid=$!
     printf '%s\n' "$pid" > "$PID_FILE"
+    # 刚 fork 出的子进程在执行 execve("$BIN") 前 /proc/$pid/exe 仍是 bash；
+    # 短暂轮询等待 exec 完成，若仍未就绪则先清理残留子进程再报错，避免孤儿进程。
+    local exec_wait=0
+    while [ "$exec_wait" -lt 30 ]; do
+        if check_process "$pid"; then
+            break
+        fi
+        if ! kill -0 "$pid" 2>/dev/null || [ "$(proc_state "$pid" 2>/dev/null || true)" = "Z" ]; then
+            break
+        fi
+        sleep 0.1 2>/dev/null || sleep 1
+        exec_wait=$((exec_wait + 1))
+    done
+    if ! check_process "$pid"; then
+        if kill -0 "$pid" 2>/dev/null && [ "$(proc_state "$pid" 2>/dev/null || true)" != "Z" ]; then
+            kill -TERM "$pid" 2>/dev/null || true
+            local term_wait=0
+            while [ "$term_wait" -lt 20 ] && kill -0 "$pid" 2>/dev/null && [ "$(proc_state "$pid" 2>/dev/null || true)" != "Z" ]; do
+                sleep 0.1 2>/dev/null || sleep 1
+                term_wait=$((term_wait + 1))
+            done
+            if kill -0 "$pid" 2>/dev/null && [ "$(proc_state "$pid" 2>/dev/null || true)" != "Z" ]; then
+                kill -KILL "$pid" 2>/dev/null || true
+            fi
+        fi
+        wait "$pid" 2>/dev/null || true
+        rm -f "$PID_FILE"
+        fail_start '服务启动失败，请查看应用日志'
+    fi
     local count=0
     while [ "$count" -lt "$START_TIMEOUT" ]; do
-        check_process "$pid" || fail_start '服务启动失败，请查看应用日志'
+        if ! check_process "$pid"; then
+            wait "$pid" 2>/dev/null || true
+            rm -f "$PID_FILE"
+            fail_start '服务启动失败，请查看应用日志'
+        fi
         if [ -S "$SOCKET" ]; then
             start_log_rotator "$pid"
             start_succeeded

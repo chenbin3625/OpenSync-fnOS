@@ -25,7 +25,9 @@ func TestFullSyncDeletesConflictingDestinationDirectoryBeforeQueueingFile(t *tes
 				Path string `json:"path"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				t.Fatalf("decode list request: %v", err)
+				t.Errorf("decode list request: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
 			}
 			switch req.Path {
 			case "/src/":
@@ -37,7 +39,9 @@ func TestFullSyncDeletesConflictingDestinationDirectoryBeforeQueueingFile(t *tes
 				// directory is listed too. It is empty.
 				_, _ = w.Write([]byte(`{"code":200,"message":"ok","data":{"total":0,"content":[]}}`))
 			default:
-				t.Fatalf("unexpected list path %q", req.Path)
+				t.Errorf("unexpected list path %q", req.Path)
+				w.WriteHeader(http.StatusNotFound)
+				return
 			}
 		case "/api/fs/remove":
 			var req struct {
@@ -45,15 +49,21 @@ func TestFullSyncDeletesConflictingDestinationDirectoryBeforeQueueingFile(t *tes
 				Names []string `json:"names"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				t.Fatalf("decode remove request: %v", err)
+				t.Errorf("decode remove request: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
 			}
 			if len(req.Names) != 1 {
-				t.Fatalf("remove names = %#v, want one name", req.Names)
+				t.Errorf("remove names = %#v, want one name", req.Names)
+				w.WriteHeader(http.StatusBadRequest)
+				return
 			}
 			removeCalls = append(removeCalls, req.Dir+req.Names[0]+"/")
 			_, _ = w.Write([]byte(`{"code":200,"message":"ok","data":{}}`))
 		default:
-			t.Fatalf("unexpected path %s", r.URL.Path)
+			t.Errorf("unexpected path %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
 		}
 	}))
 	defer server.Close()
@@ -154,7 +164,9 @@ func TestFullSyncSkipsEquivalentEscapedDestinationFileNameWithSameSize(t *testin
 				Path string `json:"path"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				t.Fatalf("decode list request: %v", err)
+				t.Errorf("decode list request: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
 			}
 			switch req.Path {
 			case "/src/":
@@ -162,7 +174,9 @@ func TestFullSyncSkipsEquivalentEscapedDestinationFileNameWithSameSize(t *testin
 			case "/dst/":
 				_, _ = w.Write([]byte(`{"code":200,"message":"ok","data":{"total":1,"content":[{"name":"Q&amp;A.mp4","is_dir":false,"size":10}]}}`))
 			default:
-				t.Fatalf("unexpected list path %q", req.Path)
+				t.Errorf("unexpected list path %q", req.Path)
+				w.WriteHeader(http.StatusNotFound)
+				return
 			}
 		case "/api/fs/remove":
 			var req struct {
@@ -170,12 +184,16 @@ func TestFullSyncSkipsEquivalentEscapedDestinationFileNameWithSameSize(t *testin
 				Names []string `json:"names"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				t.Fatalf("decode remove request: %v", err)
+				t.Errorf("decode remove request: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
 			}
 			removeCalls = append(removeCalls, req.Dir+req.Names[0])
 			_, _ = w.Write([]byte(`{"code":200,"message":"ok","data":{}}`))
 		default:
-			t.Fatalf("unexpected path %s", r.URL.Path)
+			t.Errorf("unexpected path %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
 		}
 	}))
 	defer server.Close()
@@ -215,7 +233,9 @@ func TestFullSyncRecopiesEquivalentEscapedDestinationFileNameWhenSizeDiffers(t *
 				Path string `json:"path"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				t.Fatalf("decode list request: %v", err)
+				t.Errorf("decode list request: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
 			}
 			switch req.Path {
 			case "/src/":
@@ -223,7 +243,9 @@ func TestFullSyncRecopiesEquivalentEscapedDestinationFileNameWhenSizeDiffers(t *
 			case "/dst/":
 				_, _ = w.Write([]byte(`{"code":200,"message":"ok","data":{"total":1,"content":[{"name":"Q&amp;A.mp4","is_dir":false,"size":10}]}}`))
 			default:
-				t.Fatalf("unexpected list path %q", req.Path)
+				t.Errorf("unexpected list path %q", req.Path)
+				w.WriteHeader(http.StatusNotFound)
+				return
 			}
 		case "/api/fs/remove":
 			var req struct {
@@ -231,12 +253,16 @@ func TestFullSyncRecopiesEquivalentEscapedDestinationFileNameWhenSizeDiffers(t *
 				Names []string `json:"names"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				t.Fatalf("decode remove request: %v", err)
+				t.Errorf("decode remove request: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
 			}
 			removeCalls = append(removeCalls, req.Dir+req.Names[0])
 			_, _ = w.Write([]byte(`{"code":200,"message":"ok","data":{}}`))
 		default:
-			t.Fatalf("unexpected path %s", r.URL.Path)
+			t.Errorf("unexpected path %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
 		}
 	}))
 	defer server.Close()
@@ -279,7 +305,9 @@ func TestFullSyncDoesNotFuzzyMatchWhenSourceHasCanonicalNameCollision(t *testing
 				Path string `json:"path"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				t.Fatalf("decode list request: %v", err)
+				t.Errorf("decode list request: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
 			}
 			switch req.Path {
 			case "/src/":
@@ -287,10 +315,14 @@ func TestFullSyncDoesNotFuzzyMatchWhenSourceHasCanonicalNameCollision(t *testing
 			case "/dst/":
 				_, _ = w.Write([]byte(`{"code":200,"message":"ok","data":{"total":1,"content":[{"name":"Q&amp;A.mp4","is_dir":false,"size":10}]}}`))
 			default:
-				t.Fatalf("unexpected list path %q", req.Path)
+				t.Errorf("unexpected list path %q", req.Path)
+				w.WriteHeader(http.StatusNotFound)
+				return
 			}
 		default:
-			t.Fatalf("unexpected path %s", r.URL.Path)
+			t.Errorf("unexpected path %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
 		}
 	}))
 	defer server.Close()

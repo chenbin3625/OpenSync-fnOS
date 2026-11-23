@@ -272,36 +272,44 @@ func main() {
 	case <-ctx.Done():
 	}
 	gracefulShutdown(shutdownSteps{
-		cancelRequests: cancelRequests,
-		stopServer:     server.Shutdown,
-		closeServer:    server.Close,
-		stopJobs:       service.ShutdownJobs,
-		stopNotify:     service.ShutdownNotifyDispatcher,
+		cancelRequests:  cancelRequests,
+		stopServer:      server.Shutdown,
+		closeServer:     server.Close,
+		stopRetention:   stopRetention,
+		stopJobs:        service.ShutdownJobs,
+		stopNotify:      service.ShutdownNotifyDispatcher,
+		stopNotifyTests: handler.ShutdownNotifyTests,
 	}, shutdownTimeout, notifyShutdownReserve)
 }
 
 // notifyShutdownReserve is the part of shutdownTimeout kept back for draining
 // notifications. Jobs stopping slowly would otherwise use the whole shared
 // deadline and the final "task stopped" messages would never be sent.
-const notifyShutdownReserve = 5 * time.Second
+// maxServerShutdownBudget caps HTTP server Shutdown so a stuck handler (e.g. a
+// blocked SSE write) cannot consume the whole phase budget and starve stopJobs.
+const (
+	notifyShutdownReserve   = 5 * time.Second
+	maxServerShutdownBudget = 5 * time.Second
+)
 
 type shutdownSteps struct {
-	cancelRequests func()
-	stopServer     func(context.Context) error
-	closeServer    func() error
-	stopJobs       func(context.Context)
-	stopNotify     func(context.Context)
+	cancelRequests  func()
+	stopServer      func(context.Context) error
+	closeServer     func() error
+	stopRetention   func()
+	stopJobs        func(context.Context)
+	stopNotify      func(context.Context)
+	stopNotifyTests func(context.Context)
 }
 
 // gracefulShutdown stops the process in dependency order within total:
 //
-//  1. Stop accepting requests. Jobs used to be stopped first while the server
-//     still served, so a POST /job in that window could create and start a new
-//     job just before the database closed under it.
-//  2. Stop the jobs (and the retention cleanup), which enqueues their final
-//     notifications.
-//  3. Drain notifications, with at least reserve of its own, so a wedged
-//     webhook delays exit by a bounded amount instead of indefinitely.
+//  1. Stop accepting requests under a bounded server budget so a wedged write
+//     force-closes instead of starving job shutdown.
+//  2. Stop the retention scheduler, then stop the jobs (and any in-flight
+//     retention cleanup), which enqueues their final notifications.
+//  3. Drain notifications (and any orphaned test-notify workers), with at least
+//     reserve of their own, before ShutdownDB closes the database.
 func gracefulShutdown(steps shutdownSteps, total, reserve time.Duration) {
 	start := time.Now()
 	deadline := start.Add(total)
@@ -309,15 +317,26 @@ func gracefulShutdown(steps shutdownSteps, total, reserve time.Duration) {
 	if reserve >= total {
 		phaseDeadline = start
 	}
-	phaseCtx, cancelPhase := context.WithDeadline(context.Background(), phaseDeadline)
-	defer cancelPhase()
+	phaseBudget := phaseDeadline.Sub(start)
+	serverBudget := phaseBudget / 3
+	if serverBudget > maxServerShutdownBudget {
+		serverBudget = maxServerShutdownBudget
+	}
+	serverCtx, cancelServer := context.WithTimeout(context.Background(), serverBudget)
+	defer cancelServer()
 
 	// Ends the SSE handlers before Shutdown waits on them.
 	steps.cancelRequests()
-	if steps.stopServer(phaseCtx) != nil {
+	if steps.stopServer(serverCtx) != nil {
 		steps.closeServer()
 	}
-	steps.stopJobs(phaseCtx)
+	if steps.stopRetention != nil {
+		steps.stopRetention()
+	}
+
+	jobsCtx, cancelJobs := context.WithDeadline(context.Background(), phaseDeadline)
+	defer cancelJobs()
+	steps.stopJobs(jobsCtx)
 
 	notifyDeadline := deadline
 	if min := time.Now().Add(reserve); notifyDeadline.Before(min) {
@@ -326,6 +345,9 @@ func gracefulShutdown(steps shutdownSteps, total, reserve time.Duration) {
 	notifyCtx, cancelNotify := context.WithDeadline(context.Background(), notifyDeadline)
 	defer cancelNotify()
 	steps.stopNotify(notifyCtx)
+	if steps.stopNotifyTests != nil {
+		steps.stopNotifyTests(notifyCtx)
+	}
 }
 
 // openListener binds the HTTP listener: loopback TCP by default in --dev mode,
@@ -486,19 +508,19 @@ func (p *socketPublisher) discard() {
 	if p == nil {
 		return
 	}
+	if p.pending != "" {
+		name := p.pending
+		if p.committed {
+			name = p.final
+		}
+		if current, err := os.Lstat(name); err == nil && os.SameFile(current, p.info) {
+			_ = os.Remove(name)
+		}
+		p.pending = ""
+	}
 	if p.lock != nil {
 		_ = p.lock.Close()
 		p.lock = nil
-	}
-	if p.pending == "" {
-		return
-	}
-	name := p.pending
-	if p.committed {
-		name = p.final
-	}
-	if current, err := os.Lstat(name); err == nil && os.SameFile(current, p.info) {
-		_ = os.Remove(name)
 	}
 }
 

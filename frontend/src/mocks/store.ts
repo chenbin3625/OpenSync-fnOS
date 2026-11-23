@@ -162,6 +162,7 @@ function includesStatus(status: number, requested: number): boolean {
 
 const notifyRedactionMarker = "****";
 const notifyBodyRedacted = "******";
+const defaultBarkServer = "https://api.day.app";
 
 /** Same key set as backend notifySecretKeys (service/notify_service.go). */
 const notifySecretKeys: Record<number, string[]> = {
@@ -170,40 +171,94 @@ const notifySecretKeys: Record<number, string[]> = {
   2: ["url", "webhook", "secret"],
   3: ["corpsecret", "corpSecret"],
   4: ["url", "webhook", "secret"],
-  5: ["deviceKey"],
+  5: ["server", "deviceKey"],
 };
+const allNotifySecretKeys = [
+  "url",
+  "webhook",
+  "headers",
+  "body",
+  "sendKey",
+  "secret",
+  "corpsecret",
+  "corpSecret",
+  "deviceKey",
+  "server",
+];
 
 function maskSecretValue(value: string): string {
   return value.length <= 8 ? notifyRedactionMarker : notifyRedactionMarker + value.slice(-4);
+}
+
+function maskNotifyQuery(rawQuery: string): string {
+  return rawQuery
+    .split("&")
+    .map((pair) => {
+      if (!pair) return pair;
+      const eq = pair.indexOf("=");
+      if (eq < 0) return pair;
+      const name = pair.slice(0, eq);
+      const value = pair.slice(eq + 1);
+      if (!value) return pair;
+      let decoded = value;
+      try {
+        decoded = decodeURIComponent(value.replace(/\+/g, " "));
+      } catch {
+        decoded = value;
+      }
+      const escaped = encodeURIComponent(maskSecretValue(decoded)).replace(
+        /%2A/g,
+        "*",
+      );
+      return `${name}=${escaped}`;
+    })
+    .join("&");
 }
 
 /** Keeps the host visible while masking credentials in query/path (like backend). */
 function maskNotifyUrl(rawUrl: string): string {
   try {
     const url = new URL(rawUrl);
-    if (url.username) url.username = notifyRedactionMarker;
-    if (url.password) url.password = notifyRedactionMarker;
-    if (url.search) {
-      const pairs = url.search.slice(1).split("&").map((pair) => {
-        const [name] = pair.split("=");
-        return `${name}=${notifyRedactionMarker}`;
-      });
-      url.search = `?${pairs.join("&")}`;
+    if (!url.hostname) return maskSecretValue(rawUrl);
+    if (url.username || url.password) {
+      url.username = notifyRedactionMarker;
+      url.password = "";
     }
+    const rawQuery = url.search.startsWith("?") ? url.search.slice(1) : "";
+    const maskedQuery = rawQuery ? maskNotifyQuery(rawQuery) : "";
     const segments = url.pathname.split("/");
     const last = segments[segments.length - 1];
     if (last && last.length >= 12) {
       segments[segments.length - 1] = maskSecretValue(last);
       url.pathname = segments.join("/");
     }
-    return url.toString();
+    const hadTrailingSlash =
+      rawUrl.split(/[?#]/)[0].endsWith("/") || url.pathname !== "/";
+    const base = url.origin + (hadTrailingSlash ? url.pathname : "");
+    return base + (maskedQuery ? `?${maskedQuery}` : "") + url.hash;
   } catch {
     return maskSecretValue(rawUrl);
   }
 }
 
+function isEmptyNotifyValue(value: unknown): boolean {
+  if (value === null || value === undefined) return true;
+  if (typeof value === "string") return value.trim() === "";
+  if (typeof value === "object" && !Array.isArray(value)) {
+    return Object.keys(value).length === 0;
+  }
+  return false;
+}
+
 function isMaskedNotifyValue(value: string): boolean {
-  return value.includes(notifyRedactionMarker);
+  if (value.includes(notifyRedactionMarker)) return true;
+  try {
+    return decodeURIComponent(value.replace(/\+/g, " ")).includes(
+      notifyRedactionMarker,
+    );
+  } catch {
+    return false;
+  }
 }
 
 function redactNotifyParams(method: number, paramsStr: string): string {
@@ -216,20 +271,24 @@ function redactNotifyParams(method: number, paramsStr: string): string {
     // Fail closed like the backend: a malformed row may still contain a token.
     return "{}";
   }
-  const keys =
-    notifySecretKeys[method] ?? Object.values(notifySecretKeys).flat();
+  const keys = notifySecretKeys[method] ?? allNotifySecretKeys;
   for (const key of keys) {
     const value = params[key];
-    if (value === undefined || value === null || value === "") continue;
+    if (value === undefined || value === null) continue;
     if (key === "headers") {
+      if (isEmptyNotifyValue(value)) continue;
       params[key] = notifyRedactionMarker;
       continue;
     }
-    const text = typeof value === "string" ? value : "";
+    if (typeof value !== "string") {
+      params[key] = notifyRedactionMarker;
+      continue;
+    }
+    if (value === "") continue;
     if (key === "body") params[key] = notifyBodyRedacted;
     else if (key === "url" || key === "webhook" || key === "server")
-      params[key] = maskNotifyUrl(text);
-    else params[key] = maskSecretValue(text);
+      params[key] = maskNotifyUrl(value);
+    else params[key] = maskSecretValue(value);
   }
   return JSON.stringify(params);
 }
@@ -250,6 +309,40 @@ function notifyParamsRecord(value: unknown): Record<string, unknown> | null {
   return null;
 }
 
+function paramString(
+  params: Record<string, unknown>,
+  ...keys: string[]
+): string {
+  for (const key of keys) {
+    const val = params[key];
+    if (typeof val === "string" && val.trim()) return val.trim();
+  }
+  return "";
+}
+
+function withDefaultBarkServer(
+  params: Record<string, unknown>,
+): Record<string, unknown> {
+  if (paramString(params, "server")) return params;
+  return { ...params, server: defaultBarkServer };
+}
+
+function notifyTargetChanged(
+  incoming: Record<string, unknown>,
+  existing: Record<string, unknown>,
+): boolean {
+  const incomingURL = paramString(incoming, "url", "webhook", "server");
+  if (incomingURL && !isMaskedNotifyValue(incomingURL)) {
+    const existingURL = paramString(existing, "url", "webhook", "server");
+    if (!existingURL || incomingURL !== existingURL) return true;
+  }
+  const incomingCorp = paramString(incoming, "corpid", "corpId");
+  const existingCorp = paramString(existing, "corpid", "corpId");
+  return Boolean(
+    incomingCorp && existingCorp && incomingCorp !== existingCorp,
+  );
+}
+
 /** Restores redacted/blank secrets from the stored config on edit (backend resolveNotifyParams). */
 function resolveNotifyInput(
   input: NotifyInput,
@@ -259,18 +352,42 @@ function resolveNotifyInput(
   const stored = notifyParamsRecord(previous.params);
   if (!incoming || !stored) return input;
   const method = numberValue(input.method, previous.method);
-  const keys =
-    notifySecretKeys[method] ?? Object.values(notifySecretKeys).flat();
+  if (method !== previous.method) return input;
+  const compareIncoming =
+    method === 5 ? withDefaultBarkServer(incoming) : incoming;
+  const compareStored =
+    method === 5 ? withDefaultBarkServer(stored) : stored;
+  if (notifyTargetChanged(compareIncoming, compareStored)) {
+    return input;
+  }
+  const keys = notifySecretKeys[method] ?? [];
   for (const key of keys) {
     const value = incoming[key];
     if (value === undefined || value === null) {
-      if (stored[key] !== undefined) incoming[key] = stored[key];
+      if (stored[key] !== undefined && stored[key] !== null) {
+        incoming[key] = stored[key];
+      }
       continue;
     }
-    if (typeof value !== "string") continue;
-    if (key === "secret" && value === "") continue; // explicit "disable signing"
-    if (value === "" || isMaskedNotifyValue(value)) {
-      if (stored[key] !== undefined) incoming[key] = stored[key];
+    if (typeof value === "string") {
+      if (key === "secret" && value === "") {
+        delete incoming[key]; // explicit "disable signing"
+        continue;
+      }
+      if (value === "" || isMaskedNotifyValue(value)) {
+        if (stored[key] !== undefined && stored[key] !== null) {
+          incoming[key] = stored[key];
+        }
+      }
+      continue;
+    }
+    if (
+      key === "headers" &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      Object.keys(value).length === 0
+    ) {
+      delete incoming[key];
     }
   }
   return { ...input, params: JSON.stringify(incoming) };
@@ -455,7 +572,7 @@ export class MockStore {
           ? {
               deleteCount: 3,
               deleteSize: 48 * 1024 * 1024,
-              pathCount: 3,
+              pathCount: 2,
               paths: [
                 {
                   path: "/Backup/Nightly/old-camera",
@@ -742,9 +859,31 @@ export class MockStore {
     return { ...created };
   }
 
-  toggleNotification(id: number, enable: number): void {
+  updateNotification(input: NotifyInput): NotifyItem | null {
+    const rawId = input.id;
+    const requestedId =
+      typeof rawId === "number"
+        ? rawId
+        : typeof rawId === "string" && /^\s*\d+\s*$/.test(rawId)
+          ? Number(rawId.trim())
+          : 0;
+    if (!Number.isInteger(requestedId) || requestedId <= 0) return null;
+    const index = this.notifications.findIndex(
+      (item) => item.id === requestedId,
+    );
+    if (index < 0) return null;
+    const previous = this.notifications[index];
+    const resolved = resolveNotifyInput(input, previous);
+    const updated = normalizeNotify(resolved, requestedId, previous);
+    this.notifications[index] = updated;
+    return { ...updated };
+  }
+
+  toggleNotification(id: number, enable: number): boolean {
     const item = this.notifications.find((notify) => notify.id === id);
-    if (item) item.enable = enable ? 1 : 0;
+    if (!item) return false;
+    item.enable = enable ? 1 : 0;
+    return true;
   }
 
   deleteNotification(id: number): void {

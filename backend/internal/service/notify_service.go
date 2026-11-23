@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -19,6 +20,7 @@ import (
 	"opensync/internal/msg"
 	"opensync/pkg/util"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -39,6 +41,8 @@ const (
 // maxNotifyErrorLength caps the stored failure reason. Provider responses can be
 // long, and the list endpoint returns one of these per config.
 const maxNotifyErrorLength = 300
+
+const maxWeComTokenCacheEntries = 256
 
 var wecomTokenCache struct {
 	sync.Mutex
@@ -153,6 +157,10 @@ var webhookLookupIPAddr = net.DefaultResolver.LookupIPAddr
 // validatedNotifyDialContext repeats the check on every connection (including
 // redirects and DNS rebinding), and that dial-time check is the real boundary.
 func validateWebhookDestination(rawURL string) error {
+	return validateWebhookDestinationContext(notifyBaseContext(), rawURL)
+}
+
+func validateWebhookDestinationContext(parentCtx context.Context, rawURL string) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return err
@@ -167,7 +175,10 @@ func validateWebhookDestination(rawURL string) error {
 		}
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), webhookLookupTimeout)
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parentCtx, webhookLookupTimeout)
 	defer cancel()
 	addrs, err := webhookLookupIPAddr(ctx, host)
 	if err != nil {
@@ -196,7 +207,9 @@ func validatedNotifyDialContext(
 		if ip := net.ParseIP(host); ip != nil {
 			ips = []net.IPAddr{{IP: ip}}
 		} else {
-			ips, err = lookup(ctx, host)
+			lookupCtx, cancel := context.WithTimeout(ctx, webhookLookupTimeout)
+			ips, err = lookup(lookupCtx, host)
+			cancel()
 			if err != nil {
 				return nil, err
 			}
@@ -260,7 +273,10 @@ func GetNotifyList() ([]map[string]interface{}, error) {
 		return nil, fmt.Errorf("get notify list: %w", err)
 	}
 	for _, notify := range list {
-		method := util.ToInt(notify["method"])
+		method, err := parseNotifyMethod(notify["method"])
+		if err != nil {
+			method = -1
+		}
 		notify["params"] = redactNotifyParams(method, fmt.Sprintf("%v", notify["params"]))
 	}
 	return list, nil
@@ -270,12 +286,12 @@ func GetNotifyList() ([]map[string]interface{}, error) {
 // body is included because request-body templates commonly embed tokens; the
 // stored value is restored for editing via resolveNotifyParams.
 var notifySecretKeys = map[int][]string{
-	0: {"url", "headers", "body"},   // custom webhook: URL may embed token, headers/body carry auth
-	1: {"sendKey"},                  // Server酱
-	2: {"url", "webhook", "secret"}, // 钉钉 (access_token in URL query, 加签 secret)
-	3: {"corpsecret", "corpSecret"}, // 企业微信应用密钥
-	4: {"url", "webhook", "secret"}, // 飞书 (token in URL path, 签名校验 secret)
-	5: {"server", "deviceKey"},      // Bark: server 是投递目标（可能内嵌凭据），deviceKey 是设备密钥
+	0: {"url", "webhook", "headers", "body"}, // custom webhook: URL/webhook may embed token, headers/body carry auth
+	1: {"sendKey"},                           // Server酱
+	2: {"url", "webhook", "secret"},          // 钉钉 (access_token in URL query, 加签 secret)
+	3: {"corpsecret", "corpSecret"},          // 企业微信应用密钥
+	4: {"url", "webhook", "secret"},          // 飞书 (token in URL path, 签名校验 secret)
+	5: {"server", "deviceKey"},               // Bark: server 是投递目标（可能内嵌凭据），deviceKey 是设备密钥
 }
 
 // allNotifySecretKeys is the union over every method. It is used when a stored
@@ -322,14 +338,26 @@ func maskNotifyURL(rawURL string) string {
 	if u.RawQuery != "" {
 		u.RawQuery = maskNotifyQuery(u.RawQuery)
 	}
-	segs := strings.Split(strings.Trim(u.Path, "/"), "/")
-	if len(segs) > 0 && segs[len(segs)-1] != "" {
-		last := segs[len(segs)-1]
-		// Lark-style webhooks put the token in the final path segment. The old
-		// 16-char threshold let short tokens through; 12 still keeps short
-		// human-readable paths visible while masking credential-sized segments.
-		if len(last) >= 12 {
-			segs[len(segs)-1] = maskSecretValue(last)
+	rawPath := strings.Trim(u.Path, "/")
+	if rawPath != "" {
+		segs := strings.Split(rawPath, "/")
+		changed := false
+		for i, seg := range segs {
+			// Telegram Bot API URLs carry the bot token in a /bot<token>/... segment.
+			if len(seg) > 3 && strings.HasPrefix(seg, "bot") {
+				segs[i] = "bot" + maskSecretValue(seg[3:])
+				changed = true
+				continue
+			}
+			// Lark-style webhooks put the token in the final path segment. The old
+			// 16-char threshold let short tokens through; 12 still keeps short
+			// human-readable paths visible while masking credential-sized segments.
+			if i == len(segs)-1 && len(seg) >= 12 {
+				segs[i] = maskSecretValue(seg)
+				changed = true
+			}
+		}
+		if changed {
 			u.Path = "/" + strings.Join(segs, "/")
 		}
 	}
@@ -354,7 +382,17 @@ func maskNotifyQuery(rawQuery string) string {
 		}
 		name, value, hasValue := strings.Cut(pair, "=")
 		if !hasValue {
-			// A bare flag such as "?debug" carries no value to mask.
+			decoded, err := url.QueryUnescape(pair)
+			if err != nil {
+				decoded = pair
+			}
+			// Short bare flags such as "?debug" stay readable, while token-sized
+			// query keys without "=" are redacted like query values.
+			if len(decoded) >= 8 {
+				pairs[i] = strings.ReplaceAll(
+					url.QueryEscape(maskSecretValue(decoded)), "%2A", "*",
+				)
+			}
 			continue
 		}
 		if value == "" {
@@ -513,13 +551,13 @@ func normalizeNotifyWebhookBody(params map[string]interface{}) error {
 	switch value := raw.(type) {
 	case string:
 		return validateWebhookBodyTemplate(value)
-	case map[string]interface{}, []interface{}:
+	case map[string]interface{}:
 		encoded, err := json.Marshal(value)
 		if err != nil {
 			return publicError("通知自定义 Body 格式无效")
 		}
 		params["body"] = string(encoded)
-		return nil
+		return validateWebhookBodyTemplate(string(encoded))
 	default:
 		return publicError("通知自定义 Body 格式无效")
 	}
@@ -527,15 +565,15 @@ func normalizeNotifyWebhookBody(params map[string]interface{}) error {
 
 // validateWebhookBodyTemplate checks a custom body template at save time
 // instead of at delivery time. sendWebhook substitutes the placeholders with
-// JSON-escaped strings and then unmarshals the result, so the template must
-// stay valid JSON after substitution.
+// JSON-escaped strings and then unmarshals the result into a JSON object, so
+// an empty string, array, primitive, or invalid JSON must be rejected.
 func validateWebhookBodyTemplate(template string) error {
 	if strings.TrimSpace(template) == "" {
-		return nil
+		return publicError("通知自定义 Body 格式无效")
 	}
 	rendered := strings.NewReplacer("{title}", "title", "{content}", "content").Replace(template)
-	var body interface{}
-	if err := json.Unmarshal([]byte(rendered), &body); err != nil {
+	var body map[string]interface{}
+	if err := json.Unmarshal([]byte(rendered), &body); err != nil || body == nil {
 		return publicError("通知自定义 Body 格式无效")
 	}
 	return nil
@@ -591,8 +629,51 @@ var (
 // secret values, suitable for sending a test or persisting. An explicitly
 // empty headers object ({}) clears the stored headers instead of restoring
 // them.
+func parseNotifyMethod(value interface{}) (int, error) {
+	var m int
+	switch v := value.(type) {
+	case int:
+		m = v
+	case int64:
+		if v < 0 || v > math.MaxInt {
+			return 0, publicError(msg.T(msg.NotifyMethodInvalid))
+		}
+		m = int(v)
+	case float64:
+		if math.IsNaN(v) || math.IsInf(v, 0) || v != math.Trunc(v) || v < 0 || v > 100 {
+			return 0, publicError(msg.T(msg.NotifyMethodInvalid))
+		}
+		m = int(v)
+	case json.Number:
+		n, err := v.Int64()
+		if err != nil || n < 0 || n > 100 {
+			return 0, publicError(msg.T(msg.NotifyMethodInvalid))
+		}
+		m = int(n)
+	case string:
+		s := strings.TrimSpace(v)
+		if s == "" {
+			return 0, publicError(msg.T(msg.NotifyMethodInvalid))
+		}
+		n, err := strconv.Atoi(s)
+		if err != nil {
+			return 0, publicError(msg.T(msg.NotifyMethodInvalid))
+		}
+		m = n
+	default:
+		return 0, publicError(msg.T(msg.NotifyMethodInvalid))
+	}
+	if _, ok := notifySecretKeys[m]; !ok {
+		return 0, publicError(msg.T(msg.NotifyMethodInvalid))
+	}
+	return m, nil
+}
+
 func resolveNotifyParams(notify map[string]interface{}) (map[string]interface{}, error) {
-	method := util.ToInt(notify["method"])
+	method, err := parseNotifyMethod(notify["method"])
+	if err != nil {
+		return nil, err
+	}
 	incoming, err := notifyParamsValue(notify["params"])
 	if err != nil {
 		return nil, err
@@ -617,8 +698,10 @@ func resolveNotifyParams(notify map[string]interface{}) (map[string]interface{},
 	// A different method means a different kind of credential: a stored
 	// DingTalk secret is not a Bark deviceKey. Switching method (which also
 	// switches the target field compared below) must not inherit anything.
-	if storedMethod, ok := existing["method"]; ok && storedMethod != nil && util.ToInt(storedMethod) != method {
-		return incoming, nil
+	if storedMethod, ok := existing["method"]; ok && storedMethod != nil {
+		if storedParsed, storedErr := parseNotifyMethod(storedMethod); storedErr != nil || storedParsed != method {
+			return incoming, nil
+		}
 	}
 	existingParams, _ := parseNotifyParams(fmt.Sprintf("%v", existing["params"]))
 	// Stored secrets are only merged back when the delivery target is unchanged.
@@ -634,10 +717,16 @@ func resolveNotifyParams(notify map[string]interface{}) (map[string]interface{},
 		compareIncoming = withDefaultBarkServer(incoming)
 		compareExisting = withDefaultBarkServer(existingParams)
 	}
-	if notifyTargetChanged(compareIncoming, compareExisting) {
+	if notifyTargetChanged(method, compareIncoming, compareExisting) {
 		return incoming, nil
 	}
+	if method == 3 {
+		resolveWeComSecretAliases(incoming, existingParams)
+	}
 	for _, key := range notifySecretKeys[method] {
+		if method == 3 && (key == "corpsecret" || key == "corpSecret") {
+			continue
+		}
 		v, ok := incoming[key]
 		if !ok || v == nil {
 			if ev, ok2 := existingParams[key]; ok2 && ev != nil {
@@ -684,20 +773,84 @@ func resolveNotifyParams(notify map[string]interface{}) (map[string]interface{},
 // merging stored secrets into an unknown target would ship them to a
 // destination of the caller's choosing. WeCom has no URL target at all, so its
 // corp id is compared instead.
-func notifyTargetChanged(incoming, existing map[string]interface{}) bool {
-	incomingURL := paramString(incoming, "url", "webhook", "server")
-	if incomingURL != "" && !isMaskedSecretValue(incomingURL) {
-		existingURL := paramString(existing, "url", "webhook", "server")
-		if existingURL == "" {
-			return true
+func resolveWeComSecretAliases(incoming, existingParams map[string]interface{}) {
+	var freshKey, freshVal string
+	for _, key := range []string{"corpsecret", "corpSecret"} {
+		v, ok := incoming[key]
+		if !ok || v == nil {
+			continue
 		}
-		if incomingURL != existingURL {
-			return true
+		s, isStr := v.(string)
+		if !isStr {
+			// Non-string value: preserve it for validation to reject and do not
+			// resurrect the stored secret on the other alias.
+			delete(incoming, "corpsecret")
+			delete(incoming, "corpSecret")
+			incoming[key] = v
+			return
+		}
+		trimmed := strings.TrimSpace(s)
+		if trimmed != "" && !isMaskedSecretValue(trimmed) {
+			freshKey = key
+			freshVal = trimmed
+			break
 		}
 	}
-	incomingCorp := paramString(incoming, "corpid", "corpId")
-	existingCorp := paramString(existing, "corpid", "corpId")
-	return incomingCorp != "" && existingCorp != "" && incomingCorp != existingCorp
+	if freshKey != "" {
+		delete(incoming, "corpsecret")
+		delete(incoming, "corpSecret")
+		incoming[freshKey] = freshVal
+		return
+	}
+	if stored := paramString(existingParams, "corpsecret", "corpSecret"); stored != "" {
+		targetKey := "corpsecret"
+		if _, hasCamel := incoming["corpSecret"]; hasCamel {
+			targetKey = "corpSecret"
+		} else if _, hasLower := incoming["corpsecret"]; !hasLower {
+			if _, existingCamel := existingParams["corpSecret"]; existingCamel {
+				targetKey = "corpSecret"
+			}
+		}
+		delete(incoming, "corpsecret")
+		delete(incoming, "corpSecret")
+		incoming[targetKey] = stored
+	}
+}
+
+func notifyTargetChanged(method int, incoming, existing map[string]interface{}) bool {
+	switch method {
+	case 0, 2, 4:
+		incomingURL := paramString(incoming, "url", "webhook")
+		if incomingURL != "" && !isMaskedSecretValue(incomingURL) {
+			existingURL := paramString(existing, "url", "webhook")
+			if existingURL == "" || incomingURL != existingURL {
+				return true
+			}
+		}
+		return false
+	case 1:
+		return false
+	case 3:
+		incomingCorp := paramString(incoming, "corpid", "corpId")
+		if incomingCorp != "" {
+			existingCorp := paramString(existing, "corpid", "corpId")
+			if existingCorp == "" || incomingCorp != existingCorp {
+				return true
+			}
+		}
+		return false
+	case 5:
+		incomingServer := paramString(incoming, "server")
+		if incomingServer != "" && !isMaskedSecretValue(incomingServer) {
+			existingServer := paramString(existing, "server")
+			if existingServer == "" || incomingServer != existingServer {
+				return true
+			}
+		}
+		return false
+	default:
+		return true
+	}
 }
 
 func validateNotifyParams(method int, params map[string]interface{}) error {
@@ -775,7 +928,11 @@ func validateNotifyWebhookURL(rawURL string) error {
 	if err := util.ValidateHTTPURL(rawURL, msg.T(msg.NotifyURLInvalid)); err != nil {
 		return err
 	}
-	if u, err := url.Parse(rawURL); err == nil && strings.ToLower(u.Scheme) == "http" {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || !validateHTTPURLHostPort(u) {
+		return errors.New(msg.T(msg.NotifyURLInvalid))
+	}
+	if strings.ToLower(u.Scheme) == "http" {
 		log.Printf("Warning: webhook URL uses plain HTTP, notification content will be transmitted unencrypted: %s", u.Host)
 	}
 	return nil
@@ -783,7 +940,7 @@ func validateNotifyWebhookURL(rawURL string) error {
 
 func validateNotifyHTTPSURL(rawURL string) error {
 	u, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil || u.Scheme == "" || u.Host == "" {
+	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil || !validateHTTPURLHostPort(u) {
 		return errors.New(msg.T(msg.NotifyURLInvalid))
 	}
 	if strings.ToLower(u.Scheme) != "https" {
@@ -811,11 +968,14 @@ func notifyParamsValue(value interface{}) (map[string]interface{}, error) {
 // it from "the last entry of GET /notify" is wrong as soon as two configs are
 // created concurrently, or when the list is not ordered by insertion.
 func AddNewNotify(notify map[string]interface{}) (int64, error) {
+	method, err := parseNotifyMethod(notify["method"])
+	if err != nil {
+		return 0, err
+	}
 	params, err := notifyParamsValue(notify["params"])
 	if err != nil {
 		return 0, fmt.Errorf("parse notify params: %w", err)
 	}
-	method := util.ToInt(notify["method"])
 	notify["method"] = method
 	enable, err := normalizeNotifyEnable(notify["enable"])
 	if err != nil {
@@ -859,18 +1019,22 @@ func EditNotify(notify map[string]interface{}) error {
 		return err
 	}
 	notify["enable"] = enable
+	method, err := parseNotifyMethod(notify["method"])
+	if err != nil {
+		return err
+	}
+	notify["method"] = method
 	resolved, err := resolveNotifyParams(notify)
 	if err != nil {
 		return fmt.Errorf("resolve notify params: %w", err)
 	}
-	notify["method"] = util.ToInt(notify["method"])
 	if err := rejectRedactedNotifyParams(resolved); err != nil {
 		return err
 	}
 	if err := normalizeNotifyWebhookBody(resolved); err != nil {
 		return err
 	}
-	if err := validateNotifyParams(util.ToInt(notify["method"]), resolved); err != nil {
+	if err := validateNotifyParams(method, resolved); err != nil {
 		return publicError(err.Error())
 	}
 	out, err := json.Marshal(resolved)
@@ -905,6 +1069,11 @@ func DeleteNotify(notifyID int64) error {
 // list view are restored from the stored config (when an id is given) so the
 // test sends with real credentials.
 func TestNotify(notify map[string]interface{}) error {
+	method, err := parseNotifyMethod(notify["method"])
+	if err != nil {
+		return err
+	}
+	notify["method"] = method
 	resolved, err := resolveNotifyParams(notify)
 	if err != nil {
 		return fmt.Errorf("resolve notify params: %w", err)
@@ -918,7 +1087,7 @@ func TestNotify(notify map[string]interface{}) error {
 	if err := normalizeNotifyWebhookBody(resolved); err != nil {
 		return err
 	}
-	if err := validateNotifyParams(util.ToInt(notify["method"]), resolved); err != nil {
+	if err := validateNotifyParams(method, resolved); err != nil {
 		return publicError(err.Error())
 	}
 	out, err := json.Marshal(resolved)
@@ -948,6 +1117,9 @@ func TestNotify(notify map[string]interface{}) error {
 // it directly — it hands the work to the background dispatcher via
 // QueueTaskNotification, so a slow webhook cannot hold up the finishing task.
 func SendTaskNotification(taskID int64, status int, taskNum map[string]interface{}, duration int, createTime float64) {
+	if notifyBaseContext().Err() != nil {
+		return
+	}
 	notifyList, err := mapper.GetNotifyList(true)
 	if err != nil {
 		log.Printf("Failed to load notify configs for task %d: %v", taskID, err)
@@ -1040,6 +1212,9 @@ func sendNotifyFanOut(notifyList []map[string]interface{}, title, content string
 			defer wg.Done()
 			slots <- struct{}{}
 			defer func() { <-slots }()
+			if notifyBaseContext().Err() != nil {
+				return
+			}
 			sent, sendErr := trySendNotify(notify, title, content, needNotSync)
 			recordNotifySendResult(notify, sent, sendErr)
 		}(notify)
@@ -1148,7 +1323,10 @@ func sendNotify(notify map[string]interface{}, title, content string, needNotSyn
 		return false, err
 	}
 
-	method := util.ToInt(notify["method"])
+	method, err := parseNotifyMethod(notify["method"])
+	if err != nil {
+		return false, err
+	}
 	if err := validateNotifyParams(method, params); err != nil {
 		return false, publicError(err.Error())
 	}
@@ -1605,6 +1783,30 @@ func getWeComAccessToken(client *http.Client, corpID, corpSecret string) (string
 	if wecomTokenCache.entries == nil {
 		wecomTokenCache.entries = make(map[wecomCredentials]wecomTokenEntry)
 	}
+	now := time.Now()
+	if _, exists := wecomTokenCache.entries[credentials]; !exists && len(wecomTokenCache.entries) >= maxWeComTokenCacheEntries {
+		for k, v := range wecomTokenCache.entries {
+			if !now.Before(v.expires) {
+				delete(wecomTokenCache.entries, k)
+			}
+		}
+		for len(wecomTokenCache.entries) >= maxWeComTokenCacheEntries {
+			var oldestKey wecomCredentials
+			var oldestExp time.Time
+			first := true
+			for k, v := range wecomTokenCache.entries {
+				if first || v.expires.Before(oldestExp) {
+					oldestKey = k
+					oldestExp = v.expires
+					first = false
+				}
+			}
+			if first {
+				break
+			}
+			delete(wecomTokenCache.entries, oldestKey)
+		}
+	}
 	wecomTokenCache.entries[credentials] = wecomTokenEntry{token: token, expires: expires}
 	wecomTokenCache.Unlock()
 	return token, nil
@@ -1808,7 +2010,11 @@ func sendBark(client *http.Client, params map[string]interface{}, title, content
 	if err != nil {
 		return fmt.Errorf("marshal notify body: %w", err)
 	}
-	req, err := buildNotifyRequest(http.MethodPost, strings.TrimRight(server, "/")+"/push", bytes.NewReader(jsonData), "application/json")
+	pushURL, err := barkPushURL(server)
+	if err != nil {
+		return fmt.Errorf("build notify request: %w", err)
+	}
+	req, err := buildNotifyRequest(http.MethodPost, pushURL, bytes.NewReader(jsonData), "application/json")
 	if err != nil {
 		return fmt.Errorf("build notify request: %w", err)
 	}
@@ -1829,6 +2035,20 @@ func sendBark(client *http.Client, params map[string]interface{}, title, content
 		}
 	}
 	return nil
+}
+
+func barkPushURL(server string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(server))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", errors.New(msg.T(msg.NotifyURLInvalid))
+	}
+	base := *u
+	if !strings.HasSuffix(base.Path, "/") {
+		base.Path += "/"
+	}
+	base.RawPath = ""
+	ref := &url.URL{Path: "push", RawQuery: u.RawQuery}
+	return base.ResolveReference(ref).String(), nil
 }
 
 func paramString(params map[string]interface{}, keys ...string) string {

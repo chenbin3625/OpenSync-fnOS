@@ -1,4 +1,5 @@
 import React from "react";
+import Button from "@douyinfe/semi-ui/lib/es/button";
 
 type Props = { children: React.ReactNode };
 type State = { error: Error | null };
@@ -29,9 +30,13 @@ export class ErrorBoundary extends React.Component<Props, State> {
           页面渲染时发生异常，同步任务本身不受影响，仍在后台按计划运行。
         </p>
         <pre>{error.message}</pre>
-        <button type="button" onClick={() => window.location.reload()}>
+        <Button
+          type="primary"
+          theme="solid"
+          onClick={() => window.location.reload()}
+        >
           重新加载
-        </button>
+        </Button>
       </div>
     );
   }

@@ -375,7 +375,7 @@ func (jt *JobTask) clearFullSyncApproval() {
 	jt.fullSyncApprovalCh = nil
 	jt.fullSyncApprovalMu.Unlock()
 	if hadApproval {
-		jt.notifyProgressNow()
+		jt.notifyProgressChange()
 	}
 }
 

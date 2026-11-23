@@ -66,8 +66,8 @@ func TestNotifyTargetChangedGuardsSecretMerge(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := notifyTargetChanged(tc.incoming, existing); got != tc.want {
-				t.Fatalf("notifyTargetChanged(%#v) = %v, want %v", tc.incoming, got, tc.want)
+			if got := notifyTargetChanged(0, tc.incoming, existing); got != tc.want {
+				t.Fatalf("notifyTargetChanged(0, %#v) = %v, want %v", tc.incoming, got, tc.want)
 			}
 		})
 	}
@@ -203,5 +203,31 @@ func TestResolveNotifyParamsRestoresMaskedBarkServer(t *testing.T) {
 	}
 	if got["deviceKey"] != "REALDEVICEKEY" {
 		t.Fatalf("deviceKey = %#v, want the stored key", got["deviceKey"])
+	}
+}
+
+func TestRedactNotifyParamsMasksWebhookAlias(t *testing.T) {
+	in := `{"webhook":"https://hook.example/push?token=SECRETTOKEN1234"}`
+	out := redactNotifyParams(0, in)
+	if strings.Contains(out, "SECRETTOKEN1234") {
+		t.Fatalf("redactNotifyParams(0) leaked webhook alias secret: %s", out)
+	}
+}
+
+func TestMaskNotifyURLMasksTelegramBotTokenAndBareQuerySecret(t *testing.T) {
+	tg := maskNotifyURL("https://api.telegram.org/bot123456:ABC-DEF1234ghIkl/sendMessage")
+	if strings.Contains(tg, "123456") || strings.Contains(tg, "ABC-DEF") {
+		t.Fatalf("maskNotifyURL leaked telegram bot token: %s", tg)
+	}
+	if !strings.Contains(tg, "/sendMessage") || !strings.Contains(tg, "api.telegram.org") {
+		t.Fatalf("maskNotifyURL dropped telegram path/host: %s", tg)
+	}
+
+	bare := maskNotifyURL("https://hook.example/push?SUPERSECRETTOKEN&debug")
+	if strings.Contains(bare, "SUPERSECRETTOKEN") {
+		t.Fatalf("maskNotifyURL leaked bare query token: %s", bare)
+	}
+	if !strings.Contains(bare, "debug") {
+		t.Fatalf("maskNotifyURL dropped short debug flag: %s", bare)
 	}
 }

@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/url"
 	"opensync/internal/mapper"
 	"opensync/internal/msg"
 	"opensync/pkg/util"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -20,14 +22,23 @@ var (
 	// an id that no longer exists; finishAlistClientLoad compares epochs and
 	// discards such a client instead.
 	alistClientRemovals = make(map[int64]uint64)
+	// alistClientUpdates counts UpdateClient cache commits per id so a load that
+	// started before UpdateClient cannot overwrite or outlive the new credentials
+	// even if the new client was concurrently evicted.
+	alistClientUpdates = make(map[int64]uint64)
+	// alistMutationMu serializes DB mutations (AddClient, UpdateClient,
+	// RemoveClient) with their corresponding in-memory cache updates and
+	// finishAlistClientLoad. Lock order: alistRefMu -> alistMutationMu -> alistClientListMu.
+	alistMutationMu sync.Mutex
 )
 
 type alistClientLoad struct {
-	client   *AlistClient
-	baseline *AlistClient
-	epoch    uint64
-	err      error
-	done     chan struct{}
+	client      *AlistClient
+	baseline    *AlistClient
+	epoch       uint64
+	updateEpoch uint64
+	err         error
+	done        chan struct{}
 }
 
 // GetClientList returns all alist entries without token
@@ -120,9 +131,10 @@ func beginAlistClientLoad(alistID int64) (*alistClientLoad, bool) {
 	}
 
 	load := &alistClientLoad{
-		baseline: alistClientList[alistID],
-		epoch:    alistClientRemovals[alistID],
-		done:     make(chan struct{}),
+		baseline:    alistClientList[alistID],
+		epoch:       alistClientRemovals[alistID],
+		updateEpoch: alistClientUpdates[alistID],
+		done:        make(chan struct{}),
 	}
 	alistClientLoads[alistID] = load
 	return load, true
@@ -130,6 +142,7 @@ func beginAlistClientLoad(alistID int64) (*alistClientLoad, bool) {
 
 func finishAlistClientLoad(alistID int64, load *alistClientLoad, client *AlistClient, err error) {
 	var stale *AlistClient
+	alistMutationMu.Lock()
 	alistClientListMu.Lock()
 	load.err = err
 	if err == nil && client != nil && alistClientRemovals[alistID] != load.epoch {
@@ -139,7 +152,16 @@ func finishAlistClientLoad(alistID int64, load *alistClientLoad, client *AlistCl
 		stale = client
 	} else if err == nil && client != nil {
 		current := alistClientList[alistID]
-		if current != nil && current != load.baseline {
+		if alistClientUpdates[alistID] != load.updateEpoch {
+			// UpdateClient mutated this engine while we were loading.
+			if current != nil {
+				load.client = current
+			} else {
+				load.client = nil
+				load.err = publicError(msg.T(msg.AlistConnectFail))
+			}
+			stale = client
+		} else if current != nil && current != load.baseline {
 			// A newer client was stored (e.g. via UpdateClient) while we were
 			// loading; keep the fresh one and discard the stale client we built.
 			load.client = current
@@ -153,19 +175,27 @@ func finishAlistClientLoad(alistID int64, load *alistClientLoad, client *AlistCl
 	}
 	delete(alistClientLoads, alistID)
 	alistClientListMu.Unlock()
+	alistMutationMu.Unlock()
 	close(load.done)
 	if stale != nil {
 		stale.Close()
 	}
 }
 
-func storeAlistClient(alistID int64, client *AlistClient) {
-	var previous *AlistClient
+func swapCachedAlistClient(alistID int64, client *AlistClient) *AlistClient {
 	alistClientListMu.Lock()
-	previous = alistClientList[alistID]
+	previous := alistClientList[alistID]
 	alistClientList[alistID] = client
+	alistClientUpdates[alistID]++
 	alistClientListMu.Unlock()
-	if previous != nil && previous != client {
+	if previous == client {
+		return nil
+	}
+	return previous
+}
+
+func storeAlistClient(alistID int64, client *AlistClient) {
+	if previous := swapCachedAlistClient(alistID, client); previous != nil {
 		previous.Close()
 	}
 }
@@ -230,7 +260,33 @@ func normalizeAlistInput(alist map[string]interface{}) (string, error) {
 }
 
 func validateAlistURL(rawURL string) error {
-	return util.ValidateHTTPURL(rawURL, msg.T(msg.AlistURLInvalid))
+	if err := util.ValidateHTTPURL(rawURL, msg.T(msg.AlistURLInvalid)); err != nil {
+		return err
+	}
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || !validateHTTPURLHostPort(u) {
+		return fmt.Errorf("%s", msg.T(msg.AlistURLInvalid))
+	}
+	return nil
+}
+
+func validateHTTPURLHostPort(u *url.URL) bool {
+	if u == nil {
+		return false
+	}
+	if strings.TrimSpace(u.Hostname()) == "" {
+		return false
+	}
+	if strings.HasSuffix(u.Host, ":") {
+		return false
+	}
+	if portStr := u.Port(); portStr != "" {
+		port, err := strconv.Atoi(portStr)
+		if err != nil || port < 1 || port > 65535 {
+			return false
+		}
+	}
+	return true
 }
 
 func normalizeAlistToken(alist map[string]interface{}, required bool) (string, bool, error) {
@@ -301,14 +357,34 @@ func UpdateClient(alist map[string]interface{}) error {
 	if remark != nil {
 		remarkStr = fmt.Sprintf("%v", remark)
 	}
+	alistMutationMu.Lock()
+	currentRow, err := mapper.GetAlistByID(alistID)
+	if err != nil {
+		alistMutationMu.Unlock()
+		if client != nil {
+			client.Close()
+		}
+		return publicErrorIf(err, msg.T(msg.AlistNotFound))
+	}
+	currentOldURL := fmt.Sprintf("%v", currentRow["url"])
+	if (currentOldURL != urlStr || hasToken) && client == nil {
+		alistMutationMu.Unlock()
+		return publicError(msg.T(msg.WithoutToken))
+	}
 	if err := mapper.UpdateAlist(alistID, remarkStr, urlStr, tokenPtr); err != nil {
+		alistMutationMu.Unlock()
 		if client != nil {
 			client.Close()
 		}
 		return fmt.Errorf("update alist: %w", err)
 	}
+	var previous *AlistClient
 	if client != nil {
-		storeAlistClient(alistID, client)
+		previous = swapCachedAlistClient(alistID, client)
+	}
+	alistMutationMu.Unlock()
+	if previous != nil {
+		previous.Close()
 	}
 	return nil
 }
@@ -335,8 +411,10 @@ func AddClient(alist map[string]interface{}) error {
 		remarkStr = fmt.Sprintf("%v", alist["remark"])
 	}
 
+	alistMutationMu.Lock()
 	newID, err := mapper.AddAlist(remarkStr, urlStr, client.User, token)
 	if err != nil {
+		alistMutationMu.Unlock()
 		// The validated client is never cached on this path; release its
 		// connection pool (and any HTTP/3 UDP socket) now instead of at GC.
 		client.Close()
@@ -347,7 +425,11 @@ func AddClient(alist map[string]interface{}) error {
 	}
 
 	client.AlistID = newID
-	storeAlistClient(newID, client)
+	previous := swapCachedAlistClient(newID, client)
+	alistMutationMu.Unlock()
+	if previous != nil {
+		previous.Close()
+	}
 	return nil
 }
 
@@ -360,6 +442,14 @@ var alistRefMu sync.Mutex
 func RemoveClient(alistID int64) error {
 	alistRefMu.Lock()
 	defer alistRefMu.Unlock()
+	alistMutationMu.Lock()
+	var previous *AlistClient
+	defer func() {
+		alistMutationMu.Unlock()
+		if previous != nil {
+			previous.Close()
+		}
+	}()
 	count, err := mapper.CountJobsByAlistID(alistID)
 	if err != nil {
 		return fmt.Errorf("count jobs by alist: %w", err)
@@ -375,17 +465,25 @@ func RemoveClient(alistID int64) error {
 	if err := mapper.RemoveAlist(alistID); err != nil {
 		return fmt.Errorf("remove alist: %w", err)
 	}
-	markAlistClientRemoved(alistID)
+	previous = markAlistClientRemovedLocked(alistID)
 	return nil
 }
 
 // markAlistClientRemoved evicts the cached client for alistID and bumps its
 // removal epoch so an in-flight load discards the client it is building.
 func markAlistClientRemoved(alistID int64) {
+	if previous := markAlistClientRemovedLocked(alistID); previous != nil {
+		previous.Close()
+	}
+}
+
+func markAlistClientRemovedLocked(alistID int64) *AlistClient {
 	alistClientListMu.Lock()
 	alistClientRemovals[alistID]++
+	previous := alistClientList[alistID]
+	delete(alistClientList, alistID)
 	alistClientListMu.Unlock()
-	removeCachedAlistClient(alistID)
+	return previous
 }
 
 // TestClient tests connectivity to an existing AList engine by creating a fresh

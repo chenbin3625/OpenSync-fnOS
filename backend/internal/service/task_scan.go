@@ -201,6 +201,7 @@ func (jt *JobTask) buildFullSyncPlans(works []scanWork, spec *excludeMatcher) []
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer jt.recoverWorkerPanic("full-sync plan", nil)
 			plans[i] = jt.buildFullSyncPlan(work, spec)
 		}()
 	}

@@ -243,3 +243,60 @@ func TestFullSyncApprovalTimeoutRunsCopiesWithoutDeleting(t *testing.T) {
 		t.Fatalf("approval still pending after timeout: %+v", approval)
 	}
 }
+
+// When one file inside a recursively deleted directory is relocated while other
+// files remain in that directory, approvalPreview must still report the
+// remaining deleted entries instead of hiding the whole directory.
+func TestFullSyncApprovalPreviewAccountsForPartialDirectoryRelocation(t *testing.T) {
+	relocatedMeta := FileMetadata{
+		Size: 100,
+		MD5:  "0123456789abcdef0123456789abcdef",
+	}
+	dstDir := FileListResult{"moved.bin": relocatedMeta}
+	for i := 0; i < 500; i++ {
+		dstDir[fmt.Sprintf("stay-%d.txt", i)] = FileMetadata{Size: 10}
+	}
+
+	srcRoot := FileListResult{"new/": {}}
+	dstRoot := FileListResult{"dir/": {}}
+	for i := 0; i < 1000; i++ {
+		name := fmt.Sprintf("keep-%d.txt", i)
+		srcRoot[name] = FileMetadata{Size: 1}
+		dstRoot[name] = FileMetadata{Size: 1}
+	}
+	src := &fullSyncSnapshot{root: "/src/", dirs: map[string]FileListResult{
+		"":     srcRoot,
+		"new/": {"moved.bin": relocatedMeta},
+	}}
+	dst := &fullSyncSnapshot{root: "/dst/", dirs: map[string]FileListResult{
+		"":     dstRoot,
+		"dir/": dstDir,
+	}}
+
+	plan := newFullSyncPlan(src, dst, nil)
+	plan.build(map[string]interface{}{"method": 1})
+
+	approval := plan.approvalPreview()
+	if approval == nil {
+		t.Fatal("approvalPreview() = nil, want remaining directory deletion + move")
+	}
+	// 500 remaining files + dir/ itself = 501; 500 * 10 = 5000 bytes.
+	if approval.DeleteCount != 501 || approval.DeleteSize != 5000 {
+		t.Fatalf("approval = %+v, want DeleteCount=501 DeleteSize=5000", approval)
+	}
+	if approval.PathCount != 2 {
+		t.Fatalf("PathCount = %d, want 2 (directory delete + file move)", approval.PathCount)
+	}
+	var foundDirDelete, foundMove bool
+	for _, p := range approval.Paths {
+		if p.Path == "/dst/dir" && p.Action == "删除" && p.IsPath && p.Count == 501 && p.Size == 5000 {
+			foundDirDelete = true
+		}
+		if p.Path == "/dst/dir/moved.bin" && p.Action == "移动" && !p.IsPath {
+			foundMove = true
+		}
+	}
+	if !foundDirDelete || !foundMove {
+		t.Fatalf("approval.Paths = %+v, want /dst/dir delete (501/5000) and /dst/dir/moved.bin move", approval.Paths)
+	}
+}

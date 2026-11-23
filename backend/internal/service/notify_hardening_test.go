@@ -246,18 +246,31 @@ func TestSendNotifyRequestLogsSummaryNotBody(t *testing.T) {
 // wecomServer fakes gettoken and message/send. The first issued token is
 // rejected by the send API with rejectCode; later tokens are accepted.
 type wecomServer struct {
-	mu          sync.Mutex
-	tokenCalls  int
-	sendCalls   int
-	rejectCode  int
-	tokenDelay  time.Duration
-	lastTokenOK string
+	mu           sync.Mutex
+	tokenCalls   int
+	sendCalls    int
+	rejectCode   int
+	tokenDelay   time.Duration
+	tokenStarted chan struct{}
+	lastTokenOK  string
+}
+
+func (s *wecomServer) counts() (tokenCalls, sendCalls int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.tokenCalls, s.sendCalls
 }
 
 func (s *wecomServer) handler(t *testing.T) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/gettoken":
+			if s.tokenStarted != nil {
+				select {
+				case s.tokenStarted <- struct{}{}:
+				default:
+				}
+			}
 			if s.tokenDelay > 0 {
 				time.Sleep(s.tokenDelay)
 			}
@@ -333,15 +346,15 @@ func TestSendWeComRefreshesTokenRejectedAsExpired(t *testing.T) {
 			if err := sendWeCom(server.Client(), params, "t", "c"); err != nil {
 				t.Fatalf("sendWeCom() error = %v, want retry with a fresh token to succeed", err)
 			}
-			if fake.tokenCalls != 2 || fake.sendCalls != 2 {
-				t.Fatalf("token calls=%d send calls=%d, want 2 and 2", fake.tokenCalls, fake.sendCalls)
+			if tc, sc := fake.counts(); tc != 2 || sc != 2 {
+				t.Fatalf("token calls=%d send calls=%d, want 2 and 2", tc, sc)
 			}
 			// The fresh token is cached: the next send needs no gettoken call.
 			if err := sendWeCom(server.Client(), params, "t", "c"); err != nil {
 				t.Fatal(err)
 			}
-			if fake.tokenCalls != 2 {
-				t.Fatalf("token calls=%d after a cached send, want 2", fake.tokenCalls)
+			if tc, _ := fake.counts(); tc != 2 {
+				t.Fatalf("token calls=%d after a cached send, want 2", tc)
 			}
 		})
 	}
@@ -357,15 +370,16 @@ func TestSendWeComDoesNotRetryOtherErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal("sendWeCom() = nil, want failure")
 	}
-	if fake.sendCalls != 1 || fake.tokenCalls != 1 {
-		t.Fatalf("send calls=%d token calls=%d, want 1 and 1", fake.sendCalls, fake.tokenCalls)
+	if tc, sc := fake.counts(); sc != 1 || tc != 1 {
+		t.Fatalf("send calls=%d token calls=%d, want 1 and 1", sc, tc)
 	}
 }
 
 // The cache lock is no longer held across the gettoken request, so a slow
 // fetch for one corp does not stall another corp's cached send.
 func TestWeComTokenFetchDoesNotHoldCacheLock(t *testing.T) {
-	fake := &wecomServer{tokenDelay: 300 * time.Millisecond}
+	started := make(chan struct{}, 1)
+	fake := &wecomServer{tokenDelay: 300 * time.Millisecond, tokenStarted: started}
 	server := httptest.NewServer(fake.handler(t))
 	defer server.Close()
 	useWeComServer(t, server)
@@ -381,7 +395,7 @@ func TestWeComTokenFetchDoesNotHoldCacheLock(t *testing.T) {
 		defer close(slowDone)
 		_, _ = getWeComAccessToken(server.Client(), "slow", "s")
 	}()
-	time.Sleep(50 * time.Millisecond) // let the slow fetch start
+	<-started
 
 	start := time.Now()
 	token, err := getWeComAccessToken(server.Client(), "cached", "s")
@@ -407,5 +421,53 @@ func TestWeComTokenErrorOmitsRawBody(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "SUPERSECRET") || !strings.Contains(err.Error(), "40001") {
 		t.Fatalf("error = %v, want errcode without echoed body", err)
+	}
+}
+
+func TestWeComTokenCacheBoundsEntries(t *testing.T) {
+	transport := &wecomTokenTransport{}
+	client := &http.Client{Transport: transport}
+	wecomTokenCache.Lock()
+	wecomTokenCache.entries = nil
+	wecomTokenCache.Unlock()
+	t.Cleanup(func() {
+		wecomTokenCache.Lock()
+		wecomTokenCache.entries = nil
+		wecomTokenCache.Unlock()
+	})
+
+	for i := 0; i < maxWeComTokenCacheEntries+20; i++ {
+		corp := "corp-" + itoa(i)
+		if _, err := getWeComAccessToken(client, corp, "secret"); err != nil {
+			t.Fatalf("getWeComAccessToken(%s) error: %v", corp, err)
+		}
+	}
+
+	wecomTokenCache.Lock()
+	size := len(wecomTokenCache.entries)
+	wecomTokenCache.Unlock()
+	if size > maxWeComTokenCacheEntries {
+		t.Fatalf("wecomTokenCache size = %d, want <= %d", size, maxWeComTokenCacheEntries)
+	}
+}
+
+func TestValidateWebhookDestinationContextHonorsParentCancel(t *testing.T) {
+	oldLookup := webhookLookupIPAddr
+	defer func() { webhookLookupIPAddr = oldLookup }()
+	webhookLookupIPAddr = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	parentCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	err := validateWebhookDestinationContext(parentCtx, "http://slow.example/hook")
+	if err != nil {
+		t.Fatalf("validateWebhookDestinationContext() = %v, want nil on cancelled lookup fallback", err)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("validateWebhookDestinationContext() took %v on cancelled parent context", elapsed)
 	}
 }

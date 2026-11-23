@@ -199,3 +199,37 @@ func TestExcludeMatcherDirectoryRuleDoesNotMatchPlainFile(t *testing.T) {
 		t.Error("directory rule must match when the call site only signals the trailing slash")
 	}
 }
+
+
+func TestInvalidExcludeRulesRejectsDotAndDotDotSegments(t *testing.T) {
+	input := ".\n..\n../cache/\nfoo/../bar/\n./cache/\nfoo/./\nvalid.txt\nvalid_dir/"
+	got := invalidExcludeRules(input)
+	want := []string{".", "..", "../cache/", "foo/../bar/", "./cache/", "foo/./"}
+	if len(got) != len(want) {
+		t.Fatalf("invalidExcludeRules() = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("invalidExcludeRules()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestExcludeMatcherHandlesExcludedSubtreeAndRejectsUnsafePaths(t *testing.T) {
+	matcher := newExcludeMatcher("photos/raw/\ncache/\nreport.txt")
+
+	if !matcher.matches("photos/raw/sub/a.jpg", false) {
+		t.Error("expected file inside excluded nested directory to match")
+	}
+	if !matcher.matches("backup/cache/a.txt", false) {
+		t.Error("expected file inside excluded directory name to match")
+	}
+	if matcher.matches("photos/raw_keep/a.jpg", false) {
+		t.Error("sibling prefix directory falsely matched excluded directory")
+	}
+	for _, unsafe := range []string{"../secret.txt", `a\b`, "bad\x00file", "a\nb"} {
+		if matcher.matches(unsafe, false) {
+			t.Errorf("unsafe path %q matched exclude rule", unsafe)
+		}
+	}
+}

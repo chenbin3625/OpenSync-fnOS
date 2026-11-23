@@ -788,3 +788,54 @@ func TestFullSyncWriteFailureBlocksOnlyRelatedDeletes(t *testing.T) {
 		t.Fatal("no recorded failure must not block any delete")
 	}
 }
+
+// When the destination root itself is "/", fullSyncPathBlocked must still check
+// "/" before terminating the ancestor walk so empty-source protection and
+// write-failure guards are never bypassed.
+func TestFullSyncPathBlockedHandlesRootPath(t *testing.T) {
+	blocked := map[string]struct{}{"/": {}}
+	for _, path := range []string{"/", "/file.txt", "/a/b/file.txt"} {
+		if !fullSyncPathBlocked(path, blocked) {
+			t.Fatalf(`fullSyncPathBlocked(%q, {"/": {}}) = false, want true`, path)
+		}
+	}
+	if fullSyncPathBlocked("relative.txt", blocked) {
+		t.Fatal(`fullSyncPathBlocked(relative.txt, {"/": {}}) = true, want false`)
+	}
+
+	failures := &fullSyncWriteFailures{}
+	failures.record("/", "fail.txt", int64(5), taskStatusFailed)
+	if !failures.blocks(fullSyncDelete{dir: "/sub", name: "other.txt", metadata: FileMetadata{Size: 1}}) {
+		t.Fatal(`write failure at root "/" failed to block delete in "/sub"`)
+	}
+}
+
+func TestFullSyncRootDestinationGuardsDeletesOnEmptySource(t *testing.T) {
+	var persisted []map[string]interface{}
+	restorePersist := stubPersistJobTaskItems(t, &persisted, nil)
+	defer restorePersist()
+
+	rec := &removeRecorder{}
+	server := rec.server(t)
+	defer server.Close()
+
+	src := &fullSyncSnapshot{root: "/", dirs: map[string]FileListResult{"": {}}}
+	dst := &fullSyncSnapshot{root: "/", dirs: map[string]FileListResult{
+		"": {"keep.txt": {Size: 1}, "sub/": {}},
+		"sub/": {"nested.txt": {Size: 2}},
+	}}
+	plan := newFullSyncPlan(src, dst, nil)
+	plan.build(map[string]interface{}{"method": 1})
+
+	suspicious := plan.suspiciousEmptySourceDirs()
+	if _, ok := suspicious["/"]; !ok {
+		t.Fatalf(`suspiciousEmptySourceDirs = %#v, want root "/" flagged`, suspicious)
+	}
+
+	jt := deleteSafetyTask(t, server.URL, server.Client())
+	jt.executeFullSyncPlan(plan)
+	jt.runFullSyncDeletes()
+	if calls := rec.calls(); len(calls) != 0 {
+		t.Fatalf(`remove calls = %#v, want none when root "/" source listed empty`, calls)
+	}
+}

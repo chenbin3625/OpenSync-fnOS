@@ -370,3 +370,99 @@ func TestParsePathListDropsDuplicates(t *testing.T) {
 		t.Fatalf("parsePathList = %#v, want one /nas/a", got)
 	}
 }
+
+
+func TestCleanAndValidateJobInputRejectsTraversalAndUnsafeChars(t *testing.T) {
+	for _, badPath := range []string{
+		"/src/../other",
+		"../other",
+		"/src/..",
+		`/src\sub`,
+		"/src/\x00file",
+		"/src/line\nbreak",
+		".",
+		"relative/path",
+	} {
+		job := map[string]interface{}{
+			"srcPath": []string{badPath},
+			"dstPath": []string{"/dst"},
+			"alistId": int64(1),
+			"isCron":  2,
+			"method":  0,
+		}
+		if err := CleanJobInput(job); err != nil {
+			continue
+		}
+		if err := ValidateJobInput(job); err == nil {
+			t.Fatalf("ValidateJobInput() accepted unsafe path %q (after CleanJobInput: %v)", badPath, job["srcPath"])
+		}
+	}
+
+	okJob := map[string]interface{}{
+		"srcPath": []string{"/Photos/backup..2024"},
+		"dstPath": []string{"/dst"},
+		"alistId": int64(1),
+		"isCron":  2,
+		"method":  0,
+	}
+	if err := CleanJobInput(okJob); err != nil {
+		t.Fatalf("CleanJobInput(valid dots) error: %v", err)
+	}
+	if err := ValidateJobInput(okJob); err != nil {
+		t.Fatalf("ValidateJobInput(valid dots) error: %v", err)
+	}
+}
+
+func TestSyncPathContainsEdgeCases(t *testing.T) {
+	cases := []struct {
+		parent    string
+		candidate string
+		want      bool
+	}{
+		{"", "", false},
+		{"/", "", false},
+		{"/", ".", false},
+		{"/", "relative", false},
+		{"/a/../b", "/b", false},
+		{"/d/", "/d", true},
+		{"/d", "/dx", false},
+		{"/", "/data", true},
+	}
+	for _, tc := range cases {
+		if got := syncPathContains(tc.parent, tc.candidate); got != tc.want {
+			t.Errorf("syncPathContains(%q, %q) = %v, want %v", tc.parent, tc.candidate, got, tc.want)
+		}
+	}
+}
+
+func TestValidateJobInputStrictlyValidatesEnableMethodCronAndExclude(t *testing.T) {
+	base := func() map[string]interface{} {
+		return map[string]interface{}{
+			"srcPath": []string{"/src"},
+			"dstPath": []string{"/dst"},
+			"alistId": int64(1),
+			"isCron":  2,
+			"method":  0,
+		}
+	}
+
+	for name, mutate := range map[string]func(map[string]interface{}){
+		"invalid enable string": func(j map[string]interface{}) { j["enable"] = "abc" },
+		"invalid enable int":    func(j map[string]interface{}) { j["enable"] = 2 },
+		"invalid enable float":  func(j map[string]interface{}) { j["enable"] = 1.5 },
+		"invalid method string": func(j map[string]interface{}) { j["method"] = "abc" },
+		"invalid method range":  func(j map[string]interface{}) { j["method"] = 3 },
+		"invalid method float":  func(j map[string]interface{}) { j["method"] = 1.9 },
+		"out of range cron sec": func(j map[string]interface{}) { j["isCron"] = 1; j["second"] = "99"; j["minute"] = "0" },
+		"unsupported exclude":   func(j map[string]interface{}) { j["exclude"] = "!keep.txt" },
+		"invalid size range":    func(j map[string]interface{}) { j["minFileSize"] = 100; j["maxFileSize"] = 50 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			job := base()
+			mutate(job)
+			if err := ValidateJobInput(job); err == nil {
+				t.Fatalf("ValidateJobInput() accepted %s", name)
+			}
+		})
+	}
+}

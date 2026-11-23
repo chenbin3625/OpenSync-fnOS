@@ -237,3 +237,26 @@ func TestShutdownCancelsInFlightRequestsOnDeadline(t *testing.T) {
 		t.Fatal("dispatcher context was not cancelled after the shutdown deadline")
 	}
 }
+
+func TestNotifyDispatcherShutdownCancelsContextOnCleanExit(t *testing.T) {
+	dispatcher := newNotifyDispatcher(func(notifyJob) {})
+	if !dispatcher.enqueue(notifyJob{taskID: 1}) {
+		t.Fatal("enqueue() = false")
+	}
+	dispatcher.shutdown(context.Background())
+	if err := dispatcher.context().Err(); err == nil {
+		t.Fatal("dispatcher context was not cancelled after clean shutdown")
+	}
+}
+
+func TestNotifyDispatcherRunJobSkipsWhenContextCancelled(t *testing.T) {
+	called := false
+	dispatcher := newNotifyDispatcher(func(notifyJob) {
+		called = true
+	})
+	dispatcher.cancel()
+	dispatcher.runJob(notifyJob{taskID: 1})
+	if called {
+		t.Fatal("runJob() ran handler after dispatcher context was cancelled")
+	}
+}

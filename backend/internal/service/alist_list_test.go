@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
@@ -100,20 +101,32 @@ func TestFileListApiContextPostsTypedBodyAndOverlapsRemainingPages(t *testing.T)
 	maxInflight := 0
 	seen := map[int]alistListRequest{}
 
+	handlerErr := make(chan string, 1)
+	failHandler := func(w http.ResponseWriter, format string, args ...interface{}) {
+		select {
+		case handlerErr <- fmt.Sprintf(format, args...):
+		default:
+		}
+		w.WriteHeader(http.StatusBadRequest)
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/fs/list" {
-			t.Fatalf("path = %s, want /api/fs/list", r.URL.Path)
+			failHandler(w, "path = %s, want /api/fs/list", r.URL.Path)
+			return
 		}
 		if ct := r.Header.Get("Content-Type"); ct != "application/json" {
-			t.Fatalf("Content-Type = %q", ct)
+			failHandler(w, "Content-Type = %q", ct)
+			return
 		}
 		var req alistListRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("decode list request: %v", err)
+			failHandler(w, "decode list request: %v", err)
+			return
 		}
 		// Only page 1 refreshes; later pages read the cache it rebuilt.
 		if req.Path != "/tv" || req.PerPage != 2 || req.Refresh != (req.Page == 1) {
-			t.Fatalf("list request = %#v", req)
+			failHandler(w, "list request = %#v", req)
+			return
 		}
 
 		mu.Lock()
@@ -139,6 +152,11 @@ func TestFileListApiContextPostsTypedBodyAndOverlapsRemainingPages(t *testing.T)
 	files, err := client.FileListApiContext(context.Background(), "/tv", 0, 0)
 	if err != nil {
 		t.Fatalf("FileListApiContext() error: %v", err)
+	}
+	select {
+	case msg := <-handlerErr:
+		t.Fatal(msg)
+	default:
 	}
 	if len(files) != 6 {
 		t.Fatalf("len(files) = %d, want 6 (%#v)", len(files), files)
@@ -509,5 +527,70 @@ func TestFileListApiContextHandlesMissingTotal(t *testing.T) {
 	fullClient := &AlistClient{URL: full.URL, client: full.Client()}
 	if _, err := fullClient.FileListApiContext(context.Background(), "/tv", 0, 0); err == nil {
 		t.Fatal("FileListApiContext() error = nil, want a refusal for a full page without a total")
+	}
+}
+
+func TestDecodeFileListResponsePreservesCodeAndMessageWhenDataEmpty(t *testing.T) {
+	raw := `{"data":{},"code":401,"message":"token expired"}`
+	result := FileListResult{}
+	page, err := decodeFileListResponse(strings.NewReader(raw), 1<<20, result)
+	if err != nil {
+		t.Fatalf("decodeFileListResponse() error: %v", err)
+	}
+	if page.code != 401 || page.message != "token expired" {
+		t.Fatalf("page = %+v, want code=401 message=%q", page, "token expired")
+	}
+
+	if _, err := decodeFileListResponse(strings.NewReader(`{"code":200,"message":"ok","data":{"total":0}}`), 1<<20, FileListResult{}); err == nil {
+		t.Fatal("decodeFileListResponse(200 without content) = nil, want missing data error")
+	}
+	if page, err := decodeFileListResponse(strings.NewReader(`{"code":200,"message":"ok","data":{"content":null,"total":0}}`), 1<<20, FileListResult{}); err != nil || page.n != 0 {
+		t.Fatalf("decodeFileListResponse(200 with null content) = %+v, %v; want 0 entries, nil", page, err)
+	}
+}
+
+func TestFileListApiContext401WithEmptyDataEvictsClient(t *testing.T) {
+	d := *alistDeps
+	d.FileListPageSize = 2
+	t.Cleanup(SetAlistDepsForTest(&d))
+
+	server := listServer(t, `{"data":{},"code":401,"message":"token invalidated"}`)
+	defer server.Close()
+
+	client := &AlistClient{AlistID: 88, URL: server.URL, client: server.Client()}
+	alistClientListMu.Lock()
+	previousList := alistClientList
+	alistClientList = map[int64]*AlistClient{88: client}
+	alistClientListMu.Unlock()
+	defer func() {
+		alistClientListMu.Lock()
+		alistClientList = previousList
+		alistClientListMu.Unlock()
+	}()
+
+	_, err := client.FileListApiContext(context.Background(), "/tv", 0, 0)
+	if err == nil {
+		t.Fatal("FileListApiContext() error = nil, want AlistUnAuth")
+	}
+	alistClientListMu.RLock()
+	_, stillCached := alistClientList[88]
+	alistClientListMu.RUnlock()
+	if stillCached {
+		t.Fatal("401 with empty data object did not evict cached client")
+	}
+}
+
+func TestFileListApiContextAllowsNilContextOnMultiPage(t *testing.T) {
+	d := *alistDeps
+	d.FileListPageSize = 2
+	t.Cleanup(SetAlistDepsForTest(&d))
+
+	server := pagedListServer(t, nil)
+	defer server.Close()
+
+	client := &AlistClient{URL: server.URL, client: server.Client()}
+	files, err := client.FileListApiContext(nil, "/tv", 0, 0)
+	if err != nil || len(files) != 6 {
+		t.Fatalf("FileListApiContext(nil) = %d entries, err %v; want 6 entries", len(files), err)
 	}
 }

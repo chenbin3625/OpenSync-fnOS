@@ -37,6 +37,9 @@ type alistCopyMoveRequest struct {
 }
 
 func (c *AlistClient) FileListApiContext(ctx context.Context, path string, useCache int, scanInterval int) (FileListResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	req := alistListRequest{
 		Path:    path,
 		Refresh: useCache != 1,
@@ -421,11 +424,11 @@ func decodeFileListData(dec *json.Decoder, result FileListResult) (fileListData,
 			}
 		}
 	}
-	if !contentSeen {
-		return data, nil
+	if err := consumeDelim(dec, '}'); err != nil {
+		return fileListData{}, err
 	}
-	data.contentSeen = true
-	return data, consumeDelim(dec, '}')
+	data.contentSeen = contentSeen
+	return data, nil
 }
 
 func decodeFileListContent(dec *json.Decoder, result FileListResult) (n, dropped int, err error) {

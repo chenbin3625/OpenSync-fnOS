@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"opensync/internal/config"
 )
@@ -191,5 +192,61 @@ func TestNoSuchTableOrNoRowsDoesNotMatchOtherErrors(t *testing.T) {
 	}
 	if isNoSuchTableOrNoRows(errors.New("no such column: taskNum")) {
 		t.Fatal("isNoSuchTableOrNoRows matched a missing-column error")
+	}
+}
+
+// ShutdownDB must wait for any in-flight initDBOnce to close its handle and
+// publish closedDB before ShutdownDB returns, and closedDB must already be
+// closed before it becomes visible to GetDB.
+func TestShutdownDBWaitsForInFlightInitDBOnceAndClosesHandle(t *testing.T) {
+	resetGlobalDBForTest(t, &config.Config{
+		DB:     config.DBConfig{DBName: filepath.Join(t.TempDir(), "inflight-shutdown.db")},
+		Server: config.ServerConfig{PasswdStr: "inflight-test"},
+	})
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	initDBPauseForTest = func() {
+		close(entered)
+		<-release
+	}
+	t.Cleanup(func() { initDBPauseForTest = nil })
+
+	initDone := make(chan *sql.DB, 1)
+	go func() {
+		initDone <- InitDB()
+	}()
+	<-entered
+
+	shutdownDone := make(chan error, 1)
+	go func() {
+		shutdownDone <- ShutdownDB()
+	}()
+
+	select {
+	case err := <-shutdownDone:
+		close(release)
+		t.Fatalf("ShutdownDB() returned early (err=%v) while initDBOnce was still in flight", err)
+	case <-time.After(60 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("ShutdownDB() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ShutdownDB() did not return after initDBOnce finished")
+	}
+	h1 := <-initDone
+	h2 := GetDB()
+	if h1 == nil || h2 == nil {
+		t.Fatalf("handles after ShutdownDB = %v / %v, want non-nil closed handles", h1, h2)
+	}
+	if err := h1.Ping(); err == nil {
+		t.Fatal("InitDB handle is still open after ShutdownDB returned")
+	}
+	if err := h2.Ping(); err == nil {
+		t.Fatal("GetDB handle is still open after ShutdownDB returned")
 	}
 }

@@ -60,7 +60,7 @@ describe("mock task record deletion", () => {
   it("reports a missing record as an error envelope", async () => {
     resetMockStore({ jobs: [{ id: 1, remark: "任务一" }], history: { 1: [] } });
     const result = await call("/job?taskId=123", { method: "DELETE" });
-    expect(result.status).toBe(200);
+    expect(result.status).toBe(400);
     expect(result.body.code).toBe(500);
   });
 });
@@ -97,7 +97,7 @@ describe("mock job action contract", () => {
   it("rejects an empty PUT /job body like the backend", async () => {
     resetMockStore({ jobs: [{ id: 1, remark: "任务一" }] });
     const result = await call("/job", jsonInit("PUT", {}));
-    expect(result.status).toBe(200);
+    expect(result.status).toBe(400);
     expect(result.body.code).toBe(500);
   });
 
@@ -165,7 +165,7 @@ describe("mock settings contract", () => {
       "/system/config",
       jsonInit("PUT", { scanConcurrency: 51 }),
     );
-    expect(tooBig.status).toBe(200);
+    expect(tooBig.status).toBe(400);
     expect(tooBig.body.code).toBe(500);
     expect(tooBig.body.msg).toContain("扫描并发数");
   });

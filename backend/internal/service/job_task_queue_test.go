@@ -1103,3 +1103,51 @@ func TestRunChildScanWorksFinishesCountedChildrenAfterBreak(t *testing.T) {
 		t.Fatalf("scanProgress after break child finish = %#v, want total=1 scanned=1 remaining=0", progress)
 	}
 }
+
+func TestFlushPersistBufferRestoresItemsOnPanic(t *testing.T) {
+	jt := &JobTask{TaskID: 99}
+	jt.initRuntime()
+	jt.persistBuffer = []JobTaskItem{
+		{TaskID: 99, FileName: "a.txt", Status: taskStatusSuccess},
+		{TaskID: 99, FileName: "b.txt", Status: taskStatusSuccess},
+	}
+
+	func() {
+		defer func() { _ = recover() }()
+		_ = jt.flushPersistBufferItemsWith(func([]map[string]interface{}) error {
+			panic("simulated db panic")
+		})
+	}()
+
+	jt.persistBufMu.Lock()
+	buffered := len(jt.persistBuffer)
+	jt.persistBufMu.Unlock()
+	if buffered != 2 {
+		t.Fatalf("persistBuffer len after panic = %d, want 2 restored items", buffered)
+	}
+}
+
+func TestFinishSuccessfulTaskHandlesNilJobClient(t *testing.T) {
+	testDB := newServiceTaskStatusTestDB(t)
+	restoreDB := mapperDBForServiceTest(testDB)
+	defer restoreDB()
+
+	oldQueue := queueTaskNotification
+	queueTaskNotification = func(int64, int, map[string]interface{}, int, float64) {}
+	defer func() { queueTaskNotification = oldQueue }()
+
+	jt := &JobTask{
+		TaskID:     10,
+		CreateTime: float64(time.Now().Unix()),
+		Waiting:    newCopyQueue(),
+	}
+	jt.initRuntime()
+	jt.ScanFinish.Store(true)
+
+	jt.finishSuccessfulTask()
+
+	status, _ := readServiceTaskStatus(t, testDB, 10)
+	if status != taskStatusNoSync.Int() {
+		t.Fatalf("task status = %d, want no-sync status 8", status)
+	}
+}

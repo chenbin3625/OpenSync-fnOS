@@ -582,3 +582,47 @@ func TestDeprecatedEnvironmentVariablesAreReported(t *testing.T) {
 		}
 	}
 }
+
+// Out-of-range integer values in config.ini are clamped to defaults at startup.
+// Saving settings afterwards must succeed instead of permanently locking
+// PUT /svr/system/config with a false disk-vs-memory conflict.
+func TestUpdateSystemSettingsSucceedsAfterOutOfRangeConfigClampedAtStartup(t *testing.T) {
+	withTempConfigDir(t)
+	writeConfigForTest(t, "[opensync]\ncopy_concurrency=99999\ntask_timeout=-1\ntask_save=99999\n")
+
+	cfg := GetConfig()
+	if cfg.Server.CopyConcurrency != DefaultCopyConcurrency || cfg.Server.Timeout != defaultTaskTimeout || cfg.Server.TaskSave != defaultTaskSave {
+		t.Fatalf("clamped startup config = %+v", cfg.Server)
+	}
+
+	if err := UpdateSystemSettings(SystemSettings{
+		TaskTimeout:     24,
+		TaskSave:        15,
+		CopyConcurrency: 8,
+		ScanConcurrency: 16,
+		MaxRetries:      2,
+	}); err != nil {
+		t.Fatalf("UpdateSystemSettings() after out-of-range startup value failed: %v", err)
+	}
+	saved, err := os.ReadFile(filepath.Join(ConfigDir(), "config.ini"))
+	if err != nil {
+		t.Fatalf("ReadFile(config.ini) error: %v", err)
+	}
+	if !strings.Contains(string(saved), "copy_concurrency=8") || !strings.Contains(string(saved), "task_save=15") {
+		t.Fatalf("config.ini = %q, want updated values written", saved)
+	}
+
+	// A runtime hand-edit to an out-of-range value when memory holds a different
+	// effective value (8 vs clamped 5) must still report a conflict.
+	writeConfigForTest(t, "[opensync]\ncopy_concurrency=99999\ntask_save=15\n")
+	err = UpdateSystemSettings(SystemSettings{
+		TaskTimeout:     24,
+		TaskSave:        15,
+		CopyConcurrency: 10,
+		ScanConcurrency: 16,
+		MaxRetries:      2,
+	})
+	if err == nil || !strings.Contains(err.Error(), "copy_concurrency") || !strings.Contains(err.Error(), "config.ini=99999") {
+		t.Fatalf("UpdateSystemSettings() after runtime out-of-range edit = %v, want conflict naming copy_concurrency and 99999", err)
+	}
+}

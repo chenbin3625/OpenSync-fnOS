@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/quic-go/quic-go"
 
+	"opensync/internal/config"
 	"opensync/internal/mapper"
 )
 
@@ -111,6 +113,10 @@ func TestFileStatContextReportsMissingAndUnknownSize(t *testing.T) {
 }
 
 func TestUpdateClientBadTokenKeepsWorkingCachedClient(t *testing.T) {
+	oldCfg := config.GetConfig()
+	config.SetConfigForTest(&config.Config{Server: config.ServerConfig{PasswdStr: "test-secret"}})
+	t.Cleanup(func() { config.SetConfigForTest(oldCfg) })
+
 	testDB, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatalf("sql.Open() error: %v", err)
@@ -185,25 +191,39 @@ func TestCopyMoveUseLongOperationClient(t *testing.T) {
 }
 
 func TestCreateEmptyFileContextUsesPutWithoutSourceDownload(t *testing.T) {
+	handlerErr := make(chan string, 1)
+	failHandler := func(w http.ResponseWriter, format string, args ...interface{}) {
+		select {
+		case handlerErr <- fmt.Sprintf(format, args...):
+		default:
+		}
+		w.WriteHeader(http.StatusBadRequest)
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPut || r.URL.Path != "/api/fs/put" {
-			t.Fatalf("request = %s %s, want PUT /api/fs/put", r.Method, r.URL.Path)
+			failHandler(w, "request = %s %s, want PUT /api/fs/put", r.Method, r.URL.Path)
+			return
 		}
 		if got := r.Header.Get("File-Path"); got != "%2Fdst%2F%E7%A9%BA@zod.txt" {
-			t.Fatalf("File-Path = %q, want escaped destination path", got)
+			failHandler(w, "File-Path = %q, want escaped destination path", got)
+			return
 		}
 		if got := r.Header.Get("Content-Type"); got != "application/octet-stream" {
-			t.Fatalf("Content-Type = %q, want application/octet-stream", got)
+			failHandler(w, "Content-Type = %q, want application/octet-stream", got)
+			return
 		}
 		if got := r.Header.Get("Overwrite"); got != "true" {
-			t.Fatalf("Overwrite = %q, want true", got)
+			failHandler(w, "Overwrite = %q, want true", got)
+			return
 		}
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
-			t.Fatalf("read request body: %v", err)
+			failHandler(w, "read request body: %v", err)
+			return
 		}
 		if len(body) != 0 {
-			t.Fatalf("request body length = %d, want 0", len(body))
+			failHandler(w, "request body length = %d, want 0", len(body))
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"code":200,"message":"success","data":null}`)
@@ -213,6 +233,11 @@ func TestCreateEmptyFileContextUsesPutWithoutSourceDownload(t *testing.T) {
 	client := &AlistClient{URL: server.URL, client: server.Client()}
 	if err := client.CreateEmptyFileContext(context.Background(), "/dst/", "空@zod.txt"); err != nil {
 		t.Fatalf("CreateEmptyFileContext() error: %v", err)
+	}
+	select {
+	case msg := <-handlerErr:
+		t.Fatal(msg)
+	default:
 	}
 }
 
@@ -564,7 +589,16 @@ func TestIsReplayableAlistRequest(t *testing.T) {
 		{http.MethodPost, "/api/fs/copy", false},
 		{http.MethodPost, "/api/fs/move", false},
 		{http.MethodPost, "/api/fs/remove", false},
+		{http.MethodPost, "/api/fs/mkdir", false},
+		{http.MethodPost, "/alist/api/fs/copy", false},
+		{http.MethodPost, "/alist/api/fs/move", false},
+		{http.MethodPost, "/alist/api/fs/remove", false},
+		{http.MethodPost, "/alist/api/fs/mkdir", false},
+		{http.MethodPost, "/alist/api/fs/list", true},
+		{http.MethodPost, "/alist/api/fs/get", true},
+		{http.MethodPut, "/alist/api/fs/put", false},
 		{http.MethodPost, "/api/admin/task/copy/cancel", false},
+		{http.MethodPost, "/alist/api/admin/task/copy/cancel", false},
 		{http.MethodPost, "/api/admin/task/move/info", false},
 	}
 	for _, tc := range cases {
@@ -606,5 +640,163 @@ func TestProtocolTripperHTTP3FailureExpires(t *testing.T) {
 	tripper.markHTTP3("nas.example")
 	if !tripper.preferHTTP3("nas.example") {
 		t.Fatal("HTTP/3 stayed disabled after the failure mark expired")
+	}
+}
+
+func TestAlistHTTP3TransportSetsLongIdleTimeout(t *testing.T) {
+	tr := newAlistHTTP3Transport()
+	if tr.QUICConfig == nil {
+		t.Fatal("QUICConfig = nil")
+	}
+	if tr.QUICConfig.MaxIdleTimeout < alistLongOpClientTimeout {
+		t.Fatalf("MaxIdleTimeout = %v, want >= %v", tr.QUICConfig.MaxIdleTimeout, alistLongOpClientTimeout)
+	}
+}
+
+func TestProtocolTripperBypassesHTTP3WhenProxyApplies(t *testing.T) {
+	var h12Calls, h3Calls atomic.Int64
+	h12 := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		h12Calls.Add(1)
+		header := make(http.Header)
+		header.Set("Alt-Svc", `h3=":443"`)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     header,
+			Body:       io.NopCloser(strings.NewReader(`{}`)),
+			Request:    req,
+		}, nil
+	})
+	h3 := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		h3Calls.Add(1)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{}`)),
+			Request:    req,
+		}, nil
+	})
+	tripper := newProtocolTripper(h12, h3)
+	tripper.proxyForRequest = func(req *http.Request) (*url.URL, error) {
+		return url.Parse("http://proxy.example:8080")
+	}
+	tripper.markHTTP3("example.com")
+
+	for i := 0; i < 2; i++ {
+		req, _ := http.NewRequest(http.MethodGet, "https://example.com/api/me", nil)
+		resp, err := tripper.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("RoundTrip() error: %v", err)
+		}
+		_ = resp.Body.Close()
+	}
+	if h3Calls.Load() != 0 {
+		t.Fatalf("h3Calls = %d, want 0 when proxy applies", h3Calls.Load())
+	}
+	if h12Calls.Load() != 2 {
+		t.Fatalf("h12Calls = %d, want 2", h12Calls.Load())
+	}
+}
+
+func TestAlistCheckRedirectPolicy(t *testing.T) {
+	client, longClient := newAlistHTTPClients()
+	if client.CheckRedirect == nil || longClient.CheckRedirect == nil {
+		t.Fatal("newAlistHTTPClients() must install CheckRedirect on both clients")
+	}
+
+	oldLookup := alistRedirectLookupIPAddr
+	alistRedirectLookupIPAddr = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+		switch host {
+		case "public.example":
+			return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
+		case "rebind-loopback.example":
+			return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, nil
+		case "rebind-metadata.example":
+			return []net.IPAddr{{IP: net.ParseIP("169.254.169.254")}}, nil
+		default:
+			return nil, errors.New("unknown host")
+		}
+	}
+	t.Cleanup(func() { alistRedirectLookupIPAddr = oldLookup })
+
+	makeReq := func(method, rawURL string) *http.Request {
+		req, err := http.NewRequest(method, rawURL, nil)
+		if err != nil {
+			t.Fatalf("NewRequest(%s %s) error: %v", method, rawURL, err)
+		}
+		req.Header.Set("Authorization", "secret-token")
+		return req
+	}
+
+	// 1. HTTPS -> HTTP downgrade blocked.
+	if err := alistCheckRedirect(makeReq(http.MethodGet, "http://alist.example/api/me"), []*http.Request{
+		makeReq(http.MethodGet, "https://alist.example/api/me"),
+	}); err == nil {
+		t.Fatal("HTTPS -> HTTP downgrade was allowed")
+	}
+
+	// 2. Non-GET/HEAD redirects blocked.
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
+		if err := alistCheckRedirect(makeReq(http.MethodGet, "https://alist.example/next"), []*http.Request{
+			makeReq(method, "https://alist.example/api/fs/copy"),
+		}); err == nil {
+			t.Fatalf("%s -> GET redirect was allowed", method)
+		}
+		if err := alistCheckRedirect(makeReq(method, "https://alist.example/next"), []*http.Request{
+			makeReq(method, "https://alist.example/api/fs/copy"),
+		}); err == nil {
+			t.Fatalf("%s -> %s redirect was allowed", method, method)
+		}
+	}
+
+	// 3. Cross-host redirect strips Authorization, Cookie, and Proxy-Authorization.
+	crossReq := makeReq(http.MethodGet, "https://public.example/api/me")
+	crossReq.Header.Set("Cookie", "sid=abc")
+	crossReq.Header.Set("Proxy-Authorization", "Basic secret")
+	if err := alistCheckRedirect(crossReq, []*http.Request{
+		makeReq(http.MethodGet, "https://alist.example/api/me"),
+	}); err != nil {
+		t.Fatalf("cross-host public redirect error = %v, want allowed without Authorization", err)
+	}
+	for _, hdr := range []string{"Authorization", "Cookie", "Proxy-Authorization"} {
+		if got := crossReq.Header.Get(hdr); got != "" {
+			t.Fatalf("%s leaked across hosts: %q", hdr, got)
+		}
+	}
+
+	// 3b. Unsupported scheme blocked.
+	if err := alistCheckRedirect(makeReq(http.MethodGet, "file:///etc/passwd"), []*http.Request{
+		makeReq(http.MethodGet, "https://alist.example/api/me"),
+	}); err == nil {
+		t.Fatal("file:// redirect was allowed")
+	}
+
+	// 4. Private / loopback / metadata SSRF redirects blocked.
+	for _, target := range []string{
+		"http://127.0.0.1:8080/admin",
+		"http://localhost:5244/api/me",
+		"http://localhost.:5244/api/me",
+		"http://10.0.0.1/secret",
+		"http://192.168.1.1/secret",
+		"http://169.254.169.254/latest/meta-data",
+		"http://[::1]:8080/",
+		"https://rebind-loopback.example/api/me",
+		"https://rebind-metadata.example/api/me",
+	} {
+		if err := alistCheckRedirect(makeReq(http.MethodGet, target), []*http.Request{
+			makeReq(http.MethodGet, "http://127.0.0.1:5244/api/me"),
+		}); err == nil {
+			t.Fatalf("SSRF redirect to %q was allowed", target)
+		}
+	}
+
+	// 5. Same-origin GET redirect allowed and keeps Authorization.
+	sameReq := makeReq(http.MethodGet, "http://127.0.0.1:5244/v2/api/me")
+	if err := alistCheckRedirect(sameReq, []*http.Request{
+		makeReq(http.MethodGet, "http://127.0.0.1:5244/api/me"),
+	}); err != nil {
+		t.Fatalf("same-origin GET redirect error = %v", err)
+	}
+	if got := sameReq.Header.Get("Authorization"); got != "secret-token" {
+		t.Fatalf("same-origin redirect stripped Authorization: %q", got)
 	}
 }

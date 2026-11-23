@@ -18,6 +18,11 @@ import (
 const defaultSchedulerTimeZone = "Asia/Shanghai"
 const schedulerStopTimeout = 5 * time.Second
 
+// maxJobIntervalMinutes caps interval schedules at 100 years (well below
+// math.MaxInt64 / int64(time.Minute)) so time.Duration(interval)*time.Minute
+// can never overflow into a non-positive duration and spin robfig/cron.
+const maxJobIntervalMinutes int64 = 52560000
+
 // intervalCatchUpDelay is how soon an overdue interval job runs after startup.
 // The delay avoids starting every overdue job in the same second right after a
 // restart (and after the engine becomes reachable).
@@ -37,8 +42,11 @@ type intervalSchedule struct {
 }
 
 func newIntervalSchedule(interval time.Duration, lastRun time.Time) *intervalSchedule {
+	if interval <= 0 {
+		interval = time.Minute
+	}
 	schedule := &intervalSchedule{interval: interval, first: true}
-	if !lastRun.IsZero() && interval > 0 {
+	if !lastRun.IsZero() {
 		schedule.next = lastRun.Add(interval)
 	}
 	return schedule
@@ -46,6 +54,10 @@ func newIntervalSchedule(interval time.Duration, lastRun time.Time) *intervalSch
 
 // Next implements cron.Schedule.
 func (schedule *intervalSchedule) Next(t time.Time) time.Time {
+	interval := schedule.interval
+	if interval <= 0 {
+		interval = time.Minute
+	}
 	if schedule.first {
 		schedule.first = false
 		if !schedule.next.IsZero() {
@@ -55,7 +67,7 @@ func (schedule *intervalSchedule) Next(t time.Time) time.Time {
 			return t.Add(intervalCatchUpDelay)
 		}
 	}
-	return t.Add(schedule.interval)
+	return t.Add(interval)
 }
 
 // stopCronWithTimeout stops a cron scheduler and waits up to schedulerStopTimeout.
@@ -186,8 +198,8 @@ func (s *Scheduler) addJobLocked(isCron int, jobData map[string]interface{}, fn 
 		return 0, errors.New(msg.T(msg.CannotResumeLostJob))
 	}
 	if isCron == 0 {
-		interval := util.ToInt(jobData["interval"])
-		if interval <= 0 {
+		interval := util.ToInt64(jobData["interval"])
+		if interval <= 0 || interval > maxJobIntervalMinutes {
 			return 0, errors.New(msg.T(msg.IntervalLost))
 		}
 		schedule := newIntervalSchedule(time.Duration(interval)*time.Minute, s.lastRunTime(jobData))
@@ -297,6 +309,13 @@ func buildCronSpec(jobData map[string]interface{}) (string, error) {
 	// cron-standard values directly (0=Sunday..6=Saturday) and no conversion
 	// is needed. The values are passed through unchanged.
 	return strings.Join(parts, " "), nil
+}
+
+var jobCronParser = cron.NewParser(cron.Second | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+
+func validateCronSpec(spec string) error {
+	_, err := jobCronParser.Parse(spec)
+	return err
 }
 
 func isSafeCronField(value string) bool {

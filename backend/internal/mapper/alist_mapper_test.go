@@ -329,3 +329,44 @@ func TestCountJobsByAlistID(t *testing.T) {
 		t.Fatalf("CountJobsByAlistID(7) = %d, want 2", count)
 	}
 }
+
+func TestUpdateAlistChecksNotFoundAndUniqueConstraint(t *testing.T) {
+	db := newFileTestDB(t)
+	mustExec(t, db, `CREATE TABLE alist_list(
+		id integer primary key autoincrement,
+		remark text,
+		url text,
+		userName text,
+		token text,
+		UNIQUE (url, userName)
+	)`)
+	restore := SetDBForTest(db)
+	defer restore()
+	setMapperTestConfig(t, &config.Config{Server: config.ServerConfig{PasswdStr: "alist-update-test"}})
+
+	id1, err := AddAlist("one", "https://a.test", "user", "tok1")
+	if err != nil {
+		t.Fatalf("AddAlist(1) error = %v", err)
+	}
+	if _, err := AddAlist("one-dup", "https://a.test", "user", "tok1"); !errors.Is(err, ErrAlistExists) {
+		t.Fatalf("AddAlist(dup) error = %v, want ErrAlistExists", err)
+	}
+	id2, err := AddAlist("two", "https://b.test", "user", "tok2")
+	if err != nil {
+		t.Fatalf("AddAlist(2) error = %v", err)
+	}
+	if err := UpdateAlist(999, "missing", "https://c.test", nil); !errors.Is(err, ErrAlistNotFound) {
+		t.Fatalf("UpdateAlist(missing) error = %v, want ErrAlistNotFound", err)
+	}
+	if err := UpdateAlist(id2, "collide", "https://a.test", nil); !errors.Is(err, ErrAlistExists) {
+		t.Fatalf("UpdateAlist(unique conflict) error = %v, want ErrAlistExists", err)
+	}
+	newTok := "tok1-new"
+	if err := UpdateAlist(id1, "updated", "https://a-new.test", &newTok); err != nil {
+		t.Fatalf("UpdateAlist(valid) error = %v", err)
+	}
+	row, err := GetAlistByID(id1)
+	if err != nil || row["remark"] != "updated" || row["url"] != "https://a-new.test" || row["token"] != "tok1-new" {
+		t.Fatalf("GetAlistByID() after update = %#v, %v", row, err)
+	}
+}

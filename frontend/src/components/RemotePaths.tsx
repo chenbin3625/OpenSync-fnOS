@@ -116,8 +116,8 @@ export function RemotePaths({
     [],
   );
 
-  // 自己渲染标签而不是交给 Semi 包一层白色 Tag：这样能带上类名和文件夹图标，
-  // “+N” 悬浮层里的标签（挂在 body 下）也能用同一套样式。
+  // 使用 Semi 原生浅蓝 Tag（color="blue" type="light"）+ 文件夹图标，
+  // “+N” 悬浮层里的标签（挂在 body 下）也能保持一致。
   const renderSelectedTag: RenderSelectedItemInMultiple = (node, { onClose }) => {
     const path = String(node.value ?? node.key);
     return {
@@ -126,8 +126,10 @@ export function RemotePaths({
         <Tag
           key={path}
           className="remote-paths-tag"
+          color="blue"
+          type="light"
           size="large"
-          prefixIcon={<IconFolderStroked aria-hidden="true" />}
+          prefixIcon={<IconFolderStroked size="small" aria-hidden="true" />}
           // 与 Semi 自带标签一致：选择框禁用时不能删除
           closable={Boolean(engineId)}
           onClose={onClose}

@@ -32,9 +32,11 @@ func (jt *JobTask) finishSuccessfulTask() {
 	enqueue := queueTaskNotification
 	// Mark the job idle after the DB update succeeds, before notification
 	// delivery is handed off, so the next run is never gated on it.
-	jt.JobClient.markDone()
-	jt.JobClient.clearCurrentTask(jt)
-	jt.notifyProgressNow()
+	if jt.JobClient != nil {
+		jt.JobClient.markDone()
+		jt.JobClient.clearCurrentTask(jt)
+		jt.notifyProgressNow()
+	}
 	// Queued rather than sent here: delivery costs one HTTP timeout per
 	// unreachable destination, and the task is already finished.
 	enqueue(jt.TaskID, status.Int(), taskNum, duration, jt.CreateTime)

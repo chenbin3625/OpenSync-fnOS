@@ -284,7 +284,7 @@ func (c *AlistClient) checkAlistCode(code int, message string) error {
 
 func normalizeAlistBaseURL(rawURL string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || !validateHTTPURLHostPort(u) {
 		return "", errors.New(msg.T(msg.AlistURLInvalid))
 	}
 	scheme := strings.ToLower(u.Scheme)

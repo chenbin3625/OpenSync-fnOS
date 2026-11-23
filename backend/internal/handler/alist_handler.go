@@ -35,6 +35,10 @@ func AddAlist(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
+	if req == nil {
+		respondError(c, msg.T(msg.LostPart))
+		return
+	}
 	handleServiceVoid(c, func() error {
 		return service.AddClient(req)
 	})
@@ -44,6 +48,10 @@ func AddAlist(c *gin.Context) {
 func UpdateAlist(c *gin.Context) {
 	var req map[string]interface{}
 	if !bindJSON(c, &req) {
+		return
+	}
+	if req == nil {
+		respondError(c, msg.T(msg.LostPart))
 		return
 	}
 	handleServiceVoid(c, func() error {

@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"opensync/internal/msg"
 
@@ -216,16 +217,19 @@ func parseOriginValue(value string) (callerOrigin, bool) {
 // the configured policy broader than the operator wrote.
 func parseAllowlistEntry(value string) (callerOrigin, bool) {
 	value = strings.TrimSpace(value)
-	if value == "" {
+	if value == "" || hasControlOrSpace(value) {
 		return callerOrigin{}, false
 	}
 	if strings.Contains(value, "://") {
+		if strings.ContainsAny(value, "?#") {
+			return callerOrigin{}, false
+		}
 		origin, ok := parseOriginValue(value)
 		if !ok {
 			return callerOrigin{}, false
 		}
 		parsed, err := url.Parse(value)
-		if err != nil || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		if err != nil || parsed.User != nil || parsed.ForceQuery || parsed.RawQuery != "" || parsed.Fragment != "" {
 			return callerOrigin{}, false
 		}
 		if parsed.Path != "" && parsed.Path != "/" {
@@ -233,8 +237,9 @@ func parseAllowlistEntry(value string) (callerOrigin, bool) {
 		}
 		return origin, true
 	}
-	// A bare authority must not smuggle a path or query past the host comparison.
-	if strings.ContainsAny(value, "/?#") {
+	// A bare authority must not smuggle a path, query, fragment, or userinfo
+	// past the host comparison.
+	if strings.ContainsAny(value, "/?#@") {
 		return callerOrigin{}, false
 	}
 	host, port := splitHostPort(value)
@@ -249,6 +254,15 @@ func parseAllowlistEntry(value string) (callerOrigin, bool) {
 		}
 	}
 	return callerOrigin{host: host, port: port}, true
+}
+
+func hasControlOrSpace(value string) bool {
+	for _, r := range value {
+		if unicode.IsControl(r) || unicode.IsSpace(r) {
+			return true
+		}
+	}
+	return false
 }
 
 // originAllowed reports whether the request origin matches the allow-list. A

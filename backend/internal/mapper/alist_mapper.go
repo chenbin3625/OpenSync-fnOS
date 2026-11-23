@@ -48,22 +48,41 @@ func AddAlist(remark, url, userName, token string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return ExecuteInsert(
+	id, err := ExecuteInsert(
 		"INSERT INTO alist_list (remark, url, userName, token) VALUES (?, ?, ?, ?)",
 		remark, url, userName, encryptedToken,
 	)
+	if isUniqueConstraintError(err) {
+		return 0, alistExistsError()
+	}
+	return id, err
 }
 
 // UpdateAlist updates an alist entry
 func UpdateAlist(id int64, remark, url string, token *string) error {
+	var (
+		affected int64
+		err      error
+	)
 	if token != nil {
-		encryptedToken, err := encryptCredential(*token)
-		if err != nil {
-			return err
+		encryptedToken, encErr := encryptCredential(*token)
+		if encErr != nil {
+			return encErr
 		}
-		return ExecuteUpdate("UPDATE alist_list SET remark=?, url=?, token=? WHERE id=?", remark, url, encryptedToken, id)
+		affected, err = executeUpdateAffected("UPDATE alist_list SET remark=?, url=?, token=? WHERE id=?", remark, url, encryptedToken, id)
+	} else {
+		affected, err = executeUpdateAffected("UPDATE alist_list SET remark=?, url=? WHERE id=?", remark, url, id)
 	}
-	return ExecuteUpdate("UPDATE alist_list SET remark=?, url=? WHERE id=?", remark, url, id)
+	if isUniqueConstraintError(err) {
+		return alistExistsError()
+	}
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return notFound(ErrAlistNotFound, msg.AlistNotFound)
+	}
+	return nil
 }
 
 // RemoveAlist deletes an alist entry. Deleting a row that does not exist is

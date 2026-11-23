@@ -2,7 +2,7 @@ import Notification from "@douyinfe/semi-ui/lib/es/notification";
 import { IconArrowUp } from "@douyinfe/semi-icons";
 import type { LatestVersion } from "../api/client";
 import { formatVersion, latestReleaseURL } from "./VersionLink";
-import { openExternalURL } from "../lib/host";
+import { openExternalURL, safeExternalURL } from "../lib/host";
 
 /**
  * Remembers which release the user has already been told about, so a reload
@@ -20,7 +20,7 @@ export function notifyUpdateAvailable(
   currentVersion: string,
   latest: LatestVersion,
 ) {
-  const url = latest.releaseURL || latestReleaseURL;
+  const url = safeExternalURL(latest.releaseURL) ?? latestReleaseURL;
   Notification.info({
     // 固定 id：重复点「检查更新」时更新已有卡片，而不是叠出多张常驻提醒。
     id: updateNoticeId,

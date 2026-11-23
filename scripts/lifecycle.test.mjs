@@ -432,3 +432,226 @@ test("start reports failure when initialisation fails after binding", {
     rmSync(fixture, { recursive: true });
   }
 });
+
+test("start refuses to delete a live renamed Unix socket (app.sock)", {
+  timeout: 60000,
+}, async () => {
+  const { fixture, run } = setupLifecycleFixture();
+  // 模拟 Go 后端先绑定 .app.sock.<pid> 再 rename 成 app.sock：
+  // /proc/net/unix 里路径仍是临时名，fuser/ss -lx 均匹配不到 app.sock。
+  const listener = spawn(
+    "python3",
+    [
+      "-c",
+      `
+import os, signal, socket, sys, time
+tmp = sys.argv[1]
+final = sys.argv[2]
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.bind(tmp)
+s.listen(5)
+os.rename(tmp, final)
+print("READY", flush=True)
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+while True:
+    try:
+        conn, _ = s.accept()
+        conn.close()
+    except OSError:
+        break
+`,
+      join(fixture, "target/.app.sock.99999"),
+      join(fixture, "target/app.sock"),
+    ],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  try {
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("listener did not become ready")), 5000);
+      listener.stdout.on("data", (chunk) => {
+        if (chunk.toString().includes("READY")) {
+          clearTimeout(timer);
+          resolve();
+        }
+      });
+      listener.on("exit", (code) => {
+        clearTimeout(timer);
+        reject(new Error(`listener exited early with ${code}`));
+      });
+    });
+
+    const start = run("start");
+    assert.notEqual(start.status, 0, "start must fail when renamed app.sock is live");
+    assert.match(start.stderr, /Socket 仍被进程占用/);
+    assert.ok(existsSync(join(fixture, "target/app.sock")), "live app.sock must not be deleted");
+
+    // 确认 socket 仍可连接（未被破坏）。
+    const probe = spawnSync(
+      "python3",
+      [
+        "-c",
+        "import socket,sys; s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.connect(sys.argv[1]); s.close()",
+        join(fixture, "target/app.sock"),
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(probe.status, 0, probe.stderr);
+  } finally {
+    listener.kill("SIGTERM");
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("start cleans up child process when spawned process fails before execve", {
+  timeout: 60000,
+}, () => {
+  const { fixture, env } = setupLifecycleFixture();
+  // 用一个会 sleep 但从不 exec 成 $BIN 的脚本代替二进制，验证超时未 exec 时不会留下孤儿进程。
+  const marker = `opensync-orphan-guard-${Date.now()}`;
+  const fakeBin = join(fixture, "target/server/opensync");
+  writeFileSync(fakeBin, `#!/bin/sh\nexec sleep 30 # ${marker}\n`);
+  chmodSync(fakeBin, 0o755);
+  try {
+    const start = spawnSync("bash", [join(fixture, "cmd/main"), "start"], {
+      env,
+      encoding: "utf8",
+      timeout: 20000,
+    });
+    assert.notEqual(start.status, 0);
+    assert.match(start.stderr, /服务启动失败/);
+    const leftover = spawnSync("pgrep", ["-f", marker], { encoding: "utf8" });
+    assert.notEqual(leftover.status, 0, `orphan process remained: ${leftover.stdout}`);
+  } finally {
+    spawnSync("pkill", ["-f", marker]);
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("stop terminates log-rotator and its child sleep without leaking orphans", {
+  timeout: 60000,
+}, () => {
+  const { fixture, run } = setupLifecycleFixture();
+  try {
+    const interval = "287";
+    const start = run("start", { OPENSYNC_LOG_CHECK_INTERVAL: interval });
+    assert.equal(start.status, 0, start.stderr);
+    const rotatorPidFile = join(fixture, "var/log-rotator.pid");
+    assert.ok(existsSync(rotatorPidFile));
+    const [rotatorPid] = readFileSync(rotatorPidFile, "utf8").trim().split(/\s+/);
+    assert.ok(rotatorPid);
+
+    assert.equal(run("stop").status, 0);
+    assert.ok(!existsSync(rotatorPidFile));
+
+    // rotator 及其派生 sleep 都必须已结束。
+    const checkRotator = spawnSync("ps", ["-p", rotatorPid], { encoding: "utf8" });
+    assert.notEqual(checkRotator.status, 0, "log-rotator process still running");
+    const checkSleep = spawnSync(
+      "pgrep",
+      ["-f", `sleep ${interval}`],
+      { encoding: "utf8" },
+    );
+    assert.notEqual(checkSleep.status, 0, `orphan sleep remained: ${checkSleep.stdout}`);
+  } finally {
+    run("stop");
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("start acquires lifecycle lock before touching log-rotator or upgrade-pending", {
+  timeout: 60000,
+}, async () => {
+  const { fixture, run } = setupLifecycleFixture();
+  const pendingFile = join(fixture, "var/upgrade-pending");
+  try {
+    assert.equal(run("start").status, 0);
+    writeFileSync(pendingFile, "/some/backup\n");
+    const rotatorBefore = readFileSync(join(fixture, "var/log-rotator.pid"), "utf8");
+
+    // 模拟另一个正在持锁的 lifecycle 操作（例如 stop/upgrade）。
+    const holder = spawn(
+      "flock",
+      ["-x", join(fixture, "tmp/lifecycle.lock"), "sleep", "10"],
+      { detached: true, stdio: "ignore" },
+    );
+    await new Promise((r) => setTimeout(r, 200));
+    try {
+      const start = run("start");
+      assert.notEqual(start.status, 0);
+      assert.match(start.stderr, /应用正在启动/);
+      assert.ok(existsSync(pendingFile), "upgrade-pending must not be cleared without lock");
+      assert.equal(
+        readFileSync(join(fixture, "var/log-rotator.pid"), "utf8"),
+        rotatorBefore,
+        "log-rotator must not be restarted without lock",
+      );
+    } finally {
+      try {
+        process.kill(-holder.pid, "SIGKILL");
+      } catch {}
+    }
+  } finally {
+    run("stop");
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("upgrade_init excludes log-rotator.pid and blocks concurrent start during backup", {
+  timeout: 60000,
+}, () => {
+  const { fixture, env, run } = setupLifecycleFixture();
+  try {
+    assert.equal(run("start").status, 0);
+    writeFileSync(join(fixture, "var/log-rotator.pid"), "999999 1\n");
+    const upgrade = spawnSync("bash", [join(fixture, "cmd/upgrade_init")], {
+      env,
+      encoding: "utf8",
+    });
+    assert.equal(upgrade.status, 0, upgrade.stderr);
+    const backup = readFileSync(join(fixture, "var/last-upgrade-backup"), "utf8").trim();
+    assert.ok(!existsSync(join(backup, "log-rotator.pid")), "log-rotator.pid must be excluded");
+  } finally {
+    run("stop");
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("fail still writes error to stderr when TRIM_TEMP_LOGFILE is unwritable", () => {
+  const { fixture, env } = setupLifecycleFixture();
+  try {
+    const res = spawnSync("bash", [join(fixture, "cmd/main"), "invalid-op"], {
+      env: { ...env, TRIM_TEMP_LOGFILE: join(fixture, "no-such-dir/err.log") },
+      encoding: "utf8",
+    });
+    assert.equal(res.status, 1);
+    assert.match(res.stderr, /不支持的运行操作/);
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("rotates app.log while running without following a symlink at app.log.1", {
+  timeout: 60000,
+}, async () => {
+  const { fixture, run } = setupLifecycleFixture();
+  const log = join(fixture, "var/app.log");
+  const victim = join(fixture, "var/victim.txt");
+  writeFileSync(victim, "untouched");
+  symlinkSync(victim, `${log}.1`);
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  try {
+    const start = run("start", { OPENSYNC_LOG_CHECK_INTERVAL: "1" });
+    assert.equal(start.status, 0, start.stderr);
+    appendFileSync(log, "y".repeat(10 * 1024 * 1024 + 1024));
+    const deadline = Date.now() + 20000;
+    while (Date.now() < deadline) {
+      if (statSync(log).size < 1024 * 1024) break;
+      await sleep(200);
+    }
+    assert.equal(readFileSync(victim, "utf8"), "untouched");
+    assert.ok(statSync(log).size < 1024 * 1024);
+  } finally {
+    run("stop");
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});

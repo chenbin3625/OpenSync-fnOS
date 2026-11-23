@@ -6,9 +6,9 @@ import {
   IconRefresh,
 } from "@douyinfe/semi-icons";
 import Tag from "@douyinfe/semi-ui/lib/es/tag";
-import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
 import type { LatestVersion } from "../api/client";
-import { openExternalURL } from "../lib/host";
+import { openExternalURL, safeExternalURL } from "../lib/host";
+import { IconButton } from "./common";
 
 export const repositoryURL = "https://github.com/chenbin3625/OpenSync-fnOS";
 export const latestReleaseURL =
@@ -40,7 +40,7 @@ export function VersionLink() {
   const version = formatVersion(currentVersion);
   const hasUpdate = latest?.hasUpdate === true;
   const targetURL = hasUpdate
-    ? latest.releaseURL || latestReleaseURL
+    ? (safeExternalURL(latest.releaseURL) ?? latestReleaseURL)
     : repositoryURL;
   const label = `GitHub 当前版本 ${version}${hasUpdate ? `，有新版本 ${latest.latestVersion}` : ""}${latestError ? `，版本检查失败：${latestError}` : ""}`;
   return (
@@ -78,18 +78,15 @@ export function VersionLink() {
           </span>
         )}
       </a>
-      <Tooltip content="检查更新" trigger="hover" disableFocusListener>
-        <button
-          type="button"
-          className="version-check"
-          onClick={() => void checkUpdate()}
-          disabled={checking}
-          aria-busy={checking}
-          aria-label="检查更新"
-        >
-          <IconRefresh spin={checking} aria-hidden="true" />
-        </button>
-      </Tooltip>
+      <IconButton
+        label="检查更新"
+        size="small"
+        className="version-check"
+        disabled={checking}
+        ariaBusy={checking}
+        icon={<IconRefresh spin={checking} aria-hidden="true" />}
+        onClick={() => void checkUpdate()}
+      />
     </div>
   );
 }

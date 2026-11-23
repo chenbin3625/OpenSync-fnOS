@@ -112,3 +112,35 @@ func TestFinalFlushSealsDebounceTimer(t *testing.T) {
 		t.Fatal("cancelPersistFlush re-opened the sealed task")
 	}
 }
+
+// A debounce timer callback that fires just as sealPersistFlush seals the task
+// must see the sealed state and return without flushing on a cancelled context.
+func TestScheduledPersistFlushDoesNotRunAfterSeal(t *testing.T) {
+	var calls atomic.Int32
+	d := *jobDeps
+	d.PersistJobTaskItems = func([]map[string]interface{}) error {
+		calls.Add(1)
+		return errors.New("must not flush after seal")
+	}
+	restore := SetJobDepsForTest(&d)
+	defer restore()
+
+	jt := &JobTask{TaskID: 8, Job: map[string]interface{}{}}
+	jt.initRuntime()
+	jt.appendFinish(JobTaskItem{TaskID: 8, FileName: "a.txt", Status: taskStatusSuccess})
+
+	jt.sealPersistFlush()
+	// Simulate the already-scheduled timer callback losing the persistFlushMu
+	// lock race to sealPersistFlush.
+	jt.runScheduledPersistFlush()
+
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("persist calls = %d, want 0 after sealPersistFlush", got)
+	}
+	if err := jt.taskPersistenceError(); err != nil {
+		t.Fatalf("PersistErr = %v, want nil", err)
+	}
+	if !jt.persistFlushSealed() {
+		t.Fatal("seal was lost after stale timer callback")
+	}
+}

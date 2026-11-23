@@ -121,6 +121,10 @@ func migrateStoredCredentials(db *sql.DB) error {
 				values[id] = value.String
 			}
 		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return err
+		}
 		if err := rows.Close(); err != nil {
 			return err
 		}

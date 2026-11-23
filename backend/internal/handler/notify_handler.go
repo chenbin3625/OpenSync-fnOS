@@ -1,9 +1,15 @@
 package handler
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"log"
+	"net/http"
+	"opensync/internal/model"
 	"opensync/internal/msg"
 	"opensync/internal/service"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -57,6 +63,33 @@ func AddNotify(c *gin.Context) {
 	})
 }
 
+const maxConcurrentNotifyTests = 4
+
+var (
+	notifyTestSem     = make(chan struct{}, maxConcurrentNotifyTests)
+	notifyTestWG      sync.WaitGroup
+	notifyTestMu      sync.RWMutex
+	notifyTestClosing bool
+)
+
+// ShutdownNotifyTests rejects new TestNotify invocations and waits for any
+// already-running test goroutines to finish before ctx expires.
+func ShutdownNotifyTests(ctx context.Context) {
+	notifyTestMu.Lock()
+	notifyTestClosing = true
+	notifyTestMu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		notifyTestWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+}
+
 // TestNotify handles POST /svr/notify/test
 func TestNotify(c *gin.Context) {
 	var req struct {
@@ -69,13 +102,46 @@ func TestNotify(c *gin.Context) {
 		respondError(c, msg.T(msg.LostPart))
 		return
 	}
+	if c.Request.Context().Err() != nil {
+		return
+	}
+
+	notifyTestMu.RLock()
+	if notifyTestClosing {
+		notifyTestMu.RUnlock()
+		respondError(c, msg.T(msg.NotifySendFail))
+		return
+	}
+	select {
+	case notifyTestSem <- struct{}{}:
+	default:
+		notifyTestMu.RUnlock()
+		c.JSON(http.StatusTooManyRequests, model.Error(msg.T(msg.NotifySendFail)))
+		return
+	}
+	notifyTestWG.Add(1)
+	notifyTestMu.RUnlock()
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), notifyTestTimeout)
+	defer cancel()
+
 	// Capture the seam before starting the goroutine: tests swap it and restore
 	// it in a cleanup, and the goroutine may outlive the handler on timeout.
 	testService := testNotifyService
+	payload := *req.Notify
 	done := make(chan error, 1)
-	go func() { done <- testService(*req.Notify) }()
-	timer := time.NewTimer(notifyTestTimeout)
-	defer timer.Stop()
+	go func() {
+		defer notifyTestWG.Done()
+		defer func() { <-notifyTestSem }()
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("notify test panicked: %v", r)
+				done <- fmt.Errorf("notify test panic: %v", r)
+			}
+		}()
+		done <- testService(payload)
+	}()
+
 	select {
 	case err := <-done:
 		if err != nil {
@@ -83,13 +149,15 @@ func TestNotify(c *gin.Context) {
 			return
 		}
 		respondOK(c, nil)
-	case <-c.Request.Context().Done():
-		// The client disconnected; the send keeps its own bounded lifetime but
-		// there is nobody left to write a response to.
-		log.Printf("notify test abandoned by client: %v", c.Request.Context().Err())
-	case <-timer.C:
-		log.Printf("notify test timed out after %s", notifyTestTimeout)
-		respondError(c, msg.T(msg.NotifySendFail))
+	case <-ctx.Done():
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) && c.Request.Context().Err() == nil {
+			log.Printf("notify test timed out after %s", notifyTestTimeout)
+			respondError(c, msg.T(msg.NotifySendFail))
+			return
+		}
+		// The client disconnected or the server is shutting down; the send keeps
+		// its bounded lifetime and there is nobody left to write a response to.
+		log.Printf("notify test abandoned: %v", ctx.Err())
 	}
 }
 

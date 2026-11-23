@@ -169,9 +169,15 @@ func pathHasParentSegment(value string) bool {
 }
 
 // AddJob handles POST /svr/job
+var stopTaskService = service.StopTask
+
 func AddJob(c *gin.Context) {
 	var req map[string]interface{}
 	if !bindJSON(c, &req) {
+		return
+	}
+	if req == nil {
+		respondError(c, msg.T(msg.LostPart))
 		return
 	}
 	if err := validateJobFields(req); err != nil {
@@ -202,23 +208,27 @@ func UpdateJob(c *gin.Context) {
 		// other clients; both are accepted, fractions and junk are not.
 		ID     *flexibleID `json:"id"`
 		TaskID *flexibleID `json:"taskId"`
-		Action string      `json:"action"`
+		Action *string     `json:"action"`
 		Pause  *bool       `json:"pause"`
 		Abort  *bool       `json:"abort"`
 	}
-	if !bindJSON(c, &req) {
+	if !bindJSONStrict(c, &req) {
 		return
 	}
 
 	if req.TaskID != nil {
+		if req.ID != nil || req.Pause != nil || req.Abort != nil || req.Action == nil {
+			respondError(c, msg.T(msg.LostPart))
+			return
+		}
 		taskID, err := req.TaskID.parse()
 		if err != nil {
 			respondError(c, err.Error())
 			return
 		}
-		switch req.Action {
+		switch *req.Action {
 		case "stop":
-			handleServiceVoid(c, func() error { return service.StopTask(taskID) })
+			handleServiceVoid(c, func() error { return stopTaskService(taskID) })
 		case "retry":
 			handleServiceVoid(c, func() error { return service.RetryFailedTask(taskID) })
 		case "approve":
@@ -231,7 +241,16 @@ func UpdateJob(c *gin.Context) {
 		return
 	}
 
+	if req.Action != nil {
+		respondError(c, msg.T(msg.LostPart))
+		return
+	}
+
 	if req.Pause == nil {
+		if req.Abort != nil {
+			respondError(c, msg.T(msg.LostPart))
+			return
+		}
 		// Manual execution. The id is mandatory: an empty body ({}), or any
 		// malformed request that happened to drop it, used to fall through to
 		// service.DoAllJobManual and start every enabled job at once.
@@ -263,6 +282,10 @@ func UpdateJob(c *gin.Context) {
 		}
 	} else {
 		// Enable
+		if req.Abort != nil && *req.Abort {
+			respondError(c, msg.T(msg.LostPart))
+			return
+		}
 		if req.ID == nil {
 			respondError(c, msg.T(msg.LostPart))
 			return

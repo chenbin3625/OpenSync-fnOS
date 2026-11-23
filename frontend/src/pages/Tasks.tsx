@@ -1,8 +1,14 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { useSearchParams } from "react-router-dom";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Modal from "@douyinfe/semi-ui/lib/es/modal";
-import Spin from "@douyinfe/semi-ui/lib/es/spin";
 import Switch from "@douyinfe/semi-ui/lib/es/switch";
 import Tabs from "@douyinfe/semi-ui/lib/es/tabs";
 import Tag from "@douyinfe/semi-ui/lib/es/tag";
@@ -24,7 +30,10 @@ import {
   EmptyState,
   Header,
   Info,
+  InlineNotice,
+  LoadingPanel,
   LoadState,
+  SectionCard,
   confirmAction,
   confirmDelete,
   confirmStopTask,
@@ -37,7 +46,6 @@ import {
   formatDuration,
   formatNextRun,
   formatSize,
-  formatSchedule,
   formatSchedulePlan,
   getJobName,
   methodLabel,
@@ -54,9 +62,8 @@ const History = lazy(() =>
 );
 const JobEditor = lazy(() => import("./TaskEditor"));
 const currentTaskPollMs = 3000;
-// While the realtime tab is open it owns its own (SSE + fallback) feed; the
-// parent only needs a slow re-check to keep the tab's enabled state honest.
-const currentTaskRealtimePollMs = 10000;
+// Keep approval detection responsive while on the realtime tab as well.
+const currentTaskRealtimePollMs = 3000;
 const currentTaskFollowUpMs = 1000;
 
 export default function Tasks() {
@@ -83,6 +90,7 @@ export default function Tasks() {
     open: false,
     job: null,
   });
+  const mobileJobButtons = useRef<Array<HTMLButtonElement | null>>([]);
   const actions = useAction();
   const list = jobs.data?.dataList || [];
   const { job: selected, replaceWith } = resolveJobSelection(list, selectedId);
@@ -94,10 +102,34 @@ export default function Tasks() {
     next.set("jobId", String(replaceWith));
     setParams(next, { replace: true });
   }, [replaceWith, params, setParams]);
+  const selectedJobId = selected?.id;
+  const deletedJobIdsRef = useRef<Set<number>>(new Set());
+  // Tracks which job actually completed an `api.current` request (not a
+  // deduplicated silent refresh) and whether it succeeded, so transient errors
+  // or job switches never prematurely reconcile `tab=realtime` to `overview`.
+  const [snapshotState, setSnapshotState] = useState<{
+    jobId: number;
+    ok: boolean;
+  } | null>(null);
   const currentTask = useResource(
-    (signal) =>
-      selected ? api.current(selected.id, signal) : Promise.resolve(null),
-    [selected?.id],
+    async (signal) => {
+      if (!selectedJobId || deletedJobIdsRef.current.has(selectedJobId)) {
+        return null;
+      }
+      try {
+        const result = await api.current(selectedJobId, signal);
+        if (!signal.aborted) {
+          setSnapshotState({ jobId: selectedJobId, ok: true });
+        }
+        return result;
+      } catch (err) {
+        if (!signal.aborted) {
+          setSnapshotState({ jobId: selectedJobId, ok: false });
+        }
+        throw err;
+      }
+    },
+    [selectedJobId],
   );
   const hasCurrentTask = !!currentTask.data;
   const approvalVisible = !!currentTask.data?.approval;
@@ -107,49 +139,48 @@ export default function Tasks() {
     hadApproval.current = approvalVisible;
   }, [approvalVisible]);
   const refreshCurrentTask = currentTask.refresh;
-  // The current task was fetched once, so a run started here or by the
-  // scheduler never enabled the realtime tab or flipped 启动/停止. The realtime
-  // view has its own SSE/poll feed, so this parent poll slows down (instead of
-  // stopping) while that tab is open: stopping it froze `hasCurrentTask` and
-  // left a dead realtime tab after the task ended.
-  const selectedJobId = selected?.id;
   const realtimeTab = requestedTab === "realtime";
-  // Which job the last completed snapshot request belongs to. `loading` alone
-  // cannot prove that a snapshot for this job arrived: the resource also runs
-  // its mount fetch while no job is selected yet (that one resolves
-  // immediately), so the first render after the job list loads still has
-  // loading=false and data=null — long enough for the tab reconciliation below
-  // to rewrite tab=realtime to overview before the real request ever ran.
-  const [snapshotJobId, setSnapshotJobId] = useState<number | undefined>(
-    undefined,
-  );
+  const prevRealtimeTab = useRef(realtimeTab);
   useEffect(() => {
-    setSnapshotJobId(undefined);
-    if (!selectedJobId) return;
-    let alive = true;
-    const load = () =>
-      void refreshCurrentTask(true).finally(() => {
-        if (alive) setSnapshotJobId(selectedJobId);
-      });
-    load();
+    const enteredRealtime = !prevRealtimeTab.current && realtimeTab;
+    prevRealtimeTab.current = realtimeTab;
+    if (
+      enteredRealtime &&
+      selectedJobId &&
+      !deletedJobIdsRef.current.has(selectedJobId)
+    ) {
+      void refreshCurrentTask(true);
+    }
+  }, [realtimeTab, selectedJobId, refreshCurrentTask]);
+  useEffect(() => {
+    if (!selectedJobId) {
+      setSnapshotState(null);
+      return;
+    }
     const interval = setInterval(
       () => {
-        if (document.visibilityState !== "hidden") load();
+        if (
+          document.visibilityState !== "hidden" &&
+          !deletedJobIdsRef.current.has(selectedJobId)
+        ) {
+          void refreshCurrentTask(true);
+        }
       },
       realtimeTab ? currentTaskRealtimePollMs : currentTaskPollMs,
     );
     return () => {
-      alive = false;
       clearInterval(interval);
     };
   }, [selectedJobId, realtimeTab, refreshCurrentTask]);
-  // Reconcile the tab with reality once a snapshot for *this* job has settled.
-  // Whether the task just ended or the link (sidebar / deep link to another
-  // job) carried tab=realtime for a job with nothing running, the realtime tab
-  // is disabled then, so the overview is rendered instead of a disabled-but-
-  // active tab over an empty pane. The URL is rewritten in place to match.
+  // Reconcile the tab with reality once a snapshot for *this* job has settled
+  // cleanly without error. Transient network errors must not kick users back
+  // to the overview tab.
   const currentTaskSettled =
-    !!selectedJobId && snapshotJobId === selectedJobId && !currentTask.loading;
+    !!selectedJobId &&
+    snapshotState?.jobId === selectedJobId &&
+    snapshotState.ok &&
+    !currentTask.loading &&
+    !currentTask.error;
   const tab = resolveTaskTab(requestedTab, {
     settled: currentTaskSettled,
     hasCurrentTask,
@@ -162,23 +193,43 @@ export default function Tasks() {
   }, [tab, requestedTab, params, setParams]);
   const followUp = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(followUp.current), []);
-  const update = (values: Record<string, string | number | null>) => {
-    const next = new URLSearchParams(params);
-    for (const [key, value] of Object.entries(values))
-      value === null ? next.delete(key) : next.set(key, String(value));
-    setParams(next);
-  };
-  const refreshJobs = async () => {
+  const update = useCallback(
+    (values: Record<string, string | number | null>) => {
+      const next = new URLSearchParams(params);
+      for (const [key, value] of Object.entries(values))
+        value === null ? next.delete(key) : next.set(key, String(value));
+      setParams(next);
+    },
+    [params, setParams],
+  );
+  const handleRealtimeEnded = useCallback(
+    () => update({ tab: "overview" }),
+    [update],
+  );
+  const handleOpenRealtime = useCallback(
+    () => update({ tab: "realtime" }),
+    [update],
+  );
+  const handleApprovalDetected = useCallback(() => {
+    if (selectedJobId && !deletedJobIdsRef.current.has(selectedJobId)) {
+      void refreshCurrentTask(true);
+    }
+  }, [selectedJobId, refreshCurrentTask]);
+  const refreshJobs = async (options?: { skipCurrentTask?: boolean }) => {
     // Silent: the confirm dialog/editor is already closing; a full-page
     // spinner for the reload just made the workspace blink.
     await jobs.refresh(true);
-    await currentTask.refresh(true);
     window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
+    if (options?.skipCurrentTask) {
+      clearTimeout(followUp.current);
+      return;
+    }
+    await currentTask.refresh(true);
     // Starting or stopping is asynchronous on the backend: the immediate
     // re-fetch usually still sees the previous state.
     clearTimeout(followUp.current);
     followUp.current = setTimeout(
-      () => void refreshCurrentTask(),
+      () => void refreshCurrentTask(true),
       currentTaskFollowUpMs,
     );
   };
@@ -263,16 +314,12 @@ export default function Tasks() {
       {engines.error && !engines.loading && (
         // Without engines the editor's engine select is empty and a new task
         // would be saved without alistId; say so instead of failing silently.
-        <div className="inline-error engine-load-error" role="alert">
-          存储引擎加载失败：{engines.error}
-          <Button
-            size="small"
-            theme="borderless"
-            onClick={() => void engines.refresh()}
-          >
-            重试
-          </Button>
-        </div>
+        <InlineNotice
+          className="engine-load-error"
+          role="alert"
+          message={`存储引擎加载失败：${engines.error}`}
+          onRetry={() => void engines.refresh()}
+        />
       )}
       {list.length > 1 && (
         <div
@@ -301,16 +348,24 @@ export default function Tasks() {
                     ? Math.max(0, index - 1)
                     : Math.min(list.length - 1, index + 1);
             const nextJob = list[nextIndex];
-            if (nextJob) update({ jobId: nextJob.id });
+            if (nextJob) {
+              update({ jobId: nextJob.id });
+              window.requestAnimationFrame(() =>
+                mobileJobButtons.current[nextIndex]?.focus(),
+              );
+            }
           }}
         >
-          {list.map((job) => (
+          {list.map((job, index) => (
             <button
               key={job.id}
               type="button"
               role="tab"
               aria-selected={selected?.id === job.id}
               tabIndex={selected?.id === job.id ? 0 : -1}
+              ref={(element) => {
+                mobileJobButtons.current[index] = element;
+              }}
               className={`mobile-job-chip${selected?.id === job.id ? " active" : ""}`}
               onClick={() => update({ jobId: job.id })}
             >
@@ -344,12 +399,32 @@ export default function Tasks() {
                     busy={actions.busy}
                     running={!!currentTask.data}
                     runKey={String(currentTask.data?.taskId ?? "idle")}
-                    onRun={() =>
+                    onRun={() => {
+                      if (selected.method === 2) {
+                        confirmAction({
+                          title: "确认启动移动同步？",
+                          content:
+                            "移动模式会在文件复制到目标目录并校验后删除源目录中的对应文件，是否确认立即执行？",
+                          okText: "确认移动",
+                          onOk: () =>
+                            actions.run(async () => {
+                              try {
+                                await api.jobAction({ id: String(selected.id) });
+                                Toast.success("已提交执行");
+                                await refreshJobs();
+                              } catch (err) {
+                                errorToast(err);
+                                throw err;
+                              }
+                            }),
+                        });
+                        return;
+                      }
                       action(
                         () => api.jobAction({ id: String(selected.id) }),
                         "已提交执行",
-                      )
-                    }
+                      );
+                    }}
                     onStop={() => {
                       if (!currentTask.data) return;
                       const { taskId } = currentTask.data;
@@ -398,37 +473,41 @@ export default function Tasks() {
                       );
                     }}
                     onEdit={() => setEditor({ open: true, job: selected })}
-                    onDelete={() =>
+                    onDelete={() => {
+                      const deletingId = selected.id;
                       confirmDelete(
                         "删除此同步任务？",
                         () =>
                           actions.run(async () => {
-                            await api.deleteJob(selected.id);
+                            clearTimeout(followUp.current);
+                            await api.deleteJob(deletingId);
+                            deletedJobIdsRef.current.add(deletingId);
                             update({ jobId: null });
-                            await refreshJobs();
+                            await refreshJobs({ skipCurrentTask: true });
                           }),
                         "此任务的历史执行记录将一并删除。",
-                      )
-                    }
+                      );
+                    }}
                   />
                 )}
                 {tab === "realtime" && (
-                  <Suspense fallback={<LazyPaneFallback />}>
+                  <Suspense fallback={<LoadingPanel />}>
                     <Realtime
                       key={selected.id}
                       jobId={selected.id}
                       // A finished task must not leave an empty realtime tab.
-                      onTaskEnded={() => update({ tab: "overview" })}
+                      onTaskEnded={handleRealtimeEnded}
+                      onApprovalDetected={handleApprovalDetected}
                     />
                   </Suspense>
                 )}
                 {tab === "history" && (
-                  <Suspense fallback={<LazyPaneFallback />}>
+                  <Suspense fallback={<LoadingPanel />}>
                     <History
                       key={selected.id}
                       jobId={selected.id}
                       currentTaskId={currentTask.data?.taskId}
-                      onOpenRealtime={() => update({ tab: "realtime" })}
+                      onOpenRealtime={handleOpenRealtime}
                     />
                   </Suspense>
                 )}
@@ -446,7 +525,7 @@ export default function Tasks() {
         )}
       </div>
       {editor.open && (
-        <Suspense fallback={<LazyPaneFallback />}>
+        <Suspense fallback={<LoadingPanel />}>
           <JobEditor
             job={editor.job}
             engines={engines.data || []}
@@ -460,14 +539,6 @@ export default function Tasks() {
           />
         </Suspense>
       )}
-    </div>
-  );
-}
-
-function LazyPaneFallback() {
-  return (
-    <div className="state-panel">
-      <Spin size="large" />
     </div>
   );
 }
@@ -493,15 +564,14 @@ function FullSyncApprovalModal({
       width={520}
       className="fnos-confirm full-sync-approval-modal"
       centered
-      closable={!busy}
-      closeOnEsc={!busy}
-      maskClosable={!busy}
-      onCancel={onReject}
+      closable={false}
+      closeOnEsc={false}
+      maskClosable={false}
       title="确认全量同步"
       footer={
         <div className="editor-actions">
           <Button type="tertiary" onClick={onReject} disabled={busy}>
-            取消执行
+            拒绝并取消同步
           </Button>
           <Button
             type="danger"
@@ -611,11 +681,18 @@ function Overview({
       danger: true,
     },
   ];
+  const runActionLabel = running
+    ? "停止任务"
+    : !enabled
+      ? "任务未启用，请先启用"
+      : "启动任务";
   return (
     <div className="overview">
-      <section className="overview-card card-base">
-        <div className="overview-head">
-          <h2 title={getJobName(job)}>{getJobName(job)}</h2>
+      <SectionCard
+        className="overview-card"
+        headClassName="overview-head"
+        title={<h2 title={getJobName(job)}>{getJobName(job)}</h2>}
+        extra={
           <div className="overview-head-actions">
             {job.isCron !== 2 && (
               <Switch
@@ -625,24 +702,9 @@ function Overview({
                 onChange={() => onToggle()}
               />
             )}
-            <Tooltip
-              content={
-                running
-                  ? "停止任务"
-                  : !enabled
-                    ? "任务未启用，请先启用"
-                    : "启动任务"
-              }
-              position="top"
-            >
+            <Tooltip content={runActionLabel} position="top">
               <Button
-                aria-label={
-                  running
-                    ? "停止任务"
-                    : !enabled
-                      ? "任务未启用，请先启用"
-                      : "启动任务"
-                }
+                aria-label={runActionLabel}
                 icon={
                   running ? (
                     <IconPause aria-hidden="true" />
@@ -658,7 +720,8 @@ function Overview({
             </Tooltip>
             <ActionMenu actions={menu} disabled={busy} />
           </div>
-        </div>
+        }
+      >
         <div className="overview-flow">
           <div className="flow-node">
             <div className="flow-name">
@@ -698,7 +761,7 @@ function Overview({
             </Info>
           </section>
         </div>
-      </section>
+      </SectionCard>
     </div>
   );
 }

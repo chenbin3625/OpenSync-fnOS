@@ -9,13 +9,37 @@ const baseURL = process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:3020";
 // SQLite database the preview server uses unless it is redirected. A dedicated
 // directory per run keeps the suite hermetic and leaves the developer's
 // backend/data untouched.
-const dataDir =
-  process.env.OPENSYNC_E2E_DATA_DIR ||
-  mkdtempSync(join(tmpdir(), "opensync-e2e-"));
-process.once("exit", () => {
-  if (!process.env.OPENSYNC_E2E_DATA_DIR)
+//
+// Playwright evaluates this config in both the coordinator and every worker.
+// Sharing the resolved path via process.env ensures workers reuse the
+// coordinator's directory instead of creating and deleting extra temp dirs.
+let dataDir = process.env.OPENSYNC_E2E_DATA_DIR || "";
+if (!process.env.PLAYWRIGHT_BASE_URL && !dataDir) {
+  dataDir = mkdtempSync(join(tmpdir(), "opensync-e2e-"));
+  process.env.OPENSYNC_E2E_DATA_DIR = dataDir;
+  process.env.__OPENSYNC_E2E_OWNER_PID = String(process.pid);
+}
+
+if (
+  dataDir &&
+  process.env.__OPENSYNC_E2E_OWNER_PID === String(process.pid)
+) {
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
     rmSync(dataDir, { recursive: true, force: true });
-});
+  };
+  process.once("exit", cleanup);
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    process.once(signal, () => {
+      cleanup();
+      if (process.listenerCount(signal) === 1) {
+        process.kill(process.pid, signal);
+      }
+    });
+  }
+}
 
 // Locally the suite runs against the installed Google Chrome; CI installs
 // Playwright's bundled Chromium and sets PLAYWRIGHT_CHANNEL=chromium.
@@ -32,6 +56,9 @@ export default defineConfig({
     baseURL,
     channel,
     screenshot: "only-on-failure",
+    // Block Service Workers (such as MSW in mock mode) so page.route()
+    // intercepts API requests deterministically across desktop and mobile.
+    serviceWorkers: "block",
   },
   projects: [
     { name: "desktop", use: { viewport: { width: 1100, height: 640 } } },
@@ -64,7 +91,13 @@ export default defineConfig({
           // --dev binds loopback only and skips the fnOS gateway requirement.
           command: "go run ./cmd/server --dev --port 8040",
           cwd: "../backend",
-          env: { OPENSYNC_DATA_DIR: dataDir },
+          // Clear TRIM_PKGVAR / TRIM_PKGETC so host fnOS env vars never
+          // override OPENSYNC_DATA_DIR and leak into a real installation.
+          env: {
+            OPENSYNC_DATA_DIR: dataDir,
+            TRIM_PKGVAR: "",
+            TRIM_PKGETC: "",
+          },
           url: "http://127.0.0.1:8040/app/opensync/svr/session",
           // A first run compiles the whole Go module.
           timeout: 300_000,

@@ -442,33 +442,46 @@ export function normalizeCustomFileTypePattern(input: string) {
   return normalizeCustomFilePattern(input);
 }
 
+function isValidExtensionRule(pattern: string): boolean {
+  if (!pattern.startsWith("*.")) return false;
+  const ext = pattern.slice(2);
+  return (
+    ext !== "" &&
+    !ext.startsWith(".") &&
+    !ext.endsWith(".") &&
+    !/[/\\*?\[\]{}!\u0000-\u001f\u007f-\u009f]/.test(ext)
+  );
+}
+
 function normalizeCustomFilePattern(input: string) {
   const pattern = input.trim();
   if (
     !pattern ||
     pattern.startsWith("#") ||
-    pattern.startsWith("!") ||
+    pattern.includes("!") ||
     pattern.includes("/") ||
     pattern.includes("\\") ||
-    /[\u0000-\u001f\u007f?[\]{}]/.test(pattern) ||
+    /[\u0000-\u001f\u007f-\u009f?[\]{}]/.test(pattern) ||
     pattern === "*" ||
     pattern.includes("**")
   ) {
     return "";
   }
 
-  if (/^\*\.[a-z0-9][a-z0-9.+_-]*$/i.test(pattern)) {
-    return pattern;
+  if (pattern.startsWith("*.")) {
+    return isValidExtensionRule(pattern) ? pattern : "";
   }
 
-  return pattern.startsWith("*.") ? "" : pattern.endsWith("/") ? "" : pattern;
+  return pattern.endsWith("/") ? "" : pattern;
 }
 
 function filterRuleKey(pattern: string) {
-  const value = pattern.trim().replace(/^\\(?=#recycle\/$)/, "");
-  return /^\*\.[a-z0-9][a-z0-9.+_-]*$/i.test(value)
-    ? value.toLowerCase()
-    : value;
+  const trimmed = pattern.trim();
+  const value =
+    trimmed.startsWith("\\#") && trimmed.endsWith("/")
+      ? trimmed.slice(1)
+      : trimmed;
+  return isValidExtensionRule(value) ? value.toLowerCase() : value;
 }
 
 function findCustomFileFilterBlock(lines: string[]) {
@@ -504,7 +517,7 @@ function parseFileTypePatternLine(line: string) {
   if (!value) return null;
   const enabled = !value.startsWith("# ");
   const rawPattern = enabled ? value : value.slice(2).trim();
-  if (!enabled && !/^\*\.[a-z0-9][a-z0-9.+_-]*$/i.test(rawPattern)) {
+  if (!enabled && !isValidExtensionRule(rawPattern)) {
     return null;
   }
   const normalized = normalizeCustomFilePattern(rawPattern);
@@ -602,8 +615,15 @@ const FOLDER_BLOCK_END = "# --- 文件夹过滤结束 ---";
  * 系统目录预设、已停用的注释行和带通配符的旧默认规则（如 `.Trash-*`）
  * 不属于文件夹树，不能当成文件夹过滤，否则树一保存就会被冲掉。
  */
-function isUnmarkedFolderRule(line: string): boolean {
+function normalizeFolderRuleLine(line: string): string {
   const value = line.trim();
+  return value.startsWith("\\#") && value.endsWith("/")
+    ? value.slice(1)
+    : value;
+}
+
+function isUnmarkedFolderRule(line: string): boolean {
+  const value = normalizeFolderRuleLine(line);
   if (!value.endsWith("/") || value.startsWith("# ") || value.includes("*")) {
     return false;
   }
@@ -632,8 +652,13 @@ export function parseExcludeFolders(exclude: string): string[] {
     ? exclude
         .slice(block.startIdx + FOLDER_BLOCK_START.length, block.endIdx)
         .split("\n")
-        .map((l) => l.trim())
-        .filter((l) => l && !l.startsWith("#"))
+        .map(normalizeFolderRuleLine)
+        .filter(
+          (l) =>
+            l &&
+            !l.startsWith("# ") &&
+            (l.endsWith("/") || !l.startsWith("#")),
+        )
     : [];
   const outside = (
     block
@@ -644,7 +669,7 @@ export function parseExcludeFolders(exclude: string): string[] {
   )
     .split("\n")
     .filter(isUnmarkedFolderRule)
-    .map((l) => l.trim());
+    .map(normalizeFolderRuleLine);
   return Array.from(new Set([...inside, ...outside]));
 }
 

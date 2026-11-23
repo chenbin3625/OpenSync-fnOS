@@ -4,7 +4,8 @@ import {
   useLayoutEffect,
   useRef,
   useState,
-  type MutableRefObject,
+  type Dispatch,
+  type SetStateAction,
 } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import { Form } from "@douyinfe/semi-ui/lib/es/form";
@@ -14,12 +15,12 @@ import Switch from "@douyinfe/semi-ui/lib/es/switch";
 import Checkbox from "@douyinfe/semi-ui/lib/es/checkbox";
 import Tabs from "@douyinfe/semi-ui/lib/es/tabs";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
-import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
-import { IconHelpCircleStroked } from "@douyinfe/semi-icons";
 import { api } from "../api/client";
 import {
   Editor,
   Field,
+  HelpTip,
+  InlineNotice,
   SettingRow,
   errorToast,
 } from "../components/common";
@@ -44,25 +45,24 @@ import {
   cronTypeNames,
   formatSchedulePlan,
   methodOptions,
+  parseIntervalInput,
 } from "./Home/homeUtils";
 import {
   commitFileSizeInput,
   fileSizeUnitOptions,
+  hasPendingFileSizeDraftChange,
+  mergeFileSizeDrafts,
   parseFileSizeInput,
+  type FileSizeDrafts,
   type FileSizeUnit,
 } from "./Home/fileSizeUnits";
 import type { AlistItem, JobItem } from "../types";
 
 type CronFieldName = "second" | "minute" | "hour" | "day" | "month" | "day_of_week";
-type FileSizeDraftKey = "minFileSize" | "maxFileSize";
-type FileSizeDrafts = Partial<Record<FileSizeDraftKey, string>>;
 
-// The interval input is edited as text: keeping the raw draft lets the user
-// clear the field or type a partial number without it being rewritten to 0.
-function parseIntervalInput(value: string): number {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : 0;
-}
+export { parseIntervalInput };
+
+export { hasPendingFileSizeDraftChange, mergeFileSizeDrafts };
 
 const taskEditorTabs = [
   { key: "engine", label: "引擎与路径" },
@@ -108,7 +108,9 @@ export default function TaskEditor({
   const { form, dirty, change, patch, setForm, setDirty } = useEditorForm<JobForm>(() =>
     job ? jobToForm(job) : defaultJobForm(engines[0]?.id),
   );
-  const fileSizeDrafts = useRef<FileSizeDrafts>({});
+  const [fileSizeDrafts, setFileSizeDrafts] = useState<FileSizeDrafts>({});
+  const effectiveDirty =
+    dirty || hasPendingFileSizeDraftChange(form, fileSizeDrafts);
   const methodLabelId = useId();
   const [intervalDraft, setIntervalDraft] = useState<string | null>(null);
   const isNew = !job;
@@ -139,7 +141,8 @@ export default function TaskEditor({
     if (scrollRef.current) scrollRef.current.scrollTop = 0;
   }, [activePanel]);
   const nextStep = () => {
-    const validation = validateJobFormStep(form, step);
+    const formToValidate = mergeFileSizeDrafts(form, fileSizeDrafts);
+    const validation = validateJobFormStep(formToValidate, step);
     if (validation) {
       Toast.warning(validation);
       return;
@@ -148,11 +151,7 @@ export default function TaskEditor({
   };
   const previousStep = () => setStep((s) => Math.max(s - 1, 0));
   const save = () => {
-    const formToSave: JobForm = {
-      ...form,
-      minFileSize: fileSizeDrafts.current.minFileSize ?? form.minFileSize,
-      maxFileSize: fileSizeDrafts.current.maxFileSize ?? form.maxFileSize,
-    };
+    const formToSave = mergeFileSizeDrafts(form, fileSizeDrafts);
     // 按步骤顺序校验（与 validateJobForm 一致），同时记下出错的步骤：错误项
     // 可能在当前没打开的标签里，只弹提示会让人找不到要改哪里。
     const errors = taskEditorSteps.map((_, index) =>
@@ -169,7 +168,7 @@ export default function TaskEditor({
     void action.run(async () => {
       try {
         await api.saveJob(payload);
-        fileSizeDrafts.current = {};
+        setFileSizeDrafts({});
         setDirty(false);
         Toast.success(job ? "编辑成功，下次任务生效" : "任务已创建");
         onSaved();
@@ -185,7 +184,7 @@ export default function TaskEditor({
       busy={action.busy}
       onClose={onClose}
       onSave={save}
-      dirty={dirty}
+      dirty={effectiveDirty}
       className="task-editor-modal"
       footer={({ close }) => (
         <div className="editor-actions">
@@ -280,14 +279,11 @@ export default function TaskEditor({
                   />
                 </Field>
                 {enginesError && (
-                  <div className="inline-error" role="alert">
-                    存储引擎加载失败：{enginesError}
-                    {onRetryEngines && (
-                      <Button size="small" theme="borderless" onClick={onRetryEngines}>
-                        重试
-                      </Button>
-                    )}
-                  </div>
+                  <InlineNotice
+                    role="alert"
+                    message={`存储引擎加载失败：${enginesError}`}
+                    onRetry={onRetryEngines}
+                  />
                 )}
                 <div className="form-grid">
                   <Field label="源路径" required>
@@ -346,15 +342,7 @@ export default function TaskEditor({
                     label={
                       <span className="field-label-with-tip">
                         <span id={methodLabelId}>同步方式</span>
-                        <Tooltip content={syncMethodTip} trigger="hover">
-                          <span
-                            className="field-tip-icon"
-                            aria-label="同步方式说明"
-                            tabIndex={0}
-                          >
-                            <IconHelpCircleStroked aria-hidden="true" />
-                          </span>
-                        </Tooltip>
+                        <HelpTip content={syncMethodTip} label="同步方式说明" />
                       </span>
                     }
                     ariaLabel="同步方式"
@@ -392,7 +380,14 @@ export default function TaskEditor({
                         setIntervalDraft(value);
                         change("interval", parseIntervalInput(value));
                       }}
-                      onBlur={() => setIntervalDraft(null)}
+                      onBlur={() => {
+                        if (
+                          intervalDraft !== null &&
+                          /^\d+$/.test(intervalDraft.trim())
+                        ) {
+                          setIntervalDraft(null);
+                        }
+                      }}
                     />
                   </Field>
                 )}
@@ -430,6 +425,7 @@ export default function TaskEditor({
                       change={change}
                       patch={patch}
                       drafts={fileSizeDrafts}
+                      setDrafts={setFileSizeDrafts}
                     />
                   ))}
                 </div>
@@ -517,19 +513,21 @@ function FileSizeFilterRow({
   change,
   patch,
   drafts,
+  setDrafts,
 }: {
   kind: "min" | "max";
   form: JobForm;
   change: <K extends keyof JobForm>(key: K, value: JobForm[K]) => void;
   patch: (values: Partial<JobForm>) => void;
-  drafts: MutableRefObject<FileSizeDrafts>;
+  drafts: FileSizeDrafts;
+  setDrafts: Dispatch<SetStateAction<FileSizeDrafts>>;
 }) {
   const config = fileSizeFilterDefaults[kind];
   const valueKey = `${kind}FileSize` as const;
   const unitKey = `${kind}FileSizeUnit` as const;
   const parsedValue = parseFileSizeInput(form[valueKey]);
   const currentValue = parsedValue ?? 0;
-  const [draft, setDraft] = useState<string | null>(null);
+  const draft = drafts[valueKey] ?? null;
   const editing = draft !== null;
   const enabled = editing || parsedValue === null || currentValue > 0;
   const displayValue = editing
@@ -541,9 +539,16 @@ function FileSizeFilterRow({
   const controlLabel = `${config.label}文件大小`;
   const unitLabelId = useId();
 
+  const clearDraft = () =>
+    setDrafts((prev) => {
+      if (prev[valueKey] === undefined) return prev;
+      const next = { ...prev };
+      delete next[valueKey];
+      return next;
+    });
+
   const commitInput = (raw: string) => {
-    setDraft(null);
-    delete drafts.current[valueKey];
+    clearDraft();
     change(valueKey, commitFileSizeInput(raw));
   };
 
@@ -554,8 +559,7 @@ function FileSizeFilterRow({
         checked={enabled}
         onChange={(event) => {
           const checked = Boolean(event.target.checked);
-          setDraft(null);
-          delete drafts.current[valueKey];
+          clearDraft();
           patch({
             [valueKey]: checked
               ? currentValue > 0
@@ -573,8 +577,7 @@ function FileSizeFilterRow({
         disabled={!enabled}
         value={displayValue}
         onChange={(value) => {
-          setDraft(value);
-          drafts.current[valueKey] = value;
+          setDrafts((prev) => ({ ...prev, [valueKey]: value }));
         }}
         onBlur={(event) =>
           commitInput((event.target as HTMLInputElement).value ?? "")

@@ -198,7 +198,7 @@ func (client *emptyCopyItemTestClient) FreshFileStatContext(context.Context, str
 	return client.source, nil
 }
 
-func TestCopyItemUsesEmptyFileAPIOnlyForVerifiedEmptySource(t *testing.T) {
+func TestCopyItemUsesEmptyFileAPIForKnownEmptySource(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		queuedSize int64
@@ -206,7 +206,7 @@ func TestCopyItemUsesEmptyFileAPIOnlyForVerifiedEmptySource(t *testing.T) {
 		emptyCalls int
 	}{
 		{"verified zero with empty digest", 0, FileStat{Exists: true, SizeKnown: true, MD5: emptyFileMD5}, 1},
-		{"zero without digest falls back to copy", 0, FileStat{Exists: true, SizeKnown: true}, 0},
+		{"known zero without digest", 0, FileStat{Exists: true, SizeKnown: true}, 1},
 		{"zero with a non-empty digest falls back to copy", 0, FileStat{Exists: true, SizeKnown: true, MD5: strings.Repeat("a", 32)}, 0},
 		{"unknown listing size", -1, FileStat{Exists: true, SizeKnown: true, Size: 42}, 0},
 		{"unverified zero", 0, FileStat{Exists: true}, 0},
@@ -526,5 +526,38 @@ func TestCopyItemNeverFinishesInRunningState(t *testing.T) {
 
 	if status := item.status(); status != taskStatusStopped {
 		t.Fatalf("status = %d, want stopped for an item whose monitor never applied a terminal state", status)
+	}
+}
+
+// An existing directory at the destination path (even with Size: 0) must never
+// be mistaken for a completed file copy by verifyDstComplete.
+func TestCopyItemVerifyDstCompleteRejectsDirectory(t *testing.T) {
+	pinCopyTestDeps(t)
+	for _, fileSize := range []interface{}{int64(0), int64(128), nil} {
+		base := &copyItemTestClient{
+			stat: &FileStat{Exists: true, IsDir: true, SizeKnown: true, Size: 0},
+		}
+		client := statCopyItemTestClient{copyItemTestClient: base}
+		item := newCopyItem(copyItemTestRuntime{}, client, "/src", "/dst", "entry", fileSize, taskItemTypeCopy)
+
+		done, err := item.verifyDstComplete(copyItemTestRuntime{}, client)
+		if err != nil {
+			t.Fatalf("fileSize=%v: verifyDstComplete() error = %v", fileSize, err)
+		}
+		if done {
+			t.Fatalf("fileSize=%v: verifyDstComplete() = true for destination directory, want false", fileSize)
+		}
+	}
+
+	// End-to-end synchronous copy whose destination is occupied by a directory
+	// must fail instead of reporting success.
+	base := &copyItemTestClient{
+		stat: &FileStat{Exists: true, IsDir: true, SizeKnown: true, Size: 0},
+	}
+	client := statCopyItemTestClient{copyItemTestClient: base}
+	item := newCopyItem(copyItemTestRuntime{}, client, "/src", "/dst", "entry", int64(0), taskItemTypeCopy)
+	item.DoIt()
+	if status := item.status(); status != taskStatusFailed {
+		t.Fatalf("status = %d, want failed when destination is a directory", status)
 	}
 }

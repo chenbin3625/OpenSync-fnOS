@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,6 +32,11 @@ const (
 	alistLongOpResponseHeaderTimeout = 5 * time.Minute
 	alistClientTimeout               = 300 * time.Second
 	alistLongOpClientTimeout         = alistLongOpResponseHeaderTimeout + 30*time.Second
+	// alistHTTP3MaxIdleTimeout exceeds the 5m long-operation header wait so
+	// synchronous /api/fs/copy and /api/fs/move calls over QUIC are not closed
+	// by quic-go's 30s default idle timeout while waiting for the server.
+	alistHTTP3MaxIdleTimeout   = alistLongOpClientTimeout
+	alistRedirectLookupTimeout = 5 * time.Second
 )
 
 var errRequestBodyNotReplayable = errors.New("alist: request body cannot be retried")
@@ -60,8 +67,156 @@ func isAlistLongOperation(ctx context.Context) bool {
 // sends its requests over the transport with the long header timeout.
 func newAlistHTTPClients() (client *http.Client, longClient *http.Client) {
 	tripper := newAlistRoundTripper()
-	return &http.Client{Timeout: alistClientTimeout, Transport: tripper},
-		&http.Client{Timeout: alistLongOpClientTimeout, Transport: tripper}
+	return &http.Client{Timeout: alistClientTimeout, Transport: tripper, CheckRedirect: alistCheckRedirect},
+		&http.Client{Timeout: alistLongOpClientTimeout, Transport: tripper, CheckRedirect: alistCheckRedirect}
+}
+
+var alistRedirectLookupIPAddr = net.DefaultResolver.LookupIPAddr
+
+// alistCheckRedirect enforces a strict redirect policy for AList API calls:
+//   - refuses non-http(s) schemes and HTTPS->HTTP downgrades;
+//   - refuses redirects on non-GET/HEAD requests (preventing POST->GET shifts or
+//     replaying mutating operations);
+//   - strips Authorization/Cookie/Proxy-Authorization across host/port changes;
+//   - blocks cross-origin redirects to private, loopback, link-local, or cloud
+//     metadata addresses (including via DNS resolution).
+func alistCheckRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) == 0 {
+		return nil
+	}
+	if len(via) >= 10 {
+		return errors.New("alist: stopped after 10 redirects")
+	}
+	if req == nil || req.URL == nil {
+		return errors.New("alist: invalid redirect target")
+	}
+	scheme := strings.ToLower(req.URL.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return fmt.Errorf("alist: redirect to unsupported scheme %q", req.URL.Scheme)
+	}
+	for _, prev := range via {
+		if prev != nil && prev.URL != nil && strings.EqualFold(prev.URL.Scheme, "https") && scheme != "https" {
+			return errors.New("alist: redirect blocked due to HTTPS to HTTP downgrade")
+		}
+	}
+	orig := via[0]
+	prev := via[len(via)-1]
+	if orig == nil || prev == nil {
+		return errors.New("alist: invalid redirect chain")
+	}
+	if (orig.Method != http.MethodGet && orig.Method != http.MethodHead) ||
+		(prev.Method != http.MethodGet && prev.Method != http.MethodHead) ||
+		req.Method != orig.Method {
+		return fmt.Errorf("alist: redirect blocked for %s request", orig.Method)
+	}
+
+	allSameOrigin := true
+	for _, hop := range via {
+		if hop == nil || !sameRedirectOrigin(hop.URL, req.URL) {
+			allSameOrigin = false
+			break
+		}
+	}
+	if !allSameOrigin {
+		req.Header.Del("Authorization")
+		req.Header.Del("Cookie")
+		req.Header.Del("Proxy-Authorization")
+		return validateAlistRedirectTarget(req.Context(), req.URL)
+	}
+	return validateAlistRedirectCloudMetadata(req.URL)
+}
+
+func sameRedirectOrigin(a, b *url.URL) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	if !strings.EqualFold(a.Hostname(), b.Hostname()) {
+		return false
+	}
+	aPort, bPort := effectiveRedirectPort(a), effectiveRedirectPort(b)
+	if aPort == bPort {
+		return true
+	}
+	return strings.EqualFold(a.Scheme, "http") && aPort == "80" &&
+		strings.EqualFold(b.Scheme, "https") && bPort == "443"
+}
+
+func effectiveRedirectPort(u *url.URL) string {
+	if p := u.Port(); p != "" {
+		return p
+	}
+	if strings.EqualFold(u.Scheme, "https") {
+		return "443"
+	}
+	return "80"
+}
+
+func validateAlistRedirectCloudMetadata(target *url.URL) error {
+	if target == nil {
+		return errors.New("alist: invalid redirect target")
+	}
+	host := strings.TrimSpace(target.Hostname())
+	if host == "" {
+		return errors.New("alist: redirect target has empty host")
+	}
+	if ip := net.ParseIP(host); ip != nil && isCloudMetadataIP(ip) {
+		return fmt.Errorf("alist: redirect to blocked metadata address %s", host)
+	}
+	return nil
+}
+
+func validateAlistRedirectTarget(ctx context.Context, target *url.URL) error {
+	if target == nil {
+		return errors.New("alist: invalid redirect target")
+	}
+	host := strings.TrimSpace(target.Hostname())
+	if host == "" {
+		return errors.New("alist: redirect target has empty host")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if isBlockedAlistRedirectIP(ip) {
+			return fmt.Errorf("alist: redirect to blocked address %s", host)
+		}
+		return nil
+	}
+	lowerHost := strings.TrimSuffix(strings.ToLower(host), ".")
+	if lowerHost == "localhost" || strings.HasSuffix(lowerHost, ".localhost") {
+		return fmt.Errorf("alist: redirect to blocked host %s", host)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, alistRedirectLookupTimeout)
+	defer cancel()
+	addrs, err := alistRedirectLookupIPAddr(lookupCtx, host)
+	if err != nil {
+		return fmt.Errorf("alist: redirect host lookup failed: %w", err)
+	}
+	if len(addrs) == 0 {
+		return fmt.Errorf("alist: redirect host %s resolved to no addresses", host)
+	}
+	for _, addr := range addrs {
+		if isBlockedAlistRedirectIP(addr.IP) {
+			return fmt.Errorf("alist: redirect target %s resolved to blocked address %s", host, addr.IP)
+		}
+	}
+	return nil
+}
+
+func isBlockedAlistRedirectIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() || isCloudMetadataIP(ip) {
+		return true
+	}
+	if embedded := embeddedIPv4(ip); embedded != nil {
+		return embedded.IsLoopback() || embedded.IsPrivate() || embedded.IsLinkLocalUnicast() || embedded.IsLinkLocalMulticast() || embedded.IsMulticast() || embedded.IsUnspecified()
+	}
+	return false
 }
 
 func newAlistRoundTripper() http.RoundTripper {
@@ -96,16 +251,21 @@ func newAlistHTTPTransport(responseHeaderTimeout time.Duration) *http.Transport 
 
 func newAlistHTTP3Transport() *http3.Transport {
 	return &http3.Transport{
-		QUICConfig: &quic.Config{HandshakeIdleTimeout: alistHTTP3HandshakeTimeout},
+		QUICConfig: &quic.Config{
+			HandshakeIdleTimeout: alistHTTP3HandshakeTimeout,
+			MaxIdleTimeout:       alistHTTP3MaxIdleTimeout,
+			KeepAlivePeriod:      30 * time.Second,
+		},
 	}
 }
 
 func newProtocolTripper(h12 http.RoundTripper, h3 http.RoundTripper) *protocolTripper {
 	return &protocolTripper{
-		h12:      h12,
-		h3:       h3,
-		h3Hosts:  make(map[string]struct{}),
-		h3Failed: make(map[string]time.Time),
+		h12:             h12,
+		h3:              h3,
+		proxyForRequest: http.ProxyFromEnvironment,
+		h3Hosts:         make(map[string]struct{}),
+		h3Failed:        make(map[string]time.Time),
 	}
 }
 
@@ -124,6 +284,9 @@ type protocolTripper struct {
 	// is temporary: one transient QUIC failure must not disable HTTP/3 for
 	// the lifetime of a long-lived cached client.
 	h3Failed map[string]time.Time
+	// proxyForRequest resolves whether an HTTP/HTTPS proxy applies to req.
+	// When a proxy applies, HTTP/3 is bypassed because QUIC dials UDP directly.
+	proxyForRequest func(*http.Request) (*url.URL, error)
 	// now is the clock for h3Failed expiry; nil means time.Now (tests inject).
 	now func() time.Time
 	// inflight counts requests whose response body has not been closed yet.
@@ -150,12 +313,25 @@ func (t *protocolTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
+func (t *protocolTripper) usesProxy(req *http.Request) bool {
+	if req == nil || req.URL == nil {
+		return false
+	}
+	proxyFn := t.proxyForRequest
+	if proxyFn == nil {
+		proxyFn = http.ProxyFromEnvironment
+	}
+	proxyURL, err := proxyFn(req)
+	return err != nil || proxyURL != nil
+}
+
 func (t *protocolTripper) roundTrip(req *http.Request) (*http.Response, error) {
 	h12 := t.h12
 	if t.h12Long != nil && isAlistLongOperation(req.Context()) {
 		h12 = t.h12Long
 	}
-	if req.URL.Scheme == "https" && t.preferHTTP3(req.URL.Host) {
+	proxied := t.usesProxy(req)
+	if !proxied && req.URL.Scheme == "https" && t.preferHTTP3(req.URL.Host) {
 		var wroteHeaders atomic.Bool
 		traced := req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
 			WroteHeaders: func() { wroteHeaders.Store(true) },
@@ -188,7 +364,7 @@ func (t *protocolTripper) roundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	if req.URL.Scheme == "https" {
+	if !proxied && req.URL.Scheme == "https" {
 		offered, cleared := parseAltSvcHTTP3(resp.Header.Values("Alt-Svc"), req.URL)
 		if offered {
 			t.markHTTP3(req.URL.Host)
@@ -278,20 +454,37 @@ func (t *protocolTripper) closing() bool {
 // (including the POST-based read APIs such as /api/fs/list) is replayed, since
 // re-running a read is harmless and keeps scans resilient to QUIC blips.
 var mutatingAlistPaths = map[string]bool{
-	"/api/fs/copy":   true,
-	"/api/fs/move":   true,
-	"/api/fs/remove": true,
+	"/api/fs/copy":           true,
+	"/api/fs/move":           true,
+	"/api/fs/remove":         true,
+	"/api/fs/mkdir":          true,
+	"/api/fs/put":            true,
+	"/api/fs/rename":         true,
+	"/api/fs/form":           true,
+	"/api/fs/recursive_move": true,
+	"/api/fs/regex_rename":   true,
+}
+
+func normalizeAlistAPIPath(rawPath string) string {
+	cleaned := path.Clean("/" + rawPath)
+	if idx := strings.LastIndex(cleaned, "/api/"); idx >= 0 {
+		return cleaned[idx:]
+	}
+	return cleaned
 }
 
 func isReplayableAlistRequest(req *http.Request) bool {
 	switch req.Method {
 	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
 		return true
-	}
-	if strings.HasPrefix(req.URL.Path, "/api/admin/task/") {
+	case http.MethodPut, http.MethodDelete, http.MethodPatch:
 		return false
 	}
-	return !mutatingAlistPaths[req.URL.Path]
+	apiPath := normalizeAlistAPIPath(req.URL.Path)
+	if strings.HasPrefix(apiPath, "/api/admin/") {
+		return false
+	}
+	return !mutatingAlistPaths[apiPath]
 }
 
 func (t *protocolTripper) preferHTTP3(host string) bool {

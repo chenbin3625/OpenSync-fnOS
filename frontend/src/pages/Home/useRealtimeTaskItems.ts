@@ -22,11 +22,67 @@ type RealtimeTaskItemsParams = {
 
 type RealtimeTaskPage = {
   key: string;
+  listKey: string;
   rows: TaskItem[];
   total: number;
   /** The reply did not answer this query (stale task identity, other page). */
   mismatched?: boolean;
 };
+
+export function buildRealtimeTaskListKey(params: {
+  jobId: string;
+  taskIdentity: string;
+  activeTab: number;
+  pageSize: number;
+  refreshToken: number;
+}): string {
+  return JSON.stringify([
+    params.jobId,
+    params.taskIdentity,
+    params.activeTab,
+    params.pageSize,
+    params.refreshToken,
+  ]);
+}
+
+export function buildRealtimeTaskQueryKey(params: {
+  jobId: string;
+  taskIdentity: string;
+  activeTab: number;
+  tabTaskPage: number;
+  pageSize: number;
+  refreshToken: number;
+}): string {
+  return JSON.stringify([
+    params.jobId,
+    params.taskIdentity,
+    params.activeTab,
+    params.tabTaskPage,
+    params.pageSize,
+    params.refreshToken,
+  ]);
+}
+
+export function buildRealtimeTaskTableKey(params: {
+  jobId: string;
+  taskIdentity: string;
+  activeTab: number;
+  refreshToken: number;
+}): string {
+  return JSON.stringify([
+    params.jobId,
+    params.taskIdentity,
+    params.activeTab,
+    params.refreshToken,
+  ]);
+}
+
+export function isSameRealtimeTaskListKey(
+  previousListKey: string | undefined,
+  currentListKey: string,
+): boolean {
+  return Boolean(previousListKey) && previousListKey === currentListKey;
+}
 
 export function useRealtimeTaskItems({
   jobId,
@@ -56,14 +112,27 @@ export function useRealtimeTaskItems({
   const taskIdentity = currentTask
     ? getRealtimeTaskIdentity(currentTask)
     : "";
-  const queryKey = [
+  const listKey = buildRealtimeTaskListKey({
+    jobId,
+    taskIdentity,
+    activeTab,
+    pageSize,
+    refreshToken,
+  });
+  const queryKey = buildRealtimeTaskQueryKey({
     jobId,
     taskIdentity,
     activeTab,
     tabTaskPage,
     pageSize,
     refreshToken,
-  ].join(":");
+  });
+  const tableKey = buildRealtimeTaskTableKey({
+    jobId,
+    taskIdentity,
+    activeTab,
+    refreshToken,
+  });
   // A new task reuses the same status tab, but never the old page number:
   // page N of the previous task usually does not exist, so asking for it only
   // produced an empty page that useClampedPage then pulled back to page 1.
@@ -82,7 +151,7 @@ export function useRealtimeTaskItems({
   const resource = useResource<RealtimeTaskPage | null>(
     async (signal) => {
       if (!enabled || !jobId || !taskIdentity) {
-        return { key: queryKey, rows: [], total: 0 };
+        return { key: queryKey, listKey, rows: [], total: 0 };
       }
       const response = await jobGetTaskCurrent(
         {
@@ -104,10 +173,11 @@ export function useRealtimeTaskItems({
         // A stale or mismatched reply (the backend switched task identity
         // under the request) says nothing about this page. Treating it as
         // total=0 cleared the table and clamped the user back to page 1.
-        return { key: queryKey, rows: [], total: 0, mismatched: true };
+        return { key: queryKey, listKey, rows: [], total: 0, mismatched: true };
       }
       return {
         key: queryKey,
+        listKey,
         ...normalizeTaskItemPage(response, requestIdentity),
       };
     },
@@ -118,14 +188,16 @@ export function useRealtimeTaskItems({
   // reply, and across a page change of the same task/tab while it loads, so
   // the table does not blank out and the pager keeps its position.
   const lastGood = useRef<RealtimeTaskPage | null>(null);
-  const sameListKey = (key: string) =>
-    key.split(":").filter((_, i) => i !== 3).join(":") ===
-    queryKey.split(":").filter((_, i) => i !== 3).join(":");
   const fetched = resource.data?.key === queryKey ? resource.data : null;
-  if (fetched && !fetched.mismatched) lastGood.current = fetched;
-  const fallback =
-    lastGood.current && sameListKey(lastGood.current.key) ? lastGood.current : null;
   const currentPage = fetched && !fetched.mismatched ? fetched : null;
+  useEffect(() => {
+    if (currentPage) lastGood.current = currentPage;
+  }, [currentPage]);
+  const fallback =
+    lastGood.current &&
+    isSameRealtimeTaskListKey(lastGood.current.listKey, listKey)
+      ? lastGood.current
+      : null;
   const shownPage = currentPage || fallback;
   // A mismatched reply re-polls; until a matching page arrives the view keeps
   // showing the previous data as "loading".
@@ -178,7 +250,7 @@ export function useRealtimeTaskItems({
     setPageSize,
     tabLoading: resource.loading || pendingCurrentPage,
     tabError: resource.error,
-    tableKey: queryKey,
+    tableKey,
     retryTabTasks,
   };
 }

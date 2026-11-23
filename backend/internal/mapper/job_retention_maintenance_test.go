@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -248,23 +249,40 @@ func TestWatchMaintenanceBlockedCancelsWhenTaskStarts(t *testing.T) {
 }
 
 func TestVacuumIfWorthwhileSkipsSmallShareOfFreePages(t *testing.T) {
-	testDB := fileRetentionDB(t)
+	dsn := sqliteDSN(filepath.Join(t.TempDir(), "small-share.db"))
+	testDB := newRetentionTestDB(t, dsn)
 	restore := SetDBForTest(testDB)
 	defer restore()
-	// Grow the live data so the freed pages drop well under 20% of the file.
+	if _, err := testDB.Exec(`CREATE TABLE filler(id integer primary key, payload blob)`); err != nil {
+		t.Fatalf("create filler: %v", err)
+	}
+	// Insert live data first, then insert+delete enough rows so freelist_count
+	// exceeds freePageVacuumThreshold while staying well under 20% of page_count.
 	if _, err := testDB.Exec(
-		`WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 40000)
+		`WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 24000)
 		 INSERT INTO filler(id, payload) SELECT x, zeroblob(4096) FROM c`,
 	); err != nil {
-		t.Fatalf("grow: %v", err)
+		t.Fatalf("insert live rows: %v", err)
+	}
+	if _, err := testDB.Exec(
+		`WITH RECURSIVE c(x) AS (SELECT 24001 UNION ALL SELECT x+1 FROM c WHERE x < 28000)
+		 INSERT INTO filler(id, payload) SELECT x, zeroblob(4096) FROM c`,
+	); err != nil {
+		t.Fatalf("insert extra rows: %v", err)
+	}
+	if _, err := testDB.Exec("DELETE FROM filler WHERE id > 24000"); err != nil {
+		t.Fatalf("delete extra rows: %v", err)
 	}
 	if _, err := testDB.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
 		t.Fatalf("checkpoint: %v", err)
 	}
 	before := countRows(t, testDB, "PRAGMA freelist_count")
 	pages := countRows(t, testDB, "PRAGMA page_count")
+	if before < freePageVacuumThreshold {
+		t.Fatalf("freelist_count = %d, want >= %d so test exercises the relative threshold", before, freePageVacuumThreshold)
+	}
 	if shouldVacuum(before, pages, freePageVacuumThreshold) {
-		t.Skipf("fixture still qualifies for VACUUM (%d of %d free)", before, pages)
+		t.Fatalf("shouldVacuum(%d, %d) = true, want false (< %d%% free)", before, pages, freePageVacuumMinPercent)
 	}
 
 	if err := vacuumIfWorthwhile(context.Background(), nil); err != nil {
@@ -272,5 +290,37 @@ func TestVacuumIfWorthwhileSkipsSmallShareOfFreePages(t *testing.T) {
 	}
 	if free := countRows(t, testDB, "PRAGMA freelist_count"); free != before {
 		t.Fatalf("freelist_count = %d, want unchanged %d", free, before)
+	}
+}
+
+func TestDeleteJobTaskByRunTimeContextTruncatesWALAfterVacuum(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "wal-truncate.db")
+	testDB := newRetentionTestDB(t, sqliteDSN(dbPath))
+	testDB.SetMaxOpenConns(sqliteMaxOpenConns)
+	testDB.SetMaxIdleConns(sqliteMaxOpenConns)
+	restore := SetDBForTest(testDB)
+	defer restore()
+
+	if _, err := testDB.Exec(`CREATE TABLE filler(id integer primary key, payload blob)`); err != nil {
+		t.Fatalf("create filler: %v", err)
+	}
+	if _, err := testDB.Exec(
+		`WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 4000)
+		 INSERT INTO filler(id, payload) SELECT x, zeroblob(4096) FROM c`,
+	); err != nil {
+		t.Fatalf("fill: %v", err)
+	}
+	if _, err := testDB.Exec("DELETE FROM filler"); err != nil {
+		t.Fatalf("empty filler: %v", err)
+	}
+	if err := DeleteJobTaskByRunTimeContext(context.Background(), 1000, nil); err != nil {
+		t.Fatalf("DeleteJobTaskByRunTimeContext() error: %v", err)
+	}
+	if free := countRows(t, testDB, "PRAGMA freelist_count"); free != 0 {
+		t.Fatalf("freelist_count after cleanup = %d, want 0", free)
+	}
+	info, err := os.Stat(dbPath + "-wal")
+	if err == nil && info.Size() != 0 {
+		t.Fatalf("WAL size after post-VACUUM checkpoint = %d bytes, want 0", info.Size())
 	}
 }

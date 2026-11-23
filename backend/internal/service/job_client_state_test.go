@@ -506,3 +506,245 @@ func TestStartCopyItemAssignsDistinctDoingKeysConcurrently(t *testing.T) {
 		t.Fatalf("Doing entries = %d, want %d: DoingKey collisions dropped items", got, want)
 	}
 }
+
+func TestRemoveJobClientWithPendingFullSyncApprovalDoesNotDeadlockSSE(t *testing.T) {
+	testDB := newServiceTaskStatusTestDB(t)
+	restoreDB := mapper.SetDBForTest(testDB)
+	defer restoreDB()
+	if _, err := testDB.Exec(`CREATE TABLE job(id integer primary key autoincrement, enable integer DEFAULT 1, srcPath text, dstPath text, alistId integer)`); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if _, err := testDB.Exec("INSERT INTO job(id, enable) VALUES (55, 1)"); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+
+	client := &JobClient{
+		JobID:     55,
+		Job:       map[string]interface{}{"id": int64(55), "enable": 1, "isCron": 2},
+		Scheduler: NewScheduler(),
+	}
+	defer client.Scheduler.Stop()
+
+	task := &JobTask{TaskID: 550, JobClient: client}
+	task.initRuntime()
+	task.setFullSyncApproval(&FullSyncApproval{DeleteCount: 1})
+	client.setCurrentTask(task)
+	if !client.tryMarkDoing() {
+		t.Fatalf("tryMarkDoing() = false, want true")
+	}
+
+	jobClientListMu.Lock()
+	previousClients := jobClientList
+	jobClientList = map[int64]*JobClient{55: client}
+	jobClientListMu.Unlock()
+	defer func() {
+		jobClientListMu.Lock()
+		jobClientList = previousClients
+		jobClientListMu.Unlock()
+	}()
+
+	subCh, _, ok, err := SubscribeJobProgressWithSnapshot(55)
+	if err != nil || !ok {
+		t.Fatalf("SubscribeJobProgressWithSnapshot(55) = (%v, %v, %v)", ok, err, subCh)
+	}
+	defer UnsubscribeJobProgress(55, subCh)
+
+	otherCh, _, ok2, err2 := SubscribeJobProgressWithSnapshot(56)
+	if err2 != nil || !ok2 {
+		t.Fatalf("SubscribeJobProgressWithSnapshot(56) = (%v, %v, %v)", ok2, err2, otherCh)
+	}
+	defer UnsubscribeJobProgress(56, otherCh)
+
+	removeErrCh := make(chan error, 1)
+	go func() {
+		removeErrCh <- RemoveJobClient(55)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !task.isBreak() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !task.isBreak() {
+		t.Fatal("RemoveJobClient() did not request task break")
+	}
+
+	// While RemoveJobClient is waiting for idle, GetJobCurrent and SSE on other
+	// jobs must not block on loadMu or publishMu.
+	snapDone := make(chan error, 1)
+	go func() {
+		_, _, _, err := SubscribeJobProgressWithSnapshot(56)
+		snapDone <- err
+	}()
+	select {
+	case err := <-snapDone:
+		if err != nil {
+			t.Fatalf("SubscribeJobProgressWithSnapshot(56) during remove: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SSE snapshot for unrelated job stalled while RemoveJobClient was waiting")
+	}
+
+	if _, err := GetJobCurrent(55, map[string]interface{}{}); err != nil {
+		t.Fatalf("GetJobCurrent(55) during remove: %v", err)
+	}
+
+	client.markDone()
+	client.clearCurrentTask(task)
+
+	select {
+	case err := <-removeErrCh:
+		if err != nil {
+			t.Fatalf("RemoveJobClient(55) error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("RemoveJobClient(55) deadlocked")
+	}
+}
+
+func TestTrySetCurrentTaskIfActiveRejectsPausedAndClosingJobs(t *testing.T) {
+	client := &JobClient{
+		JobID: 1,
+		Job:   map[string]interface{}{"id": int64(1), "enable": 1, "isCron": 2},
+	}
+	task := &JobTask{TaskID: 10, JobClient: client}
+	if !client.trySetCurrentTaskIfActive(task) {
+		t.Fatal("trySetCurrentTaskIfActive() = false on active job")
+	}
+	if got := client.currentTask(); got != task {
+		t.Fatalf("currentTask() = %#v, want %#v", got, task)
+	}
+	client.clearCurrentTask(task)
+
+	client.setEnable(0)
+	if client.trySetCurrentTaskIfActive(task) {
+		t.Fatal("trySetCurrentTaskIfActive() = true on paused job")
+	}
+	if client.currentTask() != nil {
+		t.Fatal("paused job retained current task")
+	}
+
+	client.setEnable(1)
+	client.closing.Store(true)
+	if client.trySetCurrentTaskIfActive(task) {
+		t.Fatal("trySetCurrentTaskIfActive() = true on closing job")
+	}
+}
+
+func TestStopJobRemoveSetsClosingFlag(t *testing.T) {
+	client := &JobClient{
+		JobID:     88,
+		Job:       map[string]interface{}{"id": int64(88), "enable": 1, "isCron": 2},
+		Scheduler: NewScheduler(),
+	}
+	task := &JobTask{TaskID: 880, JobClient: client}
+	task.initRuntime()
+	client.setCurrentTask(task)
+
+	if err := client.StopJob(true); err != nil {
+		t.Fatalf("StopJob(true) error: %v", err)
+	}
+	if !client.isClosing() {
+		t.Fatal("StopJob(true) did not mark client closing")
+	}
+	if client.enabled() {
+		t.Fatal("StopJob(true) left job enabled")
+	}
+	if !task.isBreak() {
+		t.Fatal("StopJob(true) did not break running task")
+	}
+}
+
+func TestRemoveJobClientDeletesInvalidZombieJob(t *testing.T) {
+	testDB := newServiceTaskStatusTestDB(t)
+	restoreDB := mapper.SetDBForTest(testDB)
+	defer restoreDB()
+	if _, err := testDB.Exec(`CREATE TABLE job(
+		id integer primary key autoincrement,
+		enable integer DEFAULT 1,
+		remark text,
+		srcPath text,
+		dstPath text,
+		alistId integer,
+		isCron integer DEFAULT 0,
+		interval integer DEFAULT 0,
+		method integer DEFAULT 0,
+		minFileSize integer DEFAULT 0,
+		maxFileSize integer DEFAULT 0
+	)`); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if _, err := testDB.Exec(
+		`INSERT INTO job(id, enable, srcPath, dstPath, alistId, isCron, interval)
+		 VALUES (77, 1, '["/data"]', '["/data/sub"]', 1, 2, 0)`); err != nil {
+		t.Fatalf("insert zombie job: %v", err)
+	}
+
+	jobClientListMu.Lock()
+	previousClients := jobClientList
+	jobClientList = map[int64]*JobClient{}
+	jobClientListMu.Unlock()
+	defer func() {
+		jobClientListMu.Lock()
+		jobClientList = previousClients
+		jobClientListMu.Unlock()
+	}()
+
+	if _, err := GetJobClientByID(77); err == nil {
+		t.Fatal("GetJobClientByID(77) unexpectedly accepted invalid zombie job")
+	}
+	if err := RemoveJobClient(77); err != nil {
+		t.Fatalf("RemoveJobClient(77) failed on zombie job: %v", err)
+	}
+
+	var count int
+	if err := testDB.QueryRow("SELECT COUNT(*) FROM job WHERE id=77").Scan(&count); err != nil {
+		t.Fatalf("count job 77: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("zombie job count = %d, want 0 after RemoveJobClient", count)
+	}
+}
+
+func TestConcurrentJobClientConfigReadsAndTaskLifecycleRaceFree(t *testing.T) {
+	srcSlice := []string{"/src/a"}
+	client := &JobClient{
+		JobID: 12,
+		Job:   map[string]interface{}{"id": int64(12), "enable": 1, "isCron": 2, "srcPath": srcSlice},
+	}
+	snap := client.jobSnapshot()
+	srcSlice[0] = "/mutated"
+	if got := snap["srcPath"].([]string)[0]; got != "/src/a" {
+		t.Fatalf("cloneJobConfig did not deep-copy []string: got %q", got)
+	}
+
+	jobClientListMu.Lock()
+	previousClients := jobClientList
+	jobClientList = map[int64]*JobClient{12: client}
+	jobClientListMu.Unlock()
+	defer func() {
+		jobClientListMu.Lock()
+		jobClientList = previousClients
+		jobClientListMu.Unlock()
+	}()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				task := &JobTask{TaskID: int64(id*100 + j), JobClient: client, CreateTime: 100}
+				task.initRuntime()
+				task.FirstSync.CompareAndSwap(0, 101)
+				client.trySetCurrentTaskIfActive(task)
+				_ = client.jobSnapshot()
+				_ = client.enabled()
+				_ = getJobCurrentFromCache(12)
+				_, _ = GetJobCurrent(12, map[string]interface{}{})
+				client.clearCurrentTask(task)
+				client.replaceJobConfig(map[string]interface{}{"id": int64(12), "enable": 1, "isCron": 2, "srcPath": []string{"/src/a"}}, nil)
+			}
+		}(i)
+	}
+	wg.Wait()
+}

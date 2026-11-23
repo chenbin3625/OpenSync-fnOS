@@ -21,7 +21,7 @@ function ok(data: unknown): HttpResponse<DefaultBodyType> {
  */
 function fail(
   message: string,
-  httpStatus = 200,
+  httpStatus = 400,
 ): HttpResponse<DefaultBodyType> {
   return HttpResponse.json(
     { code: 500, data: null, msg: message } as DefaultBodyType,
@@ -161,6 +161,62 @@ export const handlers = [
     return ok(null);
   }),
 
+  http.get(`${apiBase}/job/stream`, ({ request }) => {
+    const query = new URL(request.url).searchParams;
+    const jobId = numberParam(query, "id");
+    if (jobId === undefined || !Number.isInteger(jobId) || jobId <= 0) {
+      return fail("缺少必要参数");
+    }
+    const encoder = new TextEncoder();
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const payload = JSON.stringify({
+          code: 200,
+          data: mockStore.getCurrentTask(jobId),
+          msg: "success",
+        });
+        controller.enqueue(encoder.encode(`data: ${payload}\n\n`));
+        const cleanup = () => {
+          if (timer !== undefined) {
+            clearInterval(timer);
+            timer = undefined;
+          }
+        };
+        timer = setInterval(() => {
+          try {
+            controller.enqueue(encoder.encode(": heartbeat\n\n"));
+          } catch {
+            cleanup();
+          }
+        }, 15_000);
+        if (typeof timer === "object" && timer && "unref" in timer) {
+          (timer as { unref?: () => void }).unref?.();
+        }
+        request.signal?.addEventListener("abort", () => {
+          cleanup();
+          try {
+            controller.close();
+          } catch {
+            /* stream already closed */
+          }
+        });
+      },
+      cancel() {
+        if (timer !== undefined) {
+          clearInterval(timer);
+          timer = undefined;
+        }
+      },
+    });
+    return new HttpResponse(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+      },
+    });
+  }),
+
   http.get(`${apiBase}/job`, ({ request }) => {
     const query = new URL(request.url).searchParams;
     const jobId = numberParam(query, "id");
@@ -296,15 +352,47 @@ export const handlers = [
   http.put(`${apiBase}/notify`, async ({ request }) => {
     const body = await readBody(request);
     if (!body) return fail("请求内容无效");
+    const parseStrictID = (raw: unknown): number | null => {
+      if (typeof raw === "number") {
+        return Number.isInteger(raw) && raw > 0 ? raw : null;
+      }
+      if (typeof raw === "string" && /^\s*\d+\s*$/.test(raw)) {
+        const parsed = Number(raw.trim());
+        return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+      }
+      return null;
+    };
+    const parseEnable = (raw: unknown): 0 | 1 | null => {
+      if (typeof raw === "boolean") return raw ? 1 : 0;
+      if (typeof raw === "number") return raw === 0 ? 0 : raw === 1 ? 1 : null;
+      if (typeof raw === "string") {
+        const v = raw.trim().toLowerCase();
+        if (v === "0" || v === "false") return 0;
+        if (v === "1" || v === "true") return 1;
+      }
+      return null;
+    };
     if (body.notifyId !== undefined) {
-      mockStore.toggleNotification(
-        Number(body.notifyId),
-        Number(body.enable) ? 1 : 0,
-      );
-    } else {
+      const notifyId = parseStrictID(body.notifyId);
+      const enable = parseEnable(body.enable);
+      if (notifyId === null || enable === null) {
+        return fail("缺少必要参数");
+      }
+      if (!mockStore.toggleNotification(notifyId, enable)) {
+        return fail("通知配置不存在");
+      }
+    } else if (body.notify !== undefined) {
       const notify = recordBody(body.notify);
-      if (!notify) return fail("通知配置无效");
-      mockStore.saveNotification(notify);
+      if (!notify) return fail("缺少必要参数");
+      const id = parseStrictID(notify.id);
+      if (id === null) {
+        return fail("缺少必要参数");
+      }
+      if (!mockStore.updateNotification(notify)) {
+        return fail("通知配置不存在");
+      }
+    } else {
+      return fail("缺少必要参数");
     }
     return ok(null);
   }),

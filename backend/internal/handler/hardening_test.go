@@ -5,7 +5,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"context"
 	"opensync/internal/config"
+	"opensync/internal/mapper"
 	"opensync/internal/model"
 	"opensync/internal/msg"
 	"os"
@@ -443,5 +445,187 @@ func TestStreamJobCurrentReportsSubscriptionLimit(t *testing.T) {
 
 	if w.Code != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, want 429", w.Code)
+	}
+}
+
+func TestTestNotifyRecoversFromPanicAndReleasesConcurrencySlot(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	old := testNotifyService
+	testNotifyService = func(map[string]interface{}) error {
+		panic("boom")
+	}
+	t.Cleanup(func() { testNotifyService = old })
+
+	router := gin.New()
+	router.POST("/svr/notify/test", TestNotify)
+	for i := 0; i < maxConcurrentNotifyTests+1; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/svr/notify/test", strings.NewReader(`{"notify":{"method":1}}`))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("attempt %d status = %d, want 500", i, w.Code)
+		}
+	}
+}
+
+func TestTestNotifyEnforcesConcurrencyLimit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	release := make(chan struct{})
+	entered := make(chan struct{}, maxConcurrentNotifyTests)
+	old := testNotifyService
+	testNotifyService = func(map[string]interface{}) error {
+		entered <- struct{}{}
+		<-release
+		return nil
+	}
+	t.Cleanup(func() {
+		testNotifyService = old
+	})
+
+	router := gin.New()
+	router.POST("/svr/notify/test", TestNotify)
+
+	done := make(chan int, maxConcurrentNotifyTests)
+	for i := 0; i < maxConcurrentNotifyTests; i++ {
+		go func() {
+			req := httptest.NewRequest(http.MethodPost, "/svr/notify/test", strings.NewReader(`{"notify":{"method":1}}`))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+			done <- w.Code
+		}()
+		<-entered
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/svr/notify/test", strings.NewReader(`{"notify":{"method":1}}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusTooManyRequests {
+		close(release)
+		t.Fatalf("status when pool full = %d, want 429", w.Code)
+	}
+	close(release)
+	for i := 0; i < maxConcurrentNotifyTests; i++ {
+		if code := <-done; code != http.StatusOK {
+			t.Fatalf("in-flight request %d status = %d, want 200", i, code)
+		}
+	}
+}
+
+func TestShutdownNotifyTestsWaitsForInFlightAndRejectsNew(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	old := testNotifyService
+	testNotifyService = func(map[string]interface{}) error {
+		close(entered)
+		<-release
+		return nil
+	}
+	t.Cleanup(func() {
+		testNotifyService = old
+		notifyTestMu.Lock()
+		notifyTestClosing = false
+		notifyTestMu.Unlock()
+	})
+
+	router := gin.New()
+	router.POST("/svr/notify/test", TestNotify)
+
+	reqCtx, reqCancel := context.WithCancel(context.Background())
+	defer reqCancel()
+	reqDone := make(chan struct{})
+	go func() {
+		defer close(reqDone)
+		req := httptest.NewRequest(http.MethodPost, "/svr/notify/test", strings.NewReader(`{"notify":{"method":1}}`)).WithContext(reqCtx)
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+	}()
+	<-entered
+	reqCancel()
+	<-reqDone
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		ShutdownNotifyTests(context.Background())
+	}()
+
+	select {
+	case <-shutdownDone:
+		close(release)
+		t.Fatal("ShutdownNotifyTests returned before in-flight notify test finished")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/svr/notify/test", strings.NewReader(`{"notify":{"method":1}}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		close(release)
+		t.Fatalf("new TestNotify during shutdown status = %d, want 400", w.Code)
+	}
+
+	close(release)
+	select {
+	case <-shutdownDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ShutdownNotifyTests did not return after worker finished")
+	}
+}
+
+func TestStreamJobCurrentRejectsInvalidIDWith400(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET("/svr/job/stream", StreamJobCurrent)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/svr/job/stream?id=abc", nil))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestStreamJobCurrentReturns404WhenJobNotFound(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cases := map[string]error{
+		"NotFoundError": &model.NotFoundError{Sentinel: mapper.ErrJobNotFound, Message: msg.T(msg.JobNotFound)},
+		"PublicError":   model.PublicError(msg.T(msg.JobNotFound)),
+	}
+	for name, err := range cases {
+		t.Run(name, func(t *testing.T) {
+			stubSubscribeJobProgress(t, func(int64) (<-chan []byte, []byte, bool, error) {
+				return nil, nil, true, err
+			})
+			router := gin.New()
+			router.GET("/svr/job/stream", StreamJobCurrent)
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/svr/job/stream?id=7", nil))
+			if w.Code != http.StatusNotFound {
+				t.Fatalf("status = %d, want 404", w.Code)
+			}
+		})
+	}
+}
+
+type failingFlushWriter struct {
+	*httptest.ResponseRecorder
+	flushErr error
+}
+
+func (f *failingFlushWriter) FlushError() error {
+	return f.flushErr
+}
+
+func TestWriteSSEFrameStopsOnFlushError(t *testing.T) {
+	fw := &failingFlushWriter{
+		ResponseRecorder: httptest.NewRecorder(),
+		flushErr:         errors.New("broken pipe"),
+	}
+	if writeSSEFrame(fw, &fakeDeadline{}, fw, "data: x\n\n") {
+		t.Fatal("writeSSEFrame() = true when FlushError returned error, want false")
 	}
 }

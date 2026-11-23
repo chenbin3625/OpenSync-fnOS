@@ -95,7 +95,7 @@ func AddJob(job map[string]interface{}) (int64, error) {
 		job["hour"], job["minute"], job["second"], job["exclude"],
 		job["minFileSize"], job["maxFileSize"], job["dstMap"],
 	)
-	if err != nil && strings.Contains(strings.ToLower(err.Error()), "unique constraint failed") {
+	if isUniqueConstraintError(err) {
 		// job has UNIQUE(srcPath, dstPath, alistId); surface the duplicate as a
 		// user-facing reason instead of an opaque 500.
 		return 0, jobExistsError()
@@ -125,6 +125,9 @@ func UpdateJob(job map[string]interface{}) error {
 		job["minFileSize"], job["maxFileSize"], job["dstMap"],
 		jobID,
 	)
+	if isUniqueConstraintError(err) {
+		return jobExistsError()
+	}
 	if err != nil {
 		return err
 	}
@@ -145,7 +148,14 @@ func clearJobTaskCounts(where string, args ...interface{}) error {
 
 // UpdateJobEnable updates job enable status
 func UpdateJobEnable(jobID int64, enable int) error {
-	return ExecuteUpdate("UPDATE job SET enable=? WHERE id=?", enable, jobID)
+	affected, err := executeUpdateAffected("UPDATE job SET enable=? WHERE id=?", enable, jobID)
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return notFound(ErrJobNotFound, msg.JobNotFound)
+	}
+	return nil
 }
 
 // DeleteJob deletes a job and its tasks.
@@ -420,6 +430,11 @@ func DeleteJobTaskByRunTimeContext(ctx context.Context, runTime int64, maintenan
 	}
 	if err := vacuumIfWorthwhile(ctx, maintenanceBlocked); err != nil {
 		log.Printf("Failed to reclaim free database pages: %v", err)
+	}
+	if ctx.Err() == nil && !maintenanceBlocked() {
+		if err := walCheckpointTruncate(ctx); err != nil && ctx.Err() == nil {
+			log.Printf("WAL checkpoint after database maintenance failed: %v", err)
+		}
 	}
 	return nil
 }

@@ -114,7 +114,9 @@ func TestFullSyncPlanExecutesDestinationMoveBeforeDeletingOldTree(t *testing.T) 
 		w.Header().Set("Content-Type", "application/json")
 		var body map[string]interface{}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatalf("decode %s request: %v", r.URL.Path, err)
+			t.Errorf("decode %s request: %v", r.URL.Path, err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
 		}
 		mu.Lock()
 		switch r.URL.Path {
@@ -134,7 +136,9 @@ func TestFullSyncPlanExecutesDestinationMoveBeforeDeletingOldTree(t *testing.T) 
 			calls = append(calls, "remove:"+body["dir"].(string)+names[0].(string))
 		default:
 			mu.Unlock()
-			t.Fatalf("unexpected path %s", r.URL.Path)
+			t.Errorf("unexpected path %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
 		}
 		mu.Unlock()
 
@@ -225,7 +229,9 @@ func TestFullSyncPlanPreservesOldTreeWhenDestinationMoveFails(t *testing.T) {
 			removeCalled = true
 			_, _ = w.Write([]byte(`{"code":200,"message":"ok","data":{}}`))
 		default:
-			t.Fatalf("unexpected path %s", r.URL.Path)
+			t.Errorf("unexpected path %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
 		}
 	}))
 	defer server.Close()
@@ -280,7 +286,9 @@ func writeMovedFileListResponse(t *testing.T, w http.ResponseWriter, dir string)
 	}
 	response, ok := responses[dir]
 	if !ok {
-		t.Fatalf("unexpected list path %q", dir)
+		t.Errorf("unexpected list path %q", dir)
+		w.WriteHeader(http.StatusNotFound)
+		return
 	}
 	_, _ = w.Write([]byte(response))
 }
@@ -479,5 +487,45 @@ func TestFullSyncPlanBranchPanicIsContainedAndRecorded(t *testing.T) {
 	}
 	if len(gate) != 0 {
 		t.Fatalf("%d branch slots leaked after panic", len(gate))
+	}
+}
+
+type panicListRoundTripper struct{}
+
+func (panicListRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	panic("simulated transport panic")
+}
+
+// buildFullSyncPlans runs each root pair in a goroutine; an unexpected panic
+// inside a worker must be recovered and turned into a fatal task break instead
+// of crashing the process.
+func TestBuildFullSyncPlansRecoversWorkerPanic(t *testing.T) {
+	jt := &JobTask{
+		TaskID: 42,
+		Job:    map[string]interface{}{"method": 1},
+		AlistClient: &AlistClient{
+			URL:    "http://127.0.0.1:1",
+			client: &http.Client{Transport: panicListRoundTripper{}},
+		},
+	}
+	jt.initRuntime()
+	t.Cleanup(jt.cancelTaskRuntime)
+
+	plans := jt.buildFullSyncPlans([]scanWork{{
+		SrcPath:     "/src/",
+		DstPath:     "/dst/",
+		SrcRootPath: "/src/",
+		DstRootPath: "/dst/",
+		FirstDst:    true,
+	}}, nil)
+
+	if len(plans) != 0 {
+		t.Fatalf("plans len = %d, want 0 after worker panic", len(plans))
+	}
+	if !jt.isBreak() {
+		t.Fatal("task was not broken after buildFullSyncPlans worker panic")
+	}
+	if fatal := jt.fatalError(); fatal == nil {
+		t.Fatal("fatalError() = nil, want recorded worker panic")
 	}
 }

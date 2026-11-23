@@ -74,6 +74,8 @@ jobs:
       - name: Frontend production build
         run: npm run build
         working-directory: frontend
+        env:
+          VITE_DATA_MODE: real
 
       - name: Go vet
         run: go vet ./...

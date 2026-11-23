@@ -1,5 +1,5 @@
 appname=opensync
-version=0.0.39
+version=0.0.40
 display_name=OpenSync
 desc=<div><p><strong>OpenSync</strong> 是运行在飞牛 fnOS 上的文件同步与备份工具，可作为群晖 Cloud Sync 的替代方案。</p><p>应用依赖 <strong>OpenList / AList</strong> 作为存储引擎。添加本地存储、阿里云盘、百度网盘、OneDrive、S3、WebDAV 等存储后，即可在不同存储之间自动同步文件。</p><ul><li>支持增量同步与全量同步，满足备份和镜像场景。</li><li>支持 Cron、固定间隔和手动触发。</li><li>支持文件名、文件后缀、文件目录、系统目录过滤和文件大小限制。</li><li>提供实时进度、执行历史、失败重试和任务超时控制。</li><li>支持 Webhook、Server酱、钉钉、企业微信、飞书通知。</li></ul><p>开源地址：<a href="https://github.com/chenbin3625/OpenSync-fnOS">https://github.com/chenbin3625/OpenSync-fnOS</a></p></div>
 platform=x86
@@ -16,4 +16,4 @@ ctl_stop=true
 install_type=
 checkport=false
 disable_authorization_path=false
-changelog=v0.0.39：全量同步执行前展示待删除清单并要求确认，30 分钟未确认时只复制不删除；目录列举失败或源根目录为空时自动跳过删除，删除保护精确定位到异常路径；目标目录布局持久化，增删源目录不再重排其余源的目标路径；移动模式拒绝覆盖目标端同名但内容不同的文件，内容一致时跳过重复复制；同引擎下目标目录重叠的任务拒绝保存；固定间隔任务按上次执行时间调度，重启后不再无限顺延，任务列表显示真实下次执行时间；重构任务执行页与整体界面样式；加固零字节文件识别、mtime 容差和失败记录重试的配置校验。
+changelog=v0.0.40：全面安全加固与稳定性提升：后端新增 AList 重定向与 SSRF 防护、严格 JSON/参数校验、通知测试并发限流、凭据脱敏与密钥文件原子锁；修复优雅退出预算、数据库连接关闭、任务并发状态与 SQLite 瞬态锁刷盘问题，完善 HTTP/3 代理回退、无 MD5 零字节文件同步与目录排除规则匹配；前端统一 Semi Design 亮暗色 Token 与通用组件，优化实时任务 SSE/轮询合并与历史刷新，新增移动模式执行前二次确认、设置页未保存离开拦截并修复目录排除树勾选问题；加固 fnOS 生命周期脚本的 Socket 检测、运行期日志轮转与升级锁，构建流程强制隔离 Mock 并增加并发打包锁。

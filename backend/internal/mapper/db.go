@@ -37,6 +37,9 @@ var (
 	// closed".
 	closedPlaceholderDB   *sql.DB
 	closedPlaceholderOnce sync.Once
+	// initDBWG tracks in-flight initDBOnce calls so ShutdownDB can wait for
+	// them to close any unopened/uncommitted handle before returning.
+	initDBWG sync.WaitGroup
 )
 
 // initDBPauseForTest is nil in production. Tests set it to run code while
@@ -101,6 +104,15 @@ func InitDB() *sql.DB {
 }
 
 func initDBOnce(self *sync.Once) {
+	dbMu.Lock()
+	if once != self || shutdown {
+		dbMu.Unlock()
+		return
+	}
+	initDBWG.Add(1)
+	dbMu.Unlock()
+	defer initDBWG.Done()
+
 	cfg := config.GetConfig()
 	dbName := cfg.DB.DBName
 	ensureSQLiteFileMode(dbName)
@@ -133,13 +145,13 @@ func initDBOnce(self *sync.Once) {
 	}
 	dbMu.Lock()
 	if once != self || shutdown {
+		_ = handle.Close()
 		if shutdown && closedDB == nil {
 			// The very handle that was being opened is already closed, which is
 			// exactly what post-shutdown callers must observe.
 			closedDB = handle
 		}
 		dbMu.Unlock()
-		_ = handle.Close()
 		return
 	}
 	db = handle
@@ -355,8 +367,10 @@ func CloseDB() error {
 // file and WAL that shutdown had just released.
 func ShutdownDB() error {
 	dbMu.Lock()
-	defer dbMu.Unlock()
-	return closeDBLocked(true)
+	err := closeDBLocked(true)
+	dbMu.Unlock()
+	initDBWG.Wait()
+	return err
 }
 
 func closeDBLocked(forGood bool) error {

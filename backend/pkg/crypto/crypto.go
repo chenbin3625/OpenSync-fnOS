@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -148,6 +149,9 @@ func ReadOrSetFile(fileName string, defaultVal string, force bool) (string, erro
 			if len(strings.TrimSpace(string(data))) == 0 {
 				return "", fmt.Errorf("%s exists but is empty; refusing to replace it with a new value", fileName)
 			}
+			if chmodErr := os.Chmod(fileName, 0600); chmodErr != nil {
+				return "", fmt.Errorf("chmod %s to 0600: %w", fileName, chmodErr)
+			}
 			return string(data), nil
 		}
 		return "", err
@@ -218,60 +222,73 @@ func readNonEmptyFile(fileName string) (value string, ok bool, err error) {
 
 const (
 	fileLockTimeout      = 5 * time.Second
-	fileLockStaleAfter   = 30 * time.Second
 	fileLockPollInterval = 10 * time.Millisecond
 )
 
-// acquireFileLock serializes key rotation between processes (and goroutines)
-// using an O_EXCL sibling file. A lock older than fileLockStaleAfter is treated
-// as left behind by a crash and removed, so a dead process cannot block startup
-// forever.
+// acquireFileLock serializes key operations between processes and goroutines
+// using flock on a sibling lock file. The kernel releases flock automatically
+// if the holder crashes, so callers never unlink a lock out from under an active
+// holder; after acquiring flock, the opener verifies via SameFile that it locked
+// the current directory entry, and unlock unlinks only that same inode before
+// closing the descriptor.
 func acquireFileLock(fileName string) (unlock func(), err error) {
 	lockName := fileName + ".lock"
 	deadline := time.Now().Add(fileLockTimeout)
 	for {
-		f, openErr := os.OpenFile(lockName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-		if openErr == nil {
-			_ = f.Close()
-			return func() { _ = os.Remove(lockName) }, nil
-		}
-		if !errors.Is(openErr, fs.ErrExist) {
+		f, openErr := os.OpenFile(lockName, os.O_CREATE|os.O_RDWR, 0600)
+		if openErr != nil {
 			return nil, openErr
 		}
-		if info, statErr := os.Stat(lockName); statErr == nil && time.Since(info.ModTime()) > fileLockStaleAfter {
-			_ = os.Remove(lockName)
+		if flockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); flockErr != nil {
+			_ = f.Close()
+			if !errors.Is(flockErr, syscall.EWOULDBLOCK) && !errors.Is(flockErr, syscall.EAGAIN) {
+				return nil, flockErr
+			}
+			if time.Now().After(deadline) {
+				return nil, fmt.Errorf("timed out waiting for %s; another process may be rotating the key", lockName)
+			}
+			time.Sleep(fileLockPollInterval)
 			continue
 		}
-		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("timed out waiting for %s; another process may be rotating the key", lockName)
+		lockedInfo, statErr := f.Stat()
+		if statErr != nil {
+			_ = f.Close()
+			return nil, statErr
 		}
-		time.Sleep(fileLockPollInterval)
+		pathInfo, lstatErr := os.Lstat(lockName)
+		if lstatErr != nil || !os.SameFile(lockedInfo, pathInfo) {
+			_ = f.Close()
+			if time.Now().After(deadline) {
+				return nil, fmt.Errorf("timed out waiting for %s; another process may be rotating the key", lockName)
+			}
+			continue
+		}
+		return func() {
+			if cur, err := os.Lstat(lockName); err == nil && os.SameFile(lockedInfo, cur) {
+				_ = os.Remove(lockName)
+			}
+			_ = f.Close()
+		}, nil
 	}
 }
 
-// writeNewFile creates fileName exclusively with owner-only permissions and
-// fsyncs both the data and the directory entry, so a crash cannot leave an
-// empty key file behind that the next start would refuse to use.
+// writeNewFile atomically creates fileName with owner-only permissions only if
+// it does not already exist, returning fs.ErrExist otherwise. Writing through
+// a synced temp file and rename ensures a crash or concurrent reader never
+// observes a 0-byte or partially written key file.
 func writeNewFile(fileName string, data []byte) error {
-	f, err := os.OpenFile(fileName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	unlock, err := acquireFileLock(fileName)
 	if err != nil {
 		return err
 	}
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		_ = os.Remove(fileName)
+	defer unlock()
+
+	if _, err := os.Lstat(fileName); err == nil {
+		return fs.ErrExist
+	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(fileName)
-		return err
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(fileName)
-		return err
-	}
-	return syncDir(filepath.Dir(fileName))
+	return writeFileAtomic(fileName, data)
 }
 
 // writeFileAtomic replaces fileName via a synced temp file and rename, so a

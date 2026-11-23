@@ -1,7 +1,12 @@
 #!/usr/bin/env node
 // 单架构打包：node scripts/build.mjs amd64|arm64
 // 双架构发布请用 scripts/release.mjs（它会复用这里同一套打包实现）。
-import { ARCHES, buildFrontend, buildPackage } from "./lib/package.mjs";
+import {
+  ARCHES,
+  buildFrontend,
+  buildPackage,
+  withBuildLock,
+} from "./lib/package.mjs";
 import { MIN_NODE, pickNodeDir } from "./lib/toolchain.mjs";
 import { collectVersions, versionProblems } from "./lib/version.mjs";
 
@@ -15,6 +20,8 @@ if (!node.satisfiesMinimum)
 const versionIssues = versionProblems(collectVersions());
 if (versionIssues.length > 0)
   throw new Error(`版本一致性检查失败：${versionIssues.join("；")}`);
-buildFrontend(node.dir);
-const file = buildPackage(arch, { nodeDir: node.dir });
+const file = withBuildLock(() => {
+  buildFrontend(node.dir);
+  return buildPackage(arch, { nodeDir: node.dir });
+});
 console.log(`已生成 ${file}；发布前仍需在飞牛设备完成验收。`);

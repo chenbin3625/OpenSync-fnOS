@@ -269,15 +269,30 @@ func ValidateJobInput(job map[string]interface{}) error {
 // stored job is still loaded at startup (with a warning) instead of silently
 // dropping out of the scheduler while the task list keeps showing it.
 func validateJobInput(job map[string]interface{}, rejectNestedDst bool) error {
-	srcPaths := parsePathList(job["srcPath"])
-	dstPaths := parsePathList(job["dstPath"])
-	if len(srcPaths) == 0 ||
-		len(dstPaths) == 0 ||
-		util.ToInt64(job["alistId"]) <= 0 {
+	rawSrc := parseRawPathList(job["srcPath"])
+	rawDst := parseRawPathList(job["dstPath"])
+	if pathListHasParentSegment(rawSrc) || pathListHasParentSegment(rawDst) ||
+		pathListHasUnsafeChars(rawSrc) || pathListHasUnsafeChars(rawDst) {
 		return publicError(msg.T(msg.LostPart))
 	}
-	if pathListHasParentSegment(srcPaths) || pathListHasParentSegment(dstPaths) {
+
+	srcPaths := parsePathList(job["srcPath"])
+	dstPaths := parsePathList(job["dstPath"])
+	alistID, alistOK := strictJobInt64(job["alistId"])
+	if len(srcPaths) == 0 ||
+		len(dstPaths) == 0 ||
+		!alistOK || alistID <= 0 {
 		return publicError(msg.T(msg.LostPart))
+	}
+	for _, p := range srcPaths {
+		if p == "." || (rejectNestedDst && !strings.HasPrefix(p, "/")) {
+			return publicError(msg.T(msg.LostPart))
+		}
+	}
+	for _, p := range dstPaths {
+		if p == "." || (rejectNestedDst && !strings.HasPrefix(p, "/")) {
+			return publicError(msg.T(msg.LostPart))
+		}
 	}
 	if syncPathsOverlap(srcPaths, dstPaths) {
 		return publicError(msg.T(msg.SyncPathOverlap))
@@ -292,18 +307,24 @@ func validateJobInput(job map[string]interface{}, rejectNestedDst bool) error {
 		log.Printf("Warning: job %v has nested destination directories; edit it to separate them (%s)", job["id"], msg.T(msg.DstPathNested))
 	}
 
-	if enable, ok := job["enable"]; ok {
-		enableInt := util.ToInt(enable)
-		if enableInt != 0 && enableInt != 1 {
+	if enable, ok := job["enable"]; ok && enable != nil && enable != "" {
+		if _, ok := strictJobEnable(enable); !ok {
 			return publicError(msg.T(msg.LostPart))
 		}
 	}
 
-	method := util.ToInt(job["method"])
+	method := 0
+	if rawMethod, exists := job["method"]; exists && rawMethod != nil && rawMethod != "" {
+		parsed, ok := strictJobInt(rawMethod)
+		if !ok {
+			return publicError(msg.T(msg.LostPart))
+		}
+		method = parsed
+	}
 	if method < 0 || method > 2 {
 		return publicError(msg.T(msg.LostPart))
 	}
-	if method == 2 && len(parsePathList(job["dstPath"])) != 1 {
+	if method == 2 && len(dstPaths) != 1 {
 		return publicError("移动模式只允许一个目标目录")
 	}
 
@@ -318,8 +339,37 @@ func validateJobInput(job map[string]interface{}, rejectNestedDst bool) error {
 	if isCron < 0 || isCron > 2 {
 		return publicError(msg.T(msg.LostPart))
 	}
-	if isCron == 0 && util.ToInt(job["interval"]) <= 0 {
-		return publicError(msg.T(msg.IntervalLost))
+	if isCron == 0 {
+		interval, ok := strictJobInt64(job["interval"])
+		if !ok || interval <= 0 || interval > maxJobIntervalMinutes {
+			return publicError(msg.T(msg.IntervalLost))
+		}
+	} else if isCron == 1 {
+		spec, err := buildCronSpec(job)
+		if err != nil {
+			return publicError(err.Error())
+		}
+		if spec != "" {
+			if err := validateCronSpec(spec); err != nil {
+				return publicError(msg.T(msg.CronLost))
+			}
+		}
+	}
+	if job["exclude"] != nil {
+		if invalid := invalidExcludeRules(fmt.Sprintf("%v", job["exclude"])); len(invalid) > 0 {
+			return publicError(msg.ExcludeRulesUnsupported(invalid))
+		}
+	}
+	minSize, err := nonNegativeFileSize(job["minFileSize"])
+	if err != nil {
+		return publicError(msg.T(msg.MinFileSizeInvalid))
+	}
+	maxSize, err := nonNegativeFileSize(job["maxFileSize"])
+	if err != nil {
+		return publicError(msg.T(msg.MaxFileSizeInvalid))
+	}
+	if maxSize > 0 && minSize > maxSize {
+		return publicError(msg.T(msg.MinFileSizeGtMax))
 	}
 	return nil
 }
@@ -361,32 +411,59 @@ func validateJobDestinationConflicts(job map[string]interface{}) error {
 	return nil
 }
 
-func strictJobInt(value interface{}) (int, bool) {
+func strictJobInt64(value interface{}) (int64, bool) {
 	switch v := value.(type) {
 	case int:
-		return v, true
+		return int64(v), true
 	case int64:
-		parsed := int(v)
-		return parsed, int64(parsed) == v
+		return v, true
 	case float64:
 		if math.IsNaN(v) || math.IsInf(v, 0) || math.Trunc(v) != v || v < math.MinInt64 || v >= float64(1<<63) {
 			return 0, false
 		}
-		parsed := int64(v)
-		asInt := int(parsed)
-		return asInt, int64(asInt) == parsed
+		return int64(v), true
 	case json.Number:
 		parsed, err := strconv.ParseInt(string(v), 10, 64)
-		if err != nil {
-			return 0, false
-		}
-		asInt := int(parsed)
-		return asInt, int64(asInt) == parsed
+		return parsed, err == nil
 	case string:
-		parsed, err := strconv.Atoi(strings.TrimSpace(v))
+		parsed, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
 		return parsed, err == nil
 	default:
 		return 0, false
+	}
+}
+
+func strictJobInt(value interface{}) (int, bool) {
+	parsed, ok := strictJobInt64(value)
+	if !ok {
+		return 0, false
+	}
+	asInt := int(parsed)
+	return asInt, int64(asInt) == parsed
+}
+
+func strictJobEnable(value interface{}) (int, bool) {
+	switch v := value.(type) {
+	case bool:
+		if v {
+			return 1, true
+		}
+		return 0, true
+	case string:
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true":
+			return 1, true
+		case "0", "false":
+			return 0, true
+		default:
+			return 0, false
+		}
+	default:
+		parsed, ok := strictJobInt(value)
+		if !ok || (parsed != 0 && parsed != 1) {
+			return 0, false
+		}
+		return parsed, true
 	}
 }
 
@@ -598,14 +675,33 @@ func DoJobManual(jobID int64) error {
 func RemoveJobClient(jobID int64) error {
 	loadMu := jobClientLoadMutex(jobID)
 	loadMu.Lock()
-	defer loadMu.Unlock()
-	client, err := getJobClientByIDLocked(jobID)
-	if err != nil {
-		return err
+	jobClientListMu.RLock()
+	client := jobClientList[jobID]
+	jobClientListMu.RUnlock()
+	if client == nil {
+		// A job absent from jobClientList (such as a legacy/invalid job that
+		// failed startup validation) has no active scheduler or task. Delete the
+		// DB row directly without loading or validating it so zombie jobs can
+		// always be removed.
+		defer loadMu.Unlock()
+		if _, err := mapper.GetJobByID(jobID); err != nil {
+			if err := publicErrorIf(err, msg.T(msg.JobNotFound)); err != nil {
+				return err
+			}
+		}
+		if err := removeJobRow(jobID); err != nil {
+			return fmt.Errorf("delete job: %w", err)
+		}
+		return nil
 	}
+	// Release loadMu before pausing and waiting for idle: holding loadMu across
+	// pauseForRemoval / waitUntilIdle would deadlock with or stall callers such
+	// as GetJobCurrent.
+	loadMu.Unlock()
+
 	// Stop accepting new configuration changes and new tasks for this job, then
-	// release the lock while waiting: holding it across the idle wait would
-	// block an unrelated shutdown for minutes.
+	// release opMu while waiting: holding it across the idle wait would block
+	// an unrelated shutdown for minutes.
 	if !client.lockOp() {
 		client.opMu.Unlock()
 		if client.isClosing() {
@@ -636,9 +732,12 @@ func RemoveJobClient(jobID int64) error {
 		return publicError(msg.T(msg.JobDeleteWaitTimeout))
 	}
 
+	// Lock order: loadMu -> opMu.
+	loadMu.Lock()
 	client.opMu.Lock()
 	if client.deleted {
 		client.opMu.Unlock()
+		loadMu.Unlock()
 		return nil
 	}
 	deleteErr := removeJobRow(jobID)
@@ -646,19 +745,21 @@ func RemoveJobClient(jobID int64) error {
 		client.deleted = true
 		// Only now is the job really gone; stop its scheduler for good.
 		client.stopJobLocked(true) //nolint:errcheck // remove=true never fails
-	} else {
-		// Row still exists: roll back to the previous state and allow a retry.
-		client.restoreAfterFailedRemoval(previousEnable)
-		client.closing.Store(false)
+		client.opMu.Unlock()
+		jobClientListMu.Lock()
+		if jobClientList[jobID] == client {
+			delete(jobClientList, jobID)
+		}
+		jobClientListMu.Unlock()
+		loadMu.Unlock()
+		return nil
 	}
+	// Row still exists: roll back to the previous state and allow a retry.
+	client.restoreAfterFailedRemoval(previousEnable)
+	client.closing.Store(false)
 	client.opMu.Unlock()
-	if deleteErr != nil {
-		return fmt.Errorf("delete job: %w", deleteErr)
-	}
-	jobClientListMu.Lock()
-	delete(jobClientList, jobID)
-	jobClientListMu.Unlock()
-	return nil
+	loadMu.Unlock()
+	return fmt.Errorf("delete job: %w", deleteErr)
 }
 
 // removeJobIdleTimeout bounds how long a delete waits for the running task;
@@ -793,6 +894,9 @@ func GetJobList(params map[string]interface{}) (map[string]interface{}, error) {
 // list page used to show only the schedule rule ("every 60 minutes"), which
 // hid when the job would actually run next, especially after a restart.
 func addJobNextRunTimes(result map[string]interface{}) {
+	if result == nil {
+		return
+	}
 	rows, ok := result["dataList"].([]map[string]interface{})
 	if !ok || len(rows) == 0 {
 		return
@@ -817,11 +921,33 @@ func addJobNextRunTimes(result map[string]interface{}) {
 	}
 }
 
+// getJobCurrentFromCache returns live task progress purely from the in-memory
+// jobClientList cache without acquiring loadMu or hitting the database.
+func getJobCurrentFromCache(jobID int64) interface{} {
+	jobClientListMu.RLock()
+	client := jobClientList[jobID]
+	jobClientListMu.RUnlock()
+	if client == nil {
+		return nil
+	}
+	taskClient := client.currentTask()
+	if taskClient == nil {
+		return nil
+	}
+	return taskClient.getCurrentPayload()
+}
+
 // GetJobCurrent returns real-time task progress
 func GetJobCurrent(jobID int64, params map[string]interface{}) (interface{}, error) {
-	client, err := GetJobClientByID(jobID)
-	if err != nil {
-		return nil, err
+	jobClientListMu.RLock()
+	client := jobClientList[jobID]
+	jobClientListMu.RUnlock()
+	if client == nil {
+		var err error
+		client, err = GetJobClientByID(jobID)
+		if err != nil {
+			return nil, err
+		}
 	}
 	taskClient := client.currentTask()
 	if taskClient != nil {
@@ -909,11 +1035,12 @@ func GetTaskList(req map[string]interface{}) (map[string]interface{}, error) {
 				item[k] = v
 			}
 			if util.ToInt(item["status"]) > 1 {
-				taskNumJSON, _ := json.Marshal(taskNum)
-				needUpdateList = append(needUpdateList, map[string]interface{}{
-					"taskId":  item["id"],
-					"taskNum": string(taskNumJSON),
-				})
+				if taskNumJSON, err := json.Marshal(taskNum); err == nil {
+					needUpdateList = append(needUpdateList, map[string]interface{}{
+						"taskId":  item["id"],
+						"taskNum": string(taskNumJSON),
+					})
+				}
 			}
 		}
 	}

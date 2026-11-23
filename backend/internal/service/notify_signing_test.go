@@ -287,3 +287,80 @@ func TestResolveNotifyParamsBarkServerChange(t *testing.T) {
 		t.Fatal("stored deviceKey merged into a changed Bark server")
 	}
 }
+
+func TestResolveNotifyParamsWeComAliasRotation(t *testing.T) {
+	old := loadStoredNotify
+	defer func() { loadStoredNotify = old }()
+	loadStoredNotify = func(int64) (map[string]interface{}, error) {
+		return map[string]interface{}{
+			"params": `{"corpid":"c1","corpsecret":"OLD_SECRET","agentid":"1"}`,
+		}, nil
+	}
+
+	got, err := resolveNotifyParams(map[string]interface{}{
+		"id": 3, "method": 3,
+		"params": map[string]interface{}{
+			"corpid":     "c1",
+			"corpSecret": "NEW_SECRET",
+			"agentid":    "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("resolveNotifyParams() error = %v", err)
+	}
+	if _, hasOld := got["corpsecret"]; hasOld {
+		t.Fatalf("stale alias corpsecret was resurrected: %#v", got)
+	}
+	if got["corpSecret"] != "NEW_SECRET" {
+		t.Fatalf("corpSecret = %#v, want NEW_SECRET", got["corpSecret"])
+	}
+
+	// Masked old alias alongside fresh new alias must also drop the old alias.
+	got, err = resolveNotifyParams(map[string]interface{}{
+		"id": 3, "method": 3,
+		"params": map[string]interface{}{
+			"corpid":     "c1",
+			"corpsecret": "****CRET",
+			"corpSecret": "NEW_SECRET_2",
+			"agentid":    "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("resolveNotifyParams() error = %v", err)
+	}
+	if _, hasOld := got["corpsecret"]; hasOld {
+		t.Fatalf("masked alias corpsecret was kept/resurrected: %#v", got)
+	}
+	if got["corpSecret"] != "NEW_SECRET_2" {
+		t.Fatalf("corpSecret = %#v, want NEW_SECRET_2", got["corpSecret"])
+	}
+}
+
+func TestSendBarkPreservesSubpathAndQueryParams(t *testing.T) {
+	var gotPath, gotQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotQuery = r.URL.Path, r.URL.RawQuery
+		_, _ = io.WriteString(w, `{"code":200,"message":"success"}`)
+	}))
+	defer server.Close()
+
+	if err := sendBark(notifyHTTPClient, map[string]interface{}{
+		"server":    server.URL + "/base/?token=abc",
+		"deviceKey": "DEVKEY",
+	}, "t", "c"); err != nil {
+		t.Fatalf("sendBark(subpath+query) error = %v", err)
+	}
+	if gotPath != "/base/push" || gotQuery != "token=abc" {
+		t.Fatalf("request = %s?%s, want /base/push?token=abc", gotPath, gotQuery)
+	}
+
+	if err := sendBark(notifyHTTPClient, map[string]interface{}{
+		"server":    server.URL + "?token=xyz",
+		"deviceKey": "DEVKEY",
+	}, "t", "c"); err != nil {
+		t.Fatalf("sendBark(root+query) error = %v", err)
+	}
+	if gotPath != "/push" || gotQuery != "token=xyz" {
+		t.Fatalf("request = %s?%s, want /push?token=xyz", gotPath, gotQuery)
+	}
+}

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Input from "@douyinfe/semi-ui/lib/es/input";
 import Switch from "@douyinfe/semi-ui/lib/es/switch";
@@ -6,8 +6,17 @@ import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import { IconSaveStroked } from "@douyinfe/semi-icons";
 import { api } from "../api/client";
 import { VersionLink } from "../components/VersionLink";
-import { errorToast, Header, LoadState, SettingRow } from "../components/common";
+import {
+  confirmAction,
+  errorToast,
+  Header,
+  LoadState,
+  SectionCard,
+  SettingRow,
+} from "../components/common";
 import { useAction, useResource } from "../lib/hooks";
+import { getHost } from "../lib/host";
+import { normalizeSettingFieldValue } from "./Home/homeUtils";
 import type { SystemSettings } from "../types";
 
 const fields = [
@@ -85,23 +94,119 @@ const cardGroups = [
 const fieldOf = (key: (typeof fields)[number]["key"]) =>
   fields.find((field) => field.key === key)!;
 
+function formatSettingFieldValue(
+  field: (typeof fields)[number],
+  value: unknown,
+): string {
+  return normalizeSettingFieldValue(
+    value,
+    "kind" in field && field.kind === "switch",
+  );
+}
+
+export function toSettingsForm(
+  data: Partial<SystemSettings>,
+): SettingsForm {
+  return Object.fromEntries(
+    fields.map((field) => [
+      field.key,
+      formatSettingFieldValue(field, data[field.key]),
+    ]),
+  ) as SettingsForm;
+}
+
+export function isSettingsDirty(
+  form: SettingsForm | null,
+  data: Partial<SystemSettings> | null | undefined,
+): boolean {
+  if (!form || !data) return false;
+  const baseline = toSettingsForm(data);
+  return fields.some(({ key }) => form[key] !== baseline[key]);
+}
+
 export default function Settings() {
   const resource = useResource((signal) => api.settings(signal));
   const [form, setForm] = useState<SettingsForm | null>(null);
   const action = useAction();
   useEffect(() => {
-    if (resource.data)
-      setForm(
-        Object.fromEntries(
-          fields.map(({ key }) => [key, String(resource.data![key])]),
-        ) as SettingsForm,
-      );
+    if (resource.data) setForm(toSettingsForm(resource.data));
   }, [resource.data]);
-  const dirty = Boolean(
-    form &&
-      resource.data &&
-      fields.some(({ key }) => form[key] !== String(resource.data![key])),
-  );
+  const dirty = isSettingsDirty(form, resource.data);
+  const skipNextGuardRef = useRef(false);
+  useEffect(() => {
+    if (!dirty) return;
+    const host = getHost();
+    if (!host.isStandaloneWeb) {
+      void host
+        .setExitPageTips({ title: "尚未保存", content: "是否放弃当前修改？" })
+        .catch(() => {});
+    }
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    const onDocumentClick = (event: MouseEvent) => {
+      if (skipNextGuardRef.current) {
+        skipNextGuardRef.current = false;
+        return;
+      }
+      if (
+        event.defaultPrevented ||
+        event.button !== 0 ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.shiftKey ||
+        event.altKey
+      ) {
+        return;
+      }
+      const target = event.target as Element | null;
+      if (!target) return;
+      const anchor = target.closest("a[href]") as HTMLAnchorElement | null;
+      const menuToggle = target.closest("button.nav-menu-toggle") as HTMLButtonElement | null;
+      let navElement: HTMLElement | null = null;
+      if (anchor) {
+        if (anchor.target && anchor.target !== "_self") return;
+        if (anchor.hasAttribute("download")) return;
+        try {
+          const dest = new URL(anchor.href, window.location.href);
+          if (dest.origin !== window.location.origin) return;
+          if (
+            dest.pathname + dest.search ===
+            window.location.pathname + window.location.search
+          ) {
+            return;
+          }
+          navElement = anchor;
+        } catch {
+          return;
+        }
+      } else if (menuToggle) {
+        navElement = menuToggle;
+      }
+      if (!navElement) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const targetElement = navElement;
+      confirmAction({
+        title: "放弃未保存的修改？",
+        content: "当前设置尚未保存，离开后修改将丢失。",
+        okText: "放弃",
+        onOk: () => {
+          skipNextGuardRef.current = true;
+          targetElement.click();
+          skipNextGuardRef.current = false;
+        },
+      });
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    document.addEventListener("click", onDocumentClick, true);
+    return () => {
+      window.removeEventListener("beforeunload", onBeforeUnload);
+      document.removeEventListener("click", onDocumentClick, true);
+      if (!host.isStandaloneWeb) void host.setExitPageTips().catch(() => {});
+    };
+  }, [dirty]);
   const save = () => {
     if (!form || !resource.data) return;
     const values: SystemSettings = { ...resource.data };
@@ -163,22 +268,6 @@ export default function Settings() {
       )}
     </SettingRow>
   );
-  // 每个分组渲染成一张大卡片，条目靠间距区分，不用图标和小卡片分组。
-  const card = (
-    title: string,
-    keys: readonly (typeof fields)[number]["key"][],
-  ) => (
-    <section className="settings-card card-base" key={title}>
-      <div className="settings-card-head">
-        <h2>{title}</h2>
-      </div>
-      <div className="settings-card-body">
-        {keys.map((key) => (
-          <div key={key}>{input(fieldOf(key))}</div>
-        ))}
-      </div>
-    </section>
-  );
   return (
     <div className="page settings-page">
       <Header
@@ -200,9 +289,20 @@ export default function Settings() {
         error={resource.error}
         retry={resource.refresh}
       >
-        {form && cardGroups.map((group) =>
-          card(group.title, group.keys),
-        )}
+        {form &&
+          cardGroups.map((group) => (
+            <SectionCard
+              key={group.title}
+              className="settings-card"
+              headClassName="settings-card-head"
+              bodyClassName="settings-card-body"
+              title={group.title}
+            >
+              {group.keys.map((key) => (
+                <div key={key}>{input(fieldOf(key))}</div>
+              ))}
+            </SectionCard>
+          ))}
       </LoadState>
       <div className="mobile-version">
         <VersionLink />

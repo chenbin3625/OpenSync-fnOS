@@ -20,7 +20,6 @@ import {
   useNavigate,
 } from "react-router-dom";
 import Button from "@douyinfe/semi-ui/lib/es/button";
-import Spin from "@douyinfe/semi-ui/lib/es/spin";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import {
   IconBellStroked,
@@ -33,7 +32,7 @@ import {
   IconTreeTriangleRight,
 } from "@douyinfe/semi-icons";
 import { api, sessionExpiredEvent } from "./api/client";
-import { errorToast } from "./components/common";
+import { errorToast, InlineNotice, LoadingPanel } from "./components/common";
 import { VersionContext, VersionLink } from "./components/VersionLink";
 import {
   notifyUpdateAvailable,
@@ -259,17 +258,12 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
               </NavLink>
             )}
             {taskMenu.error && (
-              <div className="sidebar-task-error" role="status">
-                <span className="inline-error">{taskMenu.error}</span>
-                <Button
-                  theme="borderless"
-                  size="small"
-                  loading={taskMenu.loading}
-                  onClick={() => void taskMenu.refresh()}
-                >
-                  重试
-                </Button>
-              </div>
+              <InlineNotice
+                className="sidebar-task-error"
+                message={taskMenu.error}
+                retrying={taskMenu.loading}
+                onRetry={() => void taskMenu.refresh()}
+              />
             )}
             {hasTaskItems && taskMenuOpen && (
               <div className="nav-submenu" id="task-menu">
@@ -319,15 +313,7 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
           </div>
         </aside>
         <main className="app-workspace">
-          <Suspense
-            fallback={
-              <div className="state-panel">
-                <Spin size="large" />
-              </div>
-            }
-          >
-            {children}
-          </Suspense>
+          <Suspense fallback={<LoadingPanel />}>{children}</Suspense>
         </main>
         <nav className="mobile-navigation" aria-label="主导航">
           {sections.map((s) => (
@@ -345,14 +331,16 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
     </VersionContext>
   );
 }
+
 function Workspace() {
   const session = useResource((signal) => api.session(signal));
   const refreshSession = session.refresh;
+  const [retrying, setRetrying] = useState(false);
   // Parallel requests that all hit 401 each dispatch the event; the guard
   // collapses them into one /session check instead of aborting and restarting
   // it once per failure.
   const expiredRefresh = useMemo(
-    () => createGuardedRefresh(() => refreshSession()),
+    () => createGuardedRefresh(() => refreshSession(true)),
     [refreshSession],
   );
   useEffect(() => {
@@ -360,6 +348,17 @@ function Workspace() {
     window.addEventListener(sessionExpiredEvent, expired);
     return () => window.removeEventListener(sessionExpiredEvent, expired);
   }, [expiredRefresh]);
+  const retrySession = useCallback(async () => {
+    if (retrying) return;
+    setRetrying(true);
+    try {
+      // Keep the error screen visible until /session actually succeeds,
+      // preventing stale session.data from briefly mounting <Shell> and firing 401s.
+      await refreshSession(true);
+    } finally {
+      setRetrying(false);
+    }
+  }, [retrying, refreshSession]);
   if (session.error)
     return (
       <div className="session-error">
@@ -367,18 +366,14 @@ function Workspace() {
         <p className="inline-error">{session.error}</p>
         <Button
           icon={<IconRefresh aria-hidden="true" />}
-          onClick={() => void session.refresh()}
+          loading={retrying}
+          onClick={() => void retrySession()}
         >
           重试
         </Button>
       </div>
     );
-  if (!session.data)
-    return (
-      <div className="state-panel">
-        <Spin size="large" />
-      </div>
-    );
+  if (!session.data) return <LoadingPanel />;
   return (
     <SessionContext value={session.data}>
       <Shell version={session.data.version}>
@@ -393,6 +388,7 @@ function Workspace() {
     </SessionContext>
   );
 }
+
 export function App() {
   return (
     <BrowserRouter basename="/app/opensync">

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestProgressHubUnsubscribeDoesNotCloseChannel(t *testing.T) {
@@ -310,5 +311,38 @@ func TestStopAllCancelsPendingPublishes(t *testing.T) {
 	hub.framesMu.Unlock()
 	if frames != 0 {
 		t.Fatalf("diff frames retained after stopAll: %d", frames)
+	}
+}
+
+func TestProgressHubDoesNotBlockOnLoadMutex(t *testing.T) {
+	loadMu := jobClientLoadMutex(9999)
+	loadMu.Lock()
+	defer loadMu.Unlock()
+
+	done := make(chan error, 1)
+	go func() {
+		if _, err := BuildJobProgressStreamPayload(9999); err != nil {
+			done <- err
+			return
+		}
+		ch, _, ok, err := SubscribeJobProgressWithSnapshot(9999)
+		if err != nil {
+			done <- err
+			return
+		}
+		if ok {
+			UnsubscribeJobProgress(9999, ch)
+		}
+		_, err = buildProgressFrames(9999)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("progress stream failed while loadMu was held: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("progress stream blocked on job load mutex")
 	}
 }

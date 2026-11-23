@@ -1,11 +1,8 @@
 import { memo, useEffect, useId, useMemo, useRef, useState } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import DatePicker from "@douyinfe/semi-ui/lib/es/datePicker";
-import Input from "@douyinfe/semi-ui/lib/es/input";
-import Pagination from "@douyinfe/semi-ui/lib/es/pagination";
+import Divider from "@douyinfe/semi-ui/lib/es/divider";
 import Progress from "@douyinfe/semi-ui/lib/es/progress";
-import Select from "@douyinfe/semi-ui/lib/es/select";
-import Spin from "@douyinfe/semi-ui/lib/es/spin";
 import SideSheet from "@douyinfe/semi-ui/lib/es/sideSheet";
 import Table from "@douyinfe/semi-ui/lib/es/table";
 import Tabs from "@douyinfe/semi-ui/lib/es/tabs";
@@ -18,13 +15,17 @@ import {
   IconEyeOpenedStroked,
   IconPause,
   IconRefresh,
-  IconSearchStroked,
 } from "@douyinfe/semi-icons";
 import { api } from "../api/client";
 import {
-  IconButton,
+  DataPager,
   EmptyState,
+  FilterSelect,
+  IconButton,
+  InlineNotice,
+  LoadingPanel,
   LoadState,
+  SearchFilterInput,
   Status,
   confirmDelete,
   confirmStopTask,
@@ -39,6 +40,7 @@ import {
   formatDuration,
   formatSize,
   getTaskDisplayName,
+  normalizeDateRange,
   taskItemStatusNames,
   taskRecordStatusNames,
   taskTypeNames,
@@ -64,13 +66,16 @@ const fileTableWidths = {
   status: 160,
 } as const;
 
-export function Realtime({
+export const Realtime = memo(function Realtime({
   jobId,
   onTaskEnded,
+  onApprovalDetected,
 }: {
   jobId: number;
   /** Called once the stream/poll reports "no task running" (tab recycling). */
   onTaskEnded?: () => void;
+  /** Called immediately when the live feed observes a full-sync approval prompt. */
+  onApprovalDetected?: () => void;
 }) {
   const {
     currentTask,
@@ -99,6 +104,14 @@ export function Realtime({
     hadTask.current = false;
     onTaskEnded?.();
   }, [currentTask, taskLoading, taskError, onTaskEnded]);
+  const hasApproval = Boolean(currentTask?.approval);
+  const prevApproval = useRef(false);
+  useEffect(() => {
+    if (hasApproval && !prevApproval.current) {
+      onApprovalDetected?.();
+    }
+    prevApproval.current = hasApproval;
+  }, [hasApproval, onApprovalDetected]);
   if (!currentTask) {
     // The first poll used to flash "空空如也" before the task arrived, and a
     // failed first poll looked like "nothing running".
@@ -110,12 +123,7 @@ export function Realtime({
           retry={refreshCurrentTask}
         />
       );
-    if (taskLoading)
-      return (
-        <div className="state-panel">
-          <Spin size="large" />
-        </div>
-      );
+    if (taskLoading) return <LoadingPanel />;
     return <EmptyState />;
   }
   const task = currentTask;
@@ -155,26 +163,26 @@ export function Realtime({
         </div>
         <div className="execution-metrics">
           <span>{formatSize(task.speed)}/s</span>
-          <span className="metric-sep" />
+          <Divider layout="vertical" margin={8} />
           <span>
             已完成 {formatSize(task.doneSize)} /{" "}
             {formatSize(task.doneSize + task.remainSize)}
           </span>
-          <span className="metric-sep" />
+          <Divider layout="vertical" margin={8} />
           <span>已运行 {formatDuration(task.duration)}</span>
         </div>
         <Progress
           percent={Math.round(percent)}
           showInfo
-          stroke="var(--accent)"
+          stroke="var(--semi-color-primary)"
         />
         {taskError && (
           // Polling keeps the last snapshot on failure; without this notice the
           // frozen numbers read as a stalled transfer.
-          <div className="realtime-notice" role="status">
-            <IconAlertTriangle aria-hidden="true" size="small" />
-            连接中断，正在重试…
-          </div>
+          <InlineNotice
+            icon={<IconAlertTriangle aria-hidden="true" size="small" />}
+            message="连接中断，正在重试…"
+          />
         )}
         {!task.scanFinish && task.scan && (
           <div className="scan-status">
@@ -198,10 +206,10 @@ export function Realtime({
       </div>
       <div className="execution-scroll">
         {items.tabError && tabItems.length > 0 && (
-          <div className="realtime-notice" role="status">
-            <IconAlertTriangle aria-hidden="true" size="small" />
-            明细连接中断，正在重试…
-          </div>
+          <InlineNotice
+            icon={<IconAlertTriangle aria-hidden="true" size="small" />}
+            message="明细连接中断，正在重试…"
+          />
         )}
         {items.tabError && tabItems.length === 0 ? (
           <LoadState
@@ -217,7 +225,7 @@ export function Realtime({
           />
         )}
       </div>
-      <Pager
+      <DataPager
         total={tabTotal}
         page={items.tabTaskPage}
         size={items.pageSize}
@@ -226,9 +234,9 @@ export function Realtime({
       />
     </div>
   );
-}
+});
 
-export function History({
+export const History = memo(function History({
   jobId,
   currentTaskId,
   onOpenRealtime,
@@ -258,14 +266,22 @@ export function History({
         },
         signal,
       ),
-    [jobId, page, size, status, keyword, range, currentTaskId],
+    [jobId, page, size, status, keyword, range],
   );
+  const refreshHistory = resource.refresh;
+  const prevCurrentTaskId = useRef(currentTaskId);
+  useEffect(() => {
+    if (prevCurrentTaskId.current === currentTaskId) return;
+    prevCurrentTaskId.current = currentTaskId;
+    void refreshHistory(true);
+  }, [currentTaskId, refreshHistory]);
   const action = useAction();
   const rows = resource.data?.dataList || [];
   const totalCount = resource.data?.count || 0;
+  const isMobile = useMediaQuery("(max-width: 640px)");
   // Deleting the last record on the last page left the table empty.
   useClampedPage(page, resource.data ? totalCount : null, size, setPage);
-  const labelId = useId();
+  const rangeLabelId = useId();
   const retry = (record: TaskRecord) =>
     void action.run(async () => {
       try {
@@ -317,58 +333,43 @@ export function History({
   return (
     <div className="history-view flex-column">
       <div className="filter-bar">
-        {/* Semi Select/DatePicker drop aria-label and only forward
-            aria-labelledby, so their names come from these hidden labels. */}
-        <span id={`${labelId}-status`} className="sr-only">
-          执行状态
-        </span>
-        <span id={`${labelId}-range`} className="sr-only">
-          执行时间范围
-        </span>
-        <Input
-          prefix={<IconSearchStroked aria-hidden="true" />}
-          aria-label="搜索执行记录（任务 ID）"
+        <SearchFilterInput
+          ariaLabel="搜索执行记录（任务 ID）"
           // The backend GetJobTaskList keyword filter only matches job_task.id;
           // promising "error keyword" here made every such search return 0.
           placeholder="任务 ID"
           value={input}
-          showClear
-          onChange={(value) => {
-            setInput(value);
-            if (!value) {
-              setKeyword("");
-              setPage(1);
-            }
-          }}
-          onEnterPress={() => {
-            setKeyword(input.trim());
+          onChange={setInput}
+          onSearch={(next) => {
+            setKeyword(next);
             setPage(1);
           }}
         />
-        <Select
-          aria-labelledby={`${labelId}-status`}
-          value={status === undefined ? "all" : String(status)}
-          optionList={[
-            { label: "全部状态", value: "all" },
-            ...historyStatuses.map((value) => ({
-              value: String(value),
-              label: taskRecordStatusNames[value],
-            })),
-          ]}
-          onChange={(value) => {
-            setStatus(value === "all" ? undefined : Number(value));
+        <FilterSelect
+          label="执行状态"
+          allLabel="全部状态"
+          value={status}
+          options={historyStatuses.map((value) => ({
+            value,
+            label: taskRecordStatusNames[value],
+          }))}
+          onChange={(next) => {
+            setStatus(next);
             // The typed text and the applied filter must not diverge: applying
             // a status/date change also applies the current search text.
             setKeyword(input.trim());
             setPage(1);
           }}
         />
+        <span id={rangeLabelId} className="sr-only">
+          执行时间范围
+        </span>
         <DatePicker
           type="dateRange"
-          aria-labelledby={`${labelId}-range`}
+          aria-labelledby={rangeLabelId}
           value={range}
           onChange={(value) => {
-            setRange(Array.isArray(value) ? value.map((v) => new Date(v)) : []);
+            setRange(normalizeDateRange(value));
             setKeyword(input.trim());
             setPage(1);
           }}
@@ -376,101 +377,104 @@ export function History({
         />
       </div>
       <div className="history-scroll">
-      <LoadState
-        loading={false}
-        error={resource.error}
-        retry={resource.refresh}
-      />
-      {!resource.error && (
-      <>
-      <div className="desktop-data">
-        <Table<TaskRecord>
-          dataSource={rows}
-          loading={resource.loading}
-          pagination={false}
-          rowKey="id"
-          empty={<EmptyState />}
-          columns={[
-            {
-              title: "开始时间",
-              dataIndex: "createTime",
-              render: (value) => formatTimestamp(value, true),
-            },
-            {
-              title: "状态",
-              render: (_, record) => (
-                <Status
-                  status={record.status}
-                  label={
-                    taskRecordStatusNames[record.status] ||
-                    String(record.status)
-                  }
-                  error={record.errMsg}
-                />
-              ),
-            },
-            {
-              title: "耗时",
-              render: (_, record) =>
-                record.status !== 1 && record.runTime && record.createTime
-                  ? formatDuration(record.runTime - record.createTime)
-                  : "—",
-            },
-            {
-              title: "操作",
-              width: 140,
-              render: (_, record) => controls(record),
-            },
-          ]}
+        <LoadState
+          loading={false}
+          error={resource.error}
+          retry={resource.refresh}
         />
-      </div>
-      <div className="mobile-data">
-        {resource.loading ? (
-          <LoadState loading retry={resource.refresh} />
-        ) : !rows.length ? (
-          <EmptyState />
-        ) : (
-          rows.map((record) => (
-            <div className="mobile-record" key={record.id}>
-              <div className="record-title">
-                <strong>{formatTimestamp(record.createTime, true)}</strong>
-                <Status
-                  status={record.status}
-                  label={
-                    taskRecordStatusNames[record.status] ||
-                    String(record.status)
-                  }
-                  error={record.errMsg}
-                />
-              </div>
-              <div className="record-footer">
-                <span className="muted">
-                  {record.status !== 1 && record.runTime && record.createTime
-                    ? formatDuration(record.runTime - record.createTime)
-                    : "—"}
-                </span>
-                {controls(record)}
-              </div>
+        {!resource.error &&
+          (isMobile ? (
+            <div className="mobile-data">
+              {resource.loading ? (
+                <LoadingPanel />
+              ) : !rows.length ? (
+                <EmptyState />
+              ) : (
+                rows.map((record) => (
+                  <div className="mobile-record" key={record.id}>
+                    <div className="record-title">
+                      <strong>{formatTimestamp(record.createTime, true)}</strong>
+                      <Status
+                        status={record.status}
+                        label={
+                          taskRecordStatusNames[record.status] ||
+                          String(record.status)
+                        }
+                        error={record.errMsg}
+                      />
+                    </div>
+                    <div className="record-footer">
+                      <span className="muted">
+                        {record.status !== 1 && record.runTime && record.createTime
+                          ? formatDuration(record.runTime - record.createTime)
+                          : "—"}
+                      </span>
+                      {controls(record)}
+                    </div>
+                  </div>
+                ))
+              )}
             </div>
-          ))
-        )}
+          ) : (
+            <div className="desktop-data">
+              <Table<TaskRecord>
+                dataSource={rows}
+                loading={resource.loading}
+                pagination={false}
+                rowKey="id"
+                empty={<EmptyState />}
+                columns={[
+                  {
+                    title: "开始时间",
+                    dataIndex: "createTime",
+                    render: (value) => formatTimestamp(value, true),
+                  },
+                  {
+                    title: "状态",
+                    render: (_, record) => (
+                      <Status
+                        status={record.status}
+                        label={
+                          taskRecordStatusNames[record.status] ||
+                          String(record.status)
+                        }
+                        error={record.errMsg}
+                      />
+                    ),
+                  },
+                  {
+                    title: "耗时",
+                    render: (_, record) =>
+                      record.status !== 1 && record.runTime && record.createTime
+                        ? formatDuration(record.runTime - record.createTime)
+                        : "—",
+                  },
+                  {
+                    title: "操作",
+                    width: 140,
+                    render: (_, record) => controls(record),
+                  },
+                ]}
+              />
+            </div>
+          ))}
       </div>
-      </>
-      )}
-      </div>
-      <Pager
+      <DataPager
         total={totalCount}
         page={page}
         size={size}
         onChange={setPage}
-        onSizeChange={(s) => { setSize(s); setPage(1); }}
+        onSizeChange={(s) => {
+          setSize(s);
+          setPage(1);
+        }}
       />
       {detail !== null && (
         <FileDetails taskId={detail} onClose={() => setDetail(null)} />
       )}
     </div>
   );
-}
+});
 
 /**
  * Stable row identity. Records without an id (realtime rows not yet saved)
@@ -556,7 +560,7 @@ export const FileTable = memo(function FileTable({
                 <Progress
                   percent={pct}
                   showInfo={false}
-                  stroke="var(--accent)"
+                  stroke="var(--semi-color-primary)"
                 />
               </div>
             );
@@ -594,9 +598,7 @@ export const FileTable = memo(function FileTable({
           {loading ? (
             // Loading only: errors are rendered (with retry) by the caller, so
             // no dead "重试" button is wired to a no-op here.
-            <div className="state-panel">
-              <Spin size="large" />
-            </div>
+            <LoadingPanel />
           ) : !rows.length ? (
             <EmptyState />
           ) : (
@@ -610,27 +612,35 @@ export const FileTable = memo(function FileTable({
   );
 });
 
-function MobileFileRecord({ record }: { record: TaskItem }) {
+export { normalizeDateRange };
+
+const MobileFileRecord = memo(function MobileFileRecord({
+  record,
+}: {
+  record: TaskItem;
+}) {
   const [open, setOpen] = useState(false);
   return (
     <div className={`mobile-record file-record${open ? " open" : ""}`}>
       <div
         className="record-summary"
-        role="button"
-        tabIndex={0}
-        aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            setOpen((v) => !v);
-          }
-        }}
       >
         <div className="record-title">
-          <Tooltip content={getTaskDisplayName(record)} position="topLeft">
-            <strong>{getTaskDisplayName(record)}</strong>
-          </Tooltip>
+          <button
+            type="button"
+            className="record-title-toggle"
+            aria-expanded={open}
+            aria-label={`${getTaskDisplayName(record)}，${open ? "收起详情" : "展开详情"}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              setOpen((v) => !v);
+            }}
+          >
+            <Tooltip content={getTaskDisplayName(record)} position="topLeft">
+              <strong>{getTaskDisplayName(record)}</strong>
+            </Tooltip>
+          </button>
           <Status
             status={record.status}
             label={taskItemStatusNames[record.status]}
@@ -649,7 +659,7 @@ function MobileFileRecord({ record }: { record: TaskItem }) {
         {record.status === 1 && (
           <Progress
             percent={taskProgressPercent(record.progress)}
-            stroke="var(--accent)"
+            stroke="var(--semi-color-primary)"
             showInfo={false}
           />
         )}
@@ -674,7 +684,7 @@ function MobileFileRecord({ record }: { record: TaskItem }) {
       )}
     </div>
   );
-}
+});
 
 function FileDetails({
   taskId,
@@ -712,7 +722,13 @@ function FileDetails({
     size,
     setPage,
   );
-  const labelId = useId();
+  const applyFilter =
+    (setter: (value: number | undefined) => void) =>
+    (value: number | undefined) => {
+      setter(value);
+      setKeyword(input.trim());
+      setPage(1);
+    };
   return (
     <SideSheet
       title="执行明细"
@@ -724,75 +740,45 @@ function FileDetails({
     >
       <div className="detail-drawer-body">
         <div className="filter-bar">
-          {["操作类型", "对象类型", "错误信息"].map((label, index) => (
-            <span key={label} id={`${labelId}-${index}`} className="sr-only">
-              {label}
-            </span>
-          ))}
-          <Input
-            aria-label="搜索文件明细"
-            prefix={<IconSearchStroked aria-hidden="true" />}
+          <SearchFilterInput
+            ariaLabel="搜索文件明细"
             placeholder="文件 / 路径 / 错误"
             value={input}
-            onChange={(value) => {
-              setInput(value);
-              if (!value) {
-                setKeyword("");
-                setPage(1);
-              }
-            }}
-            onEnterPress={() => {
-              setKeyword(input.trim());
+            onChange={setInput}
+            onSearch={(next) => {
+              setKeyword(next);
               setPage(1);
             }}
-            showClear
           />
-          {[
-            {
-              label: "操作类型",
-              value: type,
-              set: setType,
-              options: [
-                { label: "复制/创建", value: 0 },
-                { label: "删除", value: 1 },
-                { label: "移动", value: 2 },
-                { label: "移动（校验后删源）", value: 3 },
-              ],
-            },
-            {
-              label: "对象类型",
-              value: object,
-              set: setObject,
-              options: [
-                { label: "文件", value: 0 },
-                { label: "目录", value: 1 },
-              ],
-            },
-            {
-              label: "错误信息",
-              value: hasError,
-              set: setHasError,
-              options: [
-                { label: "有错误信息", value: 1 },
-                { label: "无错误信息", value: 0 },
-              ],
-            },
-          ].map((filter, index) => (
-            <Select
-              key={filter.label}
-              aria-labelledby={`${labelId}-${index}`}
-              value={filter.value === undefined ? "all" : String(filter.value)}
-              optionList={[
-                { label: "全部" + filter.label, value: "all" },
-                ...filter.options.map((o) => ({ ...o, value: String(o.value) })),
-              ]}
-              onChange={(value) => {
-                filter.set(value === "all" ? undefined : Number(value));
-                setKeyword(input.trim());
-                setPage(1);
-              }}
-            />
-          ))}
+          <FilterSelect
+            label="操作类型"
+            value={type}
+            options={[
+              { label: "复制/创建", value: 0 },
+              { label: "删除", value: 1 },
+              { label: "移动", value: 2 },
+              { label: "移动（校验后删源）", value: 3 },
+            ]}
+            onChange={applyFilter(setType)}
+          />
+          <FilterSelect
+            label="对象类型"
+            value={object}
+            options={[
+              { label: "文件", value: 0 },
+              { label: "目录", value: 1 },
+            ]}
+            onChange={applyFilter(setObject)}
+          />
+          <FilterSelect
+            label="错误信息"
+            value={hasError}
+            options={[
+              { label: "有错误信息", value: 1 },
+              { label: "无错误信息", value: 0 },
+            ]}
+            onChange={applyFilter(setHasError)}
+          />
           <Button
             theme="borderless"
             onClick={() => {
@@ -820,7 +806,7 @@ function FileDetails({
           />
         )}
       </div>
-      <Pager
+      <DataPager
         total={resource.data?.count || 0}
         page={page}
         size={size}
@@ -831,54 +817,5 @@ function FileDetails({
         }}
       />
     </SideSheet>
-  );
-}
-
-function Pager({
-  total,
-  page,
-  size,
-  onChange,
-  onSizeChange,
-}: {
-  total: number;
-  page: number;
-  size: number;
-  onChange: (page: number) => void;
-  onSizeChange?: (size: number) => void;
-}) {
-  const sizeLabelId = useId();
-  return (
-    <div className="table-pagination">
-      <span className="muted">共 {total} 条</span>
-      <div className="pager-controls">
-        <Pagination
-          total={total}
-          currentPage={page}
-          pageSize={size}
-          size="small"
-          hideOnSinglePage={false}
-          onPageChange={onChange}
-        />
-        {onSizeChange && (
-          <>
-            <span id={sizeLabelId} className="sr-only">
-              每页条数
-            </span>
-            <Select
-              aria-labelledby={sizeLabelId}
-              value={size}
-              onChange={(v) => onSizeChange(v as number)}
-              size="small"
-              className="pager-size-select"
-              optionList={[10, 20, 50, 100].map((n) => ({
-                value: n,
-                label: `${n} 条/页`,
-              }))}
-            />
-          </>
-        )}
-      </div>
-    </div>
   );
 }

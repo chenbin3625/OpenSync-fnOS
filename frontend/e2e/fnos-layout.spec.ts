@@ -1,14 +1,55 @@
 import { test, expect, type Page } from "@playwright/test";
-import { createServer, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
 
-// The backend rejects writes without Content-Type: application/json (CSRF
-// guard). Playwright only sets it for requests with a JSON body, so bodiless
-// DELETEs used for cleanup must declare it explicitly.
-const jsonWrite = { headers: { "Content-Type": "application/json" } };
-
-let engine: Server;
-let engineUrl: string;
+async function routeLayoutFixtures(
+  page: Page,
+  {
+    engines = [],
+    jobs = [],
+    notifications = [],
+  }: {
+    engines?: Record<string, unknown>[];
+    jobs?: Record<string, unknown>[];
+    notifications?: Record<string, unknown>[];
+  },
+) {
+  await page.route("**/app/opensync/svr/**", async (route) => {
+    const url = new URL(route.request().url());
+    const success = (data: unknown) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ code: 200, data, msg: "" }),
+      });
+    if (url.pathname.endsWith("/session"))
+      return success({ uid: 1, development: false, version: "test" });
+    if (url.pathname.endsWith("/version/latest"))
+      return success({
+        latestVersion: "v0.0.0",
+        releaseURL: "https://example.test/releases",
+        hasUpdate: false,
+      });
+    if (url.pathname.endsWith("/system/config"))
+      return success({
+        taskTimeout: 48,
+        taskSave: 30,
+        copyConcurrency: 5,
+        scanConcurrency: 16,
+        maxRetries: 2,
+        scheduledFullSyncConfirm: 0,
+      });
+    if (url.pathname.endsWith("/alist")) return success(engines);
+    if (url.pathname.endsWith("/notify")) return success(notifications);
+    if (url.pathname.endsWith("/job") && url.searchParams.has("current"))
+      return success(null);
+    if (
+      url.pathname.endsWith("/job") &&
+      (url.searchParams.has("taskId") || url.searchParams.has("id"))
+    )
+      return success({ dataList: [], count: 0 });
+    if (url.pathname.endsWith("/job"))
+      return success({ dataList: jobs, count: jobs.length });
+    return success(null);
+  });
+}
 
 async function routeMobileTaskFixture(page: Page) {
   await page.route("**/app/opensync/svr/**", async (route) => {
@@ -56,28 +97,7 @@ async function routeMobileTaskFixture(page: Page) {
   });
 }
 
-test.beforeAll(async () => {
-  engine = createServer(async (request, response) => {
-    response.setHeader("Content-Type", "application/json");
-    if (request.url === "/api/me") {
-      response.end(
-        JSON.stringify({
-          code: 200,
-          message: "ok",
-          data: { username: "layout-engine" },
-        }),
-      );
-      return;
-    }
-    response.end(JSON.stringify({ code: 200, message: "ok", data: {} }));
-  });
-  await new Promise<void>((resolve) => engine.listen(0, "127.0.0.1", resolve));
-  engineUrl = `http://127.0.0.1:${(engine.address() as AddressInfo).port}`;
-});
 
-test.afterAll(async () => {
-  await new Promise<void>((resolve) => engine.close(() => resolve()));
-});
 
 test("desktop sidebar is 220px with icon menus and bottom settings", async ({
   page,
@@ -161,67 +181,58 @@ test("desktop shell does not overflow a short host window", async ({ page }) => 
 
 test("task management expands in the sidebar and lists task names", async ({
   page,
-  request,
 }, testInfo) => {
   test.skip(
     (page.viewportSize()?.width || 0) <= 640,
     "mobile uses bottom navigation",
   );
-  const name = "菜单任务-" + testInfo.project.name + "-" + Date.now();
-  await request.post("/app/opensync/svr/alist", {
-    data: {
-      url: engineUrl,
-      token: "layout-token",
-      remark: name,
-    },
+  const name = "菜单任务-" + testInfo.project.name;
+  const engineId = 101;
+  const jobId = 201;
+  await routeLayoutFixtures(page, {
+    engines: [
+      {
+        id: engineId,
+        url: "http://127.0.0.1:18080",
+        token: "layout-token",
+        remark: name,
+        userName: "layout-engine",
+      },
+    ],
+    jobs: [
+      {
+        id: jobId,
+        alistId: engineId,
+        srcPath: JSON.stringify(["/photos"]),
+        dstPath: JSON.stringify(["/backup/photos"]),
+        method: 0,
+        isCron: 2,
+        enable: 1,
+        useCacheS: false,
+        useCacheT: false,
+        remark: name,
+      },
+    ],
   });
-  const engines = await (await request.get("/app/opensync/svr/alist")).json();
-  const engineId = engines.data.find(
-    (e: { remark: string }) => e.remark === name,
-  ).id;
-  await request.post("/app/opensync/svr/job", {
-    data: {
-      alistId: engineId,
-      srcPath: JSON.stringify(["/photos"]),
-      dstPath: JSON.stringify(["/backup/photos"]),
-      method: 0,
-      isCron: 2,
-      enable: 1,
-      useCacheS: false,
-      useCacheT: false,
-      remark: name,
-    },
+  await page.goto(`/app/opensync/tasks?jobId=${jobId}`);
+  const sidebar = page.locator(".app-sidebar");
+  const taskToggle = sidebar.getByRole("button", {
+    name: "任务管理",
+    exact: true,
   });
-  const jobs = await (
-    await request.get("/app/opensync/svr/job?pageNum=1&pageSize=100")
-  ).json();
-  const jobId = jobs.data.dataList.find(
-    (j: { remark: string }) => j.remark === name,
-  ).id;
-  try {
-    await page.goto(`/app/opensync/tasks?jobId=${jobId}`);
-    const sidebar = page.locator(".app-sidebar");
-    const taskToggle = sidebar.getByRole("button", {
-      name: "任务管理",
-      exact: true,
-    });
-    await expect(taskToggle).toHaveAttribute("aria-expanded", "true");
-    await expect(
-      taskToggle.locator(".task-menu-triangle"),
-    ).toHaveAttribute("aria-label", "tree_triangle_down");
-    const taskLink = sidebar.getByRole("link", { name, exact: true });
-    await expect(taskLink).toBeVisible();
-    await expect(taskLink.locator(".task-sub-icon")).toHaveAttribute(
-      "aria-label",
-      "folder_stroked",
-    );
-    await expect(taskLink).toHaveCSS("background-color", "rgb(255, 255, 255)");
-    await expect(page.locator(".task-list-pane")).toHaveCount(0);
-    await expect(page.locator(".task-detail-pane")).toBeVisible();
-  } finally {
-    await request.delete(`/app/opensync/svr/job?id=${jobId}`, jsonWrite);
-    await request.delete(`/app/opensync/svr/alist?id=${engineId}`, jsonWrite);
-  }
+  await expect(taskToggle).toHaveAttribute("aria-expanded", "true");
+  await expect(
+    taskToggle.locator(".task-menu-triangle"),
+  ).toHaveAttribute("aria-label", "tree_triangle_down");
+  const taskLink = sidebar.getByRole("link", { name, exact: true });
+  await expect(taskLink).toBeVisible();
+  await expect(taskLink.locator(".task-sub-icon")).toHaveAttribute(
+    "aria-label",
+    "folder_stroked",
+  );
+  await expect(taskLink).toHaveCSS("background-color", "rgb(255, 255, 255)");
+  await expect(page.locator(".task-list-pane")).toHaveCount(0);
+  await expect(page.locator(".task-detail-pane")).toBeVisible();
 });
 
 test("task tabs and page commands share an integrated toolbar row", async ({
@@ -237,6 +248,10 @@ test("task tabs and page commands share an integrated toolbar row", async ({
   for (const { path, tab, action } of toolbars) {
     await page.goto(`/app/opensync/${path}`);
     const toolbar = page.locator(".page-toolbar");
+    await expect(toolbar).toBeVisible();
+    const tabLocator = toolbar.getByRole("tab", { name: tab, exact: true });
+    await expect(tabLocator).toBeVisible();
+    await expect(tabLocator).toHaveAttribute("aria-selected", "true");
     await expect(toolbar).toHaveCSS("border-radius", "8px 8px 0px 0px");
     await expect(toolbar.locator(".semi-tabs-bar")).toHaveCSS(
       "border-bottom-width",
@@ -250,14 +265,15 @@ test("task tabs and page commands share an integrated toolbar row", async ({
       "background-color",
       "rgba(0, 0, 0, 0)",
     );
-    const tabBox = await toolbar
-      .getByRole("tab", { name: tab, exact: true })
-      .boundingBox();
+    const tabBox = await tabLocator.boundingBox();
     expect(tabBox).not.toBeNull();
     if (action) {
-      const actionBox = await toolbar
-        .getByRole("button", { name: action, exact: true })
-        .boundingBox();
+      const actionButton = toolbar.getByRole("button", {
+        name: action,
+        exact: true,
+      });
+      await expect(actionButton).toBeVisible();
+      const actionBox = await actionButton.boundingBox();
       expect(actionBox).not.toBeNull();
       if (page.viewportSize()!.width > 640) {
         expect(
@@ -267,19 +283,21 @@ test("task tabs and page commands share an integrated toolbar row", async ({
         ).toBeLessThan(8);
       }
     } else {
-      expect(
-        await toolbar.locator(".page-actions").textContent(),
-      ).toBe("");
+      await expect(toolbar.locator(".page-actions")).toHaveText("");
     }
   }
   // 引擎管理只有一个页面，不再有 Tab；工具栏仍须撑满高度并右对齐操作按钮。
   await page.goto("/app/opensync/engines");
   const toolbar = page.locator(".page-toolbar");
+  await expect(toolbar).toBeVisible();
   await expect(toolbar.locator(".semi-tabs-bar")).toHaveCount(0);
+  const addEngineButton = toolbar.getByRole("button", {
+    name: "添加引擎",
+    exact: true,
+  });
+  await expect(addEngineButton).toBeVisible();
   const toolbarBox = await toolbar.boundingBox();
-  const actionBox = await toolbar
-    .getByRole("button", { name: "添加引擎", exact: true })
-    .boundingBox();
+  const actionBox = await addEngineButton.boundingBox();
   expect(toolbarBox!.height).toBeLessThan(80);
   expect(
     Math.abs(
@@ -409,29 +427,24 @@ test("primary surface, cards and controls use consistent radii and full width", 
 
 test("data fixture renders inspectable engine, task and notification rows", async ({
   page,
-  request,
 }, testInfo) => {
-  const name = "检查数据-" + testInfo.project.name + "-" + Date.now();
-  let engineId: number | undefined;
-  let jobId: number | undefined;
-  let notifyId: number | undefined;
-  try {
-    await request.post("/app/opensync/svr/alist", {
-      data: {
-        url: engineUrl,
+  const name = "检查数据-" + testInfo.project.name;
+  const engineId = 102;
+  const jobId = 202;
+  const notifyId = 302;
+  await routeLayoutFixtures(page, {
+    engines: [
+      {
+        id: engineId,
+        url: "http://127.0.0.1:18080",
         token: "fixture-token",
         remark: name,
+        userName: "layout-engine",
       },
-    });
-    const engines = await (
-      await request.get("/app/opensync/svr/alist")
-    ).json();
-    engineId = engines.data.find(
-      (item: { remark: string }) => item.remark === name,
-    ).id;
-
-    await request.post("/app/opensync/svr/job", {
-      data: {
+    ],
+    jobs: [
+      {
+        id: jobId,
         alistId: engineId,
         srcPath: JSON.stringify(["/Photos"]),
         dstPath: JSON.stringify(["/Backup"]),
@@ -442,173 +455,142 @@ test("data fixture renders inspectable engine, task and notification rows", asyn
         useCacheT: false,
         remark: name,
       },
-    });
-    const jobs = await (
-      await request.get("/app/opensync/svr/job?pageNum=1&pageSize=100")
-    ).json();
-    jobId = jobs.data.dataList.find(
-      (item: { remark: string }) => item.remark === name,
-    ).id;
+    ],
+    notifications: [
+      {
+        id: notifyId,
+        method: 0,
+        enable: 1,
+        params: JSON.stringify({
+          url: "http://127.0.0.1:18080/hook",
+          httpMethod: "POST",
+          contentType: "application/json",
+          needContent: true,
+          titleName: "title",
+          contentName: "content",
+          notSendNull: false,
+        }),
+      },
+    ],
+  });
 
-    // The id comes from the create response, never from the tail of the list:
-    // the finally block deletes notifyId, so guessing it would delete whatever
-    // config happened to sort last in the user's real data.
-    const created = await (
-      await request.post("/app/opensync/svr/notify", {
-        data: {
-          notify: {
-            method: 0,
-            enable: 1,
-            params: JSON.stringify({
-              url: engineUrl + "/hook",
-              httpMethod: "POST",
-              contentType: "application/json",
-              needContent: true,
-              titleName: "title",
-              contentName: "content",
-              notSendNull: false,
-            }),
-          },
-        },
-      })
-    ).json();
-    notifyId = created.data.id;
-    expect(notifyId).toBeTruthy();
+  await page.goto("/app/opensync/engines");
+  const engineCard = page
+    .locator(".engine-item")
+    .filter({ hasText: name })
+    .first();
+  await expect(engineCard.getByRole("heading", { name, exact: true })).toBeVisible();
+  await expect(engineCard.locator(".item-symbol")).toHaveCount(0);
+  await expect(
+    engineCard.getByRole("button", { name: "测试引擎", exact: true }),
+  ).toBeVisible();
 
-    await page.goto("/app/opensync/engines");
-    const engineCard = page
-      .locator(".engine-item")
-      .filter({ hasText: name })
-      .first();
-    await expect(engineCard.getByRole("heading", { name, exact: true })).toBeVisible();
-    await expect(engineCard.locator(".item-symbol")).toHaveCount(0);
+  await page.goto(`/app/opensync/tasks?jobId=${jobId}`);
+  // Mobile replaces the sidebar with the bottom navigation, so the task name
+  // only appears there on desktop.
+  if ((page.viewportSize()?.width || 0) > 640) {
     await expect(
-      engineCard.getByRole("button", { name: "测试引擎", exact: true }),
+      page.locator(".app-sidebar").getByRole("link", { name, exact: true }),
     ).toBeVisible();
-
-    await page.goto(`/app/opensync/tasks?jobId=${jobId}`);
-    // Mobile replaces the sidebar with the bottom navigation, so the task name
-    // only appears there on desktop.
-    if ((page.viewportSize()?.width || 0) > 640) {
-      await expect(
-        page.locator(".app-sidebar").getByRole("link", { name, exact: true }),
-      ).toBeVisible();
-    }
-    await expect(
-      page.getByRole("heading", { name, exact: true }),
-    ).toBeVisible();
-
-    await page.goto("/app/opensync/notifications");
-    const notifySwitch = page
-      .locator(`.notification-item[data-notify-id="${notifyId}"]`)
-      .getByRole("switch", { name: "启用自定义 Webhook", exact: true });
-    await expect(notifySwitch).toBeVisible();
-    await expect(page.locator(".notification-item .item-symbol")).toHaveCount(0);
-    await expect(
-      notifySwitch.locator("xpath=ancestor::*[contains(@class, 'semi-switch')][1]"),
-    ).toHaveCSS("width", "40px");
-    await expect(
-      notifySwitch.locator("xpath=ancestor::*[contains(@class, 'semi-switch')][1]"),
-    ).toHaveCSS("height", "24px");
-    await expect(
-      notifySwitch.locator("xpath=ancestor::*[contains(@class, 'semi-switch')][1]"),
-    ).toHaveCSS("background-color", "rgb(0, 102, 255)");
-    if (process.env.PLAYWRIGHT_SCREENSHOTS === "1")
-      await page.screenshot({
-        path: `test-results/data-${testInfo.project.name}.png`,
-        fullPage: true,
-      });
-  } finally {
-    if (notifyId)
-      await request.delete(`/app/opensync/svr/notify?notifyId=${notifyId}`, jsonWrite);
-    if (jobId)
-      await request.delete(`/app/opensync/svr/job?id=${jobId}`, jsonWrite);
-    if (engineId)
-      await request.delete(`/app/opensync/svr/alist?id=${engineId}`, jsonWrite);
   }
+  await expect(
+    page.getByRole("heading", { name, exact: true }),
+  ).toBeVisible();
+
+  await page.goto("/app/opensync/notifications");
+  const notifySwitch = page
+    .locator(`.notification-item[data-notify-id="${notifyId}"]`)
+    .getByRole("switch", { name: "启用自定义 Webhook", exact: true });
+  await expect(notifySwitch).toBeVisible();
+  await expect(page.locator(".notification-item .item-symbol")).toHaveCount(0);
+  await expect(
+    notifySwitch.locator("xpath=ancestor::*[contains(@class, 'semi-switch')][1]"),
+  ).toHaveCSS("width", "40px");
+  await expect(
+    notifySwitch.locator("xpath=ancestor::*[contains(@class, 'semi-switch')][1]"),
+  ).toHaveCSS("height", "24px");
+  await expect(
+    notifySwitch.locator("xpath=ancestor::*[contains(@class, 'semi-switch')][1]"),
+  ).toHaveCSS("background-color", "rgb(0, 102, 255)");
+  if (process.env.PLAYWRIGHT_SCREENSHOTS === "1")
+    await page.screenshot({
+      path: `test-results/data-${testInfo.project.name}.png`,
+      fullPage: true,
+    });
 });
 
 test("task cards follow the reference card style and fill the detail pane", async ({
   page,
-  request,
 }, testInfo) => {
-  const name = "布局任务-" + testInfo.project.name + "-" + Date.now();
-  await request.post("/app/opensync/svr/alist", {
-    data: {
-      url: engineUrl,
-      token: "layout-token",
-      remark: name,
-    },
+  const name = "布局任务-" + testInfo.project.name;
+  const engineId = 103;
+  const jobId = 203;
+  await routeLayoutFixtures(page, {
+    engines: [
+      {
+        id: engineId,
+        url: "http://127.0.0.1:18080",
+        token: "layout-token",
+        remark: name,
+        userName: "layout-engine",
+      },
+    ],
+    jobs: [
+      {
+        id: jobId,
+        alistId: engineId,
+        srcPath: JSON.stringify(["/docker"]),
+        dstPath: JSON.stringify(["/dav/nas/docker"]),
+        method: 0,
+        isCron: 1,
+        enable: 1,
+        hour: "2",
+        minute: "0",
+        second: "0",
+        useCacheS: false,
+        useCacheT: false,
+        remark: name,
+      },
+    ],
   });
-  const engines = await (await request.get("/app/opensync/svr/alist")).json();
-  const engineId = engines.data.find(
-    (e: { remark: string }) => e.remark === name,
-  ).id;
-  await request.post("/app/opensync/svr/job", {
-    data: {
-      alistId: engineId,
-      srcPath: JSON.stringify(["/docker"]),
-      dstPath: JSON.stringify(["/dav/nas/docker"]),
-      method: 0,
-      isCron: 1,
-      enable: 1,
-      hour: "2",
-      minute: "0",
-      second: "0",
-      useCacheS: false,
-      useCacheT: false,
-      remark: name,
-    },
+  await page.goto(`/app/opensync/tasks?jobId=${jobId}`);
+  const summary = page.locator(".overview-card");
+  const detail = page.locator(".task-detail-pane");
+  await expect(summary).toBeVisible();
+  await expect(summary).toHaveCSS("background-color", "rgb(255, 255, 255)");
+  await expect(summary).toHaveCSS("border-radius", "8px");
+  await expect(summary).toHaveCSS("border-top-width", "1px");
+  const summaryBox = await summary.boundingBox();
+  const detailBox = await detail.boundingBox();
+  expect(summaryBox!.width).toBeGreaterThan(detailBox!.width - 12);
+  // 卡片头部：名称 + 状态标签 + 「⋯」菜单
+  await expect(
+    summary.getByRole("heading", { name, exact: true }),
+  ).toBeVisible();
+  const menu = summary.getByRole("button", {
+    name: "更多操作",
+    exact: true,
   });
-  const jobs = await (
-    await request.get("/app/opensync/svr/job?pageNum=1&pageSize=100")
-  ).json();
-  const jobId = jobs.data.dataList.find(
-    (j: { remark: string }) => j.remark === name,
-  ).id;
-  try {
-    await page.goto(`/app/opensync/tasks?jobId=${jobId}`);
-    const summary = page.locator(".overview-card");
-    const detail = page.locator(".task-detail-pane");
-    await expect(summary).toBeVisible();
-    await expect(summary).toHaveCSS("background-color", "rgb(255, 255, 255)");
-    await expect(summary).toHaveCSS("border-radius", "8px");
-    await expect(summary).toHaveCSS("border-top-width", "1px");
-    const summaryBox = await summary.boundingBox();
-    const detailBox = await detail.boundingBox();
-    expect(summaryBox!.width).toBeGreaterThan(detailBox!.width - 12);
-    // 卡片头部：名称 + 状态标签 + 「⋯」菜单
+  await expect(menu).toBeVisible();
+  // 源 → 目标 流向，以及「下次执行」
+  await expect(summary.locator(".flow-arrow")).toBeVisible();
+  await expect(
+    summary.locator(".flow-next").getByText("下次执行", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    summary.getByText("/docker", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    summary.getByText("/dav/nas/docker", { exact: true }),
+  ).toBeVisible();
+  // 「⋯」菜单里的操作与参考稿一致
+  await menu.click();
+  for (const label of ["设置", "删除"]) {
     await expect(
-      summary.getByRole("heading", { name, exact: true }),
+      page.locator(".semi-dropdown-menu").getByText(label, { exact: true }),
     ).toBeVisible();
-    const menu = summary.getByRole("button", {
-      name: "更多操作",
-      exact: true,
-    });
-    await expect(menu).toBeVisible();
-    // 源 → 目标 流向，以及「下次执行」
-    await expect(summary.locator(".flow-arrow")).toBeVisible();
-    await expect(
-      summary.locator(".flow-next").getByText("下次执行", { exact: true }),
-    ).toBeVisible();
-    await expect(
-      summary.getByText("/docker", { exact: true }),
-    ).toBeVisible();
-    await expect(
-      summary.getByText("/dav/nas/docker", { exact: true }),
-    ).toBeVisible();
-    // 「⋯」菜单里的操作与参考稿一致
-    await menu.click();
-    for (const label of ["设置", "删除"]) {
-      await expect(
-        page.locator(".semi-dropdown-menu").getByText(label, { exact: true }),
-      ).toBeVisible();
-    }
-    await page.keyboard.press("Escape");
-  } finally {
-    await request.delete(`/app/opensync/svr/job?id=${jobId}`, jsonWrite);
-    await request.delete(`/app/opensync/svr/alist?id=${engineId}`, jsonWrite);
   }
+  await page.keyboard.press("Escape");
 });
 
 test("empty pages render the reference folder asset", async ({ page }) => {

@@ -151,6 +151,9 @@ func (d *notifyDispatcher) work() {
 // panic escaping here would take down a worker (and with it every later
 // notification) instead of just this one.
 func (d *notifyDispatcher) runJob(job notifyJob) {
+	if d.context().Err() != nil {
+		return
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("Notification for task %d failed: %v", job.taskID, r)
@@ -186,6 +189,9 @@ func (d *notifyDispatcher) shutdown(ctx context.Context) {
 	d.mu.Unlock()
 
 	if !started {
+		if d.cancel != nil {
+			d.cancel()
+		}
 		return
 	}
 	done := make(chan struct{})
@@ -195,6 +201,9 @@ func (d *notifyDispatcher) shutdown(ctx context.Context) {
 	}()
 	select {
 	case <-done:
+		if d.cancel != nil {
+			d.cancel()
+		}
 	case <-ctx.Done():
 		log.Printf("Gave up waiting for pending notifications to finish; cancelling in-flight requests")
 		if d.cancel != nil {

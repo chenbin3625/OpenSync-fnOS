@@ -196,3 +196,127 @@ func TestCopyAdmissionCapsConcurrentCopies(t *testing.T) {
 	}
 	jt.finishCopySlot()
 }
+
+// When Waiting is full and a blocked scan producer is waiting in pushWait,
+// holding the last concurrency slot (e.g. from runFullSyncRelocations) must not
+// cause the executor to pop an item and deadlock pushing it back.
+func TestCopyExecutorDoesNotDeadlockOnFullQueueWhenRelocationHoldsSlot(t *testing.T) {
+	pinCopyTestDeps(t)
+	var persisted []map[string]interface{}
+	restorePersist := stubPersistJobTaskItems(t, &persisted, nil)
+	defer restorePersist()
+
+	jt := &JobTask{
+		TaskID:       7,
+		Job:          map[string]interface{}{},
+		Waiting:      newCopyQueueWithCapacity(2),
+		cachedLimits: &taskRuntimeLimits{CopyConcurrency: 1},
+	}
+	jt.initRuntime()
+	t.Cleanup(jt.cancelTaskRuntime)
+
+	client := &admissionTestClient{}
+	for _, name := range []string{"a.bin", "b.bin"} {
+		if !jt.Waiting.pushWait(jt.context(), newCopyItem(jt, client, "/src/", "/dst/", name, int64(1), taskItemTypeCopy)) {
+			t.Fatalf("failed to seed queue with %s", name)
+		}
+	}
+
+	// Hold the only concurrency slot (mimics runFullSyncRelocations).
+	if !jt.tryAdmitCopy(1) {
+		t.Fatal("tryAdmitCopy(1) = false, want slot reserved")
+	}
+
+	// Block a producer in pushWait on the full queue.
+	producerDone := make(chan bool, 1)
+	go func() {
+		producerDone <- jt.Waiting.pushWait(jt.context(), newCopyItem(jt, client, "/src/", "/dst/", "c.bin", int64(1), taskItemTypeCopy))
+	}()
+
+	execDone := make(chan struct{})
+	go func() {
+		defer close(execDone)
+		jt.runCopyExecutor()
+	}()
+
+	// Give the executor a moment to attempt startAvailableCopyItems while the
+	// slot is held; it must stay unblocked rather than deadlocking on pushWait.
+	time.Sleep(30 * time.Millisecond)
+	jt.finishCopySlot()
+
+	select {
+	case ok := <-producerDone:
+		if !ok {
+			t.Fatal("producer pushWait returned false unexpectedly")
+		}
+	case <-time.After(3 * time.Second):
+		jt.requestBreak()
+		t.Fatal("producer remained blocked in pushWait (executor deadlocked)")
+	}
+
+	jt.markScanFinished()
+	select {
+	case <-execDone:
+	case <-time.After(3 * time.Second):
+		jt.requestBreak()
+		t.Fatal("runCopyExecutor did not drain after slot release")
+	}
+	jt.drainCopyExecutor()
+	if err := jt.persistRemainingTaskItems(); err != nil {
+		t.Fatalf("persistRemainingTaskItems() error = %v", err)
+	}
+	if !jt.isDrained() {
+		t.Fatal("executor was not marked drained")
+	}
+	if len(persisted) != 3 {
+		t.Fatalf("persisted len = %d, want 3 items", len(persisted))
+	}
+}
+
+// If concurrency is saturated when requestBreak() fires, queued items must stay
+// recorded as Stopped rather than being dropped.
+func TestCopyExecutorBusySlotAndBreakDoesNotDropStoppedItem(t *testing.T) {
+	var persisted []map[string]interface{}
+	restorePersist := stubPersistJobTaskItems(t, &persisted, nil)
+	defer restorePersist()
+
+	jt := &JobTask{
+		TaskID:       8,
+		Job:          map[string]interface{}{},
+		Waiting:      newCopyQueueWithCapacity(2),
+		cachedLimits: &taskRuntimeLimits{CopyConcurrency: 1},
+	}
+	jt.initRuntime()
+	t.Cleanup(jt.cancelTaskRuntime)
+
+	client := &admissionTestClient{}
+	for _, name := range []string{"a.bin", "b.bin"} {
+		if !jt.Waiting.pushWait(jt.context(), newCopyItem(jt, client, "/src/", "/dst/", name, int64(1), taskItemTypeCopy)) {
+			t.Fatalf("failed to seed queue with %s", name)
+		}
+	}
+
+	// Saturate concurrency so startAvailableCopyItems cannot admit anything.
+	if !jt.tryAdmitCopy(1) {
+		t.Fatal("tryAdmitCopy(1) = false")
+	}
+	if jt.startAvailableCopyItems() {
+		t.Fatal("startAvailableCopyItems() = true while slot held")
+	}
+
+	jt.requestBreak()
+	jt.markWaitingAsAborted()
+	jt.finishCopySlot()
+
+	if err := jt.persistRemainingTaskItems(); err != nil {
+		t.Fatalf("persistRemainingTaskItems() error = %v", err)
+	}
+	if len(persisted) != 2 {
+		t.Fatalf("persisted len = %d, want both queued items recorded as stopped", len(persisted))
+	}
+	for i, item := range persisted {
+		if item["status"] != taskStatusStopped.Int() {
+			t.Fatalf("persisted[%d].status = %v, want stopped", i, item["status"])
+		}
+	}
+}

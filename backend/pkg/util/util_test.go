@@ -86,6 +86,7 @@ func TestToBoolAcceptsTrimmedAndHumanValues(t *testing.T) {
 func TestValidateHTTPURLRejectsCredentials(t *testing.T) {
 	valid := []string{
 		"http://nas.example:5666", "https://nas.example", "http://127.0.0.1:5244", " https://nas.example/app ",
+		"http://[::1]:5244", "https://[::1]/app",
 	}
 	for _, raw := range valid {
 		if err := ValidateHTTPURL(raw, "invalid"); err != nil {
@@ -93,8 +94,10 @@ func TestValidateHTTPURLRejectsCredentials(t *testing.T) {
 		}
 	}
 	invalid := []string{
-		"http://user:pass@nas.example", "https://user@nas.example", "ftp://nas.example",
-		"nas.example", "http://", "http://nas.example\nX-Evil: 1",
+		"", "   ", "http://user:pass@nas.example", "https://user@nas.example", "http://@nas.example",
+		"ftp://nas.example", "nas.example", "http://", "http://:5244",
+		"http://nas.example:", "http://nas.example:0", "http://nas.example:65536", "http://nas.example:abc",
+		"http://[not-ip]", "http://nas.example\nX-Evil: 1", "http://nas.example/a b",
 	}
 	for _, raw := range invalid {
 		if err := ValidateHTTPURL(raw, "invalid"); err == nil {

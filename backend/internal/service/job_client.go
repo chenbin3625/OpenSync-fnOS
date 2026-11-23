@@ -126,6 +126,17 @@ func (jc *JobClient) setCurrentTask(task *JobTask) {
 	jc.mu.Unlock()
 }
 
+func (jc *JobClient) trySetCurrentTaskIfActive(task *JobTask) bool {
+	jc.mu.Lock()
+	defer jc.mu.Unlock()
+	if jc.Job == nil || util.ToInt(jc.Job["enable"]) != 1 || jc.isClosing() {
+		return false
+	}
+	jc.CurrentJobTask = task
+	jc.signalStateChangeLocked()
+	return true
+}
+
 func (jc *JobClient) currentTask() *JobTask {
 	jc.mu.Lock()
 	defer jc.mu.Unlock()
@@ -273,6 +284,8 @@ func cloneJobConfig(job map[string]interface{}) map[string]interface{} {
 		switch v := value.(type) {
 		case map[string]interface{}:
 			cloned[key] = cloneJobConfig(v)
+		case []string:
+			cloned[key] = append([]string(nil), v...)
 		case []interface{}:
 			cp := make([]interface{}, len(v))
 			for i, elem := range v {
@@ -468,22 +481,23 @@ func (jc *JobClient) runMarkedJobConfig(sourceTaskID int64, statuses []taskStatu
 		jc.markDone()
 		return
 	}
-	if jc.isClosing() {
-		// The job is being deleted: record the task as stopped instead of
-		// starting transfers that nobody will ever see or be able to stop.
-		if err := UpdateJobTaskStatusSimple(taskID, taskStatusStopped, nil); err != nil {
-			log.Printf("Failed to mark closing task %d as stopped: %v", taskID, err)
-		}
-		jc.markDone()
-		return
-	}
 	if sourceTaskID > 0 {
 		task.RetrySourceTaskID = sourceTaskID
 		task.RetryStatuses = append([]taskStatus(nil), statuses...)
 	}
 	task.RequireFullSyncApproval = manual ||
 		(sourceTaskID == 0 && config.GetConfig().Server.ScheduledFullSyncConfirm == 1)
-	jc.setCurrentTask(task)
+	if !jc.trySetCurrentTaskIfActive(task) {
+		// The job was paused or deleted while newJobTask initialized: record the
+		// task as stopped instead of starting transfers that pause/delete
+		// missed before CurrentJobTask was published.
+		if err := UpdateJobTaskStatusSimple(taskID, taskStatusStopped, nil); err != nil {
+			log.Printf("Failed to mark closing/paused task %d as stopped: %v", taskID, err)
+		}
+		task.requestBreak()
+		jc.markDone()
+		return
+	}
 	task.Start()
 }
 
@@ -492,7 +506,7 @@ func (jc *JobClient) runMarkedJobConfig(sourceTaskID int64, statuses []taskStatu
 func (jc *JobClient) DoJob() {
 	const maxAttempts = 30
 	for attempt := 0; !jc.tryMarkDoing(); attempt++ {
-		if !jc.enabled() || attempt >= maxAttempts {
+		if !jc.enabled() || jc.isClosing() || attempt >= maxAttempts {
 			if attempt >= maxAttempts {
 				log.Printf("DoJob: gave up waiting for job %d after %d attempts", jc.idSnapshot(), maxAttempts)
 			}
@@ -521,6 +535,10 @@ func (jc *JobClient) DoManual() error {
 	if !jc.tryMarkDoing() {
 		return publicError(msg.T(msg.JobRunning))
 	}
+	if jc.isClosing() {
+		jc.markDone()
+		return publicError(msg.T(msg.JobNotFound))
+	}
 	go jc.runMarkedManualJob()
 	return nil
 }
@@ -533,6 +551,10 @@ func (jc *JobClient) DoRetryFailedTaskItems(sourceTaskID int64) error {
 	}
 	if !jc.tryMarkDoing() {
 		return publicError(msg.T(msg.JobRunning))
+	}
+	if jc.isClosing() {
+		jc.markDone()
+		return publicError(msg.T(msg.JobNotFound))
 	}
 	if !jc.enabled() {
 		jc.markDone()
@@ -621,8 +643,14 @@ func (jc *JobClient) stopJobLocked(remove bool) error {
 	jobID := jc.idSnapshot()
 	scheduler := jc.schedulerSnapshot()
 	if remove {
-		jc.setEnable(0)
-		if task := jc.currentTask(); task != nil {
+		jc.closing.Store(true)
+		jc.mu.Lock()
+		if jc.Job != nil {
+			jc.Job["enable"] = 0
+		}
+		task := jc.CurrentJobTask
+		jc.mu.Unlock()
+		if task != nil {
 			task.requestBreak()
 		}
 		if scheduler != nil {
@@ -633,11 +661,18 @@ func (jc *JobClient) stopJobLocked(remove bool) error {
 	if err := mapper.UpdateJobEnable(jobID, 0); err != nil {
 		return fmt.Errorf("disable job: %w", err)
 	}
-	jc.setEnable(0)
+	// Atomically disable and read CurrentJobTask under jc.mu so a starting task
+	// either sees enable=0 in trySetCurrentTaskIfActive or is seen here and broken.
+	jc.mu.Lock()
+	if jc.Job != nil {
+		jc.Job["enable"] = 0
+	}
+	task := jc.CurrentJobTask
+	jc.mu.Unlock()
 	// Break the task before rewriting history. The reverse order marked the
 	// row aborted while the task was still running, so the task's own final
 	// write could land afterwards and resurrect it as running.
-	if task := jc.currentTask(); task != nil {
+	if task != nil {
 		task.requestBreak()
 	}
 	idle := jc.waitUntilIdle(pauseJobIdleTimeout)

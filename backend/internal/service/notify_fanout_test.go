@@ -1,7 +1,9 @@
 package service
 
 import (
+	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -64,14 +66,18 @@ func TestSendNotifyFanOutSendsConcurrently(t *testing.T) {
 	case <-allArrived:
 	case <-time.After(10 * time.Second):
 		close(release)
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
 		t.Fatal("not every send was in flight at once: the fan-out is still serial")
 	}
 
 	peakMu.Lock()
 	got := peak
 	peakMu.Unlock()
-	if got < 2 {
-		t.Errorf("peak concurrent sends = %d, want at least 2", got)
+	if got != configs {
+		t.Errorf("peak concurrent sends = %d, want %d", got, configs)
 	}
 
 	close(release)
@@ -125,6 +131,15 @@ func TestSendNotifyFanOutRespectsConcurrencyBound(t *testing.T) {
 // A panic from one bad config must not prevent the others from being attempted,
 // and must not escape into the task completion path.
 func TestSendNotifyFanOutIsolatesPanics(t *testing.T) {
+	oldLookup := webhookLookupIPAddr
+	webhookLookupIPAddr = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+		if host == "panic.example" {
+			panic("boom inside destination check")
+		}
+		return oldLookup(ctx, host)
+	}
+	defer func() { webhookLookupIPAddr = oldLookup }()
+
 	var delivered int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&delivered, 1)
@@ -133,7 +148,7 @@ func TestSendNotifyFanOutIsolatesPanics(t *testing.T) {
 	defer server.Close()
 
 	notifyList := []map[string]interface{}{
-		{"method": 0, "params": `{"url":"not a url"}`},
+		{"method": 0, "params": `{"url":"http://panic.example/hook","httpMethod":"POST"}`},
 		{"method": 99, "params": `{}`},
 		{"method": -1, "params": `not json`},
 		{
@@ -145,12 +160,13 @@ func TestSendNotifyFanOutIsolatesPanics(t *testing.T) {
 		},
 	}
 
+	panicCh := make(chan interface{}, 1)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		defer func() {
 			if r := recover(); r != nil {
-				t.Errorf("sendNotifyFanOut() leaked a panic: %v", r)
+				panicCh <- r
 			}
 		}()
 		sendNotifyFanOut(notifyList, "title", "content", false)
@@ -160,8 +176,13 @@ func TestSendNotifyFanOutIsolatesPanics(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("sendNotifyFanOut() did not return")
 	}
+	select {
+	case r := <-panicCh:
+		t.Fatalf("sendNotifyFanOut() leaked a panic: %v", r)
+	default:
+	}
 
-	// The three broken configs panic; the healthy one must still be delivered.
+	// Broken/panicking configs must be isolated; the healthy one must still be delivered.
 	if got := atomic.LoadInt64(&delivered); got != 1 {
 		t.Fatalf("delivered = %d, want the one healthy config to be sent", got)
 	}

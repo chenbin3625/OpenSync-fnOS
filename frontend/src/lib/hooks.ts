@@ -128,28 +128,83 @@ export function useAction() {
   };
 }
 
+export function isDeepEqual(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  if (
+    typeof a !== "object" ||
+    typeof b !== "object" ||
+    a === null ||
+    b === null
+  ) {
+    return false;
+  }
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) {
+      return false;
+    }
+    for (let i = 0; i < a.length; i += 1) {
+      if (!isDeepEqual(a[i], b[i])) return false;
+    }
+    return true;
+  }
+  if (a instanceof Date || b instanceof Date) {
+    return (
+      a instanceof Date &&
+      b instanceof Date &&
+      Object.is(a.getTime(), b.getTime())
+    );
+  }
+  if (a instanceof RegExp || b instanceof RegExp) {
+    return (
+      a instanceof RegExp &&
+      b instanceof RegExp &&
+      a.source === b.source &&
+      a.flags === b.flags
+    );
+  }
+  const objA = a as Record<string, unknown>;
+  const objB = b as Record<string, unknown>;
+  const keys = new Set([...Object.keys(objA), ...Object.keys(objB)]);
+  for (const key of keys) {
+    if (!isDeepEqual(objA[key], objB[key])) return false;
+  }
+  return true;
+}
+
 export function useEditorForm<T extends object>(
   initial: T | (() => T),
 ) {
-  const [form, setForm] = useState<T>(initial);
+  const [form, setFormState] = useState<T>(initial);
   const [dirty, setDirty] = useState(false);
   // Snapshot of the form as it was opened, used to keep "dirty" honest: simply
   // re-selecting the current value (or typing and reverting it) is not an
   // unsaved change and must not trigger the "放弃修改？" / beforeunload prompts.
   const initialRef = useRef(form);
-  const isPristine = (value: T) =>
-    (Object.keys(initialRef.current) as (keyof T)[]).every((key) =>
-      Object.is(value[key], initialRef.current[key]),
-    );
-  const change = <K extends keyof T>(key: K, value: T[K]) => {
-    const next = { ...form, [key]: value };
-    setForm(next);
-    setDirty(!isPristine(next));
-  };
-  const patch = (values: Partial<T>) => {
-    const next = { ...form, ...values };
-    setForm(next);
-    setDirty(!isPristine(next));
-  };
+  const formRef = useRef(form);
+  formRef.current = form;
+
+  const setForm = useCallback((action: SetStateAction<T>) => {
+    const next =
+      typeof action === "function"
+        ? (action as (prev: T) => T)(formRef.current)
+        : action;
+    formRef.current = next;
+    setFormState(next);
+  }, []);
+
+  const change = useCallback(<K extends keyof T>(key: K, value: T[K]) => {
+    const next = { ...formRef.current, [key]: value };
+    formRef.current = next;
+    setFormState(next);
+    setDirty(!isDeepEqual(next, initialRef.current));
+  }, []);
+
+  const patch = useCallback((values: Partial<T>) => {
+    const next = { ...formRef.current, ...values };
+    formRef.current = next;
+    setFormState(next);
+    setDirty(!isDeepEqual(next, initialRef.current));
+  }, []);
+
   return { form, dirty, change, patch, setForm, setDirty };
 }

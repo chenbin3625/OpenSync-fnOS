@@ -241,3 +241,59 @@ func TestRemoveAlistReportsMissingRow(t *testing.T) {
 		t.Fatalf("RemoveAlist(missing) error = %v, want ErrAlistNotFound", err)
 	}
 }
+
+func TestUpdateJobChecksUniqueConstraintAndEnableChecksNotFound(t *testing.T) {
+	db := newFileTestDB(t)
+	mustExec(t, db, `CREATE TABLE job(
+		id integer primary key autoincrement,
+		enable integer DEFAULT 1,
+		remark text,
+		srcPath text,
+		dstPath text,
+		alistId integer,
+		useCacheT integer DEFAULT 0,
+		scanIntervalT integer DEFAULT 0,
+		useCacheS integer DEFAULT 0,
+		scanIntervalS integer DEFAULT 0,
+		method integer,
+		interval integer,
+		isCron integer DEFAULT 0,
+		month text DEFAULT NULL,
+		day text DEFAULT NULL,
+		day_of_week text DEFAULT NULL,
+		hour text DEFAULT NULL,
+		minute text DEFAULT NULL,
+		second text DEFAULT NULL,
+		exclude text DEFAULT NULL,
+		minFileSize integer DEFAULT 0,
+		maxFileSize integer DEFAULT 0,
+		dstMap text DEFAULT NULL,
+		createTime integer DEFAULT (strftime('%s', 'now')),
+		UNIQUE (srcPath, dstPath, alistId)
+	)`)
+	restore := SetDBForTest(db)
+	defer restore()
+
+	j1 := jobTestMap(0)
+	j1["srcPath"] = "/src1"
+	j1["dstPath"] = "/dst1"
+	if _, err := AddJob(j1); err != nil {
+		t.Fatalf("AddJob(1) error = %v", err)
+	}
+	j2 := jobTestMap(0)
+	j2["srcPath"] = "/src2"
+	j2["dstPath"] = "/dst2"
+	id2, err := AddJob(j2)
+	if err != nil {
+		t.Fatalf("AddJob(2) error = %v", err)
+	}
+	dup := jobTestMap(id2)
+	dup["srcPath"] = "/src1"
+	dup["dstPath"] = "/dst1"
+	if err := UpdateJob(dup); !errors.Is(err, ErrJobExists) {
+		t.Fatalf("UpdateJob(unique conflict) error = %v, want ErrJobExists", err)
+	}
+	if err := UpdateJobEnable(999, 0); !errors.Is(err, ErrJobNotFound) {
+		t.Fatalf("UpdateJobEnable(missing) error = %v, want ErrJobNotFound", err)
+	}
+}

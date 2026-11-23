@@ -109,6 +109,7 @@ export function FileTypeFilter({
               <div className="file-type-group-row">
                 <Button
                   className={`file-type-expand${isExpanded ? " expanded" : ""}`}
+                  size="small"
                   type="tertiary"
                   theme="borderless"
                   icon={<IconChevronRight aria-hidden="true" />}
@@ -178,6 +179,7 @@ export function FileTypeFilter({
             <div className="file-type-group-row">
               <Button
                 className={`file-type-expand${otherExpanded ? " expanded" : ""}`}
+                size="small"
                 type="tertiary"
                 theme="borderless"
                 icon={<IconChevronRight aria-hidden="true" />}
@@ -226,6 +228,7 @@ export function FileTypeFilter({
                       {item.pattern}
                     </Checkbox>
                     <Button
+                      size="small"
                       type="tertiary"
                       theme="borderless"
                       icon={<IconDeleteStroked aria-hidden="true" />}

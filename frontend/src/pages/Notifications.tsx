@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Input from "@douyinfe/semi-ui/lib/es/input";
 import Select from "@douyinfe/semi-ui/lib/es/select";
@@ -18,6 +18,7 @@ import {
   Header,
   IconButton,
   LoadState,
+  ResourceCard,
   SettingRow,
   confirmDelete,
   errorToast,
@@ -52,14 +53,27 @@ function DeliveryNote({ item }: { item: NotifyItem }) {
   );
 }
 
+function getNotifyEndpoint(params?: string): string {
+  try {
+    const parsed = JSON.parse(params || "{}");
+    return parsed.url || parsed.webhook || parsed.server || "—";
+  } catch {
+    return "—";
+  }
+}
+
 export default function Notifications() {
   const resource = useResource((signal) => api.notifications(signal));
   const action = useAction();
   const [editing, setEditing] = useState<NotifyItem | null | undefined>();
-  const [testingId, setTestingId] = useState<number | null>(null);
-  const [togglingId, setTogglingId] = useState<number | null>(null);
+  const [testingIds, setTestingIds] = useState<Record<number, boolean>>({});
+  const [togglingIds, setTogglingIds] = useState<Record<number, boolean>>({});
+  const testingInFlight = useRef(new Set<number>());
+  const togglingInFlight = useRef(new Set<number>());
   const testNotify = async (item: NotifyItem) => {
-    setTestingId(item.id);
+    if (testingInFlight.current.has(item.id)) return;
+    testingInFlight.current.add(item.id);
+    setTestingIds((prev) => ({ ...prev, [item.id]: true }));
     try {
       await api.testNotification({
         id: item.id,
@@ -71,11 +85,18 @@ export default function Notifications() {
     } catch (error) {
       errorToast(error);
     } finally {
-      setTestingId(null);
+      testingInFlight.current.delete(item.id);
+      setTestingIds((prev) => {
+        const next = { ...prev };
+        delete next[item.id];
+        return next;
+      });
     }
   };
   const toggleNotify = async (id: number, checked: boolean) => {
-    setTogglingId(id);
+    if (togglingInFlight.current.has(id)) return;
+    togglingInFlight.current.add(id);
+    setTogglingIds((prev) => ({ ...prev, [id]: true }));
     try {
       await api.toggleNotification(id, checked ? 1 : 0);
       Toast.success("通知状态已更新");
@@ -85,7 +106,12 @@ export default function Notifications() {
     } catch (error) {
       errorToast(error);
     } finally {
-      setTogglingId(null);
+      togglingInFlight.current.delete(id);
+      setTogglingIds((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
     }
   };
   return (
@@ -110,62 +136,50 @@ export default function Notifications() {
       >
         <div className="item-list">
           {resource.data?.map((item) => (
-            <div
-              className="notification-item card-base"
+            <ResourceCard
               key={item.id}
+              className="notification-item"
               data-notify-id={item.id}
-            >
-              <div className="item-content">
-                <h2>
-                  {channelNames[item.method] || `未知渠道 #${item.method}`}
-                </h2>
-                <div className="item-meta mono">
-                  {(() => {
-                    try {
-                      const p = JSON.parse(item.params || "{}");
-                      return p.url || p.webhook || p.server || "";
-                    } catch {
-                      return "";
+              title={channelNames[item.method] || `未知渠道 #${item.method}`}
+              subtitle={getNotifyEndpoint(item.params)}
+              meta={<DeliveryNote item={item} />}
+              actions={
+                <>
+                  <Switch
+                    aria-label={`启用${channelNames[item.method] || "通知"}`}
+                    checked={item.enable === 1}
+                    disabled={Boolean(togglingIds[item.id])}
+                    onChange={(checked) =>
+                      void toggleNotify(item.id, checked)
                     }
-                  })() || "—"}
-                </div>
-                <DeliveryNote item={item} />
-              </div>
-              <div className="row-actions">
-                <Switch
-                  aria-label={`启用${channelNames[item.method] || "通知"}`}
-                  checked={item.enable === 1}
-                  disabled={togglingId === item.id}
-                  onChange={(checked) =>
-                    void toggleNotify(item.id, checked)
-                  }
-                />
-                <IconButton
-                  label="发送测试通知"
-                  icon={<IconSendStroked aria-hidden="true" />}
-                  disabled={testingId === item.id}
-                  onClick={() => void testNotify(item)}
-                />
-                <IconButton
-                  label="编辑通知"
-                  icon={<IconEditStroked aria-hidden="true" />}
-                  onClick={() => setEditing(item)}
-                />
-                <IconButton
-                  label="删除通知"
-                  icon={<IconDeleteStroked aria-hidden="true" />}
-                  danger
-                  onClick={() =>
-                    confirmDelete("删除此通知渠道？", () =>
-                      action.run(async () => {
-                        await api.deleteNotification(item.id);
-                        await resource.refresh(true);
-                      }),
-                    )
-                  }
-                />
-              </div>
-            </div>
+                  />
+                  <IconButton
+                    label="发送测试通知"
+                    icon={<IconSendStroked aria-hidden="true" />}
+                    disabled={Boolean(testingIds[item.id])}
+                    onClick={() => void testNotify(item)}
+                  />
+                  <IconButton
+                    label="编辑通知"
+                    icon={<IconEditStroked aria-hidden="true" />}
+                    onClick={() => setEditing(item)}
+                  />
+                  <IconButton
+                    label="删除通知"
+                    icon={<IconDeleteStroked aria-hidden="true" />}
+                    danger
+                    onClick={() =>
+                      confirmDelete("删除此通知渠道？", () =>
+                        action.run(async () => {
+                          await api.deleteNotification(item.id);
+                          await resource.refresh(true);
+                        }),
+                      )
+                    }
+                  />
+                </>
+              }
+            />
           ))}
         </div>
       </LoadState>
@@ -182,6 +196,7 @@ export default function Notifications() {
     </div>
   );
 }
+
 function NotificationEditor({
   item,
   onClose,

@@ -125,35 +125,34 @@ func (jt *JobTask) stopCopyExecutorIfBroken() bool {
 
 func (jt *JobTask) startAvailableCopyItems() bool {
 	started := false
-	limits := jt.taskLimits()
+	limit := jt.taskLimits().CopyConcurrency
+	if limit < 1 {
+		limit = 1
+	}
 	for {
 		if jt.isBreak() {
 			jt.markWaitingAsAborted()
 			break
 		}
-		if !jt.hasCopySlot(limits.CopyConcurrency) {
+		if jt.Waiting.len() == 0 {
+			break
+		}
+		// Reserve the concurrency slot before popping from Waiting so the
+		// executor never has to push an un-admitted item back into a queue
+		// whose producer may be blocked on pushWait.
+		if !jt.tryAdmitCopy(limit) {
+			if jt.copyStopped() {
+				jt.markWaitingAsAborted()
+			}
 			break
 		}
 		item, ok := jt.Waiting.pop()
 		if !ok {
+			jt.releaseUnusedCopySlot()
 			break
 		}
-		if jt.startCopyItemTracked(item, nil) {
-			started = true
-			continue
-		}
-		if jt.copyStopped() {
-			// startCopyItemTracked already recorded the stopped item.
-			break
-		}
-		// A full-sync relocation took the last slot between the capacity check
-		// and admission. Put the item back instead of dropping or over-admitting
-		// it; the queue has room because this executor just popped it.
-		if !jt.Waiting.pushWait(jt.context(), item) {
-			item.setStatus(taskStatusStopped)
-			jt.appendFinish(item.ToJobTaskItem(jt.TaskID))
-		}
-		break
+		jt.launchAdmittedCopy(item, nil)
+		started = true
 	}
 	return started
 }
@@ -181,12 +180,14 @@ func (jt *JobTask) startCopyItem(item *CopyItem) {
 	jt.startCopyItemTracked(item, nil)
 }
 
-// hasCopySlot reports whether one more copy may be admitted. It is only an
-// optimisation: adherence to CopyConcurrency is enforced by tryAdmitCopy.
-func (jt *JobTask) hasCopySlot(limit int) bool {
+// releaseUnusedCopySlot returns a slot reserved by tryAdmitCopy when Waiting
+// turned out to be empty before an item could be launched. It intentionally
+// does not signal Waiting so an empty queue cannot wake the executor in a loop.
+func (jt *JobTask) releaseUnusedCopySlot() {
+	jt.copyWG.Done()
 	jt.copySlotMu.Lock()
-	defer jt.copySlotMu.Unlock()
-	return jt.copyInFlight < limit
+	jt.copyInFlight--
+	jt.copySlotMu.Unlock()
 }
 
 // copyStopped reports whether copies must be refused for good (task stopped,

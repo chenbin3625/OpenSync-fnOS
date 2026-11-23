@@ -99,8 +99,13 @@ export function applyProgressFrame(
     ? payload.doingTask
     : mergeTaskItemPatches(base?.doingTask || [], payload.doingPatch);
   return {
-    ...(base ?? {}),
     ...payload,
+    duration: payload.duration ?? 0,
+    doneSize: payload.doneSize ?? 0,
+    remainSize: payload.remainSize ?? 0,
+    speed: payload.speed ?? 0,
+    speedAvg: payload.speedAvg ?? 0,
+    remainTime: payload.remainTime ?? 0,
     doingTask,
     doingPatch: undefined,
   };
@@ -160,6 +165,7 @@ export function createJobProgressStream(
     const envelope = parseProgressEnvelope(event.data);
     if (!envelope) return;
     if (envelope.code !== 200) {
+      live = false;
       options.onStateChange?.({ live: false, reason: "error" });
       return;
     }

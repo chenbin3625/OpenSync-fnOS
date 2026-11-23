@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { TreeNodeData } from "@douyinfe/semi-ui/lib/es/tree/interface";
-import { api } from "../api/client";
+import { api, combineSignals } from "../api/client";
 import { errorToast } from "../components/common";
 import {
   collectTreeKeys,
@@ -44,6 +44,8 @@ export function useAsyncTree({
   const [loadedKeys, setLoadedKeys] = useState<Set<string>>(() => new Set());
   const [refreshing, setRefreshing] = useState(false);
   const controllerRef = useRef<AbortController | null>(null);
+  const refreshControllerRef = useRef<AbortController | null>(null);
+  const refreshSeqRef = useRef(0);
   const engineRef = useRef(engineId);
   engineRef.current = engineId;
   const expandedRef = useRef(expandedKeys);
@@ -94,7 +96,15 @@ export function useAsyncTree({
   /** 强制刷新：重新请求根目录和所有已展开的目录，拿到引擎上的最新子目录 */
   const refresh = useCallback(async () => {
     if (!engineId) return;
-    const signal = controllerRef.current?.signal;
+    refreshControllerRef.current?.abort();
+    const refreshController = new AbortController();
+    refreshControllerRef.current = refreshController;
+    const seq = ++refreshSeqRef.current;
+    const { signal, cleanup } = combineSignals([
+      controllerRef.current?.signal,
+      refreshController.signal,
+    ]);
+    const isStale = () => signal.aborted || seq !== refreshSeqRef.current;
     setRefreshing(true);
     setLoadedKeys(new Set());
     try {
@@ -103,9 +113,9 @@ export function useAsyncTree({
         rootKeysRef.current,
         before,
         (path) => loadChildren(path, engineId, signal),
-        () => Boolean(signal?.aborted),
+        isStale,
       );
-      if (!kept) return;
+      if (!kept || isStale()) return;
       const keep = new Set(kept);
       const checked = new Set(before);
       // 只折叠本次核对过且已不存在的目录；刷新期间新展开的（如 onLoaded 追加的）保留
@@ -113,13 +123,20 @@ export function useAsyncTree({
         prev.filter((key) => keep.has(key) || !checked.has(key)),
       );
     } finally {
-      if (!signal?.aborted) setRefreshing(false);
+      cleanup();
+      if (refreshControllerRef.current === refreshController) {
+        refreshControllerRef.current = null;
+      }
+      if (!isStale()) setRefreshing(false);
     }
   }, [engineId, loadChildren]);
 
   const resetTree = useCallback(
     (roots: TreeNodeData[], initialExpanded: string[]) => {
       controllerRef.current?.abort();
+      refreshControllerRef.current?.abort();
+      refreshControllerRef.current = null;
+      refreshSeqRef.current += 1;
       controllerRef.current = new AbortController();
       setTreeData(roots);
       setExpandedKeys(initialExpanded);
@@ -131,7 +148,11 @@ export function useAsyncTree({
   );
 
   useEffect(() => {
-    return () => controllerRef.current?.abort();
+    return () => {
+      controllerRef.current?.abort();
+      refreshControllerRef.current?.abort();
+      refreshSeqRef.current += 1;
+    };
   }, []);
 
   // 父级重新加载后可能移除了某些子目录，已加载记录只保留树中仍存在的节点

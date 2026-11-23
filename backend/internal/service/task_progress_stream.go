@@ -345,10 +345,7 @@ func queueProgressPayload(ch chan []byte, payload []byte) (queued, dropped bool)
 // new connection received would make the next patch skip every file-set change
 // that happened in between, for everyone else.
 func marshalJobSnapshot(jobID int64) ([]byte, error) {
-	data, err := GetJobCurrent(jobID, map[string]interface{}{})
-	if err != nil {
-		return nil, err
-	}
+	data := getJobCurrentFromCache(jobID)
 	return marshalProgressJSON(model.Success(data))
 }
 
@@ -381,10 +378,7 @@ func (f *progressFrames) snapshot() ([]byte, error) {
 }
 
 func buildProgressFrames(jobID int64) (*progressFrames, error) {
-	data, err := GetJobCurrent(jobID, map[string]interface{}{})
-	if err != nil {
-		return nil, err
-	}
+	data := getJobCurrentFromCache(jobID)
 	if data == nil {
 		jobProgressHub.clearFrame(jobID)
 		payload, err := marshalProgressJSON(model.Success(nil))

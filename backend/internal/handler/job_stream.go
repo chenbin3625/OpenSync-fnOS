@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"opensync/internal/mapper"
 	"opensync/internal/model"
 	"opensync/internal/msg"
 	"opensync/internal/service"
@@ -39,7 +40,7 @@ func reserveSSEConnection() bool {
 func StreamJobCurrent(c *gin.Context) {
 	jobID, err := parseRequiredID(c.Query("id"))
 	if err != nil {
-		c.JSON(http.StatusOK, model.Error(msg.T(msg.LostPart)))
+		respondError(c, msg.T(msg.LostPart))
 		return
 	}
 
@@ -63,6 +64,22 @@ func StreamJobCurrent(c *gin.Context) {
 	// including the task's final one, which left the page showing "running".
 	updates, initialPayload, ok, err := subscribeJobProgress(jobID)
 	if err != nil {
+		var notFound *model.NotFoundError
+		var pubErr model.PublicError
+		if errors.As(err, &notFound) || errors.Is(err, mapper.ErrJobNotFound) ||
+			(errors.As(err, &pubErr) && string(pubErr) == msg.T(msg.JobNotFound)) {
+			c.JSON(http.StatusNotFound, model.Error(msg.T(msg.JobNotFound)))
+			return
+		}
+		if errors.As(err, &pubErr) {
+			respondError(c, pubErr.Error())
+			return
+		}
+		var public model.PublicMessager
+		if errors.As(err, &public) {
+			respondError(c, public.PublicMessage())
+			return
+		}
 		log.Printf("SSE initial payload for job %d failed: %v", jobID, err)
 		c.JSON(http.StatusInternalServerError, model.Error(msg.T(msg.InternalError)))
 		return
@@ -132,13 +149,54 @@ type sseDeadlineSetter interface {
 // writeSSEFrame arms the write deadline, writes one frame and flushes it. A
 // writer that cannot take deadlines (ErrNotSupported, e.g. a test recorder) is
 // still written to; any other deadline error means the connection is unusable.
+type sseFlushError interface {
+	FlushError() error
+}
+
+type sseUnwrapper interface {
+	Unwrap() http.ResponseWriter
+}
+
+type sseControllerFlusher interface {
+	Flush() error
+}
+
+func flushSSE(w io.Writer, rc sseDeadlineSetter, flusher http.Flusher) error {
+	if fe, ok := flusher.(sseFlushError); ok {
+		return fe.FlushError()
+	}
+	if rw, ok := w.(http.ResponseWriter); ok {
+		for rw != nil {
+			if fe, ok := rw.(sseFlushError); ok {
+				return fe.FlushError()
+			}
+			u, ok := rw.(sseUnwrapper)
+			if !ok {
+				break
+			}
+			rw = u.Unwrap()
+		}
+	}
+	if cf, ok := rc.(sseControllerFlusher); ok {
+		if err := cf.Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			return err
+		}
+		return nil
+	}
+	flusher.Flush()
+	return nil
+}
+
 func writeSSEFrame(w io.Writer, rc sseDeadlineSetter, flusher http.Flusher, frame string) bool {
 	if err := rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
 		return false
 	}
-	if _, err := io.WriteString(w, frame); err != nil {
+	n, err := io.WriteString(w, frame)
+	if err != nil || n != len(frame) {
 		return false
 	}
-	flusher.Flush()
+	if err := flushSSE(w, rc, flusher); err != nil {
+		return false
+	}
 	return true
 }

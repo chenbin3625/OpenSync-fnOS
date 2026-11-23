@@ -392,12 +392,34 @@ func loadServerConfig(passwdStr string) (ServerConfig, error) {
 // unbounded number of goroutines, or task_timeout=-1 producing a negative
 // timeout).
 func clampServerConfig(sCfg *ServerConfig) {
-	sCfg.Timeout = clampInt(sCfg.Timeout, minTaskTimeout, maxTaskTimeout, defaultTaskTimeout)
-	sCfg.TaskSave = clampInt(sCfg.TaskSave, minTaskSave, maxTaskSave, defaultTaskSave)
-	sCfg.CopyConcurrency = clampInt(sCfg.CopyConcurrency, MinCopyConcurrency, MaxCopyConcurrency, DefaultCopyConcurrency)
-	sCfg.ScanConcurrency = clampInt(sCfg.ScanConcurrency, MinScanConcurrency, MaxScanConcurrency, DefaultScanConcurrency)
-	sCfg.MaxRetries = clampInt(sCfg.MaxRetries, MinMaxRetries, MaxRetryAttempts, DefaultMaxRetries)
-	sCfg.ScheduledFullSyncConfirm = clampInt(sCfg.ScheduledFullSyncConfirm, 0, 1, 0)
+	sCfg.Timeout = clampManagedInt("task_timeout", sCfg.Timeout)
+	sCfg.TaskSave = clampManagedInt("task_save", sCfg.TaskSave)
+	sCfg.CopyConcurrency = clampManagedInt("copy_concurrency", sCfg.CopyConcurrency)
+	sCfg.ScanConcurrency = clampManagedInt("scan_concurrency", sCfg.ScanConcurrency)
+	sCfg.MaxRetries = clampManagedInt("max_retries", sCfg.MaxRetries)
+	sCfg.ScheduledFullSyncConfirm = clampManagedInt("scheduled_full_sync_confirm", sCfg.ScheduledFullSyncConfirm)
+}
+
+// clampManagedInt applies the same startup range clamping to a single managed
+// integer key so conflict detection compares against the effective value that
+// startup loaded.
+func clampManagedInt(key string, value int) int {
+	switch key {
+	case "task_timeout":
+		return clampInt(value, minTaskTimeout, maxTaskTimeout, defaultTaskTimeout)
+	case "task_save":
+		return clampInt(value, minTaskSave, maxTaskSave, defaultTaskSave)
+	case "copy_concurrency":
+		return clampInt(value, MinCopyConcurrency, MaxCopyConcurrency, DefaultCopyConcurrency)
+	case "scan_concurrency":
+		return clampInt(value, MinScanConcurrency, MaxScanConcurrency, DefaultScanConcurrency)
+	case "max_retries":
+		return clampInt(value, MinMaxRetries, MaxRetryAttempts, DefaultMaxRetries)
+	case "scheduled_full_sync_confirm":
+		return clampInt(value, 0, 1, 0)
+	default:
+		return value
+	}
 }
 
 func clampInt(value, min, max, fallback int) int {
@@ -764,15 +786,16 @@ func checkManagedValuesConflict(content string, before ServerConfig) error {
 		if !ok || diskValue == "" {
 			continue
 		}
-		diskInt, err := strconv.Atoi(diskValue)
+		rawDiskInt, err := strconv.Atoi(diskValue)
 		if err != nil {
 			continue
 		}
+		effectiveDiskInt := clampManagedInt(key, rawDiskInt)
 		current, ok := managedIntValue(key, before)
-		if !ok || diskInt == current {
+		if !ok || effectiveDiskInt == current {
 			continue
 		}
-		return &configConflictError{detail: fmt.Sprintf("%s（内存=%d，config.ini=%d）", key, current, diskInt)}
+		return &configConflictError{detail: fmt.Sprintf("%s（内存=%d，config.ini=%d）", key, current, rawDiskInt)}
 	}
 	return nil
 }

@@ -5,12 +5,17 @@ import {
   useEffect,
   useId,
   useState,
+  type HTMLAttributes,
   type ReactNode,
 } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
+import Card from "@douyinfe/semi-ui/lib/es/card";
 import Dropdown from "@douyinfe/semi-ui/lib/es/dropdown";
 import Empty from "@douyinfe/semi-ui/lib/es/empty";
+import Input from "@douyinfe/semi-ui/lib/es/input";
 import Modal from "@douyinfe/semi-ui/lib/es/modal";
+import Pagination from "@douyinfe/semi-ui/lib/es/pagination";
+import Select from "@douyinfe/semi-ui/lib/es/select";
 import Spin from "@douyinfe/semi-ui/lib/es/spin";
 import Tag from "@douyinfe/semi-ui/lib/es/tag";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
@@ -21,6 +26,7 @@ import {
   IconHelpCircleStroked,
   IconMoreStroked,
   IconRefresh,
+  IconSearchStroked,
 } from "@douyinfe/semi-icons";
 import { getHost } from "../lib/host";
 import { actionSkipped } from "../lib/hooks";
@@ -32,6 +38,7 @@ export function getErrorMessage(error: unknown, fallback = "操作失败"): stri
 export function errorToast(error: unknown, fallback = "操作失败") {
   Toast.error(getErrorMessage(error, fallback));
 }
+
 export function Header({
   title,
   tabs,
@@ -43,29 +50,43 @@ export function Header({
 }) {
   return (
     <header className="page-toolbar" aria-label={`${title}操作`}>
-      {tabs ? <div className="page-tabs">{tabs}</div> : <h1 className="page-title">{title}</h1>}
+      {tabs ? (
+        <div className="page-tabs">{tabs}</div>
+      ) : (
+        <h1 className="page-title">{title}</h1>
+      )}
       <div className="page-actions">{actions}</div>
     </header>
   );
 }
+
 export function IconButton({
   label,
   icon,
   onClick,
   disabled,
   danger,
+  size,
+  className,
+  ariaBusy,
 }: {
   label: string;
   icon: ReactNode;
   onClick: () => void;
   disabled?: boolean;
   danger?: boolean;
+  size?: "small" | "default";
+  className?: string;
+  ariaBusy?: boolean;
 }) {
   return (
     <Tooltip content={label} trigger="hover" disableFocusListener>
       <Button
+        className={className}
         aria-label={label}
+        aria-busy={ariaBusy}
         icon={icon}
+        size={size}
         theme="borderless"
         type={danger ? "danger" : "tertiary"}
         disabled={disabled}
@@ -74,6 +95,243 @@ export function IconButton({
     </Tooltip>
   );
 }
+
+export function HelpTip({
+  content,
+  label,
+}: {
+  content: ReactNode;
+  label: string;
+}) {
+  return (
+    <Tooltip content={content} trigger="hover">
+      <span className="field-tip-icon" aria-label={label} tabIndex={0}>
+        <IconHelpCircleStroked aria-hidden="true" />
+      </span>
+    </Tooltip>
+  );
+}
+
+export function LoadingPanel() {
+  return (
+    <div className="state-panel">
+      <Spin size="large" />
+    </div>
+  );
+}
+
+export function InlineNotice({
+  message,
+  icon,
+  role = "status",
+  className,
+  onRetry,
+  retrying = false,
+}: {
+  message: ReactNode;
+  icon?: ReactNode;
+  role?: "status" | "alert";
+  className?: string;
+  onRetry?: () => void;
+  retrying?: boolean;
+}) {
+  return (
+    <div
+      className={["inline-notice", className].filter(Boolean).join(" ")}
+      role={role}
+    >
+      {icon}
+      <span className="inline-error">{message}</span>
+      {onRetry && (
+        <Button
+          size="small"
+          theme="borderless"
+          loading={retrying}
+          onClick={onRetry}
+        >
+          重试
+        </Button>
+      )}
+    </div>
+  );
+}
+
+export function SectionCard({
+  title,
+  extra,
+  className,
+  headClassName = "section-card-head",
+  bodyClassName,
+  children,
+}: {
+  title?: ReactNode;
+  extra?: ReactNode;
+  className?: string;
+  headClassName?: string;
+  bodyClassName?: string;
+  children: ReactNode;
+}) {
+  return (
+    <Card bordered className={className} bodyStyle={{ padding: 0 }}>
+      {(title || extra) && (
+        <div className={headClassName}>
+          {typeof title === "string" ? <h2>{title}</h2> : title}
+          {extra}
+        </div>
+      )}
+      {bodyClassName ? <div className={bodyClassName}>{children}</div> : children}
+    </Card>
+  );
+}
+
+export function ResourceCard({
+  title,
+  subtitle,
+  meta,
+  actions,
+  className,
+  ...rest
+}: {
+  title: ReactNode;
+  subtitle?: ReactNode;
+  meta?: ReactNode;
+  actions?: ReactNode;
+  className?: string;
+} & Omit<HTMLAttributes<HTMLDivElement>, "title">) {
+  return (
+    <Card
+      bordered
+      className={["resource-card", className].filter(Boolean).join(" ")}
+      bodyStyle={{ padding: 0 }}
+      {...rest}
+    >
+      <div className="resource-card-inner">
+        <div className="item-content">
+          <h2>{title}</h2>
+          {subtitle && <div className="item-meta mono">{subtitle}</div>}
+          {meta}
+        </div>
+        {actions && <div className="row-actions">{actions}</div>}
+      </div>
+    </Card>
+  );
+}
+
+export function SearchFilterInput({
+  ariaLabel,
+  placeholder,
+  value,
+  onChange,
+  onSearch,
+}: {
+  ariaLabel: string;
+  placeholder: string;
+  value: string;
+  onChange: (value: string) => void;
+  onSearch: (keyword: string) => void;
+}) {
+  return (
+    <Input
+      prefix={<IconSearchStroked aria-hidden="true" />}
+      aria-label={ariaLabel}
+      placeholder={placeholder}
+      value={value}
+      showClear
+      onChange={(next) => {
+        onChange(next);
+        if (!next) onSearch("");
+      }}
+      onEnterPress={() => onSearch(value.trim())}
+    />
+  );
+}
+
+export function FilterSelect({
+  label,
+  allLabel,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  allLabel?: string;
+  value: number | undefined;
+  options: Array<{ label: string; value: number }>;
+  onChange: (value: number | undefined) => void;
+}) {
+  const labelId = useId();
+  return (
+    <>
+      <span id={labelId} className="sr-only">
+        {label}
+      </span>
+      <Select
+        aria-labelledby={labelId}
+        value={value === undefined ? "all" : String(value)}
+        optionList={[
+          { label: allLabel ?? `全部${label}`, value: "all" },
+          ...options.map((option) => ({
+            label: option.label,
+            value: String(option.value),
+          })),
+        ]}
+        onChange={(next) =>
+          onChange(next === "all" ? undefined : Number(next))
+        }
+      />
+    </>
+  );
+}
+
+export function DataPager({
+  total,
+  page,
+  size,
+  onChange,
+  onSizeChange,
+}: {
+  total: number;
+  page: number;
+  size: number;
+  onChange: (page: number) => void;
+  onSizeChange?: (size: number) => void;
+}) {
+  const sizeLabelId = useId();
+  return (
+    <div className="table-pagination">
+      <span className="muted">共 {total} 条</span>
+      <div className="pager-controls">
+        <Pagination
+          total={total}
+          currentPage={page}
+          pageSize={size}
+          size="small"
+          hideOnSinglePage={false}
+          onPageChange={onChange}
+        />
+        {onSizeChange && (
+          <>
+            <span id={sizeLabelId} className="sr-only">
+              每页条数
+            </span>
+            <Select
+              aria-labelledby={sizeLabelId}
+              value={size}
+              onChange={(v) => onSizeChange(v as number)}
+              size="small"
+              className="pager-size-select"
+              optionList={[10, 20, 50, 100].map((n) => ({
+                value: n,
+                label: `${n} 条/页`,
+              }))}
+            />
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export interface MenuAction {
   label: string;
   icon?: ReactNode;
@@ -115,6 +373,7 @@ export function ActionMenu({
     </Dropdown>
   );
 }
+
 export function EmptyState() {
   return (
     <div className="fnos-empty" role="status" aria-label="空空如也">
@@ -125,6 +384,7 @@ export function EmptyState() {
     </div>
   );
 }
+
 export function LoadState({
   loading,
   error,
@@ -150,15 +410,11 @@ export function LoadState({
         </Button>
       </div>
     );
-  if (loading)
-    return (
-      <div className="state-panel">
-        <Spin size="large" />
-      </div>
-    );
+  if (loading) return <LoadingPanel />;
   if (empty) return <EmptyState />;
   return <>{children}</>;
 }
+
 export function Field({
   label,
   ariaLabel,
@@ -201,24 +457,25 @@ export function Field({
           </span>
         )}
       </label>
-      {single
-        ? cloneElement(
-            single,
-            ariaLabel
-              ? { id: single.props.id || id, "aria-label": ariaLabel }
-              : { id: single.props.id || id, "aria-labelledby": `${id}-label` },
-          )
-        : childArray.length > 1
-          ? (
-              <div className="field-controls" role="group" {...groupName}>
-                {children}
-              </div>
-            )
-          : children}
+      {single ? (
+        cloneElement(
+          single,
+          ariaLabel
+            ? { id: single.props.id || id, "aria-label": ariaLabel }
+            : { id: single.props.id || id, "aria-labelledby": `${id}-label` },
+        )
+      ) : childArray.length > 1 ? (
+        <div className="field-controls" role="group" {...groupName}>
+          {children}
+        </div>
+      ) : (
+        children
+      )}
       {hint && <div className="field-hint">{hint}</div>}
     </div>
   );
 }
+
 export function SettingRow({
   label,
   children,
@@ -234,22 +491,13 @@ export function SettingRow({
     <div className={`setting-row${variant ? ` setting-row--${variant}` : ""}`}>
       <span className="setting-row-label">
         {label}
-        {tip && (
-          <Tooltip content={tip} trigger="hover">
-            <span
-              className="field-tip-icon"
-              aria-label={`${label}说明`}
-              tabIndex={0}
-            >
-              <IconHelpCircleStroked aria-hidden="true" />
-            </span>
-          </Tooltip>
-        )}
+        {tip && <HelpTip content={tip} label={`${label}说明`} />}
       </span>
       {children}
     </div>
   );
 }
+
 export function Info({
   label,
   children,
@@ -266,6 +514,7 @@ export function Info({
     </div>
   );
 }
+
 export function Status({
   status,
   label,
@@ -292,6 +541,7 @@ export function Status({
     </span>
   );
 }
+
 /**
  * The reason used to be a hover-only tooltip on a plain icon, so keyboard and
  * touch users could not read it. Visibility is controlled so hover, focus and
@@ -346,6 +596,7 @@ function ErrorReason({ error }: { error: string }) {
     </Tooltip>
   );
 }
+
 export function confirmAction({
   title,
   content,
@@ -373,13 +624,14 @@ export function confirmAction({
     cancelText: "取消",
     okButtonProps: {
       type: "danger",
-      ...(variant === "error" ? { theme: "solid" as const } : {}),
+      theme: "solid",
       "aria-label": okLabel || okText,
     },
     cancelButtonProps: { "aria-label": "取消" },
     onOk,
   });
 }
+
 export function confirmDelete(
   title: string,
   action: () => Promise<unknown>,
@@ -403,6 +655,7 @@ export function confirmDelete(
     },
   });
 }
+
 export function confirmStopTask(action: () => Promise<unknown>) {
   confirmAction({
     title: "停止当前任务？",
@@ -420,6 +673,7 @@ export function confirmStopTask(action: () => Promise<unknown>) {
     },
   });
 }
+
 export function Editor({
   title,
   visible,

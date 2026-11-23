@@ -1,6 +1,9 @@
 package crypto
 
 import (
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -226,8 +229,8 @@ func TestEnsureNonEmptyFilePreservesValidKey(t *testing.T) {
 	}
 }
 
-// Two starts recovering the same empty key must converge on one value instead
-// of each keeping a different in-memory key (review P3-13).
+// Two starts recovering the same empty key with distinct candidate secrets must
+// converge on one winner matching what is persisted on disk (review P3-13).
 func TestEnsureNonEmptyFileSerializesConcurrentWriters(t *testing.T) {
 	dir := t.TempDir()
 	secretPath := filepath.Join(dir, "secret.key")
@@ -235,30 +238,40 @@ func TestEnsureNonEmptyFileSerializesConcurrentWriters(t *testing.T) {
 		t.Fatalf("setup empty secret: %v", err)
 	}
 	const writers = 8
+	start := make(chan struct{})
 	results := make(chan string, writers)
 	errs := make(chan error, writers)
 	var wg sync.WaitGroup
 	for i := 0; i < writers; i++ {
 		wg.Add(1)
-		go func() {
+		go func(idx int) {
 			defer wg.Done()
-			got, err := EnsureNonEmptyFile(secretPath, "shared-key")
+			<-start
+			got, err := EnsureNonEmptyFile(secretPath, fmt.Sprintf("writer-key-%d", idx))
 			if err != nil {
 				errs <- err
 				return
 			}
 			results <- got
-		}()
+		}(i)
 	}
+	close(start)
 	wg.Wait()
 	close(errs)
 	close(results)
 	for err := range errs {
 		t.Fatalf("EnsureNonEmptyFile() error: %v", err)
 	}
+	onDisk, err := os.ReadFile(secretPath)
+	if err != nil {
+		t.Fatalf("read secret.key: %v", err)
+	}
+	if !strings.HasPrefix(string(onDisk), "writer-key-") {
+		t.Fatalf("secret.key on disk = %q, want one of the writer keys", onDisk)
+	}
 	for got := range results {
-		if got != "shared-key" {
-			t.Fatalf("EnsureNonEmptyFile() = %q, want shared-key", got)
+		if got != string(onDisk) {
+			t.Fatalf("EnsureNonEmptyFile() = %q, want winner %q", got, onDisk)
 		}
 	}
 	entries, err := os.ReadDir(dir)
@@ -286,5 +299,103 @@ func TestEnsureNonEmptyFileRemovesStaleLock(t *testing.T) {
 	}
 	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
 		t.Fatalf("lock file still exists: %v", err)
+	}
+}
+
+func TestReadOrSetFileSerializesConcurrentCreates(t *testing.T) {
+	dir := t.TempDir()
+	secretPath := filepath.Join(dir, "secret.key")
+	const writers = 8
+	start := make(chan struct{})
+	results := make(chan string, writers)
+	errs := make(chan error, writers)
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start
+			got, err := ReadOrSetFile(secretPath, fmt.Sprintf("init-key-%d", idx), false)
+			if err != nil {
+				errs <- err
+				return
+			}
+			results <- got
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	close(results)
+	for err := range errs {
+		t.Fatalf("ReadOrSetFile() error: %v", err)
+	}
+	onDisk, err := os.ReadFile(secretPath)
+	if err != nil {
+		t.Fatalf("read secret.key: %v", err)
+	}
+	for got := range results {
+		if got != string(onDisk) {
+			t.Fatalf("ReadOrSetFile() = %q, want winner %q", got, onDisk)
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("directory entries = %v, %v; want only secret.key", entries, err)
+	}
+}
+
+func TestWriteNewFileDoesNotOverwriteExisting(t *testing.T) {
+	dir := t.TempDir()
+	secretPath := filepath.Join(dir, "secret.key")
+	if err := writeNewFile(secretPath, []byte("first")); err != nil {
+		t.Fatalf("first writeNewFile() error: %v", err)
+	}
+	if err := writeNewFile(secretPath, []byte("second")); !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("second writeNewFile() error = %v, want fs.ErrExist", err)
+	}
+	data, err := os.ReadFile(secretPath)
+	if err != nil || string(data) != "first" {
+		t.Fatalf("file = %q, %v; want first", data, err)
+	}
+}
+
+func TestAcquireFileLockExcludesActiveHolderEvenWhenAged(t *testing.T) {
+	dir := t.TempDir()
+	secretPath := filepath.Join(dir, "secret.key")
+	unlock, err := acquireFileLock(secretPath)
+	if err != nil {
+		t.Fatalf("first acquireFileLock() error: %v", err)
+	}
+	lockPath := secretPath + ".lock"
+	old := time.Now().Add(-2 * time.Minute)
+	if err := os.Chtimes(lockPath, old, old); err != nil {
+		unlock()
+		t.Fatalf("Chtimes: %v", err)
+	}
+	contenderDone := make(chan error, 1)
+	go func() {
+		u2, err := acquireFileLock(secretPath)
+		if err != nil {
+			contenderDone <- err
+			return
+		}
+		u2()
+		contenderDone <- nil
+	}()
+	select {
+	case err := <-contenderDone:
+		unlock()
+		t.Fatalf("contender acquired lock while active holder still held it (err=%v)", err)
+	case <-time.After(80 * time.Millisecond):
+	}
+	unlock()
+	select {
+	case err := <-contenderDone:
+		if err != nil {
+			t.Fatalf("contender failed after unlock: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("contender did not acquire lock after unlock")
 	}
 }

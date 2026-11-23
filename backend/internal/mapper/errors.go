@@ -4,6 +4,7 @@ import (
 	"errors"
 	"opensync/internal/model"
 	"opensync/internal/msg"
+	"strings"
 )
 
 // Sentinel errors for missing rows. Mapper functions return a
@@ -28,6 +29,7 @@ var (
 	ErrListTooLarge      = errors.New("list too large")
 	ErrInvalidPagination = errors.New("invalid pagination")
 	ErrJobExists         = errors.New("job already exists")
+	ErrAlistExists       = errors.New("alist already exists")
 )
 
 // publicError is a user-facing failure with a stable machine-readable sentinel.
@@ -56,4 +58,12 @@ func invalidPaginationError() error {
 // message the user can act on instead of a generic "internal error".
 func jobExistsError() error {
 	return &publicError{sentinel: ErrJobExists, message: msg.T(msg.JobExists)}
+}
+
+func alistExistsError() error {
+	return &publicError{sentinel: ErrAlistExists, message: msg.T(msg.AlistExists)}
+}
+
+func isUniqueConstraintError(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "unique constraint failed")
 }

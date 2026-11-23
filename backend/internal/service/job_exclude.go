@@ -127,6 +127,11 @@ func validDirectoryRule(value string) bool {
 		containsControl(value) {
 		return false
 	}
+	for _, segment := range strings.Split(value, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+	}
 	if !strings.Contains(value, "*") {
 		return true
 	}
@@ -149,6 +154,8 @@ func validExtensionRule(value string) bool {
 
 func validFileNameRule(value string) bool {
 	return value != "" &&
+		value != "." &&
+		value != ".." &&
 		!strings.Contains(value, "/") &&
 		!strings.ContainsAny(value, `\?[]{}!`) &&
 		value != "*" &&
@@ -183,15 +190,16 @@ func (matcher *excludeMatcher) matches(relativePath string, isDir bool) bool {
 	}
 
 	relativePath = strings.TrimSpace(relativePath)
-	if relativePath == "" {
+	if relativePath == "" || containsControl(relativePath) || strings.ContainsRune(relativePath, '\\') {
 		return false
 	}
 	isDirectory := isDir || strings.HasSuffix(relativePath, "/")
 	cleanPath := strings.Trim(path.Clean(strings.TrimSuffix(relativePath, "/")), "/")
-	if cleanPath == "" || cleanPath == "." {
+	if cleanPath == "" || cleanPath == "." || cleanPath == ".." || strings.HasPrefix(cleanPath, "../") {
 		return false
 	}
-	baseName := path.Base(cleanPath)
+	segments := strings.Split(cleanPath, "/")
+	baseName := segments[len(segments)-1]
 
 	for _, rule := range matcher.rules {
 		switch rule.kind {
@@ -208,16 +216,22 @@ func (matcher *excludeMatcher) matches(relativePath string, isDir bool) bool {
 			// "build/" names a directory; a plain file called build is synced.
 			// Both sides are filtered alike, so this never exposes an excluded
 			// directory to deletion.
-			if !isDirectory {
-				continue
-			}
 			rulePath := strings.TrimSuffix(rule.value, "/")
 			if strings.Contains(rulePath, "/") {
-				if cleanPath == rulePath || strings.HasSuffix(cleanPath, "/"+rulePath) {
+				if (isDirectory && (cleanPath == rulePath || strings.HasSuffix(cleanPath, "/"+rulePath))) ||
+					strings.HasPrefix(cleanPath, rulePath+"/") ||
+					strings.Contains(cleanPath, "/"+rulePath+"/") {
 					return true
 				}
-			} else if simpleWildcardMatch(rulePath, baseName) {
+				continue
+			}
+			if isDirectory && simpleWildcardMatch(rulePath, baseName) {
 				return true
+			}
+			for _, ancestor := range segments[:len(segments)-1] {
+				if simpleWildcardMatch(rulePath, ancestor) {
+					return true
+				}
 			}
 		}
 	}

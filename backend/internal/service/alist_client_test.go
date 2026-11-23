@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"opensync/internal/config"
 	"opensync/internal/mapper"
 )
 
@@ -213,12 +214,23 @@ func TestGetClientByIDContextPassesCancellationToInitialLoad(t *testing.T) {
 }
 
 func TestGetContextDoesNotSendContentTypeWithoutBody(t *testing.T) {
+	handlerErr := make(chan string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
-			t.Fatalf("method = %s, want GET", r.Method)
+			select {
+			case handlerErr <- fmt.Sprintf("method = %s, want GET", r.Method):
+			default:
+			}
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
 		}
 		if got := r.Header.Get("Content-Type"); got != "" {
-			t.Fatalf("Content-Type = %q, want empty for GET without body", got)
+			select {
+			case handlerErr <- fmt.Sprintf("Content-Type = %q, want empty for GET without body", got):
+			default:
+			}
+			w.WriteHeader(http.StatusBadRequest)
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"code":200,"message":"ok","data":{"username":"admin"}}`))
@@ -232,6 +244,11 @@ func TestGetContextDoesNotSendContentTypeWithoutBody(t *testing.T) {
 
 	if _, err := client.GetContext(context.Background(), "/api/me", nil); err != nil {
 		t.Fatalf("GetContext() error: %v", err)
+	}
+	select {
+	case msg := <-handlerErr:
+		t.Fatal(msg)
+	default:
 	}
 }
 
@@ -385,6 +402,10 @@ func TestStoreAlistClientClosesReplacedClient(t *testing.T) {
 }
 
 func TestUpdateClientKeepsCachedClientWhenDatabaseUpdateFails(t *testing.T) {
+	oldCfg := config.GetConfig()
+	config.SetConfigForTest(&config.Config{Server: config.ServerConfig{PasswdStr: "test-secret"}})
+	t.Cleanup(func() { config.SetConfigForTest(oldCfg) })
+
 	testDB, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatalf("sql.Open() error: %v", err)
@@ -460,6 +481,20 @@ func TestValidateAlistURLAcceptsHTTPAndHTTPS(t *testing.T) {
 	}
 	if err := validateAlistURL("ftp://alist.example.com"); err == nil {
 		t.Fatalf("validateAlistURL() accepted unsupported scheme")
+	}
+	for _, bad := range []string{
+		"http://:5244",
+		"https://[]:5244",
+		"http://alist.example.com:0",
+		"http://alist.example.com:65536",
+		"http://alist.example.com:",
+	} {
+		if err := validateAlistURL(bad); err == nil {
+			t.Fatalf("validateAlistURL(%q) = nil, want error", bad)
+		}
+		if _, err := normalizeAlistBaseURL(bad); err == nil {
+			t.Fatalf("normalizeAlistBaseURL(%q) = nil, want error", bad)
+		}
 	}
 }
 

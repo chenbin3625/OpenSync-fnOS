@@ -63,7 +63,14 @@ export const methodOptions = [
 ];
 export const methodNames = methodOptions.map((method) => method.name);
 export const methodLabel = (method?: number | null) => {
-  return methodNames[Number(method)] ?? "—";
+  if (method === null || method === undefined || method === ("" as unknown)) {
+    return "—";
+  }
+  const index = Number(method);
+  if (!Number.isInteger(index) || index < 0 || index >= methodNames.length) {
+    return "—";
+  }
+  return methodNames[index];
 };
 export const cronTypeNames = ["间隔(分钟)", "Cron", "仅手动"];
 export const cronFields = [
@@ -133,10 +140,26 @@ const cronValue = (value?: string | null, fallback = "*") => {
 
 const isPlainCronNumber = (value: string) => /^\d+$/.test(value);
 
+const isCronIntInRange = (value: string, min: number, max: number) => {
+  if (!isPlainCronNumber(value)) return false;
+  const num = Number(value);
+  return Number.isInteger(num) && num >= min && num <= max;
+};
+
+const isValidCronWeekdayList = (value: string) => {
+  if (!/^[0-6](?:-[0-6])?(?:,[0-6](?:-[0-6])?)*$/.test(value)) {
+    return false;
+  }
+  return value.split(",").every((part) => {
+    const [start, end] = part.split("-");
+    return end === undefined || Number(start) <= Number(end);
+  });
+};
+
 /**
- * Only plain numbers can be rendered as a clock. A step/range/list expression
- * used to be glued in as e.g. "2:STAR-SLASH-5:0", which reads as a valid but
- * wrong time; describeCronPlan falls back to the raw expression instead.
+ * Only plain numbers within valid clock bounds can be rendered as a clock.
+ * A step/range/list or out-of-range expression falls back to the raw
+ * expression in describeCronPlan instead.
  */
 const formatTime = (
   hour?: string | null,
@@ -146,8 +169,12 @@ const formatTime = (
   const h = cronValue(hour);
   const m = cronValue(minute);
   const s = cronValue(second, "0");
-  if (isPlainCronNumber(h) && isPlainCronNumber(m) && isPlainCronNumber(s)) {
-    return `${h.padStart(2, "0")}:${m.padStart(2, "0")}:${s.padStart(2, "0")}`;
+  if (
+    isCronIntInRange(h, 0, 23) &&
+    isCronIntInRange(m, 0, 59) &&
+    isCronIntInRange(s, 0, 59)
+  ) {
+    return `${String(Number(h)).padStart(2, "0")}:${String(Number(m)).padStart(2, "0")}:${String(Number(s)).padStart(2, "0")}`;
   }
   return `${h}:${m}:${s}`;
 };
@@ -156,7 +183,7 @@ const weekdayNames = ["周日", "周一", "周二", "周三", "周四", "周五"
 
 export const formatCronDayOfWeek = (value?: string | null) => {
   const normalized = cronValue(value);
-  if (!/^[0-6](?:-[0-6])?(?:,[0-6](?:-[0-6])?)*$/.test(normalized)) {
+  if (!isValidCronWeekdayList(normalized)) {
     return normalized;
   }
 
@@ -171,57 +198,55 @@ export const formatCronDayOfWeek = (value?: string | null) => {
     .join("、");
 };
 
-const describeCronPlan = (values: ScheduleValues) => {
-  const second = cronValue(values.second, "0");
-  const minute = cronValue(values.minute);
-  const hour = cronValue(values.hour);
-  const day = cronValue(values.day);
-  const month = cronValue(values.month);
-  const dayOfWeek = cronValue(values.day_of_week);
+const describeCronPlan = (values?: ScheduleValues | null) => {
+  const safe = values || {};
+  const second = cronValue(safe.second, "0");
+  const minute = cronValue(safe.minute);
+  const hour = cronValue(safe.hour);
+  const day = cronValue(safe.day);
+  const month = cronValue(safe.month);
+  const dayOfWeek = cronValue(safe.day_of_week);
   const dayOfWeekLabel = formatCronDayOfWeek(dayOfWeek);
   const time = formatTime(hour, minute, second);
-  // "每天 02:00:00" is only truthful when 时/分/秒 are single numbers. For
-  // `*/5`, `1-5` … fall through to the raw expression below.
+  // "每天 02:00:00" is only truthful when 时/分/秒 are single in-range numbers.
   const renderableClock =
-    isPlainCronNumber(hour) &&
-    isPlainCronNumber(minute) &&
-    isPlainCronNumber(second);
+    isCronIntInRange(hour, 0, 23) &&
+    isCronIntInRange(minute, 0, 59) &&
+    isCronIntInRange(second, 0, 59);
 
   if (
     renderableClock &&
     day === "*" &&
     month === "*" &&
-    dayOfWeek === "*" &&
-    hour !== "*" &&
-    minute !== "*"
+    dayOfWeek === "*"
   ) {
     return `每天 ${time} 执行`;
   }
   if (
     renderableClock &&
-    day !== "*" &&
+    isCronIntInRange(day, 1, 31) &&
     month === "*" &&
-    dayOfWeek === "*" &&
-    hour !== "*" &&
-    minute !== "*"
+    dayOfWeek === "*"
   ) {
-    return `每月 ${day} 日 ${time} 执行`;
+    return `每月 ${Number(day)} 日 ${time} 执行`;
   }
   if (
     renderableClock &&
     day === "*" &&
     month === "*" &&
-    dayOfWeek !== "*" &&
-    hour !== "*" &&
-    minute !== "*"
+    isValidCronWeekdayList(dayOfWeek)
   ) {
     return `每周 ${dayOfWeekLabel} 的 ${time} 执行`;
   }
   return `按 Cron 表达式 ${[second, minute, hour, day, month, dayOfWeek].join(" ")} 执行`;
 };
 
-export const formatSchedulePlan = (values: ScheduleValues) => {
-  if (values.isCron === 0) return `每 ${values.interval || 0} 分钟执行一次`;
+export const formatSchedulePlan = (values?: ScheduleValues | null) => {
+  if (!values) return "不自动执行，只能手动触发";
+  if (values.isCron === 0) {
+    const mins = Number(values.interval);
+    return `每 ${Number.isFinite(mins) && mins >= 0 ? mins : 0} 分钟执行一次`;
+  }
   if (values.isCron === 1) return describeCronPlan(values);
   return "不自动执行，只能手动触发";
 };
@@ -297,14 +322,22 @@ export const formatSize = (bytes: number) => {
 
 export const getJobName = (job: JobItem) => job.remark || `同步任务 #${job.id}`;
 
-export const formatNextRun = (job: JobItem) => {
+export const formatNextRun = (job?: JobItem | null) => {
+  if (!job) return "—";
   if (job.isCron === 2) return "仅手动触发";
-  if (!job.nextRunTime || job.nextRunTime <= 0) return formatSchedule(job);
-  return new Date(job.nextRunTime * 1000).toLocaleString("zh-CN", { hour12: false });
+  const nextRun = Number(job.nextRunTime);
+  if (!Number.isFinite(nextRun) || nextRun <= 0) return formatSchedule(job);
+  const date = new Date(nextRun * 1000);
+  if (!Number.isFinite(date.getTime())) return formatSchedule(job);
+  return date.toLocaleString("zh-CN", { hour12: false });
 };
 
-export const formatSchedule = (job: JobItem) => {
-  if (job.isCron === 0) return `每 ${job.interval} 分钟`;
+export const formatSchedule = (job?: JobItem | null) => {
+  if (!job) return "—";
+  if (job.isCron === 0) {
+    const mins = Number(job.interval);
+    return `每 ${Number.isFinite(mins) && mins >= 0 ? mins : 0} 分钟`;
+  }
   if (job.isCron === 1) {
     return describeCronPlan(job);
   }
@@ -331,4 +364,37 @@ export function getTaskDisplayName(task: TaskItem): string {
   if (!path) return "--";
   const cleanPath = path.replace(/\/+$/, "");
   return cleanPath.split("/").pop() || cleanPath;
+}
+
+export function parseIntervalInput(value: string): number {
+  const trimmed = value.trim();
+  if (!trimmed) return 0;
+  if (/^\d+$/.test(trimmed)) return Number(trimmed);
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) && !Number.isInteger(parsed) ? parsed : 0;
+}
+
+export function normalizeDateRange(value: unknown): Date[] {
+  if (!Array.isArray(value)) return [];
+  const parsed = value.slice(0, 2).map((item) => {
+    if (item === null || item === undefined || item === "") return null;
+    const date =
+      item instanceof Date
+        ? new Date(item.getTime())
+        : new Date(item as string | number);
+    return Number.isFinite(date.getTime()) ? date : null;
+  });
+  return parsed.length === 2 && parsed.every((d): d is Date => d !== null)
+    ? parsed
+    : [];
+}
+
+export function normalizeSettingFieldValue(
+  value: unknown,
+  isSwitch = false,
+): string {
+  if (value === undefined || value === null || value === "") {
+    return isSwitch ? "0" : "";
+  }
+  return String(value);
 }

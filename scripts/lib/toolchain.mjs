@@ -54,9 +54,31 @@ const satisfies = (version, minimum) => {
  * 是通过 PATH 查找 node 的：只调用 homebrew 的 node 而不前置它的目录，
  * npm 仍会拉起 PATH 上更靠前的旧版本。
  */
+const inspectNodeDir = (dir) => {
+  const nodeNames = process.platform === "win32" ? ["node.exe", "node"] : ["node"];
+  const npmNames = process.platform === "win32" ? ["npm.cmd", "npm"] : ["npm"];
+  const node = nodeNames.map((name) => join(dir, name)).find(existsSync);
+  const npm = npmNames.map((name) => join(dir, name)).find(existsSync);
+  // 目录里必须同时有 npm，否则前置它并不能修好 npm 的运行时。
+  if (!node || !npm) return null;
+  const versionResult = capture(node, ["-v"]);
+  const version = versionResult.status === 0 ? parseVersion(versionResult.stdout) : null;
+  if (!version) return null;
+  return { dir, version, text: `v${version.join(".")}` };
+};
+
 export const pickNodeDir = () => {
+  const explicitDir = process.env.OPENSYNC_NODE_DIR?.trim();
+  if (explicitDir) {
+    const explicit = inspectNodeDir(explicitDir);
+    if (!explicit)
+      throw new Error(
+        `OPENSYNC_NODE_DIR (${explicitDir}) 不可用：目录需同时包含可执行的 node 与 npm`,
+      );
+    return { ...explicit, satisfiesMinimum: satisfies(explicit.version, MIN_NODE) };
+  }
+
   const dirs = new Set();
-  if (process.env.OPENSYNC_NODE_DIR) dirs.add(process.env.OPENSYNC_NODE_DIR);
   dirs.add(dirname(process.execPath));
   for (const dir of (process.env.PATH || "").split(delimiter))
     if (dir) dirs.add(dir);
@@ -65,19 +87,11 @@ export const pickNodeDir = () => {
 
   const candidates = [];
   const seen = new Set();
-  const nodeNames = process.platform === "win32" ? ["node.exe", "node"] : ["node"];
-  const npmNames = process.platform === "win32" ? ["npm.cmd", "npm"] : ["npm"];
   for (const dir of dirs) {
     if (seen.has(dir)) continue;
     seen.add(dir);
-    const node = nodeNames.map((name) => join(dir, name)).find(existsSync);
-    const npm = npmNames.map((name) => join(dir, name)).find(existsSync);
-    // 目录里必须同时有 npm，否则前置它并不能修好 npm 的运行时。
-    if (!node || !npm) continue;
-    const versionResult = capture(node, ["-v"]);
-    const version = versionResult.status === 0 ? parseVersion(versionResult.stdout) : null;
-    if (!version) continue;
-    candidates.push({ dir, version, text: `v${version.join(".")}` });
+    const info = inspectNodeDir(dir);
+    if (info) candidates.push(info);
   }
   if (candidates.length === 0)
     throw new Error("找不到 node 运行时，请确认已安装 Node.js 22.12+");

@@ -12,11 +12,11 @@ func TestWriteConfigFileReplacesDuplicateManagedKeys(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("TRIM_PKGETC", dir)
 	path := filepath.Join(dir, "config.ini")
-	if err := os.WriteFile(path, []byte("[opensync]\ntask_save=9000\ntask_save=9001\n[other]\ntask_save=8000\n"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte("[opensync]\ntask_save=900\ntask_save=901\n[other]\ntask_save=8000\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	before := testServerConfig()
-	before.TaskSave = 9001 // last duplicate on disk, matching readINI's last-wins behavior
+	before.TaskSave = 901 // last duplicate on disk, matching readINI's last-wins behavior
 	if err := writeConfigFile(testServerConfig(), before); err != nil {
 		t.Fatal(err)
 	}
@@ -24,7 +24,7 @@ func TestWriteConfigFileReplacesDuplicateManagedKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), "task_save=9001") || !strings.Contains(string(data), "task_save=8000") {
+	if strings.Contains(string(data), "task_save=901") || !strings.Contains(string(data), "task_save=8000") {
 		t.Fatalf("duplicate or foreign key changed: %s", data)
 	}
 	parsed, err := readINI(path)

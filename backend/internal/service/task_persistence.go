@@ -74,12 +74,22 @@ func (jt *JobTask) persistRemainingTaskItems() error {
 	// bounded by its own cleanup deadline.
 	ctx, cancel := jt.cleanupContext()
 	defer cancel()
-	if err := jt.flushPersistBufferWith(func(items []map[string]interface{}) error {
+	if err := jt.flushPersistBufferItemsWith(func(items []map[string]interface{}) error {
 		return jt.persistWithBusyRetryCtx(ctx, false, items)
 	}); err != nil {
 		return err
 	}
+	// Any earlier SQLITE_BUSY error (for example a mid-run flush whose retry
+	// was cut short by stop/timeout) left its items in persistBuffer, and we
+	// just persisted all of them cleanly. Do not poison the terminal status.
+	jt.clearTransientBusyPersistenceError()
 	return jt.taskPersistenceError()
+}
+
+func (jt *JobTask) persistForCleanup(items []map[string]interface{}) error {
+	ctx, cancel := jt.cleanupContext()
+	defer cancel()
+	return jt.persistWithBusyRetryCtx(ctx, false, items)
 }
 
 func (jt *JobTask) appendFinish(item JobTaskItem) {
@@ -107,11 +117,22 @@ func (jt *JobTask) appendFinishMany(items []JobTaskItem) {
 	needFlush := len(jt.persistBuffer) >= persistBatchSize
 	jt.persistBufMu.Unlock()
 
-	if needFlush || jt.persistFlushSealed() {
+	if jt.persistFlushSealed() {
 		// A sealed task already performed its final flush, so this record
 		// arrived late (it should not happen: the executor waits for the scan
-		// worker and every copy before sealing). Write it synchronously instead
-		// of arming a timer that would outlive the task.
+		// worker and every copy before sealing). Write it synchronously under a
+		// cleanup context instead of arming a timer or failing immediately on a
+		// cancelled task context.
+		if err := jt.flushPersistBufferWith(jt.persistForCleanup); err != nil {
+			jt.recordTaskPersistenceError(err)
+			jt.requestBreak()
+		}
+	} else if jt.isBreak() || jt.context().Err() != nil {
+		// The task is already stopping or timed out: leave the aborted/stopped
+		// items buffered for persistRemainingTaskItems, which flushes them in
+		// bounded chunks under a cleanup context instead of tripping on a
+		// cancelled task context.
+	} else if needFlush {
 		if err := jt.flushPersistBuffer(); err != nil {
 			jt.recordTaskPersistenceError(err)
 			jt.requestBreak()
@@ -160,40 +181,39 @@ func (jt *JobTask) schedulePersistFlush() {
 		return
 	}
 	jt.persistFlushScheduled = true
-	jt.persistFlushTimer = time.AfterFunc(persistFlushInterval, func() {
-		// This runs on the timer's own goroutine, which no Gin middleware
-		// covers: an unrecovered panic here takes the whole NAS app down. The
-		// progress hub's debounced timer recovers for the same reason.
-		defer func() {
-			if r := recover(); r != nil {
-				err := fmt.Errorf("persist flush panic: %v", r)
-				log.Printf("Task %d %v", jt.TaskID, err)
-				jt.recordTaskPersistenceError(err)
-				jt.requestBreak()
-			}
-		}()
-		jt.persistFlushMu.Lock()
-		// Only the timer still registered here may clear the state: if the task
-		// sealed (or cancelled) while this callback was already running, the
-		// seal must survive or a later append could arm a new timer after the
-		// final flush.
-		ownsTimer := jt.persistFlushTimer != nil
-		if ownsTimer {
-			jt.persistFlushScheduled = false
-			jt.persistFlushTimer = nil
-		}
-		sealed := jt.persistFlushScheduled && jt.persistFlushTimer == nil
-		jt.persistFlushMu.Unlock()
-		if !ownsTimer && !sealed {
-			// Cancelled before this callback took the lock; the final flush that
-			// cancelled it writes the buffer itself.
-			return
-		}
-		if err := jt.flushPersistBuffer(); err != nil {
+	jt.persistFlushTimer = time.AfterFunc(persistFlushInterval, jt.runScheduledPersistFlush)
+}
+
+func (jt *JobTask) runScheduledPersistFlush() {
+	// This runs on the timer's own goroutine, which no Gin middleware
+	// covers: an unrecovered panic here takes the whole NAS app down. The
+	// progress hub's debounced timer recovers for the same reason.
+	defer func() {
+		if r := recover(); r != nil {
+			err := fmt.Errorf("persist flush panic: %v", r)
+			log.Printf("Task %d %v", jt.TaskID, err)
 			jt.recordTaskPersistenceError(err)
 			jt.requestBreak()
 		}
-	})
+	}()
+	jt.persistFlushMu.Lock()
+	// Only the timer still registered here may clear the state: if the task
+	// sealed (or cancelled) while this callback was already running, the
+	// seal must survive and the final flush owns writing the buffer.
+	ownsTimer := jt.persistFlushTimer != nil
+	sealed := jt.persistFlushScheduled && jt.persistFlushTimer == nil
+	if ownsTimer {
+		jt.persistFlushScheduled = false
+		jt.persistFlushTimer = nil
+	}
+	jt.persistFlushMu.Unlock()
+	if !ownsTimer || sealed {
+		return
+	}
+	if err := jt.flushPersistBuffer(); err != nil {
+		jt.recordTaskPersistenceError(err)
+		jt.requestBreak()
+	}
 }
 
 // cancelPersistFlush stops a pending debounced flush. Without it the timer
@@ -221,6 +241,13 @@ func (jt *JobTask) flushPersistBuffer() error {
 }
 
 func (jt *JobTask) flushPersistBufferWith(persist func([]map[string]interface{}) error) error {
+	if err := jt.flushPersistBufferItemsWith(persist); err != nil {
+		return err
+	}
+	return jt.taskPersistenceError()
+}
+
+func (jt *JobTask) flushPersistBufferItemsWith(persist func([]map[string]interface{}) error) error {
 	// Serialize the write itself. Without this the final flush can observe an
 	// empty buffer while a timer flush is still writing, report success, and
 	// only then have that write fail and push the items back — losing them
@@ -230,27 +257,55 @@ func (jt *JobTask) flushPersistBufferWith(persist func([]map[string]interface{})
 	jt.persistBufMu.Lock()
 	if len(jt.persistBuffer) == 0 {
 		jt.persistBufMu.Unlock()
-		return jt.taskPersistenceError()
+		return nil
 	}
 	items := append([]JobTaskItem(nil), jt.persistBuffer...)
 	jt.persistBuffer = jt.persistBuffer[:0]
 	jt.persistBufMu.Unlock()
 
-	if err := persist(jobTaskItemsToMaps(items)); err != nil {
+	cursor := 0
+	handled := false
+	defer func() {
+		if handled || cursor >= len(items) {
+			return
+		}
 		jt.persistBufMu.Lock()
-		jt.persistBuffer = append(items, jt.persistBuffer...)
+		remaining := make([]JobTaskItem, 0, len(items)-cursor+len(jt.persistBuffer))
+		remaining = append(remaining, items[cursor:]...)
+		remaining = append(remaining, jt.persistBuffer...)
+		jt.persistBuffer = remaining
 		jt.persistBufMu.Unlock()
+	}()
 
-		first := items[0]
-		log.Printf(
-			"Failed to save %d task items for task %d (job %d) first file=%q: %v",
-			len(items), jt.TaskID, jt.jobIDSnapshot(), first.FileName, err,
-		)
-		jt.recordTaskPersistenceError(err)
-		jt.requestBreak()
-		return err
+	for start := 0; start < len(items); start += persistBatchSize {
+		cursor = start
+		end := start + persistBatchSize
+		if end > len(items) {
+			end = len(items)
+		}
+		if err := persist(jobTaskItemsToMaps(items[start:end])); err != nil {
+			jt.persistBufMu.Lock()
+			remaining := make([]JobTaskItem, 0, len(items)-start+len(jt.persistBuffer))
+			remaining = append(remaining, items[start:]...)
+			remaining = append(remaining, jt.persistBuffer...)
+			jt.persistBuffer = remaining
+			jt.persistBufMu.Unlock()
+			handled = true
+
+			first := items[start]
+			log.Printf(
+				"Failed to save %d task items for task %d (job %d) first file=%q: %v",
+				len(items)-start, jt.TaskID, jt.jobIDSnapshot(), first.FileName, err,
+			)
+			jt.recordTaskPersistenceError(err)
+			if !jt.isBreak() && jt.context().Err() == nil {
+				jt.requestBreak()
+			}
+			return err
+		}
 	}
-	return jt.taskPersistenceError()
+	handled = true
+	return nil
 }
 
 func (jt *JobTask) recordTaskPersistenceError(err error) {
@@ -261,6 +316,14 @@ func (jt *JobTask) recordTaskPersistenceError(err error) {
 	defer jt.PersistMu.Unlock()
 	if jt.PersistErr == nil {
 		jt.PersistErr = err
+	}
+}
+
+func (jt *JobTask) clearTransientBusyPersistenceError() {
+	jt.PersistMu.Lock()
+	defer jt.PersistMu.Unlock()
+	if isSQLiteBusy(jt.PersistErr) {
+		jt.PersistErr = nil
 	}
 }
 

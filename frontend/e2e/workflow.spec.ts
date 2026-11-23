@@ -11,6 +11,7 @@ const jsonWrite = { headers: { "Content-Type": "application/json" } };
 let engine: Server, engineUrl: string;
 let webhookBody: unknown;
 let webhookCalls = 0;
+const webhookHeaders: (string | string[] | undefined)[] = [];
 test.beforeAll(async () => {
   engine = createServer(async (request, response) => {
     response.setHeader("Content-Type", "application/json");
@@ -18,7 +19,7 @@ test.beforeAll(async () => {
       let body = "";
       for await (const chunk of request) body += chunk;
       webhookBody = JSON.parse(body);
-      expect(request.headers["x-fixture"]).toBe("test-secret");
+      webhookHeaders.push(request.headers["x-fixture"]);
       webhookCalls++;
       response.end("{}");
       return;
@@ -83,6 +84,7 @@ test("sends a webhook template and preserves masked credentials when editing", a
       .getByRole("button", { name: "发送测试通知", exact: true })
       .click();
     await expect.poll(() => webhookCalls).toBe(initialCalls + 1);
+    expect(webhookHeaders.at(-1)).toBe("test-secret");
     expect(webhookBody).toHaveProperty("subject");
     expect(JSON.stringify(webhookBody)).not.toContain("{title}");
     // The id is read from the create response rather than the tail of the list:
@@ -120,6 +122,11 @@ test("sends a webhook template and preserves masked credentials when editing", a
       .getByRole("button", { name: "发送测试通知", exact: true })
       .click();
     await expect.poll(() => webhookCalls).toBe(initialCalls + 3);
+    expect(webhookHeaders.slice(initialCalls)).toEqual([
+      "test-secret",
+      "test-secret",
+      "test-secret",
+    ]);
   } finally {
     if (id)
       await request.delete(`/app/opensync/svr/notify?notifyId=${id}`, jsonWrite);

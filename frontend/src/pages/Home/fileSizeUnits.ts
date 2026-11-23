@@ -84,3 +84,24 @@ export function splitBytesToFileSize(bytes?: number | null): {
   }
   return { value: Math.round(normalized), unit: "B" };
 }
+
+export type FileSizeDrafts = Partial<Record<"minFileSize" | "maxFileSize", string>>;
+
+export function mergeFileSizeDrafts<
+  T extends { minFileSize: FileSizeInput; maxFileSize: FileSizeInput },
+>(form: T, drafts: FileSizeDrafts): T {
+  return {
+    ...form,
+    minFileSize: drafts.minFileSize ?? form.minFileSize,
+    maxFileSize: drafts.maxFileSize ?? form.maxFileSize,
+  };
+}
+
+export function hasPendingFileSizeDraftChange(
+  form: { minFileSize: FileSizeInput; maxFileSize: FileSizeInput },
+  drafts: FileSizeDrafts,
+): boolean {
+  return (["minFileSize", "maxFileSize"] as const).some(
+    (key) => drafts[key] !== undefined && drafts[key] !== String(form[key]),
+  );
+}

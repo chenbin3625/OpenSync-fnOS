@@ -53,9 +53,8 @@ type copyItemStatClient interface {
 // makes when the probe itself keeps erroring.
 const maxTransientPollErrors = 3
 
-// emptyFileMD5 is the MD5 digest every empty payload has. It is the only
-// positive evidence that a driver-reported zero size really means an empty
-// file rather than an unreadable size.
+// emptyFileMD5 is the canonical digest for an empty payload when a driver
+// provides hash metadata for a zero-byte file.
 const emptyFileMD5 = "d41d8cd98f00b204e9800998ecf8427e"
 
 type CopyItem struct {
@@ -422,13 +421,11 @@ func (ci *CopyItem) startTransfer(ctx context.Context, client copyItemClient) (s
 				source, err := emptyClient.FreshFileStatContext(ctx, ci.SrcPath, ci.FileName, interval)
 				if err == nil && source.Exists && !source.IsDir && source.SizeKnown && source.Size >= 0 {
 					if source.Size == 0 {
-						// A zero size alone is not proof of an empty file: some
-						// drivers report 0 for files whose size they cannot
-						// read. Creating an empty destination then would mark a
-						// real file as synced (and, in move mode, let the real
-						// source be deleted). Only the empty-file digest is
-						// positive evidence; without it, copy normally.
-						if source.MD5 == emptyFileMD5 {
+						// AList drivers may omit hash metadata for zero-byte files.
+						// An explicit zero size is still enough to avoid /api/fs/copy,
+						// whose downstream Range construction can produce bytes=0--1.
+						// Keep the copy path when a supplied digest contradicts the size.
+						if source.MD5 == "" || source.MD5 == emptyFileMD5 {
 							return "", emptyClient.CreateEmptyFileContext(ctx, ci.DstPath, ci.FileName)
 						}
 					} else {
@@ -706,7 +703,7 @@ func (ci *CopyItem) verifyDstComplete(runtime copyItemRuntime, client copyItemCl
 	defer cancel()
 	statClient, canStat := client.(copyItemStatClient)
 	wantSize, sizeKnown := ci.expectedSize()
-	if !canStat || !sizeKnown {
+	if !canStat {
 		return client.FileExistsContext(ctx, ci.DstPath, ci.FileName)
 	}
 	stat, err := statClient.FileStatContext(ctx, ci.DstPath, ci.FileName)
@@ -716,7 +713,13 @@ func (ci *CopyItem) verifyDstComplete(runtime copyItemRuntime, client copyItemCl
 	if !stat.Exists {
 		return false, nil
 	}
-	if stat.IsDir || ci.IsPath == taskItemPath || !stat.SizeKnown {
+	if ci.IsPath == taskItemPath {
+		return stat.IsDir, nil
+	}
+	if stat.IsDir {
+		return false, nil
+	}
+	if !sizeKnown || !stat.SizeKnown {
 		return true, nil
 	}
 	return stat.Size == wantSize, nil

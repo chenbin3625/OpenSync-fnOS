@@ -23,6 +23,8 @@ export interface JobProgressStreamResult {
   live: boolean;
   /** False when the environment has no usable EventSource. */
   supported: boolean;
+  /** Monotonic counter incremented on every delivered SSE frame for this job. */
+  frameSeq?: number;
 }
 
 function isDocumentHidden(): boolean {
@@ -33,9 +35,19 @@ export function useJobProgressStream(
   jobId: string,
   enabled: boolean,
 ): JobProgressStreamResult {
-  const [data, setData] = useState<CurrentTaskData | null>(null);
-  const [hasFrame, setHasFrame] = useState(false);
-  const [live, setLive] = useState(false);
+  const [streamState, setStreamState] = useState<{
+    jobId: string;
+    data: CurrentTaskData | null;
+    hasFrame: boolean;
+    live: boolean;
+    frameSeq: number;
+  }>({
+    jobId,
+    data: null,
+    hasFrame: false,
+    live: false,
+    frameSeq: 0,
+  });
   const [visible, setVisible] = useState(() => !isDocumentHidden());
   const supported = isEventSourceSupported();
   const jobRef = useRef(jobId);
@@ -55,30 +67,43 @@ export function useJobProgressStream(
     // does not blank out while suspended.
     const jobChanged = jobRef.current !== jobId;
     jobRef.current = jobId;
-    setLive(false);
-    if (jobChanged) {
-      setData(null);
-      setHasFrame(false);
-    }
+    setStreamState((prev) =>
+      jobChanged || prev.jobId !== jobId
+        ? { jobId, data: null, hasFrame: false, live: false, frameSeq: 0 }
+        : { ...prev, live: false },
+    );
     if (!enabled || !jobId || !visible || !supported) return;
 
     const stream = createJobProgressStream({
       jobId,
       onData: (task) => {
-        setData(task);
-        setHasFrame(true);
+        setStreamState((prev) => ({
+          ...prev,
+          jobId,
+          data: task,
+          hasFrame: true,
+          frameSeq: prev.jobId === jobId ? prev.frameSeq + 1 : 1,
+        }));
       },
-      onStateChange: (state) => setLive(state.live),
+      onStateChange: (state) => {
+        setStreamState((prev) => ({
+          ...prev,
+          jobId,
+          live: state.live,
+        }));
+      },
     });
     return () => {
       stream.close();
     };
   }, [enabled, jobId, visible, supported]);
 
+  const sameJob = streamState.jobId === jobId;
   return {
-    data,
-    hasFrame,
-    live: live && supported && visible,
+    data: sameJob ? streamState.data : null,
+    hasFrame: sameJob ? streamState.hasFrame : false,
+    live: sameJob && streamState.live && supported && visible,
     supported,
+    frameSeq: sameJob ? streamState.frameSeq : 0,
   };
 }

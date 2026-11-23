@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"opensync/internal/config"
 	"opensync/internal/mapper"
 	"opensync/internal/msg"
 )
@@ -117,6 +118,10 @@ func TestAlistClientLoadDiscardedAfterRemoval(t *testing.T) {
 // A DB failure after validation (here: UNIQUE on url) must close the client
 // that will never be cached instead of leaking its transport.
 func TestAddClientClosesClientWhenInsertFails(t *testing.T) {
+	oldCfg := config.GetConfig()
+	config.SetConfigForTest(&config.Config{Server: config.ServerConfig{PasswdStr: "test-secret"}})
+	t.Cleanup(func() { config.SetConfigForTest(oldCfg) })
+
 	testDB, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatalf("sql.Open() error: %v", err)
@@ -380,5 +385,43 @@ func TestCheckWaitPruneKeepsLongerReservation(t *testing.T) {
 	}
 	if keptShort {
 		t.Fatal("expired reservation was kept")
+	}
+}
+
+func TestFinishAlistClientLoadDiscardsPreUpdateClientEvenIfEvicted(t *testing.T) {
+	swapAlistClientCache(t)
+	alistClientListMu.Lock()
+	oldUpdates := alistClientUpdates
+	alistClientUpdates = make(map[int64]uint64)
+	alistClientListMu.Unlock()
+	t.Cleanup(func() {
+		alistClientListMu.Lock()
+		alistClientUpdates = oldUpdates
+		alistClientListMu.Unlock()
+	})
+
+	load, owner := beginAlistClientLoad(15)
+	if !owner {
+		t.Fatal("beginAlistClientLoad() owner = false, want true")
+	}
+	newClient := &AlistClient{AlistID: 15, URL: "https://new.example"}
+	storeAlistClient(15, newClient)
+	removeCachedAlistClientIf(15, newClient)
+
+	staleTransport := &closeTrackingTransport{}
+	staleClient := &AlistClient{AlistID: 15, URL: "https://old.example", client: &http.Client{Transport: staleTransport}}
+	finishAlistClientLoad(15, load, staleClient, nil)
+
+	alistClientListMu.RLock()
+	_, cached := alistClientList[15]
+	alistClientListMu.RUnlock()
+	if cached {
+		t.Fatal("pre-update client was cached after update+evict")
+	}
+	if load.err == nil {
+		t.Fatal("load.err = nil, want error when pre-update load lost race")
+	}
+	if !staleTransport.closed.Load() {
+		t.Fatal("stale pre-update client was not closed")
 	}
 }

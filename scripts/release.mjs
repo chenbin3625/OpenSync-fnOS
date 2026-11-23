@@ -2,7 +2,7 @@
 // 一键发布：校验 → 全量测试 → 前端构建一次 → 双架构打包 → 校验和与产物清单。
 // 用法：node scripts/release.mjs [--skip-tests]
 // GitHub 推送与 Release 由 CI（.github/workflows/release.yml）完成。
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { join, relative } from "node:path";
 import {
   capture,
@@ -20,6 +20,7 @@ import {
   readVersion,
   requireNodeModules,
   sha256,
+  withBuildLock,
   writeChecksums,
 } from "./lib/package.mjs";
 import { collectVersions, versionProblems } from "./lib/version.mjs";
@@ -109,24 +110,40 @@ if (runTests) {
   run("go", ["test", "-race", "./..."], { cwd: join(root, "backend") });
 }
 
-// ── 4. 前端构建 ──────────────────────────────────────────────────────────
-step(4, TOTAL, "构建前端（仅一次，两个架构共用）");
-buildFrontend(node.dir);
-
-// ── 5. 双架构打包 ────────────────────────────────────────────────────────
-step(5, TOTAL, `打包 ${ARCHES.join(" / ")}`);
 const version = readVersion();
 if (!version) throw new Error("无法从 fnos/manifest 读取 version");
-const artifacts = [];
-for (const arch of ARCHES)
-  artifacts.push({ arch, file: buildPackage(arch, { nodeDir: node.dir }) });
 
-// ── 6. 校验和与产物清单 ──────────────────────────────────────────────────
-step(6, TOTAL, "生成 SHA256SUMS 与产物清单");
-const checksumFile = writeChecksums(
-  artifacts.map(({ file }) => file),
-  version,
-);
+const { artifacts, checksumFile } = withBuildLock(() => {
+  const produced = [];
+  let sumFile = "";
+  const cleanupArtifacts = () => {
+    for (const arch of ARCHES)
+      rmSync(join(root, "dist", `opensync-${arch}.fpk`), { force: true });
+    rmSync(join(root, "dist", "SHA256SUMS"), { force: true });
+  };
+  cleanupArtifacts();
+  try {
+    // ── 4. 前端构建 ──────────────────────────────────────────────────────────
+    step(4, TOTAL, "构建前端（仅一次，两个架构共用）");
+    buildFrontend(node.dir);
+
+    // ── 5. 双架构打包 ────────────────────────────────────────────────────────
+    step(5, TOTAL, `打包 ${ARCHES.join(" / ")}`);
+    for (const arch of ARCHES)
+      produced.push({ arch, file: buildPackage(arch, { nodeDir: node.dir }) });
+
+    // ── 6. 校验和与产物清单 ──────────────────────────────────────────────────
+    step(6, TOTAL, "生成 SHA256SUMS 与产物清单");
+    sumFile = writeChecksums(
+      produced.map(({ file }) => file),
+      version,
+    );
+    return { artifacts: produced, checksumFile: sumFile };
+  } catch (error) {
+    cleanupArtifacts();
+    throw error;
+  }
+});
 
 console.log(`\n\x1b[32m✓ 发布产物已生成\x1b[0m  OpenSync ${version}  HEAD ${head}`);
 for (const { arch, file } of artifacts)

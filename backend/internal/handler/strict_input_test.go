@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"opensync/internal/msg"
@@ -35,6 +36,7 @@ func TestStrictInt64(t *testing.T) {
 	}
 	reject := map[string]interface{}{
 		"fraction": 1.9, "junk": "abc", "float string": "1.5", "bool": true, "nil": nil, "object": map[string]interface{}{}, "empty": "",
+		"float64 2^63": float64(1 << 63), "float64 below MinInt64": float64(math.MinInt64) - 2048,
 	}
 	for name, v := range reject {
 		if _, ok := strictInt64(v); ok {
@@ -102,18 +104,69 @@ func TestFlexibleIDAcceptsStringAndNumber(t *testing.T) {
 }
 
 // A numeric id used to fail ShouldBindJSON into *string and answer LostPart
-// for a well-formed request. It must now reach the action (and fail later for
-// other reasons, which is outside this test), not be rejected at binding.
+// for a well-formed request. Verify both that a fractional taskId is rejected
+// and that a valid numeric taskId reaches the action handler with the exact id.
 func TestUpdateJobAcceptsNumericTaskIDAndRejectsFraction(t *testing.T) {
 	status, _, message := serveJSON(t, http.MethodPut, "/svr/job", UpdateJob, `{"taskId":1.5,"action":"stop"}`)
 	if status != http.StatusBadRequest || message != msg.T(msg.LostPart) {
 		t.Fatalf("fractional taskId = %d %q, want 400 LostPart", status, message)
 	}
-	// Unknown action with a valid numeric id is rejected after id parsing,
-	// proving the numeric id itself bound successfully.
+
+	var gotID int64
+	oldStop := stopTaskService
+	stopTaskService = func(taskID int64) error {
+		gotID = taskID
+		return nil
+	}
+	t.Cleanup(func() { stopTaskService = oldStop })
+
+	status, code, _ := serveJSON(t, http.MethodPut, "/svr/job", UpdateJob, `{"taskId":7,"action":"stop"}`)
+	if status != http.StatusOK || code != 200 || gotID != 7 {
+		t.Fatalf("numeric taskId stop = status %d code %d gotID=%d, want 200/200 gotID=7", status, code, gotID)
+	}
 	status, _, message = serveJSON(t, http.MethodPut, "/svr/job", UpdateJob, `{"taskId":7,"action":"nope"}`)
 	if status != http.StatusBadRequest || message != msg.T(msg.LostPart) {
-		t.Fatalf("numeric taskId = %d %q, want 400 LostPart from the action switch", status, message)
+		t.Fatalf("unknown action = %d %q, want 400 LostPart", status, message)
+	}
+}
+
+func TestHandlersRejectJSONNullBodyWithoutNilMapPanic(t *testing.T) {
+	cases := []struct {
+		name    string
+		method  string
+		path    string
+		handler gin.HandlerFunc
+	}{
+		{"AddJob", http.MethodPost, "/svr/job", AddJob},
+		{"AddAlist", http.MethodPost, "/svr/alist", AddAlist},
+		{"UpdateAlist", http.MethodPut, "/svr/alist", UpdateAlist},
+		{"UpdateNotify", http.MethodPut, "/svr/notify", UpdateNotify},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			status, code, message := serveJSON(t, tc.method, tc.path, tc.handler, "null")
+			if status != http.StatusBadRequest || code != 500 || message != msg.T(msg.LostPart) {
+				t.Fatalf("%s(null) = %d/%d %q, want 400 LostPart", tc.name, status, code, message)
+			}
+		})
+	}
+}
+
+func TestUpdateJobRejectsMalformedPayloadsWithoutRunningJob(t *testing.T) {
+	payloads := []string{
+		`null`,
+		`{"id":1,"action":"stop"}`,
+		`{"id":1,"abort":true}`,
+		`{"id":1,"pasue":true}`,
+		`{"id":1,"pause":false,"abort":true}`,
+		`{"id":1,"taskId":2,"action":"stop"}`,
+		`{"id":1}{}`,
+	}
+	for _, body := range payloads {
+		status, code, message := serveJSON(t, http.MethodPut, "/svr/job", UpdateJob, body)
+		if status != http.StatusBadRequest || code != 500 || message != msg.T(msg.LostPart) {
+			t.Errorf("PUT /svr/job %s = %d/%d %q, want 400 LostPart", body, status, code, message)
+		}
 	}
 }
 
