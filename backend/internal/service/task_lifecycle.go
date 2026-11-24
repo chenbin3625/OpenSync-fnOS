@@ -23,6 +23,16 @@ func (jt *JobTask) finishSubmittedTask(persistErr error) {
 	jt.finishSuccessfulTask()
 }
 
+func (jt *JobTask) releaseSlotNow() {
+	jt.runtimeMu.Lock()
+	release := jt.releaseEngineSlot
+	jt.releaseEngineSlot = nil
+	jt.runtimeMu.Unlock()
+	if release != nil {
+		release()
+	}
+}
+
 func (jt *JobTask) finishSuccessfulTask() {
 	status, taskNum, duration, err := jt.updateTaskStatus()
 	if err != nil {
@@ -30,6 +40,7 @@ func (jt *JobTask) finishSuccessfulTask() {
 		return
 	}
 	enqueue := queueTaskNotification
+	jt.releaseSlotNow()
 	// Mark the job idle after the DB update succeeds, before notification
 	// delivery is handed off, so the next run is never gated on it.
 	if jt.JobClient != nil {
@@ -66,6 +77,7 @@ func (jt *JobTask) finishFailedTask(errMsg string) {
 	duration := taskDuration(jt.CreateTime)
 	taskNum["duration"] = duration
 	enqueue := queueTaskNotification
+	jt.releaseSlotNow()
 	if jt.JobClient != nil {
 		jt.JobClient.markDone()
 		jt.JobClient.clearCurrentTask(jt)

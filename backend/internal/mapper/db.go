@@ -398,10 +398,12 @@ func SetDBForTest(testDB *sql.DB) func() {
 	dbMu.Lock()
 	oldDB := db
 	db = testDB
+	once = &sync.Once{}
 	dbMu.Unlock()
 	return func() {
 		dbMu.Lock()
 		db = oldDB
+		once = &sync.Once{}
 		dbMu.Unlock()
 	}
 }

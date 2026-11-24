@@ -208,7 +208,7 @@ export function ResourceCard({
       <div className="resource-card-inner">
         <div className="item-content">
           <h2>{title}</h2>
-          {subtitle && <div className="item-meta mono">{subtitle}</div>}
+          {subtitle && <div className="item-meta">{subtitle}</div>}
           {meta}
         </div>
         {actions && <div className="row-actions">{actions}</div>}

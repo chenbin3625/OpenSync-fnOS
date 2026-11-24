@@ -244,6 +244,18 @@ func CleanJobInput(job map[string]interface{}) error {
 		}
 		job["exclude"] = normalizeExclude(excludeStr)
 	}
+	if job["include"] != nil {
+		includeStr := fmt.Sprintf("%v", job["include"])
+		if invalid := invalidIncludeRules(includeStr); len(invalid) > 0 {
+			return publicError(msg.IncludeRulesUnsupported(invalid))
+		}
+		normalized := normalizeInclude(includeStr)
+		if normalized == "" {
+			job["include"] = nil
+		} else {
+			job["include"] = normalized
+		}
+	}
 	if job["srcPath"] != nil {
 		job["srcPath"] = normalizePathListForStorage(job["srcPath"])
 	}
@@ -253,9 +265,189 @@ func CleanJobInput(job map[string]interface{}) error {
 	if err := normalizeJobFileSizeRange(job); err != nil {
 		return err
 	}
+	if err := normalizeJobExtendedFields(job); err != nil {
+		return err
+	}
 	// Persisted after srcPath/dstPath are normalized: this is what keeps the
 	// destination layout stable when the source selection is edited later.
 	ensureJobDstMap(job)
+	return nil
+}
+
+func normalizeJobExtendedFields(job map[string]interface{}) error {
+	// Scan intervals (0..300 seconds)
+	for _, key := range []string{"scanIntervalS", "scanIntervalT"} {
+		if raw, ok := job[key]; ok && raw != nil && raw != "" {
+			n, valid := strictJobInt(raw)
+			if !valid || n < 0 || n > 300 {
+				return publicError(msg.T(msg.ScanIntervalInvalid))
+			}
+			job[key] = n
+		}
+	}
+	// Per-job concurrency / retry overrides
+	if raw, ok := job["copyConcurrency"]; ok && raw != nil && raw != "" {
+		n, valid := strictJobInt(raw)
+		if !valid || n < 0 || n > 100 {
+			return publicError(msg.T(msg.CopyConcurrencyInvalid))
+		}
+		job["copyConcurrency"] = n
+	} else {
+		job["copyConcurrency"] = 0
+	}
+	if raw, ok := job["scanConcurrency"]; ok && raw != nil && raw != "" {
+		n, valid := strictJobInt(raw)
+		if !valid || n < 0 || n > 50 {
+			return publicError(msg.T(msg.ScanConcurrencyInvalid))
+		}
+		job["scanConcurrency"] = n
+	} else {
+		job["scanConcurrency"] = 0
+	}
+	if raw, ok := job["maxRetries"]; ok && raw != nil && raw != "" {
+		n, valid := strictJobInt(raw)
+		if !valid || n < -1 || n > 10 {
+			return publicError(msg.T(msg.MaxRetriesInvalid))
+		}
+		job["maxRetries"] = n
+	} else {
+		job["maxRetries"] = -1
+	}
+	// Compare mode (0..2) & conflict policy (0..2) & deleteEmptySrcDirs (0..1)
+	if raw, ok := job["compareMode"]; ok && raw != nil && raw != "" {
+		n, valid := strictJobInt(raw)
+		if !valid || n < 0 || n > 2 {
+			return publicError(msg.T(msg.CompareModeInvalid))
+		}
+		job["compareMode"] = n
+	} else {
+		job["compareMode"] = 0
+	}
+	if raw, ok := job["conflictPolicy"]; ok && raw != nil && raw != "" {
+		n, valid := strictJobInt(raw)
+		if !valid || n < 0 || n > 2 {
+			return publicError(msg.T(msg.ConflictPolicyInvalid))
+		}
+		job["conflictPolicy"] = n
+	} else {
+		job["conflictPolicy"] = 0
+	}
+	if raw, ok := job["deleteEmptySrcDirs"]; ok && raw != nil && raw != "" {
+		n, valid := strictJobEnable(raw)
+		if !valid {
+			return publicError(msg.T(msg.LostPart))
+		}
+		job["deleteEmptySrcDirs"] = n
+	} else {
+		job["deleteEmptySrcDirs"] = 0
+	}
+	// Target trash
+	if raw, ok := job["trashEnable"]; ok && raw != nil && raw != "" {
+		n, valid := strictJobEnable(raw)
+		if !valid {
+			return publicError(msg.T(msg.LostPart))
+		}
+		job["trashEnable"] = n
+	} else {
+		job["trashEnable"] = 0
+	}
+	trashDir, err := normalizeTrashDir(util.StringValue(job["trashDir"]))
+	if err != nil {
+		return err
+	}
+	job["trashDir"] = trashDir
+	if raw, ok := job["trashRetentionDays"]; ok && raw != nil && raw != "" {
+		n, valid := strictJobInt(raw)
+		if !valid || n < 0 || n > maxTrashRetentionDays {
+			return publicError(msg.T(msg.TrashRetentionInvalid))
+		}
+		job["trashRetentionDays"] = n
+	} else {
+		job["trashRetentionDays"] = defaultTrashRetention
+	}
+	// Filter mode & time filters
+	if raw, ok := job["filterMode"]; ok && raw != nil && raw != "" {
+		n, valid := strictJobInt(raw)
+		if !valid || (n != 0 && n != 1) {
+			return publicError(msg.T(msg.FilterModeInvalid))
+		}
+		job["filterMode"] = n
+	} else {
+		job["filterMode"] = 0
+	}
+	for _, key := range []string{"minFileAgeMinutes", "olderThanDays", "newerThanDays"} {
+		if raw, ok := job[key]; ok && raw != nil && raw != "" {
+			n, valid := strictJobInt(raw)
+			if !valid || n < 0 || n > 36500 {
+				return publicError(msg.T(msg.TimeFilterInvalid))
+			}
+			job[key] = n
+		} else {
+			job[key] = 0
+		}
+	}
+	if older := util.ToInt(job["olderThanDays"]); older > 0 {
+		if newer := util.ToInt(job["newerThanDays"]); newer > 0 && older >= newer {
+			return publicError(msg.T(msg.TimeFilterRangeConflict))
+		}
+	}
+	// Time window
+	windowEnable := 0
+	if raw, ok := job["windowEnable"]; ok && raw != nil && raw != "" {
+		n, valid := strictJobEnable(raw)
+		if !valid {
+			return publicError(msg.T(msg.TimeWindowInvalid))
+		}
+		windowEnable = n
+	}
+	job["windowEnable"] = windowEnable
+	winStart, winEnd, err := ValidateTimeWindow(windowEnable, util.StringValue(job["windowStart"]), util.StringValue(job["windowEnd"]))
+	if err != nil {
+		return err
+	}
+	if winStart == "" {
+		job["windowStart"] = nil
+	} else {
+		job["windowStart"] = winStart
+	}
+	if winEnd == "" {
+		job["windowEnd"] = nil
+	} else {
+		job["windowEnd"] = winEnd
+	}
+	if raw, ok := job["windowStopOutside"]; ok && raw != nil && raw != "" {
+		n, valid := strictJobEnable(raw)
+		if !valid {
+			return publicError(msg.T(msg.TimeWindowInvalid))
+		}
+		job["windowStopOutside"] = n
+	} else {
+		job["windowStopOutside"] = 0
+	}
+	// Per-job notification binding
+	notifyMode := 0
+	if raw, ok := job["notifyMode"]; ok && raw != nil && raw != "" {
+		n, valid := strictJobInt(raw)
+		if !valid || n < 0 || n > 2 {
+			return publicError(msg.T(msg.NotifyModeInvalid))
+		}
+		notifyMode = n
+	}
+	job["notifyMode"] = notifyMode
+	if notifyMode == 1 {
+		ids, err := parseNotifyIDList(job["notifyIds"])
+		if err != nil {
+			return err
+		}
+		if len(ids) > 0 {
+			encoded, _ := json.Marshal(ids)
+			job["notifyIds"] = string(encoded)
+		} else {
+			job["notifyIds"] = "[]"
+		}
+	} else {
+		job["notifyIds"] = nil
+	}
 	return nil
 }
 
@@ -360,6 +552,11 @@ func validateJobInput(job map[string]interface{}, rejectNestedDst bool) error {
 			return publicError(msg.ExcludeRulesUnsupported(invalid))
 		}
 	}
+	if job["include"] != nil {
+		if invalid := invalidIncludeRules(fmt.Sprintf("%v", job["include"])); len(invalid) > 0 {
+			return publicError(msg.IncludeRulesUnsupported(invalid))
+		}
+	}
 	minSize, err := nonNegativeFileSize(job["minFileSize"])
 	if err != nil {
 		return publicError(msg.T(msg.MinFileSizeInvalid))
@@ -370,6 +567,9 @@ func validateJobInput(job map[string]interface{}, rejectNestedDst bool) error {
 	}
 	if maxSize > 0 && minSize > maxSize {
 		return publicError(msg.T(msg.MinFileSizeGtMax))
+	}
+	if err := normalizeJobExtendedFields(cloneJobConfig(job)); err != nil {
+		return err
 	}
 	return nil
 }
@@ -870,8 +1070,14 @@ func RejectFullSyncTask(taskID int64) error {
 	return nil
 }
 
-// RetryFailedTask replays the non-success items of a historical task.
+// RetryFailedTask replays all non-success items of a historical task.
 func RetryFailedTask(taskID int64) error {
+	return RetryFailedTaskItems(taskID, nil)
+}
+
+// RetryFailedTaskItems replays either all non-success items (when itemIDs is
+// empty) or only the selected item IDs of a historical task.
+func RetryFailedTaskItems(taskID int64, itemIDs []int64) error {
 	job, err := mapper.GetJobByTaskID(taskID)
 	if err != nil {
 		if err := publicErrorIf(err, msg.T(msg.JobNotFound)); err != nil {
@@ -885,7 +1091,7 @@ func RetryFailedTask(taskID int64) error {
 	if !client.enabled() {
 		return publicError(msg.T(msg.DisabledJobCannotRun))
 	}
-	return client.DoRetryFailedTaskItems(taskID)
+	return client.DoRetrySelectedTaskItems(taskID, itemIDs)
 }
 
 // GetJobList returns paginated job list
@@ -920,14 +1126,29 @@ func addJobNextRunTimes(result map[string]interface{}) {
 		}
 	}
 	jobClientListMu.RUnlock()
+	queuedSet := engineQueue.AllQueuedJobIDs()
+	latestTasks, _ := mapper.GetLatestTaskPerJob()
 	for _, row := range rows {
+		jobID := util.ToInt64(row["id"])
 		next := int64(0)
-		if client := clients[util.ToInt64(row["id"])]; client != nil {
+		running := false
+		pendingApproval := false
+		if client := clients[jobID]; client != nil {
 			if nextTime, scheduled := client.nextRunTime(); scheduled {
 				next = nextTime.Unix()
 			}
+			if task := client.currentTask(); task != nil {
+				running = true
+				pendingApproval = task.fullSyncApprovalSnapshot() != nil
+			}
 		}
 		row["nextRunTime"] = next
+		row["running"] = running
+		row["queued"] = queuedSet[jobID]
+		row["pendingApproval"] = pendingApproval
+		if latest, ok := latestTasks[jobID]; ok {
+			row["lastStatus"] = util.ToInt(latest["status"])
+		}
 	}
 }
 

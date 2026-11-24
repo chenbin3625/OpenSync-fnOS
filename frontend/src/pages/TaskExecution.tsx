@@ -1,5 +1,6 @@
 import { memo, useEffect, useId, useMemo, useRef, useState } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
+import Checkbox from "@douyinfe/semi-ui/lib/es/checkbox";
 import DatePicker from "@douyinfe/semi-ui/lib/es/datePicker";
 import Divider from "@douyinfe/semi-ui/lib/es/divider";
 import Progress from "@douyinfe/semi-ui/lib/es/progress";
@@ -12,6 +13,7 @@ import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
 import {
   IconAlertTriangle,
   IconDeleteStroked,
+  IconDownload,
   IconEyeOpenedStroked,
   IconPause,
   IconRefresh,
@@ -60,10 +62,12 @@ const statusTabs = [
 const historyStatuses = [1, 2, 3, 4, 5, 6, 7, 8];
 
 const fileTableWidths = {
-  name: 360,
+  select: 40,
+  name: 340,
   size: 96,
   action: 76,
   status: 160,
+  ops: 56,
 } as const;
 
 export const Realtime = memo(function Realtime({
@@ -72,9 +76,7 @@ export const Realtime = memo(function Realtime({
   onApprovalDetected,
 }: {
   jobId: number;
-  /** Called once the stream/poll reports "no task running" (tab recycling). */
   onTaskEnded?: () => void;
-  /** Called immediately when the live feed observes a full-sync approval prompt. */
   onApprovalDetected?: () => void;
 }) {
   const {
@@ -97,9 +99,6 @@ export const Realtime = memo(function Realtime({
       return;
     }
     if (taskLoading || taskError || !hadTask.current) return;
-    // A hidden tab closes the stream; that must not be mistaken for "the task
-    // ended" and kick the user back to the overview tab. A deep link that never
-    // saw a task also stays put (the tab is disabled anyway).
     if (document.visibilityState === "hidden") return;
     hadTask.current = false;
     onTaskEnded?.();
@@ -113,8 +112,6 @@ export const Realtime = memo(function Realtime({
     prevApproval.current = hasApproval;
   }, [hasApproval, onApprovalDetected]);
   if (!currentTask) {
-    // The first poll used to flash "空空如也" before the task arrived, and a
-    // failed first poll looked like "nothing running".
     if (taskError)
       return (
         <LoadState
@@ -177,8 +174,6 @@ export const Realtime = memo(function Realtime({
           stroke="var(--semi-color-primary)"
         />
         {taskError && (
-          // Polling keeps the last snapshot on failure; without this notice the
-          // frozen numbers read as a stalled transfer.
           <InlineNotice
             icon={<IconAlertTriangle aria-hidden="true" size="small" />}
             message="连接中断，正在重试…"
@@ -252,6 +247,7 @@ export const History = memo(function History({
   const [keyword, setKeyword] = useState("");
   const [range, setRange] = useState<Date[]>([]);
   const [detail, setDetail] = useState<number | null>(null);
+  const [selectedTaskIds, setSelectedTaskIds] = useState<number[]>([]);
   const resource = useResource(
     (signal) =>
       api.history(
@@ -279,9 +275,23 @@ export const History = memo(function History({
   const rows = resource.data?.dataList || [];
   const totalCount = resource.data?.count || 0;
   const isMobile = useMediaQuery("(max-width: 640px)");
-  // Deleting the last record on the last page left the table empty.
   useClampedPage(page, resource.data ? totalCount : null, size, setPage);
   const rangeLabelId = useId();
+
+  // Clear selections when page/job changes
+  useEffect(() => {
+    setSelectedTaskIds([]);
+  }, [jobId, page, size, status, keyword, range]);
+
+  const deletableRows = useMemo(
+    () => rows.filter((r) => r.status !== 1),
+    [rows],
+  );
+  const selectedSet = useMemo(() => new Set(selectedTaskIds), [selectedTaskIds]);
+  const allDeletableSelected =
+    deletableRows.length > 0 &&
+    deletableRows.every((r) => selectedSet.has(r.id));
+
   const retry = (record: TaskRecord) =>
     void action.run(async () => {
       try {
@@ -292,6 +302,52 @@ export const History = memo(function History({
         errorToast(error);
       }
     });
+
+  const handleBatchDelete = () => {
+    if (!selectedTaskIds.length) return;
+    confirmDelete(
+      `删除选中的 ${selectedTaskIds.length} 条执行记录？`,
+      () =>
+        action.run(async () => {
+          const res = await api.deleteTasksBatch(selectedTaskIds);
+          setSelectedTaskIds([]);
+          Toast.success(`已删除 ${res.deleted} 条记录`);
+          await resource.refresh(true);
+        }),
+      "相关执行明细将一并清理，无法恢复。",
+    );
+  };
+
+  const handleClearAll = () => {
+    confirmDelete(
+      "清空此任务的全部已完成历史记录？",
+      () =>
+        action.run(async () => {
+          const res = await api.clearJobHistory(jobId);
+          setSelectedTaskIds([]);
+          Toast.success(`已清空 ${res.deleted} 条历史记录`);
+          await resource.refresh(true);
+        }),
+      "正在运行的记录会保留，已完成的历史记录和明细将被彻底删除。",
+    );
+  };
+
+  const renderCounts = (record: TaskRecord) => {
+    if (record.status === 1) return "—";
+    const all = record.allNum ?? 0;
+    const ok = record.successNum ?? 0;
+    const fail = record.failNum ?? 0;
+    if (all === 0 && ok === 0 && fail === 0) return "0 项";
+    return (
+      <span className="history-counts">
+        <span>
+          {ok}/{all}
+        </span>
+        {fail > 0 && <span className="inline-error">（失败 {fail}）</span>}
+      </span>
+    );
+  };
+
   const controls = (record: TaskRecord) =>
     record.status === 1 ? (
       <Button
@@ -335,8 +391,6 @@ export const History = memo(function History({
       <div className="filter-bar">
         <SearchFilterInput
           ariaLabel="搜索执行记录（任务 ID）"
-          // The backend GetJobTaskList keyword filter only matches job_task.id;
-          // promising "error keyword" here made every such search return 0.
           placeholder="任务 ID"
           value={input}
           onChange={setInput}
@@ -355,8 +409,6 @@ export const History = memo(function History({
           }))}
           onChange={(next) => {
             setStatus(next);
-            // The typed text and the applied filter must not diverge: applying
-            // a status/date change also applies the current search text.
             setKeyword(input.trim());
             setPage(1);
           }}
@@ -375,6 +427,30 @@ export const History = memo(function History({
           }}
           showClear
         />
+        <div className="history-toolbar-actions">
+          {selectedTaskIds.length > 0 && (
+            <Button
+              size="small"
+              type="danger"
+              theme="light"
+              icon={<IconDeleteStroked aria-hidden="true" />}
+              disabled={action.busy}
+              onClick={handleBatchDelete}
+            >
+              批量删除 ({selectedTaskIds.length})
+            </Button>
+          )}
+          {totalCount > 0 && (
+            <Button
+              size="small"
+              type="tertiary"
+              disabled={action.busy}
+              onClick={handleClearAll}
+            >
+              清空已完成
+            </Button>
+          )}
+        </div>
       </div>
       <div className="history-scroll">
         <LoadState
@@ -408,6 +484,12 @@ export const History = memo(function History({
                         {record.status !== 1 && record.runTime && record.createTime
                           ? formatDuration(record.runTime - record.createTime)
                           : "—"}
+                        {record.status !== 1 && record.allNum !== undefined
+                          ? ` · ${record.successNum ?? 0}/${record.allNum} 项`
+                          : ""}
+                        {(record.sumSize ?? 0) > 0
+                          ? ` · ${formatSize(record.sumSize || 0)}`
+                          : ""}
                       </span>
                       {controls(record)}
                     </div>
@@ -424,6 +506,40 @@ export const History = memo(function History({
                 rowKey="id"
                 empty={<EmptyState />}
                 columns={[
+                  {
+                    title: (
+                      <Checkbox
+                        aria-label="全选本页可删除记录"
+                        checked={allDeletableSelected}
+                        indeterminate={
+                          selectedTaskIds.length > 0 && !allDeletableSelected
+                        }
+                        disabled={!deletableRows.length}
+                        onChange={(e) =>
+                          setSelectedTaskIds(
+                            e.target.checked
+                              ? deletableRows.map((r) => r.id)
+                              : [],
+                          )
+                        }
+                      />
+                    ),
+                    width: 44,
+                    render: (_, record) =>
+                      record.status === 1 ? null : (
+                        <Checkbox
+                          aria-label={`选择记录 #${record.id}`}
+                          checked={selectedSet.has(record.id)}
+                          onChange={(e) =>
+                            setSelectedTaskIds((prev) =>
+                              e.target.checked
+                                ? [...prev, record.id]
+                                : prev.filter((id) => id !== record.id),
+                            )
+                          }
+                        />
+                      ),
+                  },
                   {
                     title: "开始时间",
                     dataIndex: "createTime",
@@ -443,7 +559,21 @@ export const History = memo(function History({
                     ),
                   },
                   {
+                    title: "文件数",
+                    width: 130,
+                    render: (_, record) => renderCounts(record),
+                  },
+                  {
+                    title: "传输大小",
+                    width: 108,
+                    render: (_, record) =>
+                      record.status !== 1 && (record.sumSize ?? 0) > 0
+                        ? formatSize(record.sumSize || 0)
+                        : "—",
+                  },
+                  {
                     title: "耗时",
+                    width: 108,
                     render: (_, record) =>
                       record.status !== 1 && record.runTime && record.createTime
                         ? formatDuration(record.runTime - record.createTime)
@@ -470,7 +600,11 @@ export const History = memo(function History({
         }}
       />
       {detail !== null && (
-        <FileDetails taskId={detail} onClose={() => setDetail(null)} />
+        <FileDetails
+          taskId={detail}
+          onClose={() => setDetail(null)}
+          onRetried={() => void resource.refresh(true)}
+        />
       )}
     </div>
   );
@@ -488,20 +622,70 @@ export function fileRowKey(record?: TaskItem): string {
     .join("\u0000");
 }
 
+function isRetryableItem(record: TaskItem): boolean {
+  return (
+    typeof record.id === "number" &&
+    record.id > 0 &&
+    record.status !== 2 &&
+    record.status !== 1
+  );
+}
+
 export const FileTable = memo(function FileTable({
   rows,
   loading = false,
+  selectedIds,
+  onToggleSelect,
+  onToggleSelectAll,
+  onRetrySingle,
+  busy = false,
 }: {
   rows: TaskItem[];
   loading?: boolean;
+  selectedIds?: Set<number>;
+  onToggleSelect?: (itemId: number, checked: boolean) => void;
+  onToggleSelectAll?: (checked: boolean) => void;
+  onRetrySingle?: (itemId: number) => void;
+  busy?: boolean;
 }) {
-  // The columns are static; building them inline on every render re-created the
-  // render closures that Semi feeds into every cell.
-  // Render only the layout that is visible: CSS hid one of the two, but React
-  // still built a table and a card list for every row on every update.
   const isMobile = useMediaQuery("(max-width: 640px)");
-  const columns = useMemo(
-    () => [
+  const selectableRows = useMemo(() => rows.filter(isRetryableItem), [rows]);
+  const allSelected =
+    Boolean(selectedIds) &&
+    selectableRows.length > 0 &&
+    selectableRows.every((r) => selectedIds!.has(Number(r.id)));
+  const someSelected =
+    Boolean(selectedIds) &&
+    selectableRows.some((r) => selectedIds!.has(Number(r.id))) &&
+    !allSelected;
+
+  const columns = useMemo(() => {
+    const base: Array<Record<string, unknown>> = [];
+    if (selectedIds && onToggleSelect && onToggleSelectAll) {
+      base.push({
+        title: (
+          <Checkbox
+            aria-label="全选本页可重试项"
+            checked={allSelected}
+            indeterminate={someSelected}
+            disabled={!selectableRows.length}
+            onChange={(e) => onToggleSelectAll(Boolean(e.target.checked))}
+          />
+        ),
+        width: fileTableWidths.select,
+        render: (_: unknown, record: TaskItem) =>
+          isRetryableItem(record) ? (
+            <Checkbox
+              aria-label={`选择 ${getTaskDisplayName(record)}`}
+              checked={selectedIds.has(Number(record.id))}
+              onChange={(e) =>
+                onToggleSelect(Number(record.id), Boolean(e.target.checked))
+              }
+            />
+          ) : null,
+      });
+    }
+    base.push(
       {
         title: "文件 / 目录",
         width: fileTableWidths.name,
@@ -515,7 +699,7 @@ export const FileTable = memo(function FileTable({
               content={record.dstPath || record.srcPath || "—"}
               position="topLeft"
             >
-              <span className="mono muted">
+              <span className="muted">
                 {record.dstPath || record.srcPath || "—"}
               </span>
             </Tooltip>
@@ -551,7 +735,6 @@ export const FileTable = memo(function FileTable({
         width: fileTableWidths.status,
         className: "file-col-status",
         render: (_: unknown, record: TaskItem) => {
-          // 运行中：展示实时进度
           if (record.status === 1) {
             const pct = taskProgressPercent(record.progress);
             return (
@@ -565,7 +748,6 @@ export const FileTable = memo(function FileTable({
               </div>
             );
           }
-          // 其他状态：展示状态标签 + 错误提示图标
           return (
             <Status
               status={record.status}
@@ -575,9 +757,34 @@ export const FileTable = memo(function FileTable({
           );
         },
       },
-    ],
-    [],
-  );
+    );
+    if (onRetrySingle) {
+      base.push({
+        title: "重试",
+        width: fileTableWidths.ops,
+        render: (_: unknown, record: TaskItem) =>
+          isRetryableItem(record) ? (
+            <IconButton
+              label="仅重试此项"
+              size="small"
+              icon={<IconRefresh aria-hidden="true" />}
+              disabled={busy}
+              onClick={() => onRetrySingle(Number(record.id))}
+            />
+          ) : null,
+      });
+    }
+    return base;
+  }, [
+    selectedIds,
+    onToggleSelect,
+    onToggleSelectAll,
+    allSelected,
+    someSelected,
+    selectableRows.length,
+    onRetrySingle,
+    busy,
+  ]);
   return (
     <>
       {!isMobile && (
@@ -596,14 +803,17 @@ export const FileTable = memo(function FileTable({
       {isMobile && (
         <div className="mobile-data">
           {loading ? (
-            // Loading only: errors are rendered (with retry) by the caller, so
-            // no dead "重试" button is wired to a no-op here.
             <LoadingPanel />
           ) : !rows.length ? (
             <EmptyState />
           ) : (
             rows.map((record) => (
-              <MobileFileRecord key={fileRowKey(record)} record={record} />
+              <MobileFileRecord
+                key={fileRowKey(record)}
+                record={record}
+                onRetrySingle={onRetrySingle}
+                busy={busy}
+              />
             ))
           )}
         </div>
@@ -616,16 +826,17 @@ export { normalizeDateRange };
 
 const MobileFileRecord = memo(function MobileFileRecord({
   record,
+  onRetrySingle,
+  busy,
 }: {
   record: TaskItem;
+  onRetrySingle?: (itemId: number) => void;
+  busy?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   return (
     <div className={`mobile-record file-record${open ? " open" : ""}`}>
-      <div
-        className="record-summary"
-        onClick={() => setOpen((v) => !v)}
-      >
+      <div className="record-summary" onClick={() => setOpen((v) => !v)}>
         <div className="record-title">
           <button
             type="button"
@@ -655,6 +866,19 @@ const MobileFileRecord = memo(function MobileFileRecord({
           {record.status === 1 && (
             <span>{taskProgressPercent(record.progress)}%</span>
           )}
+          {onRetrySingle && isRetryableItem(record) && (
+            <Button
+              size="small"
+              theme="borderless"
+              disabled={busy}
+              onClick={(e) => {
+                e.stopPropagation();
+                onRetrySingle(Number(record.id));
+              }}
+            >
+              重试
+            </Button>
+          )}
         </div>
         {record.status === 1 && (
           <Progress
@@ -668,11 +892,11 @@ const MobileFileRecord = memo(function MobileFileRecord({
         <div className="file-expanded">
           <div>
             <span>源目录</span>
-            <p className="mono">{record.srcPath || "—"}</p>
+            <p className="file-expanded-path">{record.srcPath || "—"}</p>
           </div>
           <div>
             <span>目标目录</span>
-            <p className="mono">{record.dstPath || "—"}</p>
+            <p className="file-expanded-path">{record.dstPath || "—"}</p>
           </div>
           {record.errMsg && (
             <div className="inline-error">
@@ -689,9 +913,11 @@ const MobileFileRecord = memo(function MobileFileRecord({
 function FileDetails({
   taskId,
   onClose,
+  onRetried,
 }: {
   taskId: number;
   onClose: () => void;
+  onRetried?: () => void;
 }) {
   const [page, setPage] = useState(1),
     [size, setSize] = useState(10);
@@ -700,6 +926,9 @@ function FileDetails({
     [hasError, setHasError] = useState<number | undefined>();
   const [input, setInput] = useState(""),
     [keyword, setKeyword] = useState("");
+  const [selectedItemIds, setSelectedItemIds] = useState<number[]>([]);
+  const action = useAction();
+
   const resource = useResource(
     (signal) =>
       api.items(
@@ -722,6 +951,13 @@ function FileDetails({
     size,
     setPage,
   );
+  useEffect(() => {
+    setSelectedItemIds([]);
+  }, [taskId, page, size, type, object, hasError, keyword]);
+
+  const rows = resource.data?.dataList || [];
+  const selectedSet = useMemo(() => new Set(selectedItemIds), [selectedItemIds]);
+
   const applyFilter =
     (setter: (value: number | undefined) => void) =>
     (value: number | undefined) => {
@@ -729,9 +965,39 @@ function FileDetails({
       setKeyword(input.trim());
       setPage(1);
     };
+
+  const triggerExport = (format: "csv" | "txt") => {
+    const url = api.exportTaskItemsUrl(taskId, format, {
+      type,
+      isPath: object,
+      hasError,
+      keyword,
+    });
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `opensync-task-${taskId}.${format}`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  };
+
+  const retryItems = (itemIds: number[]) => {
+    if (!itemIds.length) return;
+    void action.run(async () => {
+      try {
+        await api.taskAction(taskId, "retry", itemIds);
+        Toast.success(`已提交重试 ${itemIds.length} 项`);
+        setSelectedItemIds([]);
+        onRetried?.();
+      } catch (err) {
+        errorToast(err);
+      }
+    });
+  };
+
   return (
     <SideSheet
-      title="执行明细"
+      title={`执行明细 · 任务 #${taskId}`}
       visible
       onCancel={onClose}
       placement="bottom"
@@ -792,6 +1058,35 @@ function FileDetails({
           >
             重置
           </Button>
+          <div className="history-toolbar-actions">
+            {selectedItemIds.length > 0 && (
+              <Button
+                size="small"
+                theme="solid"
+                icon={<IconRefresh aria-hidden="true" />}
+                loading={action.busy}
+                onClick={() => retryItems(selectedItemIds)}
+              >
+                重试选中项 ({selectedItemIds.length})
+              </Button>
+            )}
+            <Button
+              size="small"
+              type="tertiary"
+              icon={<IconDownload aria-hidden="true" />}
+              onClick={() => triggerExport("csv")}
+            >
+              导出 CSV
+            </Button>
+            <Button
+              size="small"
+              type="tertiary"
+              icon={<IconDownload aria-hidden="true" />}
+              onClick={() => triggerExport("txt")}
+            >
+              导出 TXT
+            </Button>
+          </div>
         </div>
         {resource.error ? (
           <LoadState
@@ -801,8 +1096,27 @@ function FileDetails({
           />
         ) : (
           <FileTable
-            rows={resource.data?.dataList || []}
+            rows={rows}
             loading={resource.loading}
+            selectedIds={selectedSet}
+            onToggleSelect={(id, checked) =>
+              setSelectedItemIds((prev) =>
+                checked
+                  ? prev.includes(id)
+                    ? prev
+                    : [...prev, id]
+                  : prev.filter((item) => item !== id),
+              )
+            }
+            onToggleSelectAll={(checked) =>
+              setSelectedItemIds(
+                checked
+                  ? rows.filter(isRetryableItem).map((r) => Number(r.id))
+                  : [],
+              )
+            }
+            onRetrySingle={(id) => retryItems([id])}
+            busy={action.busy}
           />
         )}
       </div>

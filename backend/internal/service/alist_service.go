@@ -41,7 +41,8 @@ type alistClientLoad struct {
 	done        chan struct{}
 }
 
-// GetClientList returns all alist entries without token
+// GetClientList returns all alist entries without token, enriched with live
+// health status and concurrency queue stats.
 func GetClientList() ([]map[string]interface{}, error) {
 	clientList, err := mapper.GetAlistList()
 	if err != nil {
@@ -49,6 +50,14 @@ func GetClientList() ([]map[string]interface{}, error) {
 	}
 	for _, client := range clientList {
 		delete(client, "token")
+		alistID := util.ToInt64(client["id"])
+		if _, ok := client["maxConcurrentJobs"]; !ok || client["maxConcurrentJobs"] == nil {
+			client["maxConcurrentJobs"] = 0
+		}
+		active, queued := engineQueue.EngineStats(alistID)
+		client["activeJobs"] = active
+		client["queuedJobs"] = queued
+		client["health"] = GetEngineHealth(alistID)
 	}
 	return clientList, nil
 }
@@ -310,6 +319,44 @@ func normalizeAlistToken(alist map[string]interface{}, required bool) (string, b
 	return tokenStr, true, nil
 }
 
+func normalizeAlistMaxConcurrentJobs(alist map[string]interface{}) (int, bool, error) {
+	raw, ok := alist["maxConcurrentJobs"]
+	if !ok || raw == nil {
+		return 0, false, nil
+	}
+	n, valid := parseStrictNonNegativeInt(raw)
+	if !valid || n < 0 || n > 50 {
+		return 0, false, publicError(msg.T(msg.MaxConcurrentJobsInvalid))
+	}
+	return n, true, nil
+}
+
+func parseStrictNonNegativeInt(raw interface{}) (int, bool) {
+	switch v := raw.(type) {
+	case int:
+		return v, v >= 0
+	case int64:
+		return int(v), v >= 0
+	case float64:
+		if v != float64(int64(v)) || v < 0 {
+			return 0, false
+		}
+		return int(v), true
+	case string:
+		s := strings.TrimSpace(v)
+		if s == "" {
+			return 0, true
+		}
+		n, err := strconv.Atoi(s)
+		if err != nil || n < 0 {
+			return 0, false
+		}
+		return n, true
+	default:
+		return 0, false
+	}
+}
+
 // UpdateClient updates an AList client
 func UpdateClient(alist map[string]interface{}) error {
 	alistID := util.ToInt64(alist["id"])
@@ -319,6 +366,11 @@ func UpdateClient(alist map[string]interface{}) error {
 	}
 
 	token, hasToken, err := normalizeAlistToken(alist, false)
+	if err != nil {
+		return err
+	}
+
+	maxConcurrentJobs, hasMaxConcurrent, err := normalizeAlistMaxConcurrentJobs(alist)
 	if err != nil {
 		return err
 	}
@@ -352,6 +404,10 @@ func UpdateClient(alist map[string]interface{}) error {
 	if hasToken {
 		tokenPtr = &token
 	}
+	var maxConcurrentPtr *int
+	if hasMaxConcurrent {
+		maxConcurrentPtr = &maxConcurrentJobs
+	}
 	remarkStr := ""
 	remark, _ := alist["remark"]
 	if remark != nil {
@@ -371,7 +427,7 @@ func UpdateClient(alist map[string]interface{}) error {
 		alistMutationMu.Unlock()
 		return publicError(msg.T(msg.WithoutToken))
 	}
-	if err := mapper.UpdateAlist(alistID, remarkStr, urlStr, tokenPtr); err != nil {
+	if err := mapper.UpdateAlistWithConcurrency(alistID, remarkStr, urlStr, tokenPtr, maxConcurrentPtr); err != nil {
 		alistMutationMu.Unlock()
 		if client != nil {
 			client.Close()
@@ -386,6 +442,9 @@ func UpdateClient(alist map[string]interface{}) error {
 	if previous != nil {
 		previous.Close()
 	}
+	if hasMaxConcurrent {
+		engineQueue.RefreshLimit(alistID, maxConcurrentJobs)
+	}
 	return nil
 }
 
@@ -396,6 +455,10 @@ func AddClient(alist map[string]interface{}) error {
 		return err
 	}
 	token, _, err := normalizeAlistToken(alist, true)
+	if err != nil {
+		return err
+	}
+	maxConcurrentJobs, _, err := normalizeAlistMaxConcurrentJobs(alist)
 	if err != nil {
 		return err
 	}
@@ -412,7 +475,7 @@ func AddClient(alist map[string]interface{}) error {
 	}
 
 	alistMutationMu.Lock()
-	newID, err := mapper.AddAlist(remarkStr, urlStr, client.User, token)
+	newID, err := mapper.AddAlistWithConcurrency(remarkStr, urlStr, client.User, token, maxConcurrentJobs)
 	if err != nil {
 		alistMutationMu.Unlock()
 		// The validated client is never cached on this path; release its
@@ -466,6 +529,7 @@ func RemoveClient(alistID int64) error {
 		return fmt.Errorf("remove alist: %w", err)
 	}
 	previous = markAlistClientRemovedLocked(alistID)
+	RemoveEngineHealth(alistID)
 	return nil
 }
 
@@ -489,27 +553,45 @@ func markAlistClientRemovedLocked(alistID int64) *AlistClient {
 // TestClient tests connectivity to an existing AList engine by creating a fresh
 // connection (bypassing the cache) so we know the engine is reachable right now.
 func TestClient(ctx context.Context, alistID int64) error {
+	_, err := TestClientWithHealth(ctx, alistID)
+	return err
+}
+
+// TestClientWithHealth probes connectivity and mounted storages on an existing
+// AList engine, updates the health cache, and returns the EngineHealth snapshot.
+func TestClientWithHealth(ctx context.Context, alistID int64) (*EngineHealth, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	alist, err := alistDeps.GetAlistByID(alistID)
 	if err != nil {
 		if err := publicErrorIf(err, msg.T(msg.AlistNotFound)); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	// util.StringValue, not a bare type assertion: a DB row can carry a
 	// non-string (or NULL) here, and an assertion would silently degrade the
 	// token to "" and test the engine unauthenticated.
-	url := util.StringValue(alist["url"])
-	token := util.StringValue(alist["token"])
-	if url == "" {
-		return publicError(msg.T(msg.AlistURLInvalid))
+	urlStr := util.StringValue(alist["url"])
+	if urlStr == "" {
+		return nil, publicError(msg.T(msg.AlistURLInvalid))
 	}
-	client, err := alistDeps.NewAlistClientCtx(ctx, url, token, alistID)
-	if err != nil {
-		log.Printf("alist test failed: alistID=%d: %v", alistID, err)
-		return publicError(msg.T(msg.AlistConnectFail))
+	row := make(map[string]interface{}, len(alist)+1)
+	for k, v := range alist {
+		row[k] = v
 	}
-	client.Close()
-	return nil
+	if util.ToInt64(row["id"]) == 0 && alistID > 0 {
+		row["id"] = alistID
+	}
+	health := probeEngineRow(ctx, row, false)
+	if health.Status != "online" {
+		log.Printf("alist test failed: alistID=%d: %s", alistID, health.Error)
+		if health.Error == msg.T(msg.AlistUnAuth) {
+			return health, publicError(msg.T(msg.AlistUnAuth))
+		}
+		return health, publicError(msg.T(msg.AlistConnectFail))
+	}
+	return health, nil
 }
 
 // GetChildPath gets child directory paths for path selector

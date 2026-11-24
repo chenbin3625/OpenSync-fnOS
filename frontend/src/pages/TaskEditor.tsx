@@ -16,12 +16,14 @@ import Select from "@douyinfe/semi-ui/lib/es/select";
 import Switch from "@douyinfe/semi-ui/lib/es/switch";
 import Tabs from "@douyinfe/semi-ui/lib/es/tabs";
 import Tag from "@douyinfe/semi-ui/lib/es/tag";
+import TextArea from "@douyinfe/semi-ui/lib/es/input/textarea";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import {
   IconAlertTriangle,
   IconChevronRight,
   IconInfoCircle,
   IconTick,
+  IconTickCircle,
 } from "@douyinfe/semi-icons";
 import { api } from "../api/client";
 import {
@@ -37,7 +39,8 @@ import { ExcludeTree } from "../components/ExcludeTree";
 import { FileTypeFilter } from "../components/FileTypeFilter";
 import { RemotePaths } from "../components/RemotePaths";
 import { SyncPathPreview } from "../components/SyncPathPreview";
-import { useAction, useEditorForm } from "../lib/hooks";
+import { useAction, useEditorForm, useResource } from "../lib/hooks";
+import { channelNames, getNotifyEndpointSummary } from "../lib/notifyForm";
 import { RemoteDirCacheProvider } from "../lib/remoteDirCache";
 import {
   applyCronPresetMode,
@@ -74,10 +77,14 @@ import {
   type JobForm,
 } from "../lib/taskForm";
 import {
+  compareModeOptions,
+  conflictPolicyOptions,
   cronFields,
   cronTypeNames,
+  filterModeOptions,
   formatSchedulePlan,
   methodOptions,
+  notifyModeOptions,
   parseIntervalInput,
 } from "./Home/homeUtils";
 import {
@@ -89,7 +96,7 @@ import {
   type FileSizeDrafts,
   type FileSizeUnit,
 } from "./Home/fileSizeUnits";
-import type { AlistItem, JobItem } from "../types";
+import type { AlistItem, FilterTestResult, JobItem } from "../types";
 
 export { parseIntervalInput };
 export { hasPendingFileSizeDraftChange, mergeFileSizeDrafts };
@@ -152,6 +159,7 @@ const syncMethodTip = (
 
 export default function TaskEditor({
   job,
+  initialDraft,
   engines,
   existingJobs,
   enginesError,
@@ -161,6 +169,8 @@ export default function TaskEditor({
   onSaved,
 }: {
   job: JobItem | null;
+  /** Optional pre-populated draft for cloning an existing job. */
+  initialDraft?: JobForm;
   engines: AlistItem[];
   existingJobs?: JobItem[];
   /** Load error of the engine list; the select would otherwise just be empty. */
@@ -170,22 +180,33 @@ export default function TaskEditor({
   onClose: () => void;
   onSaved: (result: TaskEditorSavedResult) => void;
 }) {
+  const seedForm = useMemo(
+    () =>
+      initialDraft
+        ? initialDraft
+        : job
+          ? jobToForm(job)
+          : defaultJobForm(engines[0]?.id),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
   const { form, dirty, change, patch, setForm, setDirty } =
-    useEditorForm<JobForm>(() =>
-      job ? jobToForm(job) : defaultJobForm(engines[0]?.id),
-    );
+    useEditorForm<JobForm>(() => seedForm);
+  const notifications = useResource((signal) => api.notifications(signal));
   const [fileSizeDrafts, setFileSizeDrafts] = useState<FileSizeDrafts>({});
   const [sizeEnabled, setSizeEnabled] = useState<{ min: boolean; max: boolean }>(
     () => ({
-      min: (parseFileSizeInput(job ? jobToForm(job).minFileSize : 0) ?? 0) > 0,
-      max: (parseFileSizeInput(job ? jobToForm(job).maxFileSize : 0) ?? 0) > 0,
+      min: (parseFileSizeInput(seedForm.minFileSize) ?? 0) > 0,
+      max: (parseFileSizeInput(seedForm.maxFileSize) ?? 0) > 0,
     }),
   );
   const effectiveDirty =
-    dirty || hasPendingFileSizeDraftChange(form, fileSizeDrafts);
+    dirty ||
+    Boolean(initialDraft) ||
+    hasPendingFileSizeDraftChange(form, fileSizeDrafts);
   const methodLabelId = useId();
   const initialInterval = useMemo(
-    () => splitIntervalMinutes(job ? job.interval : defaultJobForm().interval),
+    () => splitIntervalMinutes(seedForm.interval),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
   );
@@ -194,12 +215,36 @@ export default function TaskEditor({
   );
   const [intervalDraft, setIntervalDraft] = useState<string | null>(null);
   const [cronPresetMode, setCronPresetMode] = useState<SchedulePresetMode>(() =>
-    detectCronPresetMode(job ? jobToForm(job) : defaultJobForm()),
+    detectCronPresetMode(seedForm),
+  );
+  const [policyOpen, setPolicyOpen] = useState<boolean>(() =>
+    Boolean(
+      seedForm.compareMode ||
+        seedForm.conflictPolicy ||
+        seedForm.trashEnable ||
+        seedForm.deleteEmptySrcDirs,
+    ),
   );
   const [advancedOpen, setAdvancedOpen] = useState<boolean>(() =>
-    Boolean(job && (job.useCacheS || job.useCacheT)),
+    Boolean(
+      seedForm.useCacheS ||
+        seedForm.useCacheT ||
+        seedForm.scanIntervalS ||
+        seedForm.scanIntervalT ||
+        seedForm.copyConcurrency ||
+        seedForm.scanConcurrency ||
+        seedForm.maxRetries >= 0,
+    ),
   );
   const [runAfterCreate, setRunAfterCreate] = useState(false);
+
+  // Filter interactive tester state
+  const [testPath, setTestPath] = useState("2026/photo.jpg");
+  const [testSizeMB, setTestSizeMB] = useState("2");
+  const [testAgeMinutes, setTestAgeMinutes] = useState("60");
+  const [testIsDir, setTestIsDir] = useState(false);
+  const [testingFilter, setTestingFilter] = useState(false);
+  const [testResult, setTestResult] = useState<FilterTestResult | null>(null);
 
   const isNew = !job;
   const [step, setStep] = useState(0);
@@ -419,7 +464,54 @@ export default function TaskEditor({
     return Number.isInteger(scaled) ? String(scaled) : String(form.interval);
   }, [intervalDraft, intervalUnit, form.interval]);
 
-  const activeCacheCount = (form.useCacheS ? 1 : 0) + (form.useCacheT ? 1 : 0);
+  const activeAdvancedCount =
+    (form.useCacheS ? 1 : 0) +
+    (form.useCacheT ? 1 : 0) +
+    (Number(form.scanIntervalS || 0) > 0 ? 1 : 0) +
+    (Number(form.scanIntervalT || 0) > 0 ? 1 : 0) +
+    (Number(form.copyConcurrency || 0) > 0 ? 1 : 0) +
+    (Number(form.scanConcurrency || 0) > 0 ? 1 : 0) +
+    (Number(form.maxRetries) >= 0 ? 1 : 0);
+  const activePolicyCount =
+    (form.compareMode !== 0 ? 1 : 0) +
+    (form.conflictPolicy !== 0 ? 1 : 0) +
+    (form.trashEnable ? 1 : 0) +
+    (form.method === 2 && form.deleteEmptySrcDirs ? 1 : 0);
+
+  const runFilterTest = async () => {
+    const samplePath = testPath.trim();
+    if (!samplePath) {
+      Toast.warning("请输入要测试的示例文件路径");
+      return;
+    }
+    setTestingFilter(true);
+    try {
+      const payload = buildJobPayload(mergedForm);
+      const sizeBytes = Math.max(0, Math.round((Number(testSizeMB) || 0) * 1024 * 1024));
+      const ageMinutes = Math.max(0, Math.trunc(Number(testAgeMinutes) || 0));
+      const res = await api.testJobFilter({
+        exclude: payload.exclude || "",
+        include: payload.include || "",
+        filterMode: payload.filterMode,
+        minFileSize: payload.minFileSize,
+        maxFileSize: payload.maxFileSize,
+        minFileAgeMinutes: payload.minFileAgeMinutes,
+        olderThanDays: payload.olderThanDays,
+        newerThanDays: payload.newerThanDays,
+        trashEnable: payload.trashEnable,
+        trashDir: payload.trashDir,
+        samplePath,
+        sampleSize: sizeBytes,
+        sampleAgeMinutes: ageMinutes,
+        sampleIsDir: testIsDir,
+      });
+      setTestResult(res);
+    } catch (err) {
+      errorToast(err);
+    } finally {
+      setTestingFilter(false);
+    }
+  };
   const excludedFolders = useMemo(
     () => parseExcludeFolders(form.exclude),
     [form.exclude],
@@ -440,7 +532,7 @@ export default function TaskEditor({
   return (
     <RemoteDirCacheProvider>
       <Editor
-        title={job ? "编辑任务" : "新建任务"}
+        title={job ? "编辑任务" : initialDraft ? "复制任务" : "新建任务"}
         visible
         busy={action.busy}
         onClose={onClose}
@@ -696,6 +788,107 @@ export default function TaskEditor({
                         : undefined
                     }
                   />
+
+                  <div className="advanced-options">
+                    <button
+                      type="button"
+                      className={`advanced-options-toggle${policyOpen ? " is-open" : ""}`}
+                      aria-expanded={policyOpen}
+                      onClick={() => setPolicyOpen((open) => !open)}
+                    >
+                      <IconChevronRight
+                        className="advanced-options-chevron"
+                        aria-hidden="true"
+                      />
+                      <span>同步策略与回收站</span>
+                      {activePolicyCount > 0 && (
+                        <Tag size="small" color="blue" type="light">
+                          已定制 {activePolicyCount} 项
+                        </Tag>
+                      )}
+                    </button>
+                    {policyOpen && (
+                      <div className="advanced-options-body">
+                        <Field label="文件比对方式">
+                          <Select
+                            value={form.compareMode}
+                            optionList={compareModeOptions.map((o) => ({
+                              label: o.label,
+                              value: o.value,
+                            }))}
+                            onChange={(v) => change("compareMode", Number(v))}
+                          />
+                        </Field>
+                        <Field label="同名冲突处理">
+                          <Select
+                            value={form.conflictPolicy}
+                            optionList={conflictPolicyOptions.map((o) => ({
+                              label: o.label,
+                              value: o.value,
+                            }))}
+                            onChange={(v) =>
+                              change("conflictPolicy", Number(v))
+                            }
+                          />
+                        </Field>
+                        <SettingRow
+                          label="启用目标端回收站（软删除）"
+                          variant="bordered"
+                          tip="开启后，全量删除或覆盖旧文件时先移至目标目录下的回收站子目录，避免误删不可恢复"
+                        >
+                          <Switch
+                            aria-label="启用目标端回收站"
+                            checked={form.trashEnable}
+                            onChange={(v) => change("trashEnable", v)}
+                          />
+                        </SettingRow>
+                        {form.trashEnable && (
+                          <div className="form-grid form-grid--two">
+                            <Field
+                              label="回收站目录名"
+                              error={showStepError(0, "trashDir")}
+                              hint="自动从同步扫描中排除"
+                            >
+                              <Input
+                                value={form.trashDir}
+                                placeholder=".opensync-trash"
+                                onChange={(v) => change("trashDir", v)}
+                              />
+                            </Field>
+                            <Field
+                              label="回收站保留天数"
+                              hint="0 表示永久保留，不自动清理"
+                            >
+                              <Input
+                                inputMode="numeric"
+                                value={String(form.trashRetentionDays)}
+                                placeholder="30"
+                                onChange={(v) =>
+                                  change(
+                                    "trashRetentionDays",
+                                    Math.max(0, Math.trunc(Number(v) || 0)),
+                                  )
+                                }
+                              />
+                            </Field>
+                          </div>
+                        )}
+                        {form.method === 2 && (
+                          <SettingRow
+                            label="移动完成后清理空源子目录"
+                            variant="bordered"
+                            tip="仅清理本次扫描过且全部文件已移空的源子目录，不会删除源根目录本身"
+                          >
+                            <Switch
+                              aria-label="移动完成后清理空源子目录"
+                              checked={form.deleteEmptySrcDirs}
+                              onChange={(v) => change("deleteEmptySrcDirs", v)}
+                            />
+                          </SettingRow>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
 
@@ -1065,7 +1258,7 @@ export default function TaskEditor({
                         {form.isCron === 1 && upcomingRuns.length > 0 && (
                           <div className="schedule-preview-runs">
                             <span className="muted">预计接下来执行：</span>
-                            <div className="schedule-preview-run-list mono">
+                            <div className="schedule-preview-run-list">
                               {upcomingRuns.map((date) => (
                                 <span key={date.getTime()}>
                                   {formatCronRunTime(date)}
@@ -1126,6 +1319,94 @@ export default function TaskEditor({
                     </div>
                   )}
 
+                  <SettingRow
+                    label="限制允许运行时间窗口"
+                    variant="bordered"
+                    tip="开启后，定时调度仅在指定时段内启动（支持跨午夜，如 23:00 至 06:00），方便错峰利用夜间闲时带宽"
+                  >
+                    <Switch
+                      aria-label="限制允许运行时间窗口"
+                      checked={form.windowEnable}
+                      onChange={(value) => change("windowEnable", value)}
+                    />
+                  </SettingRow>
+
+                  {form.windowEnable && (
+                    <div className="form-section">
+                      <div className="form-grid form-grid--two">
+                        <Field
+                          label="开始时间 (HH:MM)"
+                          error={showStepError(1, "window")}
+                        >
+                          <Input
+                            value={form.windowStart}
+                            placeholder="23:00"
+                            onChange={(v) => change("windowStart", v)}
+                          />
+                        </Field>
+                        <Field label="结束时间 (HH:MM)">
+                          <Input
+                            value={form.windowEnd}
+                            placeholder="06:00"
+                            onChange={(v) => change("windowEnd", v)}
+                          />
+                        </Field>
+                      </div>
+                      <SettingRow
+                        label="超出时间窗口时自动中止运行中的任务"
+                        variant="bordered"
+                        tip="关闭则允许已在窗口内启动的任务运行完毕；开启则在离开窗口后自动停止任务"
+                      >
+                        <Switch
+                          aria-label="超出时间窗口时自动中止运行中的任务"
+                          checked={form.windowStopOutside}
+                          onChange={(v) => change("windowStopOutside", v)}
+                        />
+                      </SettingRow>
+                    </div>
+                  )}
+
+                  <Field label="任务通知绑定">
+                    <Select
+                      value={form.notifyMode}
+                      optionList={notifyModeOptions.map((o) => ({
+                        label: o.label,
+                        value: o.value,
+                      }))}
+                      onChange={(v) => change("notifyMode", Number(v))}
+                    />
+                  </Field>
+
+                  {form.notifyMode === 1 && (
+                    <Field
+                      label="选择通知渠道"
+                      error={showStepError(1, "notifyIds")}
+                      hint="该任务的完成与审批通知仅发送到所选渠道"
+                    >
+                      <Select
+                        multiple
+                        value={form.notifyIds}
+                        placeholder={
+                          notifications.data?.length
+                            ? "请选择一个或多个通知渠道"
+                            : "暂无可用通知渠道，请先在通知配置页面添加"
+                        }
+                        optionList={(notifications.data || []).map((n) => ({
+                          value: n.id,
+                          label: `#${n.id} ${channelNames[n.method] || "未知渠道"} · ${getNotifyEndpointSummary(n)}`,
+                        }))}
+                        onChange={(vals) =>
+                          change(
+                            "notifyIds",
+                            Array.isArray(vals)
+                              ? vals.map(Number).filter(Number.isFinite)
+                              : [],
+                          )
+                        }
+                      />
+                    </Field>
+                  )}
+
                   <div className="advanced-options">
                     <button
                       type="button"
@@ -1137,10 +1418,10 @@ export default function TaskEditor({
                         className="advanced-options-chevron"
                         aria-hidden="true"
                       />
-                      <span>高级选项（目录缓存）</span>
-                      {activeCacheCount > 0 && (
+                      <span>高级选项（目录缓存、防风控限流与并发覆盖）</span>
+                      {activeAdvancedCount > 0 && (
                         <Tag size="small" color="blue" type="light">
-                          已开启 {activeCacheCount} 项
+                          已配置 {activeAdvancedCount} 项
                         </Tag>
                       )}
                     </button>
@@ -1168,6 +1449,81 @@ export default function TaskEditor({
                             onChange={(value) => change("useCacheT", value)}
                           />
                         </SettingRow>
+                        <div className="form-grid form-grid--two">
+                          <Field
+                            label="源端扫描间隔（秒）"
+                            hint="0–300，每次列目录后延迟，防网盘触发 QPS 风控"
+                          >
+                            <Input
+                              inputMode="numeric"
+                              value={String(form.scanIntervalS)}
+                              onChange={(v) =>
+                                change(
+                                  "scanIntervalS",
+                                  Math.max(0, Math.min(300, Math.trunc(Number(v) || 0))),
+                                )
+                              }
+                            />
+                          </Field>
+                          <Field
+                            label="目标端扫描间隔（秒）"
+                            hint="0–300，每次列目录后延迟"
+                          >
+                            <Input
+                              inputMode="numeric"
+                              value={String(form.scanIntervalT)}
+                              onChange={(v) =>
+                                change(
+                                  "scanIntervalT",
+                                  Math.max(0, Math.min(300, Math.trunc(Number(v) || 0))),
+                                )
+                              }
+                            />
+                          </Field>
+                        </div>
+                        <div className="form-grid form-grid--three">
+                          <Field label="操作并发覆盖" hint="0 = 跟随全局设置 (1–100)">
+                            <Input
+                              inputMode="numeric"
+                              value={String(form.copyConcurrency)}
+                              onChange={(v) =>
+                                change(
+                                  "copyConcurrency",
+                                  Math.max(0, Math.min(100, Math.trunc(Number(v) || 0))),
+                                )
+                              }
+                            />
+                          </Field>
+                          <Field label="扫描并发覆盖" hint="0 = 跟随全局设置 (1–50)">
+                            <Input
+                              inputMode="numeric"
+                              value={String(form.scanConcurrency)}
+                              onChange={(v) =>
+                                change(
+                                  "scanConcurrency",
+                                  Math.max(0, Math.min(50, Math.trunc(Number(v) || 0))),
+                                )
+                              }
+                            />
+                          </Field>
+                          <Field label="失败重试覆盖" hint="-1 = 跟随全局 (0–10)">
+                            <Input
+                              inputMode="numeric"
+                              value={String(form.maxRetries)}
+                              onChange={(v) => {
+                                const trimmed = v.trim();
+                                if (trimmed === "-" || trimmed === "") {
+                                  change("maxRetries", -1);
+                                  return;
+                                }
+                                const n = Math.trunc(Number(trimmed));
+                                if (Number.isFinite(n)) {
+                                  change("maxRetries", Math.max(-1, Math.min(10, n)));
+                                }
+                              }}
+                            />
+                          </Field>
+                        </div>
                       </div>
                     )}
                   </div>
@@ -1176,6 +1532,36 @@ export default function TaskEditor({
 
               {panelMounted("filter") && (
                 <div className="form-section" style={panelStyle("filter")}>
+                  <Field
+                    label="过滤模式"
+                    hint="排除模式会同步除黑名单外的所有文件；白名单模式仅同步命中包含规则且未被排除的文件"
+                  >
+                    <Select
+                      value={form.filterMode}
+                      optionList={filterModeOptions.map((o) => ({
+                        label: o.label,
+                        value: o.value,
+                      }))}
+                      onChange={(v) => change("filterMode", Number(v))}
+                    />
+                  </Field>
+
+                  {form.filterMode === 1 && (
+                    <Field
+                      label="白名单包含规则"
+                      required
+                      error={showStepError(2, "include")}
+                      hint="每行一条文件名或后缀规则（如 *.jpg、*.mp4、README.md）；目录过滤与系统目录排除依然生效"
+                    >
+                      <TextArea
+                        autosize={{ minRows: 3, maxRows: 8 }}
+                        value={form.include}
+                        placeholder={"*.jpg\n*.png\n*.mp4"}
+                        onChange={(v) => change("include", v)}
+                      />
+                    </Field>
+                  )}
+
                   <div className="filter-section-block">
                     <div className="filter-section-title">文件大小过滤</div>
                     <div
@@ -1227,6 +1613,57 @@ export default function TaskEditor({
                         {sizeGroupError}
                       </div>
                     )}
+                  </div>
+
+                  <div className="filter-section-block">
+                    <div className="filter-section-title">文件时间过滤</div>
+                    <div className="form-grid form-grid--three">
+                      <Field
+                        label="最小稳定时间（分钟）"
+                        hint="跳过刚修改的文件，避免同步未写完的大文件（0 关闭）"
+                      >
+                        <Input
+                          inputMode="numeric"
+                          value={String(form.minFileAgeMinutes)}
+                          onChange={(v) =>
+                            change(
+                              "minFileAgeMinutes",
+                              Math.max(0, Math.trunc(Number(v) || 0)),
+                            )
+                          }
+                        />
+                      </Field>
+                      <Field
+                        label="仅同步早于（天）"
+                        hint="冷数据归档：只同步 N 天前修改的文件（0 不限）"
+                      >
+                        <Input
+                          inputMode="numeric"
+                          value={String(form.olderThanDays)}
+                          onChange={(v) =>
+                            change(
+                              "olderThanDays",
+                              Math.max(0, Math.trunc(Number(v) || 0)),
+                            )
+                          }
+                        />
+                      </Field>
+                      <Field
+                        label="仅同步最近（天）"
+                        hint="只同步最近 N 天内修改的文件（0 不限）"
+                      >
+                        <Input
+                          inputMode="numeric"
+                          value={String(form.newerThanDays)}
+                          onChange={(v) =>
+                            change(
+                              "newerThanDays",
+                              Math.max(0, Math.trunc(Number(v) || 0)),
+                            )
+                          }
+                        />
+                      </Field>
+                    </div>
                   </div>
 
                   <Field
@@ -1292,13 +1729,75 @@ export default function TaskEditor({
                               {group.label}
                             </Checkbox>
                             <span className="system-dir-patterns">
-                              {group.patterns.join("  ")}
+                              {group.patterns.join(" · ")}
                             </span>
                           </div>
                         );
                       })}
                     </div>
                   </Field>
+                  <div className="filter-tester">
+                    <div className="filter-tester-head">
+                      <strong>规则实时测试器</strong>
+                      <span className="muted">
+                        输入示例相对路径和属性，立即验证是否会被当前过滤规则同步
+                      </span>
+                    </div>
+                    <div className="filter-tester-grid">
+                      <Input
+                        aria-label="示例相对路径"
+                        placeholder="如 2026/photo.jpg 或 cache/tmp.log"
+                        value={testPath}
+                        onChange={setTestPath}
+                      />
+                      <Input
+                        aria-label="示例文件大小 MB"
+                        inputMode="decimal"
+                        suffix="MB"
+                        value={testSizeMB}
+                        onChange={setTestSizeMB}
+                      />
+                      <Input
+                        aria-label="距上次修改分钟数"
+                        inputMode="numeric"
+                        suffix="分钟前"
+                        value={testAgeMinutes}
+                        onChange={setTestAgeMinutes}
+                      />
+                      <Button
+                        type="primary"
+                        theme="light"
+                        loading={testingFilter}
+                        onClick={() => void runFilterTest()}
+                      >
+                        测试匹配
+                      </Button>
+                    </div>
+                    <div className="filter-tester-foot">
+                      <Checkbox
+                        checked={testIsDir}
+                        onChange={(e) => setTestIsDir(Boolean(e.target.checked))}
+                      >
+                        作为目录测试
+                      </Checkbox>
+                      {testResult && (
+                        <div
+                          className={`filter-tester-result${testResult.willSync ? " is-sync" : " is-skip"}`}
+                          role="status"
+                        >
+                          {testResult.willSync ? (
+                            <IconTickCircle aria-hidden="true" size="small" />
+                          ) : (
+                            <IconAlertTriangle aria-hidden="true" size="small" />
+                          )}
+                          <span>
+                            {testResult.willSync ? "将会同步" : "不会同步"}：
+                            {testResult.reason}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 </div>
               )}
             </div>

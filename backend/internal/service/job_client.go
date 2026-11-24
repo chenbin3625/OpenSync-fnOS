@@ -40,6 +40,25 @@ type JobClient struct {
 	// running: the replay reads the source task's items in id-ordered batches,
 	// so deleting them mid-run silently drops the remainder.
 	retrySourceID int64
+	// queueCancel cancels an in-flight wait on engineQueue.Acquire so stop,
+	// pause, delete, and shutdown abort queued jobs immediately.
+	queueCancel context.CancelFunc
+}
+
+func (jc *JobClient) setQueueCancel(cancel context.CancelFunc) {
+	jc.mu.Lock()
+	jc.queueCancel = cancel
+	jc.mu.Unlock()
+}
+
+func (jc *JobClient) cancelQueueWait() {
+	jc.mu.Lock()
+	cancel := jc.queueCancel
+	jc.queueCancel = nil
+	jc.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // lockOp takes the configuration lock and reports whether the job still
@@ -423,20 +442,24 @@ func NewJobClient(job map[string]interface{}, isInit bool) (*JobClient, error) {
 }
 
 func (jc *JobClient) runMarkedJob() {
-	jc.runMarkedJobConfig(0, nil, false)
+	jc.runMarkedJobConfig(0, nil, nil, false)
 }
 
 func (jc *JobClient) runMarkedManualJob() {
-	jc.runMarkedJobConfig(0, nil, true)
+	jc.runMarkedJobConfig(0, nil, nil, true)
 }
 
 // runMarkedJobConfig starts a task. With sourceTaskID > 0 it replays the source
-// task's items whose status is in statuses (retry-failed); otherwise it runs a
-// fresh full scan.
-func (jc *JobClient) runMarkedJobConfig(sourceTaskID int64, statuses []taskStatus, manual bool) {
+// task's items whose status is in statuses (or matching itemIDs when provided);
+// otherwise it runs a fresh full scan.
+func (jc *JobClient) runMarkedJobConfig(sourceTaskID int64, statuses []taskStatus, itemIDs []int64, manual bool) {
 	taskID := int64(0)
+	var releaseSlot func()
 	defer func() {
 		if r := recover(); r != nil {
+			if releaseSlot != nil {
+				releaseSlot()
+			}
 			jc.markDone()
 			jc.clearCurrentTask(nil)
 			errMsg := fmt.Sprintf("%v", r)
@@ -457,10 +480,37 @@ func (jc *JobClient) runMarkedJobConfig(sourceTaskID int64, statuses []taskStatu
 		return
 	}
 
+	// Enforce per-engine maxConcurrentJobs queue before creating the task row.
+	jobSnap := jc.jobSnapshot()
+	alistID := util.ToInt64(jobSnap["alistId"])
+	maxConcurrent := 0
+	if alistID > 0 && alistDeps != nil && alistDeps.GetAlistByID != nil {
+		if alistRow, err := alistDeps.GetAlistByID(alistID); err == nil && alistRow != nil {
+			maxConcurrent = util.ToInt(alistRow["maxConcurrentJobs"])
+		}
+	}
+	queueCtx, queueCancel := context.WithCancel(context.Background())
+	jc.setQueueCancel(queueCancel)
+	slotRelease, acquireErr := engineQueue.Acquire(queueCtx, alistID, jc.idSnapshot(), maxConcurrent)
+	jc.setQueueCancel(nil)
+	queueCancel()
+	if acquireErr != nil {
+		jc.markDone()
+		return
+	}
+	releaseSlot = slotRelease
+
+	if !jc.enabled() || jc.isClosing() {
+		releaseSlot()
+		jc.markDone()
+		return
+	}
+
 	var err error
 	taskID, err = mapper.AddJobTask(jc.idSnapshot(), time.Now().Unix())
 	if err != nil {
 		log.Printf("Failed to create task for job %d: %v", jc.idSnapshot(), err)
+		releaseSlot()
 		jc.markDone()
 		return
 	}
@@ -468,6 +518,7 @@ func (jc *JobClient) runMarkedJobConfig(sourceTaskID int64, statuses []taskStatu
 		if err := UpdateJobTaskStatusSimple(taskID, taskStatusStopped, nil); err != nil {
 			log.Printf("Failed to mark disabled task %d as stopped: %v", taskID, err)
 		}
+		releaseSlot()
 		jc.markDone()
 		return
 	}
@@ -478,12 +529,18 @@ func (jc *JobClient) runMarkedJobConfig(sourceTaskID int64, statuses []taskStatu
 		if err := UpdateJobTaskStatusSimple(taskID, taskStatusSystemFailed, &errMsg); err != nil {
 			log.Printf("Failed to mark task %d as failed: %v", taskID, err)
 		}
+		releaseSlot()
 		jc.markDone()
 		return
 	}
+	task.releaseEngineSlot = releaseSlot
+	releaseSlot = nil
 	if sourceTaskID > 0 {
 		task.RetrySourceTaskID = sourceTaskID
 		task.RetryStatuses = append([]taskStatus(nil), statuses...)
+		if len(itemIDs) > 0 {
+			task.RetryItemIDs = append([]int64(nil), itemIDs...)
+		}
 	}
 	task.RequireFullSyncApproval = manual ||
 		(sourceTaskID == 0 && config.GetConfig().Server.ScheduledFullSyncConfirm == 1)
@@ -495,10 +552,35 @@ func (jc *JobClient) runMarkedJobConfig(sourceTaskID int64, statuses []taskStatu
 			log.Printf("Failed to mark closing/paused task %d as stopped: %v", taskID, err)
 		}
 		task.requestBreak()
+		task.releaseSlotNow()
 		jc.markDone()
 		return
 	}
+	if !manual && util.ToInt(task.Job["windowEnable"]) == 1 && util.ToInt(task.Job["windowStopOutside"]) == 1 {
+		go watchTaskTimeWindow(task)
+	}
 	task.Start()
+}
+
+func watchTaskTimeWindow(task *JobTask) {
+	ctx := task.context()
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if task.isBreak() {
+				return
+			}
+			if !JobInTimeWindow(task.Job, time.Now()) {
+				log.Printf("Task %d (job %d) left configured run window; stopping task", task.TaskID, task.jobIDSnapshot())
+				task.requestBreak()
+				return
+			}
+		}
+	}
 }
 
 // DoJob executes the job, waiting until any current run has finished.
@@ -517,8 +599,13 @@ func (jc *JobClient) DoJob() {
 	jc.runMarkedManualJob()
 }
 
-// DoScheduled executes a scheduled job once, skipping if the previous run is still active.
+// DoScheduled executes a scheduled job once, skipping if outside its allowed
+// time window or if the previous run is still active.
 func (jc *JobClient) DoScheduled() bool {
+	if !JobInTimeWindow(jc.jobSnapshot(), time.Now()) {
+		log.Printf("Skipping scheduled run of job %d: outside allowed time window", jc.idSnapshot())
+		return false
+	}
 	if !jc.tryMarkDoing() {
 		log.Printf("Skipping job %d because previous run is still active", jc.idSnapshot())
 		return false
@@ -543,9 +630,15 @@ func (jc *JobClient) DoManual() error {
 	return nil
 }
 
-// DoRetryFailedTaskItems triggers a manual execution that replays the non-success
-// items of a historical task.
+// DoRetryFailedTaskItems triggers a manual execution that replays all
+// non-success items of a historical task.
 func (jc *JobClient) DoRetryFailedTaskItems(sourceTaskID int64) error {
+	return jc.DoRetrySelectedTaskItems(sourceTaskID, nil)
+}
+
+// DoRetrySelectedTaskItems replays either all non-success items (when itemIDs
+// is empty) or only the specified retryable item IDs of a historical task.
+func (jc *JobClient) DoRetrySelectedTaskItems(sourceTaskID int64, itemIDs []int64) error {
 	if jc.isClosing() {
 		return publicError(msg.T(msg.JobNotFound))
 	}
@@ -564,16 +657,27 @@ func (jc *JobClient) DoRetryFailedTaskItems(sourceTaskID int64) error {
 	// checks this claim, so the source cannot disappear between validation and the
 	// replay.
 	jc.setRetrySource(sourceTaskID)
-	count, err := jobDeps.CountJobTaskItemsByStatuses(sourceTaskID, retryableStatusValues())
+	var (
+		count int64
+		err   error
+	)
+	if len(itemIDs) > 0 {
+		count, err = mapper.CountJobTaskItemsByIDs(sourceTaskID, itemIDs, retryableStatusValues())
+	} else {
+		count, err = jobDeps.CountJobTaskItemsByStatuses(sourceTaskID, retryableStatusValues())
+	}
 	if err != nil {
 		jc.markDone()
 		return fmt.Errorf("count retryable items: %w", err)
 	}
 	if count == 0 {
 		jc.markDone()
+		if len(itemIDs) > 0 {
+			return publicError(msg.T(msg.NoRetryItemSelected))
+		}
 		return publicError(msg.T(msg.NoFailedTaskItems))
 	}
-	go jc.runMarkedJobConfig(sourceTaskID, retryableTaskStatuses, false)
+	go jc.runMarkedJobConfig(sourceTaskID, retryableTaskStatuses, itemIDs, false)
 	return nil
 }
 
@@ -616,8 +720,9 @@ func (jc *JobClient) ResumeJob() error {
 	return nil
 }
 
-// AbortJob aborts the current running task
+// AbortJob aborts the current running or queued task
 func (jc *JobClient) AbortJob() {
+	jc.cancelQueueWait()
 	if task := jc.currentTask(); task != nil {
 		task.requestBreak()
 	}
@@ -644,6 +749,7 @@ func (jc *JobClient) stopJobLocked(remove bool) error {
 	scheduler := jc.schedulerSnapshot()
 	if remove {
 		jc.closing.Store(true)
+		jc.cancelQueueWait()
 		jc.mu.Lock()
 		if jc.Job != nil {
 			jc.Job["enable"] = 0
@@ -661,6 +767,7 @@ func (jc *JobClient) stopJobLocked(remove bool) error {
 	if err := mapper.UpdateJobEnable(jobID, 0); err != nil {
 		return fmt.Errorf("disable job: %w", err)
 	}
+	jc.cancelQueueWait()
 	// Atomically disable and read CurrentJobTask under jc.mu so a starting task
 	// either sees enable=0 in trySetCurrentTaskIfActive or is seen here and broken.
 	jc.mu.Lock()
@@ -701,6 +808,7 @@ var pauseJobIdleTimeout = 30 * time.Second
 // the scheduler alive so a delete that cannot complete can be rolled back. It
 // returns the previous in-memory enable value. The caller holds opMu.
 func (jc *JobClient) pauseForRemoval() int {
+	jc.cancelQueueWait()
 	jc.mu.Lock()
 	previous := 0
 	if jc.Job != nil {

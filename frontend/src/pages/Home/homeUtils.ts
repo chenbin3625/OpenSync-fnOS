@@ -62,6 +62,37 @@ export const methodOptions = [
   },
 ];
 export const methodNames = methodOptions.map((method) => method.name);
+
+export const compareModeOptions = [
+  { value: 0, label: "默认（大小 + 修改时间 / MD5）" },
+  { value: 1, label: "仅按文件大小（忽略修改时间）" },
+  { value: 2, label: "大小 + MD5（忽略修改时间，适合跨网盘）" },
+] as const;
+
+export const conflictPolicyOptions = [
+  { value: 0, label: "覆盖目标文件（开启回收站时先移入回收站）" },
+  { value: 1, label: "跳过已存在的目标文件" },
+  { value: 2, label: "保留双方（旧目标文件重命名为 .conflict-时间戳）" },
+] as const;
+
+export const filterModeOptions = [
+  { value: 0, label: "排除模式（黑名单，默认）" },
+  { value: 1, label: "仅同步匹配文件（白名单）" },
+] as const;
+
+export const notifyModeOptions = [
+  { value: 0, label: "跟随全局通知渠道" },
+  { value: 1, label: "仅发送到指定通知渠道" },
+  { value: 2, label: "关闭此任务通知" },
+] as const;
+
+export const compareModeLabel = (mode?: number | null) =>
+  compareModeOptions.find((item) => item.value === Number(mode ?? 0))?.label ??
+  compareModeOptions[0].label;
+
+export const conflictPolicyLabel = (policy?: number | null) =>
+  conflictPolicyOptions.find((item) => item.value === Number(policy ?? 0))?.label ??
+  conflictPolicyOptions[0].label;
 export const methodLabel = (method?: number | null) => {
   if (method === null || method === undefined || method === ("" as unknown)) {
     return "—";

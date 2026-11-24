@@ -35,7 +35,14 @@ type ServerConfig struct {
 	// ScheduledFullSyncConfirm pauses a scheduled full sync before it deletes
 	// destination entries and waits for an operator to confirm the plan.
 	ScheduledFullSyncConfirm int
-	PasswdStr                string
+	// FullSyncApprovalTimeout is how many minutes a full sync waits for deletion
+	// approval before continuing with copy-only (0 = wait indefinitely until
+	// task timeout or cancellation).
+	FullSyncApprovalTimeout int
+	// EngineHealthCheckInterval is the periodic storage engine health probe
+	// interval in minutes (0 = disabled).
+	EngineHealthCheckInterval int
+	PasswdStr                 string
 	// AllowedOrigins lists the origins allowed to perform mutations. Entries are
 	// full origins ("http://nas.example:5666") or bare hosts ("nas.example");
 	// full origins match scheme and effective port exactly, while bare hosts
@@ -77,26 +84,34 @@ const (
 )
 
 const (
-	DefaultCopyConcurrency = 5
-	DefaultScanConcurrency = 16
-	DefaultMaxRetries      = 2
+	DefaultCopyConcurrency           = 5
+	DefaultScanConcurrency           = 16
+	DefaultMaxRetries                = 2
+	DefaultFullSyncApprovalTimeout   = 30
+	DefaultEngineHealthCheckInterval = 15
 
-	MinCopyConcurrency = 1
-	MaxCopyConcurrency = 100
-	MinScanConcurrency = 1
-	MaxScanConcurrency = 50
-	MinMaxRetries      = 0
-	MaxRetryAttempts   = 10
+	MinCopyConcurrency           = 1
+	MaxCopyConcurrency           = 100
+	MinScanConcurrency           = 1
+	MaxScanConcurrency           = 50
+	MinMaxRetries                = 0
+	MaxRetryAttempts             = 10
+	MinFullSyncApprovalTimeout   = 0
+	MaxFullSyncApprovalTimeout   = 1440
+	MinEngineHealthCheckInterval = 0
+	MaxEngineHealthCheckInterval = 1440
 )
 
 // SystemSettings is the subset of backend settings exposed for runtime editing.
 type SystemSettings struct {
-	TaskTimeout              int `json:"taskTimeout"`
-	TaskSave                 int `json:"taskSave"`
-	CopyConcurrency          int `json:"copyConcurrency"`
-	ScanConcurrency          int `json:"scanConcurrency"`
-	MaxRetries               int `json:"maxRetries"`
-	ScheduledFullSyncConfirm int `json:"scheduledFullSyncConfirm"`
+	TaskTimeout               int `json:"taskTimeout"`
+	TaskSave                  int `json:"taskSave"`
+	CopyConcurrency           int `json:"copyConcurrency"`
+	ScanConcurrency           int `json:"scanConcurrency"`
+	MaxRetries                int `json:"maxRetries"`
+	ScheduledFullSyncConfirm  int `json:"scheduledFullSyncConfirm"`
+	FullSyncApprovalTimeout   int `json:"fullSyncApprovalTimeout"`
+	EngineHealthCheckInterval int `json:"engineHealthCheckInterval"`
 }
 
 // GetPasswordStr gets or generates the encryption secret key. Persistence is
@@ -273,6 +288,7 @@ var deprecatedConfigEnv = []string{
 var knownConfigKeys = map[string]struct{}{
 	"task_save": {}, "task_timeout": {}, "copy_concurrency": {},
 	"scan_concurrency": {}, "max_retries": {}, "scheduled_full_sync_confirm": {},
+	"full_sync_approval_timeout": {}, "engine_health_check_interval": {},
 	"allowed_origins": {}, "locale": {},
 }
 
@@ -311,12 +327,14 @@ func warnUnknownConfigKeys(opensync map[string]string) {
 // reason to use defaults.
 func loadServerConfig(passwdStr string) (ServerConfig, error) {
 	sCfg := ServerConfig{
-		TaskSave:        defaultTaskSave,
-		Timeout:         defaultTaskTimeout,
-		CopyConcurrency: DefaultCopyConcurrency,
-		ScanConcurrency: DefaultScanConcurrency,
-		MaxRetries:      DefaultMaxRetries,
-		PasswdStr:       passwdStr,
+		TaskSave:                  defaultTaskSave,
+		Timeout:                   defaultTaskTimeout,
+		CopyConcurrency:           DefaultCopyConcurrency,
+		ScanConcurrency:           DefaultScanConcurrency,
+		MaxRetries:                DefaultMaxRetries,
+		FullSyncApprovalTimeout:   DefaultFullSyncApprovalTimeout,
+		EngineHealthCheckInterval: DefaultEngineHealthCheckInterval,
+		PasswdStr:                 passwdStr,
 	}
 
 	sCfg.TaskSave = envIntConfigValue("OPENSYNC_TASK_SAVE", sCfg.TaskSave)
@@ -325,6 +343,8 @@ func loadServerConfig(passwdStr string) (ServerConfig, error) {
 	sCfg.ScanConcurrency = envIntConfigValue("OPENSYNC_SCAN_CONCURRENCY", sCfg.ScanConcurrency)
 	sCfg.MaxRetries = envIntConfigValue("OPENSYNC_MAX_RETRIES", sCfg.MaxRetries)
 	sCfg.ScheduledFullSyncConfirm = envIntConfigValue("OPENSYNC_SCHEDULED_FULL_SYNC_CONFIRM", sCfg.ScheduledFullSyncConfirm)
+	sCfg.FullSyncApprovalTimeout = envIntConfigValue("OPENSYNC_FULL_SYNC_APPROVAL_TIMEOUT", sCfg.FullSyncApprovalTimeout)
+	sCfg.EngineHealthCheckInterval = envIntConfigValue("OPENSYNC_ENGINE_HEALTH_CHECK_INTERVAL", sCfg.EngineHealthCheckInterval)
 	sCfg.AllowedOrigins = splitList(os.Getenv("OPENSYNC_ALLOWED_ORIGINS"))
 	sCfg.Locale = envStringConfigValue("OPENSYNC_LOCALE", sCfg.Locale)
 	for _, name := range deprecatedConfigEnv {
@@ -369,6 +389,12 @@ func loadServerConfig(passwdStr string) (ServerConfig, error) {
 		if v, ok := opensync["scheduled_full_sync_confirm"]; ok {
 			sCfg.ScheduledFullSyncConfirm = intConfigValue(v, sCfg.ScheduledFullSyncConfirm, "scheduled_full_sync_confirm")
 		}
+		if v, ok := opensync["full_sync_approval_timeout"]; ok {
+			sCfg.FullSyncApprovalTimeout = intConfigValue(v, sCfg.FullSyncApprovalTimeout, "full_sync_approval_timeout")
+		}
+		if v, ok := opensync["engine_health_check_interval"]; ok {
+			sCfg.EngineHealthCheckInterval = intConfigValue(v, sCfg.EngineHealthCheckInterval, "engine_health_check_interval")
+		}
 		if v, ok := opensync["allowed_origins"]; ok {
 			sCfg.AllowedOrigins = splitList(v)
 		}
@@ -398,6 +424,8 @@ func clampServerConfig(sCfg *ServerConfig) {
 	sCfg.ScanConcurrency = clampManagedInt("scan_concurrency", sCfg.ScanConcurrency)
 	sCfg.MaxRetries = clampManagedInt("max_retries", sCfg.MaxRetries)
 	sCfg.ScheduledFullSyncConfirm = clampManagedInt("scheduled_full_sync_confirm", sCfg.ScheduledFullSyncConfirm)
+	sCfg.FullSyncApprovalTimeout = clampManagedInt("full_sync_approval_timeout", sCfg.FullSyncApprovalTimeout)
+	sCfg.EngineHealthCheckInterval = clampManagedInt("engine_health_check_interval", sCfg.EngineHealthCheckInterval)
 }
 
 // clampManagedInt applies the same startup range clamping to a single managed
@@ -417,6 +445,10 @@ func clampManagedInt(key string, value int) int {
 		return clampInt(value, MinMaxRetries, MaxRetryAttempts, DefaultMaxRetries)
 	case "scheduled_full_sync_confirm":
 		return clampInt(value, 0, 1, 0)
+	case "full_sync_approval_timeout":
+		return clampInt(value, MinFullSyncApprovalTimeout, MaxFullSyncApprovalTimeout, DefaultFullSyncApprovalTimeout)
+	case "engine_health_check_interval":
+		return clampInt(value, MinEngineHealthCheckInterval, MaxEngineHealthCheckInterval, DefaultEngineHealthCheckInterval)
 	default:
 		return value
 	}
@@ -454,12 +486,14 @@ func GetSystemSettings() SystemSettings {
 
 func settingsFromServer(s ServerConfig) SystemSettings {
 	return SystemSettings{
-		TaskTimeout:              s.Timeout,
-		TaskSave:                 s.TaskSave,
-		CopyConcurrency:          s.CopyConcurrency,
-		ScanConcurrency:          s.ScanConcurrency,
-		MaxRetries:               s.MaxRetries,
-		ScheduledFullSyncConfirm: s.ScheduledFullSyncConfirm,
+		TaskTimeout:               s.Timeout,
+		TaskSave:                  s.TaskSave,
+		CopyConcurrency:           s.CopyConcurrency,
+		ScanConcurrency:           s.ScanConcurrency,
+		MaxRetries:                s.MaxRetries,
+		ScheduledFullSyncConfirm:  s.ScheduledFullSyncConfirm,
+		FullSyncApprovalTimeout:   s.FullSyncApprovalTimeout,
+		EngineHealthCheckInterval: s.EngineHealthCheckInterval,
 	}
 }
 
@@ -506,6 +540,8 @@ func UpdateSystemSettingsWith(update func(current SystemSettings) SystemSettings
 	nextServer.ScanConcurrency = settings.ScanConcurrency
 	nextServer.MaxRetries = settings.MaxRetries
 	nextServer.ScheduledFullSyncConfirm = settings.ScheduledFullSyncConfirm
+	nextServer.FullSyncApprovalTimeout = settings.FullSyncApprovalTimeout
+	nextServer.EngineHealthCheckInterval = settings.EngineHealthCheckInterval
 
 	if err := writeConfigFile(nextServer, cfg.Server); err != nil {
 		var conflict *configConflictError
@@ -534,6 +570,8 @@ func validateSystemSettings(settings SystemSettings) error {
 		{msg.T(msg.SettingsScanConcurrency), settings.ScanConcurrency, MinScanConcurrency, MaxScanConcurrency},
 		{msg.T(msg.SettingsMaxRetries), settings.MaxRetries, MinMaxRetries, MaxRetryAttempts},
 		{msg.T(msg.SettingsSchedConfirm), settings.ScheduledFullSyncConfirm, 0, 1},
+		{msg.T(msg.SettingsApprovalTimeout), settings.FullSyncApprovalTimeout, MinFullSyncApprovalTimeout, MaxFullSyncApprovalTimeout},
+		{msg.T(msg.SettingsHealthCheckInterval), settings.EngineHealthCheckInterval, MinEngineHealthCheckInterval, MaxEngineHealthCheckInterval},
 	}
 	for _, item := range checks {
 		if item.value < item.min || item.value > item.max {
@@ -562,17 +600,19 @@ func envStringConfigValue(envName string, fallback string) string {
 // OPENSYNC_ALLOWED_ORIGINS and OPENSYNC_LOCALE in effect after the first save.
 var configManagedKeys = []string{
 	"task_save", "task_timeout", "copy_concurrency", "scan_concurrency", "max_retries",
-	"scheduled_full_sync_confirm",
+	"scheduled_full_sync_confirm", "full_sync_approval_timeout", "engine_health_check_interval",
 }
 
 func configManagedValues(sCfg ServerConfig) map[string]string {
 	return map[string]string{
-		"task_save":                   strconv.Itoa(sCfg.TaskSave),
-		"task_timeout":                strconv.Itoa(sCfg.Timeout),
-		"copy_concurrency":            strconv.Itoa(sCfg.CopyConcurrency),
-		"scan_concurrency":            strconv.Itoa(sCfg.ScanConcurrency),
-		"max_retries":                 strconv.Itoa(sCfg.MaxRetries),
-		"scheduled_full_sync_confirm": strconv.Itoa(sCfg.ScheduledFullSyncConfirm),
+		"task_save":                    strconv.Itoa(sCfg.TaskSave),
+		"task_timeout":                 strconv.Itoa(sCfg.Timeout),
+		"copy_concurrency":             strconv.Itoa(sCfg.CopyConcurrency),
+		"scan_concurrency":             strconv.Itoa(sCfg.ScanConcurrency),
+		"max_retries":                  strconv.Itoa(sCfg.MaxRetries),
+		"scheduled_full_sync_confirm":  strconv.Itoa(sCfg.ScheduledFullSyncConfirm),
+		"full_sync_approval_timeout":   strconv.Itoa(sCfg.FullSyncApprovalTimeout),
+		"engine_health_check_interval": strconv.Itoa(sCfg.EngineHealthCheckInterval),
 	}
 }
 
@@ -750,6 +790,10 @@ func managedIntValue(key string, sCfg ServerConfig) (int, bool) {
 		return sCfg.MaxRetries, true
 	case "scheduled_full_sync_confirm":
 		return sCfg.ScheduledFullSyncConfirm, true
+	case "full_sync_approval_timeout":
+		return sCfg.FullSyncApprovalTimeout, true
+	case "engine_health_check_interval":
+		return sCfg.EngineHealthCheckInterval, true
 	}
 	return 0, false
 }

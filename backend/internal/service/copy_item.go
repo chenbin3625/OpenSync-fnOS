@@ -57,14 +57,20 @@ const maxTransientPollErrors = 3
 // provides hash metadata for a zero-byte file.
 const emptyFileMD5 = "d41d8cd98f00b204e9800998ecf8427e"
 
+type copyItemRenameClient interface {
+	RenameFileContext(context.Context, string, string, int) error
+}
+
 type CopyItem struct {
 	mu          sync.RWMutex
 	SrcPath     string
 	DstPath     string
+	DstRoot     string
 	FileName    string
 	FileSize    interface{}
 	CopyType    taskItemType
 	IsPath      taskItemObject
+	IsOverwrite bool
 	AlistTaskID string
 	Status      taskStatus
 	Progress    float64
@@ -74,7 +80,8 @@ type CopyItem struct {
 	// submittedAt is the Unix time the current transfer attempt was sent to
 	// AList (guarded by mu). When the remote task record later vanishes, a
 	// copy only counts as done if the destination was written since then.
-	submittedAt int64
+	submittedAt      int64
+	conflictPrepared bool
 
 	runtime         copyItemRuntime
 	client          copyItemClient
@@ -275,7 +282,7 @@ func (ci *CopyItem) toJobTaskItemLocked(taskID int64) JobTaskItem {
 func (ci *CopyItem) DoIt() {
 	runtime := ci.copyRuntime()
 	client := ci.copyClient()
-	maxRetries := runtimeTaskLimits().MaxRetries
+	maxRetries := taskRuntimeLimitsForJob(runtime.jobConfig()).MaxRetries
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if runtime.isBreak() {
 			ci.setStatus(taskStatusStopped)
@@ -415,6 +422,12 @@ func (ci *CopyItem) startTransfer(ctx context.Context, client copyItemClient) (s
 	case taskItemTypeMove:
 		return client.MoveFileContext(ctx, ci.SrcPath, ci.DstPath, ci.FileName)
 	default:
+		if ci.CopyType == taskItemTypeCopy && ci.IsOverwrite && !ci.conflictPrepared {
+			if err := ci.prepareDestinationConflict(ctx, client); err != nil {
+				return "", err
+			}
+			ci.conflictPrepared = true
+		}
 		if size, known := ci.expectedSize(); known && size == 0 {
 			if emptyClient, ok := client.(copyItemEmptyFileClient); ok {
 				interval := util.ToInt(ci.copyRuntime().jobConfig()["scanIntervalS"])
@@ -757,6 +770,46 @@ func (ci *CopyItem) stopRemoteTask(client copyItemClient, cause error) {
 		deleteCtx, cancelDelete := ci.copyRuntime().cleanupContext()
 		_ = client.TaskDeleteContext(deleteCtx, taskID, ci.CopyType)
 		cancelDelete()
+	}
+}
+
+func (ci *CopyItem) prepareDestinationConflict(ctx context.Context, client copyItemClient) error {
+	runtime := ci.copyRuntime()
+	if runtime == nil {
+		return nil
+	}
+	job := runtime.jobConfig()
+	if job == nil {
+		return nil
+	}
+	policy := util.ToInt(job["conflictPolicy"])
+	scanIntervalT := util.ToInt(job["scanIntervalT"])
+
+	switch policy {
+	case 2: // Keep both: rename existing destination file before copying
+		renamer, ok := client.(copyItemRenameClient)
+		if !ok {
+			return errors.New("storage client does not support rename for keep-both conflict policy")
+		}
+		filePath := strings.TrimRight(ci.DstPath, "/") + "/" + ci.FileName
+		newName := conflictBackupName(ci.FileName, time.Now())
+		if err := renamer.RenameFileContext(ctx, filePath, newName, scanIntervalT); err != nil {
+			if isAlistObjectNotFound(err) {
+				return nil
+			}
+			return fmt.Errorf("keep-both rename existing destination %q: %w", ci.FileName, err)
+		}
+		return nil
+	case 0: // Overwrite: if target trash enabled, move old destination copy to trash first
+		if !trashEnabled(job) || ci.DstRoot == "" {
+			return nil
+		}
+		if jt, ok := runtime.(*JobTask); ok {
+			return jt.moveItemToTrash(ci.DstRoot, ci.DstPath, ci.FileName)
+		}
+		return nil
+	default:
+		return nil
 	}
 }
 

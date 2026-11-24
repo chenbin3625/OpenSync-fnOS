@@ -76,16 +76,22 @@ type JobTask struct {
 	// CurrentMu guards the transfer meter below (speed bookkeeping).
 	CurrentMu sync.RWMutex
 
-	RetrySourceTaskID     int64
-	RetryStatuses         []taskStatus
-	FatalMu               sync.Mutex
-	FatalErr              *string
-	PersistMu             sync.Mutex
-	PersistErr            error
-	persistBufMu          sync.Mutex
-	persistBuffer         []JobTaskItem
-	persistFlushMu        sync.Mutex
-	persistFlushScheduled bool
+	RetrySourceTaskID         int64
+	RetryStatuses             []taskStatus
+	RetryItemIDs              []int64
+	releaseEngineSlot         func()
+	trashDirMu                sync.Mutex
+	trashDirsCreated          map[string]struct{}
+	moveSrcDirMu              sync.Mutex
+	moveSrcSubdirs            map[string]string
+	FatalMu                   sync.Mutex
+	FatalErr                  *string
+	PersistMu                 sync.Mutex
+	PersistErr                error
+	persistBufMu              sync.Mutex
+	persistBuffer             []JobTaskItem
+	persistFlushMu            sync.Mutex
+	persistFlushScheduled     bool
 	// persistFlushTimer is the pending debounced flush. It is retained so the
 	// task can cancel it on completion: an AfterFunc that outlives the task
 	// would still write task items (and reach GetDB) after the run finished,
@@ -102,7 +108,11 @@ type JobTask struct {
 
 func newJobTask(taskID int64, jc *JobClient) (*JobTask, error) {
 	job := jc.jobSnapshot()
-	limits := runtimeTaskLimits()
+	limits := taskRuntimeLimitsForJob(job)
+	scanLimit := limits.ScanConcurrency
+	if scanLimit < config.MinScanConcurrency {
+		scanLimit = scanConcurrencyLimit()
+	}
 	jt := &JobTask{
 		TaskID:         taskID,
 		JobClient:      jc,
@@ -112,8 +122,8 @@ func newJobTask(taskID int64, jc *JobClient) (*JobTask, error) {
 		FinishedSizes:  make(map[taskStatus]int64),
 		Doing:          make(map[int64]*CopyItem),
 		Waiting:        newCopyQueueWithCapacity(defaultCopyQueueCapacity),
-		scanSem:        make(chan struct{}, scanConcurrencyLimit()),
-		scanBranchSem:  make(chan struct{}, scanBranchLimit()),
+		scanSem:        make(chan struct{}, scanLimit),
+		scanBranchSem:  make(chan struct{}, scanLimit*3),
 		cachedLimits:   &limits,
 	}
 	jt.ctx, jt.cancel = newTaskContext(config.GetConfig().Server.Timeout)
@@ -132,7 +142,7 @@ func (jt *JobTask) taskLimits() taskRuntimeLimits {
 	if jt.cachedLimits != nil {
 		return *jt.cachedLimits
 	}
-	return runtimeTaskLimits()
+	return taskRuntimeLimitsForJob(jt.Job)
 }
 
 func newTaskContext(timeoutHours int) (context.Context, context.CancelFunc) {
@@ -290,10 +300,18 @@ func (jt *JobTask) ensureRuntimeLocked() {
 		jt.FinishedSizes = make(map[taskStatus]int64)
 	}
 	if jt.scanSem == nil {
-		jt.scanSem = make(chan struct{}, scanConcurrencyLimit())
+		scanLimit := jt.taskLimits().ScanConcurrency
+		if scanLimit < config.MinScanConcurrency {
+			scanLimit = scanConcurrencyLimit()
+		}
+		jt.scanSem = make(chan struct{}, scanLimit)
 	}
 	if jt.scanBranchSem == nil {
-		jt.scanBranchSem = make(chan struct{}, scanBranchLimit())
+		scanLimit := jt.taskLimits().ScanConcurrency
+		if scanLimit < config.MinScanConcurrency {
+			scanLimit = scanConcurrencyLimit()
+		}
+		jt.scanBranchSem = make(chan struct{}, scanLimit*3)
 	}
 	if jt.ctx == nil || jt.cancel == nil {
 		jt.ctx, jt.cancel = newTaskContext(config.GetConfig().Server.Timeout)
@@ -340,6 +358,9 @@ func (jt *JobTask) setFullSyncApproval(approval *FullSyncApproval) {
 	jt.fullSyncApprovalCh = make(chan struct{})
 	jt.fullSyncApprovalMu.Unlock()
 	jt.notifyProgressNow()
+	if approval != nil && jt.TaskID > 0 {
+		QueueApprovalNotification(jt.TaskID, jt.jobIDSnapshot(), jt.Job, approval)
+	}
 }
 
 func (jt *JobTask) fullSyncApprovalSnapshot() *FullSyncApproval {
@@ -379,12 +400,22 @@ func (jt *JobTask) clearFullSyncApproval() {
 	}
 }
 
+const defaultFullSyncApprovalWait = 30 * time.Minute
+
 // fullSyncApprovalWait bounds how long a run waits for operator confirmation.
-// Without a bound a forgotten confirmation dialog blocked the whole job forever:
-// copies were not started, later scheduled runs were skipped, and nothing told
-// the operator. The timeout does not delete anything: the run continues with
-// the non-destructive part of the plan and records why cleanup was skipped.
-var fullSyncApprovalWait = 30 * time.Minute
+// Tests may override it directly; in production it follows SystemSettings.FullSyncApprovalTimeout.
+var fullSyncApprovalWait = defaultFullSyncApprovalWait
+
+func effectiveFullSyncApprovalWait() time.Duration {
+	if fullSyncApprovalWait != defaultFullSyncApprovalWait {
+		return fullSyncApprovalWait
+	}
+	minutes := config.GetSystemSettings().FullSyncApprovalTimeout
+	if minutes <= 0 {
+		return 0
+	}
+	return time.Duration(minutes) * time.Minute
+}
 
 type fullSyncApprovalResult int
 
@@ -401,8 +432,14 @@ func (jt *JobTask) waitForFullSyncApproval() fullSyncApprovalResult {
 	if ch == nil {
 		return fullSyncApprovalGranted
 	}
-	timer := time.NewTimer(fullSyncApprovalWait)
-	defer timer.Stop()
+	waitDur := effectiveFullSyncApprovalWait()
+	var timer *time.Timer
+	var timerC <-chan time.Time
+	if waitDur > 0 {
+		timer = time.NewTimer(waitDur)
+		defer timer.Stop()
+		timerC = timer.C
+	}
 	select {
 	case <-ch:
 		jt.fullSyncApprovalMu.Lock()
@@ -413,7 +450,7 @@ func (jt *JobTask) waitForFullSyncApproval() fullSyncApprovalResult {
 			return fullSyncApprovalGranted
 		}
 		return fullSyncApprovalRejected
-	case <-timer.C:
+	case <-timerC:
 		jt.fullSyncApprovalMu.Lock()
 		pending := jt.fullSyncApprovalCh == ch
 		if pending {
@@ -425,7 +462,7 @@ func (jt *JobTask) waitForFullSyncApproval() fullSyncApprovalResult {
 			// A decision landed between the timer and the lock.
 			return fullSyncApprovalGranted
 		}
-		log.Printf("Task %d full-sync approval timed out after %s; continuing with copies only", jt.TaskID, fullSyncApprovalWait)
+		log.Printf("Task %d full-sync approval timed out after %s; continuing with copies only", jt.TaskID, waitDur)
 		jt.notifyProgressNow()
 		return fullSyncApprovalTimedOut
 	case <-jt.context().Done():

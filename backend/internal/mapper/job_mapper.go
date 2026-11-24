@@ -81,20 +81,70 @@ func GetJobByTaskID(taskID int64) (map[string]interface{}, error) {
 	return rst[0], nil
 }
 
+func jobExtVal(job map[string]interface{}, key string, fallback interface{}) interface{} {
+	if v, ok := job[key]; ok && v != nil {
+		return v
+	}
+	return fallback
+}
+
 // AddJob inserts a new job
 func AddJob(job map[string]interface{}) (int64, error) {
-	id, err := ExecuteInsert(
-		`INSERT INTO job (enable, remark, srcPath, dstPath, alistId, useCacheT, scanIntervalT, useCacheS, scanIntervalS,
-		 method, interval, isCron, month, day, day_of_week, hour, minute, second, exclude,
-		 minFileSize, maxFileSize, dstMap)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		job["enable"], job["remark"], job["srcPath"], job["dstPath"], job["alistId"],
-		job["useCacheT"], job["scanIntervalT"], job["useCacheS"], job["scanIntervalS"],
-		job["method"], job["interval"], job["isCron"],
-		job["month"], job["day"], job["day_of_week"],
-		job["hour"], job["minute"], job["second"], job["exclude"],
-		job["minFileSize"], job["maxFileSize"], job["dstMap"],
+	hasExt, _ := tableHasColumnDBErr(GetDB(), "job", "copyConcurrency")
+	var (
+		id  int64
+		err error
 	)
+	if hasExt {
+		id, err = ExecuteInsert(
+			`INSERT INTO job (enable, remark, srcPath, dstPath, alistId, useCacheT, scanIntervalT, useCacheS, scanIntervalS,
+			 method, interval, isCron, month, day, day_of_week, hour, minute, second, exclude,
+			 minFileSize, maxFileSize, dstMap,
+			 copyConcurrency, scanConcurrency, maxRetries, compareMode, conflictPolicy, deleteEmptySrcDirs,
+			 trashEnable, trashDir, trashRetentionDays, filterMode, include, minFileAgeMinutes, olderThanDays, newerThanDays,
+			 windowEnable, windowStart, windowEnd, windowStopOutside, notifyMode, notifyIds)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			job["enable"], job["remark"], job["srcPath"], job["dstPath"], job["alistId"],
+			job["useCacheT"], job["scanIntervalT"], job["useCacheS"], job["scanIntervalS"],
+			job["method"], job["interval"], job["isCron"],
+			job["month"], job["day"], job["day_of_week"],
+			job["hour"], job["minute"], job["second"], job["exclude"],
+			job["minFileSize"], job["maxFileSize"], job["dstMap"],
+			jobExtVal(job, "copyConcurrency", 0),
+			jobExtVal(job, "scanConcurrency", 0),
+			jobExtVal(job, "maxRetries", -1),
+			jobExtVal(job, "compareMode", 0),
+			jobExtVal(job, "conflictPolicy", 0),
+			jobExtVal(job, "deleteEmptySrcDirs", 0),
+			jobExtVal(job, "trashEnable", 0),
+			jobExtVal(job, "trashDir", ".opensync-trash"),
+			jobExtVal(job, "trashRetentionDays", 30),
+			jobExtVal(job, "filterMode", 0),
+			job["include"],
+			jobExtVal(job, "minFileAgeMinutes", 0),
+			jobExtVal(job, "olderThanDays", 0),
+			jobExtVal(job, "newerThanDays", 0),
+			jobExtVal(job, "windowEnable", 0),
+			job["windowStart"],
+			job["windowEnd"],
+			jobExtVal(job, "windowStopOutside", 0),
+			jobExtVal(job, "notifyMode", 0),
+			job["notifyIds"],
+		)
+	} else {
+		id, err = ExecuteInsert(
+			`INSERT INTO job (enable, remark, srcPath, dstPath, alistId, useCacheT, scanIntervalT, useCacheS, scanIntervalS,
+			 method, interval, isCron, month, day, day_of_week, hour, minute, second, exclude,
+			 minFileSize, maxFileSize, dstMap)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			job["enable"], job["remark"], job["srcPath"], job["dstPath"], job["alistId"],
+			job["useCacheT"], job["scanIntervalT"], job["useCacheS"], job["scanIntervalS"],
+			job["method"], job["interval"], job["isCron"],
+			job["month"], job["day"], job["day_of_week"],
+			job["hour"], job["minute"], job["second"], job["exclude"],
+			job["minFileSize"], job["maxFileSize"], job["dstMap"],
+		)
+	}
 	if isUniqueConstraintError(err) {
 		// job has UNIQUE(srcPath, dstPath, alistId); surface the duplicate as a
 		// user-facing reason instead of an opaque 500.
@@ -113,18 +163,61 @@ func UpdateJob(job map[string]interface{}) error {
 	if jobID <= 0 {
 		return fmt.Errorf("update job: missing or invalid id")
 	}
-	affected, err := executeUpdateAffected(
-		`UPDATE job SET enable=?, remark=?, srcPath=?, dstPath=?, alistId=?, useCacheT=?, scanIntervalT=?,
-		 useCacheS=?, scanIntervalS=?, method=?, interval=?, isCron=?, month=?, day=?,
-		 day_of_week=?, hour=?, minute=?, second=?, exclude=?, minFileSize=?, maxFileSize=?, dstMap=? WHERE id=?`,
-		job["enable"], job["remark"], job["srcPath"], job["dstPath"], job["alistId"],
-		job["useCacheT"], job["scanIntervalT"], job["useCacheS"], job["scanIntervalS"],
-		job["method"], job["interval"], job["isCron"],
-		job["month"], job["day"], job["day_of_week"],
-		job["hour"], job["minute"], job["second"], job["exclude"],
-		job["minFileSize"], job["maxFileSize"], job["dstMap"],
-		jobID,
+	hasExt, _ := tableHasColumnDBErr(GetDB(), "job", "copyConcurrency")
+	var (
+		affected int64
+		err      error
 	)
+	if hasExt {
+		affected, err = executeUpdateAffected(
+			`UPDATE job SET enable=?, remark=?, srcPath=?, dstPath=?, alistId=?, useCacheT=?, scanIntervalT=?,
+			 useCacheS=?, scanIntervalS=?, method=?, interval=?, isCron=?, month=?, day=?,
+			 day_of_week=?, hour=?, minute=?, second=?, exclude=?, minFileSize=?, maxFileSize=?, dstMap=?,
+			 copyConcurrency=?, scanConcurrency=?, maxRetries=?, compareMode=?, conflictPolicy=?, deleteEmptySrcDirs=?,
+			 trashEnable=?, trashDir=?, trashRetentionDays=?, filterMode=?, include=?, minFileAgeMinutes=?, olderThanDays=?, newerThanDays=?,
+			 windowEnable=?, windowStart=?, windowEnd=?, windowStopOutside=?, notifyMode=?, notifyIds=? WHERE id=?`,
+			job["enable"], job["remark"], job["srcPath"], job["dstPath"], job["alistId"],
+			job["useCacheT"], job["scanIntervalT"], job["useCacheS"], job["scanIntervalS"],
+			job["method"], job["interval"], job["isCron"],
+			job["month"], job["day"], job["day_of_week"],
+			job["hour"], job["minute"], job["second"], job["exclude"],
+			job["minFileSize"], job["maxFileSize"], job["dstMap"],
+			jobExtVal(job, "copyConcurrency", 0),
+			jobExtVal(job, "scanConcurrency", 0),
+			jobExtVal(job, "maxRetries", -1),
+			jobExtVal(job, "compareMode", 0),
+			jobExtVal(job, "conflictPolicy", 0),
+			jobExtVal(job, "deleteEmptySrcDirs", 0),
+			jobExtVal(job, "trashEnable", 0),
+			jobExtVal(job, "trashDir", ".opensync-trash"),
+			jobExtVal(job, "trashRetentionDays", 30),
+			jobExtVal(job, "filterMode", 0),
+			job["include"],
+			jobExtVal(job, "minFileAgeMinutes", 0),
+			jobExtVal(job, "olderThanDays", 0),
+			jobExtVal(job, "newerThanDays", 0),
+			jobExtVal(job, "windowEnable", 0),
+			job["windowStart"],
+			job["windowEnd"],
+			jobExtVal(job, "windowStopOutside", 0),
+			jobExtVal(job, "notifyMode", 0),
+			job["notifyIds"],
+			jobID,
+		)
+	} else {
+		affected, err = executeUpdateAffected(
+			`UPDATE job SET enable=?, remark=?, srcPath=?, dstPath=?, alistId=?, useCacheT=?, scanIntervalT=?,
+			 useCacheS=?, scanIntervalS=?, method=?, interval=?, isCron=?, month=?, day=?,
+			 day_of_week=?, hour=?, minute=?, second=?, exclude=?, minFileSize=?, maxFileSize=?, dstMap=? WHERE id=?`,
+			job["enable"], job["remark"], job["srcPath"], job["dstPath"], job["alistId"],
+			job["useCacheT"], job["scanIntervalT"], job["useCacheS"], job["scanIntervalS"],
+			job["method"], job["interval"], job["isCron"],
+			job["month"], job["day"], job["day_of_week"],
+			job["hour"], job["minute"], job["second"], job["exclude"],
+			job["minFileSize"], job["maxFileSize"], job["dstMap"],
+			jobID,
+		)
+	}
 	if isUniqueConstraintError(err) {
 		return jobExistsError()
 	}
@@ -373,6 +466,102 @@ func DeleteJobTaskByTaskID(taskID int64) error {
 		}
 		return nil
 	})
+}
+
+// DeleteJobTasksByIDs deletes a batch of finished tasks and their items.
+func DeleteJobTasksByIDs(taskIDs []int64) error {
+	if len(taskIDs) == 0 {
+		return nil
+	}
+	for start := 0; start < len(taskIDs); start += expiredTaskDeleteBatchSize {
+		end := start + expiredTaskDeleteBatchSize
+		if end > len(taskIDs) {
+			end = len(taskIDs)
+		}
+		if err := deleteJobTasksByIDs(context.Background(), taskIDs[start:end]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// GetFinishedTaskIDsByJobID returns all finished (non-running) task IDs for a job.
+func GetFinishedTaskIDsByJobID(jobID int64) ([]int64, error) {
+	rows, err := GetDB().Query(
+		`SELECT id FROM job_task WHERE jobId=? AND status NOT IN (0, 1) ORDER BY id ASC`,
+		jobID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+// GetJobTasksByIDs returns task rows matching the supplied IDs.
+func GetJobTasksByIDs(taskIDs []int64) ([]map[string]interface{}, error) {
+	if len(taskIDs) == 0 {
+		return nil, nil
+	}
+	var out []map[string]interface{}
+	for start := 0; start < len(taskIDs); start += 400 {
+		end := start + 400
+		if end > len(taskIDs) {
+			end = len(taskIDs)
+		}
+		clause, args := int64InClause(taskIDs[start:end])
+		rows, err := FetchAllToTable(fmt.Sprintf("SELECT * FROM job_task WHERE id IN (%s)", clause), args...)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rows...)
+	}
+	return out, nil
+}
+
+// GetLatestTaskPerJob returns the most recent job_task record for every jobId.
+func GetLatestTaskPerJob() (map[int64]map[string]interface{}, error) {
+	rows, err := FetchAllToTable(`
+		SELECT id, jobId, status, errMsg, runTime, taskNum, createTime
+		FROM (
+			SELECT id, jobId, status, errMsg, runTime, taskNum, createTime,
+			       ROW_NUMBER() OVER (PARTITION BY jobId ORDER BY createTime DESC, id DESC) AS rn
+			FROM job_task
+		)
+		WHERE rn = 1
+	`)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[int64]map[string]interface{}, len(rows))
+	for _, row := range rows {
+		jobID := util.ToInt64(row["jobId"])
+		if jobID > 0 {
+			result[jobID] = row
+		}
+	}
+	return result, nil
+}
+
+// GetRecentTasks returns tasks whose effective time is >= sinceUnix.
+func GetRecentTasks(sinceUnix int64) ([]map[string]interface{}, error) {
+	return FetchAllToTable(
+		`SELECT id, jobId, status, runTime, taskNum, createTime
+		 FROM job_task
+		 WHERE COALESCE(NULLIF(runTime, 0), createTime) >= ?`,
+		sinceUnix,
+	)
 }
 
 // DeleteJobTaskByRunTimeContext deletes finished tasks older than runTime, then
@@ -747,8 +936,7 @@ func AddJobTaskItemMany(items []map[string]interface{}) error {
 	)
 }
 
-// GetJobTaskItemList gets paginated task item list
-func GetJobTaskItemList(params map[string]interface{}) (map[string]interface{}, error) {
+func buildJobTaskItemWhere(params map[string]interface{}) whereBuilder {
 	taskID := params["taskId"]
 	where := newWhereBuilder("WHERE taskId=?", taskID)
 
@@ -780,6 +968,12 @@ func GetJobTaskItemList(params map[string]interface{}) (map[string]interface{}, 
 			where.args = append(where.args, filterArgs...)
 		}
 	}
+	return where
+}
+
+// GetJobTaskItemList gets paginated task item list
+func GetJobTaskItemList(params map[string]interface{}) (map[string]interface{}, error) {
+	where := buildJobTaskItemWhere(params)
 
 	baseSQL := fmt.Sprintf("SELECT %s FROM job_task_item %s ORDER BY createTime DESC, id DESC", jobTaskItemListColumns, where.clause)
 	// A separate COUNT(*) instead of FetchAllToPage's window count: the window
@@ -787,6 +981,96 @@ func GetJobTaskItemList(params map[string]interface{}) (map[string]interface{}, 
 	// which for a million-item task is a full scan per click.
 	countSQL := fmt.Sprintf("SELECT COUNT(*) FROM job_task_item %s", where.clause)
 	return FetchAllToPageWithCount(baseSQL, countSQL, params, where.args...)
+}
+
+// GetJobTaskItemsForExport fetches filtered task items bounded by limit for CSV/TXT export.
+func GetJobTaskItemsForExport(params map[string]interface{}, limit int) ([]map[string]interface{}, error) {
+	if limit <= 0 {
+		limit = 50000
+	}
+	where := buildJobTaskItemWhere(params)
+	query := fmt.Sprintf("SELECT %s FROM job_task_item %s ORDER BY createTime DESC, id DESC LIMIT ?", jobTaskItemListColumns, where.clause)
+	args := appendSQLArgs(where.args, limit)
+	return FetchAllToTable(query, args...)
+}
+
+// GetTopFailedTaskItems returns up to limit failed items for notification error summaries.
+func GetTopFailedTaskItems(taskID int64, limit int) ([]map[string]interface{}, error) {
+	if limit <= 0 {
+		limit = 3
+	}
+	return FetchAllToTable(
+		fmt.Sprintf("SELECT %s FROM job_task_item WHERE taskId=? AND (status=7 OR (errMsg IS NOT NULL AND errMsg<>'')) ORDER BY id ASC LIMIT ?", jobTaskItemRuntimeColumns),
+		taskID, limit,
+	)
+}
+
+// CountJobTaskItemsByIDs counts selected task items matching any of the given statuses.
+func CountJobTaskItemsByIDs(taskID int64, itemIDs []int64, statuses []int) (int64, error) {
+	if len(itemIDs) == 0 || len(statuses) == 0 {
+		return 0, nil
+	}
+	statusClause, statusArgs := statusInClause(statuses)
+	var total int64
+	for start := 0; start < len(itemIDs); start += 400 {
+		end := start + 400
+		if end > len(itemIDs) {
+			end = len(itemIDs)
+		}
+		idClause, idArgs := int64InClause(itemIDs[start:end])
+		query := fmt.Sprintf("SELECT COUNT(id) FROM job_task_item WHERE taskId=? AND status IN (%s) AND id IN (%s)", statusClause, idClause)
+		args := make([]interface{}, 0, 1+len(statusArgs)+len(idArgs))
+		args = append(args, taskID)
+		args = append(args, statusArgs...)
+		args = append(args, idArgs...)
+		var count int64
+		if err := GetDB().QueryRow(query, args...).Scan(&count); err != nil {
+			return 0, err
+		}
+		total += count
+	}
+	return total, nil
+}
+
+// ForEachJobTaskItemsByIDs reads selected task items in id order matching statuses.
+func ForEachJobTaskItemsByIDs(taskID int64, itemIDs []int64, statuses []int, batchSize int, fn func([]map[string]interface{}) error) error {
+	if len(itemIDs) == 0 || len(statuses) == 0 {
+		return nil
+	}
+	if batchSize <= 0 || batchSize > 400 {
+		batchSize = 400
+	}
+	statusClause, statusArgs := statusInClause(statuses)
+	for start := 0; start < len(itemIDs); start += batchSize {
+		end := start + batchSize
+		if end > len(itemIDs) {
+			end = len(itemIDs)
+		}
+		idClause, idArgs := int64InClause(itemIDs[start:end])
+		query := fmt.Sprintf(
+			`SELECT %s FROM job_task_item
+			 WHERE taskId=? AND status IN (%s) AND id IN (%s)
+			 ORDER BY id ASC`,
+			jobTaskItemRuntimeColumns,
+			statusClause,
+			idClause,
+		)
+		args := make([]interface{}, 0, 1+len(statusArgs)+len(idArgs))
+		args = append(args, taskID)
+		args = append(args, statusArgs...)
+		args = append(args, idArgs...)
+		items, err := FetchAllToTable(query, args...)
+		if err != nil {
+			return err
+		}
+		if len(items) == 0 {
+			continue
+		}
+		if err := fn(items); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // CountJobTaskItemsByStatuses counts task items matching any of the given statuses.

@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const currentVersion = 261121
+const currentVersion = 261122
 
 // InitSQL initializes the database schema and runs migrations
 func InitSQL() {
@@ -36,6 +36,7 @@ func InitSQL() {
 				url text,
 				userName text,
 				token text,
+				maxConcurrentJobs integer DEFAULT 0,
 				createTime integer DEFAULT (strftime('%s', 'now')),
 				UNIQUE (url, userName)
 			)`,
@@ -64,6 +65,26 @@ func InitSQL() {
 				minFileSize integer DEFAULT 0,
 				maxFileSize integer DEFAULT 0,
 				dstMap text DEFAULT NULL,
+				copyConcurrency integer DEFAULT 0,
+				scanConcurrency integer DEFAULT 0,
+				maxRetries integer DEFAULT -1,
+				compareMode integer DEFAULT 0,
+				conflictPolicy integer DEFAULT 0,
+				deleteEmptySrcDirs integer DEFAULT 0,
+				trashEnable integer DEFAULT 0,
+				trashDir text DEFAULT '.opensync-trash',
+				trashRetentionDays integer DEFAULT 30,
+				filterMode integer DEFAULT 0,
+				include text DEFAULT NULL,
+				minFileAgeMinutes integer DEFAULT 0,
+				olderThanDays integer DEFAULT 0,
+				newerThanDays integer DEFAULT 0,
+				windowEnable integer DEFAULT 0,
+				windowStart text DEFAULT NULL,
+				windowEnd text DEFAULT NULL,
+				windowStopOutside integer DEFAULT 0,
+				notifyMode integer DEFAULT 0,
+				notifyIds text DEFAULT NULL,
 				createTime integer DEFAULT (strftime('%s', 'now')),
 				UNIQUE (srcPath, dstPath, alistId)
 			)`,
@@ -375,6 +396,31 @@ func migrationStatements(fromVersion int64) []string {
 			// Superseded by idx_job_task_item_task_status_time, which has the
 			// same (taskId, status) prefix.
 			"DROP INDEX IF EXISTS idx_job_task_item_task_status",
+		)
+	}
+	if fromVersion < 261122 {
+		stmts = append(stmts,
+			"ALTER TABLE alist_list ADD COLUMN maxConcurrentJobs integer DEFAULT 0",
+			"ALTER TABLE job ADD COLUMN copyConcurrency integer DEFAULT 0",
+			"ALTER TABLE job ADD COLUMN scanConcurrency integer DEFAULT 0",
+			"ALTER TABLE job ADD COLUMN maxRetries integer DEFAULT -1",
+			"ALTER TABLE job ADD COLUMN compareMode integer DEFAULT 0",
+			"ALTER TABLE job ADD COLUMN conflictPolicy integer DEFAULT 0",
+			"ALTER TABLE job ADD COLUMN deleteEmptySrcDirs integer DEFAULT 0",
+			"ALTER TABLE job ADD COLUMN trashEnable integer DEFAULT 0",
+			"ALTER TABLE job ADD COLUMN trashDir text DEFAULT '.opensync-trash'",
+			"ALTER TABLE job ADD COLUMN trashRetentionDays integer DEFAULT 30",
+			"ALTER TABLE job ADD COLUMN filterMode integer DEFAULT 0",
+			"ALTER TABLE job ADD COLUMN include text DEFAULT NULL",
+			"ALTER TABLE job ADD COLUMN minFileAgeMinutes integer DEFAULT 0",
+			"ALTER TABLE job ADD COLUMN olderThanDays integer DEFAULT 0",
+			"ALTER TABLE job ADD COLUMN newerThanDays integer DEFAULT 0",
+			"ALTER TABLE job ADD COLUMN windowEnable integer DEFAULT 0",
+			"ALTER TABLE job ADD COLUMN windowStart text DEFAULT NULL",
+			"ALTER TABLE job ADD COLUMN windowEnd text DEFAULT NULL",
+			"ALTER TABLE job ADD COLUMN windowStopOutside integer DEFAULT 0",
+			"ALTER TABLE job ADD COLUMN notifyMode integer DEFAULT 0",
+			"ALTER TABLE job ADD COLUMN notifyIds text DEFAULT NULL",
 		)
 	}
 	stmts = append(stmts, fmt.Sprintf("UPDATE schema_version SET version=%d", currentVersion))

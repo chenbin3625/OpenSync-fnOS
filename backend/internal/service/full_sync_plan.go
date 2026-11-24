@@ -370,6 +370,8 @@ func (jt *JobTask) scanFullSyncTree(root, pairedRoot string, firstDst bool, spec
 		children := make([]string, 0)
 		var excluded []string
 		var specExcluded, sizeExcluded []string
+		includeM := buildJobIncludeMatcher(jt.Job)
+		now := time.Now()
 		for name, metadata := range items {
 			isDir := strings.HasSuffix(name, "/")
 			relPath := relDir + name
@@ -382,7 +384,16 @@ func (jt *JobTask) scanFullSyncTree(root, pairedRoot string, firstDst bool, spec
 				}
 				continue
 			}
-			if !isSrc && !isDir && !jobAllowsFileSize(jt.Job, metadata.Size) {
+			if !isDir && includeM != nil && !includeM.matchesListed(relPath) {
+				if isSrc {
+					delete(items, name)
+				} else {
+					excluded = append(excluded, relPath)
+					specExcluded = append(specExcluded, relPath)
+				}
+				continue
+			}
+			if !isSrc && !isDir && !jobAllowsFileMeta(jt.Job, metadata, now) {
 				excluded = append(excluded, relPath)
 				sizeExcluded = append(sizeExcluded, relPath)
 				continue
@@ -516,6 +527,9 @@ func (plan *fullSyncPlan) compareDir(job map[string]interface{}, srcRelDir, dstR
 	// Collect child directory pairs for concurrent comparison.
 	type childPair struct{ srcRel, dstRel string }
 	var children []childPair
+	now := time.Now()
+	compareMode := util.ToInt(job["compareMode"])
+	conflictPolicy := util.ToInt(job["conflictPolicy"])
 
 	for _, name := range sortedFileListKeys(srcItems) {
 		metadata := srcItems[name]
@@ -530,7 +544,7 @@ func (plan *fullSyncPlan) compareDir(job map[string]interface{}, srcRelDir, dstR
 				// being deleted when the source has no counterpart.
 				if nameExcluded || typeConflict {
 					matchedDst[dstName] = struct{}{}
-					if typeConflict && !plan.scanIncomplete && (isDir || jobAllowsFileSize(job, metadata.Size)) {
+					if typeConflict && !plan.scanIncomplete && (isDir || jobAllowsFileMeta(job, metadata, now)) {
 						plan.addBlocker(dstDir, dstName, dstItems[dstName], dstDir+name, dstRelPath)
 					}
 					continue
@@ -538,11 +552,11 @@ func (plan *fullSyncPlan) compareDir(job map[string]interface{}, srcRelDir, dstR
 			}
 		}
 		if !isDir {
-			// The size filter decides what gets copied, never what gets deleted.
+			// The size/time filter decides what gets copied, never what gets deleted.
 			// Claim the matching destination entry before skipping so a file that
 			// still exists at the source is not treated as an extra file and
 			// deleted from the destination.
-			allowed := jobAllowsFileSize(job, metadata.Size)
+			allowed := jobAllowsFileMeta(job, metadata, now)
 			if !allowed {
 				if dstName, _, exists := dstIndex.find(name, srcIndex); exists {
 					matchedDst[dstName] = struct{}{}
@@ -566,14 +580,18 @@ func (plan *fullSyncPlan) compareDir(job map[string]interface{}, srcRelDir, dstR
 			dstName, dstMetadata, exists := dstIndex.find(name, srcIndex)
 			if exists {
 				matchedDst[dstName] = struct{}{}
+				if conflictPolicy == 1 {
+					// Conflict policy: skip existing destination file.
+					continue
+				}
 				dstRelPath := dstRelDir + dstName
 				_, nameExcluded := plan.dst.specExcluded[dstRelPath]
 				_, sizeExcluded := plan.dst.sizeExcluded[dstRelPath]
-				// The destination copy was skipped by the size filter, so it was
+				// The destination copy was skipped by the size/time filter, so it was
 				// never compared; the source file is in range now and must
 				// replace it. Leaving it in place silently blocked the update
 				// forever, with no record saying why.
-				if !nameExcluded && (sizeExcluded || fileChanged(metadata, dstMetadata)) {
+				if !nameExcluded && (sizeExcluded || fileChangedWithMode(metadata, dstMetadata, compareMode)) {
 					plan.addChanged(newFullSyncFile(srcDir, dstDir, name, metadata))
 				}
 				continue
@@ -670,6 +688,7 @@ func (plan *fullSyncPlan) collectSourceOnly(job map[string]interface{}, srcRelDi
 	srcDir := plan.src.root + srcRelDir
 	dstDir := plan.dst.root + dstRelDir
 	plan.addNewDir(normalizeDirPath(dstDir), fullSyncDir{srcDir: srcDir, dstDir: dstDir})
+	now := time.Now()
 
 	for _, name := range sortedFileListKeys(plan.src.dirs[srcRelDir]) {
 		metadata := plan.src.dirs[srcRelDir][name]
@@ -677,7 +696,7 @@ func (plan *fullSyncPlan) collectSourceOnly(job map[string]interface{}, srcRelDi
 			plan.collectSourceOnly(job, srcRelDir+name, dstRelDir+name)
 			continue
 		}
-		if jobAllowsFileSize(job, metadata.Size) {
+		if jobAllowsFileMeta(job, metadata, now) {
 			plan.addNewFile(newFullSyncFile(srcDir, dstDir, name, metadata))
 		}
 	}
@@ -820,7 +839,7 @@ func (jt *JobTask) executeFullSyncPlan(plan *fullSyncPlan) {
 		writes = plan.writeIndex()
 		guardReason, deletesUnsafe = plan.unsafeDeleteVolume(plan.plannedDeleteWeight(relocations, writes))
 	}
-	deletes := &fullSyncDeleteRun{jt: jt}
+	deletes := &fullSyncDeleteRun{jt: jt, root: plan.dst.root}
 
 	blocked := make(map[string]struct{})
 	// Remove type conflicts first so missing destination directories can be
@@ -898,7 +917,7 @@ func (jt *JobTask) executeFullSyncPlan(plan *fullSyncPlan) {
 	}
 	for _, file := range sortedFullSyncFiles(plan.changed) {
 		if !fullSyncPathBlocked(file.target, blocked) {
-			jt.queueCopyFile(file.srcDir, file.dstDir, file.name, file.metadata.Size, taskItemTypeCopy, writesFailed)
+			jt.queueCopyFileWithConflict(file.srcDir, file.dstDir, plan.dst.root, file.name, file.metadata.Size, taskItemTypeCopy, writesFailed, true)
 		}
 	}
 	for _, target := range sortedNewFileTargets(plan.newFiles) {
@@ -1196,6 +1215,7 @@ const maxConsecutiveDeleteErrors = 10
 // failure cap, so type-conflict removals and extra deletes count together.
 type fullSyncDeleteRun struct {
 	jt                *JobTask
+	root              string
 	consecutiveErrors int
 	aborted           bool
 }
@@ -1206,7 +1226,7 @@ func (run *fullSyncDeleteRun) run(item fullSyncDelete) bool {
 	if run.aborted || run.jt.isBreak() {
 		return false
 	}
-	if run.jt.delFile(item.dir, item.name, item.metadata.Size) == taskStatusSuccess {
+	if run.jt.delFileWithRoot(run.root, item.dir, item.name, item.metadata.Size) == taskStatusSuccess {
 		run.consecutiveErrors = 0
 		return true
 	}

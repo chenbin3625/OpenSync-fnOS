@@ -1,10 +1,18 @@
 import type {
   AlistItem,
+  AppLogsResponse,
+  BatchJobActionResult,
   CurrentTaskData,
+  DashboardOverview,
+  DryRunResult,
+  EngineHealth,
+  FilterTestResult,
   JobItem,
   NotifyItem,
   PageData,
   RealtimeTaskItemPage,
+  SystemBackupPayload,
+  SystemImportSummary,
   SystemSettings,
   TaskItem,
   TaskRecord,
@@ -37,6 +45,8 @@ const defaultSettings: SystemSettings = {
   scanConcurrency: 16,
   maxRetries: 2,
   scheduledFullSyncConfirm: 0,
+  fullSyncApprovalTimeout: 30,
+  engineHealthCheckInterval: 15,
 };
 
 const defaultPaths: Record<string, { name: string }[]> = {
@@ -92,6 +102,9 @@ function normalizeEngine(
     remark: merged.remark == null ? null : stringValue(merged.remark),
     url: stringValue(merged.url, "https://mock-engine.test"),
     userName: stringValue(merged.userName, "mock-user"),
+    maxConcurrentJobs: Math.max(0, numberValue(merged.maxConcurrentJobs, 0)),
+    activeJobs: numberValue(merged.activeJobs, 0),
+    queuedJobs: numberValue(merged.queuedJobs, 0),
     createTime: numberValue(merged.createTime, now()),
   };
 }
@@ -101,6 +114,11 @@ function normalizeJob(input: JobInput, id: number, previous?: JobItem): JobItem 
     ...(previous as unknown as Record<string, unknown> | undefined),
     ...input,
   };
+  const notifyIds = Array.isArray(merged.notifyIds)
+    ? JSON.stringify(merged.notifyIds)
+    : merged.notifyIds == null
+      ? "[]"
+      : stringValue(merged.notifyIds);
   return {
     id: numberValue(merged.id, id),
     enable: merged.enable === true ? 1 : numberValue(merged.enable, 1),
@@ -126,6 +144,29 @@ function normalizeJob(input: JobInput, id: number, previous?: JobItem): JobItem 
     exclude: merged.exclude == null ? null : stringValue(merged.exclude),
     minFileSize: numberValue(merged.minFileSize, 0),
     maxFileSize: numberValue(merged.maxFileSize, 0),
+    compareMode: numberValue(merged.compareMode, 0),
+    conflictPolicy: numberValue(merged.conflictPolicy, 0),
+    trashEnable: merged.trashEnable === true ? 1 : numberValue(merged.trashEnable, 0),
+    trashDir: merged.trashDir == null ? ".opensync-trash" : stringValue(merged.trashDir),
+    trashRetentionDays: numberValue(merged.trashRetentionDays, 30),
+    deleteEmptySrcDirs:
+      merged.deleteEmptySrcDirs === true ? 1 : numberValue(merged.deleteEmptySrcDirs, 0),
+    filterMode: numberValue(merged.filterMode, 0),
+    include: merged.include == null ? null : stringValue(merged.include),
+    minFileAgeMinutes: numberValue(merged.minFileAgeMinutes, 0),
+    olderThanDays: numberValue(merged.olderThanDays, 0),
+    newerThanDays: numberValue(merged.newerThanDays, 0),
+    copyConcurrency: numberValue(merged.copyConcurrency, 0),
+    scanConcurrency: numberValue(merged.scanConcurrency, 0),
+    maxRetries: merged.maxRetries === undefined ? -1 : numberValue(merged.maxRetries, -1),
+    windowEnable:
+      merged.windowEnable === true ? 1 : numberValue(merged.windowEnable, 0),
+    windowStart: merged.windowStart == null ? "00:00" : stringValue(merged.windowStart),
+    windowEnd: merged.windowEnd == null ? "06:00" : stringValue(merged.windowEnd),
+    windowStopOutside:
+      merged.windowStopOutside === true ? 1 : numberValue(merged.windowStopOutside, 0),
+    notifyMode: numberValue(merged.notifyMode, 0),
+    notifyIds,
     createTime: numberValue(merged.createTime, now()),
   };
 }
@@ -173,6 +214,12 @@ const notifySecretKeys: Record<number, string[]> = {
   3: ["corpsecret", "corpSecret"],
   4: ["url", "webhook", "secret"],
   5: ["server", "deviceKey"],
+  6: ["botToken", "apiBase"],
+  7: ["url", "webhook"],
+  8: ["password"],
+  9: ["server", "token"],
+  10: ["server", "token"],
+  11: ["token"],
 };
 const allNotifySecretKeys = [
   "url",
@@ -185,6 +232,10 @@ const allNotifySecretKeys = [
   "corpSecret",
   "deviceKey",
   "server",
+  "botToken",
+  "apiBase",
+  "password",
+  "token",
 ];
 
 function maskSecretValue(value: string): string {
@@ -407,6 +458,8 @@ export class MockStore {
   private nextJobId: number;
   private nextNotifyId: number;
   private nextTaskId = 7000;
+  private dryRuns = new Map<number, DryRunResult>();
+  private engineHealthMap = new Map<number, EngineHealth>();
 
   constructor(seed: MockStoreSeed = {}) {
     const seededEngines = seed.engines ?? [
@@ -485,7 +538,37 @@ export class MockStore {
   }
 
   listEngines(): AlistItem[] {
-    return this.engines.map((engine) => ({ ...engine }));
+    return this.engines.map((engine) => ({
+      ...engine,
+      activeJobs: [...this.currentTasks.keys()].filter((jobId) => {
+        const job = this.jobs.find((j) => j.id === jobId);
+        return job?.alistId === engine.id;
+      }).length,
+      queuedJobs: 0,
+      health: this.getEngineHealth(engine.id),
+    }));
+  }
+
+  getEngineHealth(id: number, refresh = false): EngineHealth {
+    const existing = this.engineHealthMap.get(id);
+    if (existing && !refresh) return { ...existing };
+    const h: EngineHealth = {
+      alistId: id,
+      status: "online",
+      latencyMs: 24,
+      lastCheckedAt: now(),
+      storagesKnown: true,
+      storages: [
+        { mountPath: "/Photos", driver: "Local", status: "work", disabled: false },
+        { mountPath: "/Backup", driver: "AliyundriveOpen", status: "work", disabled: false },
+      ],
+    };
+    this.engineHealthMap.set(id, h);
+    return { ...h };
+  }
+
+  listAllEngineHealth(refresh = false): EngineHealth[] {
+    return this.engines.map((e) => this.getEngineHealth(e.id, refresh));
   }
 
   // The real handler (service.GetChildPath -> AlistClient.FilePathList) returns
@@ -516,9 +599,17 @@ export class MockStore {
 
   listJobs(pageNum = 1, pageSize = 500): PageData<JobItem> {
     return {
-      dataList: pageDemoRows(this.jobs, pageNum, pageSize).map((job) => ({
-        ...job,
-      })),
+      dataList: pageDemoRows(this.jobs, pageNum, pageSize).map((job) => {
+        const current = this.currentTasks.get(job.id);
+        const latest = (this.histories.get(job.id) || [])[0];
+        return {
+          ...job,
+          running: Boolean(current),
+          queued: false,
+          pendingApproval: Boolean(current?.approval),
+          lastStatus: latest?.status ?? 0,
+        };
+      }),
       count: this.jobs.length,
     };
   }
@@ -898,6 +989,342 @@ export class MockStore {
   updateSettings(settings: Partial<SystemSettings>): SystemSettings {
     this.settings = { ...this.settings, ...settings };
     return this.getSettings();
+  }
+
+  getDashboard(): DashboardOverview {
+    const pendingApprovals: DashboardOverview["pendingApprovals"] = [];
+    let runningJobs = 0;
+    let enabledJobs = 0;
+    const jobSummaries = this.jobs.map((job) => {
+      if (job.enable === 1) enabledJobs += 1;
+      const current = this.currentTasks.get(job.id);
+      if (current) runningJobs += 1;
+      if (current?.approval) {
+        pendingApprovals.push({
+          jobId: job.id,
+          jobName: job.remark || `任务 #${job.id}`,
+          taskId: current.taskId,
+          deleteCount: current.approval.deleteCount,
+          deleteSize: current.approval.deleteSize,
+          pathCount: current.approval.pathCount,
+        });
+      }
+      const engine = this.engines.find((e) => e.id === job.alistId);
+      const latest = (this.histories.get(job.id) || [])[0];
+      const done = current?.doneSize ?? 0;
+      const total = done + (current?.remainSize ?? 0);
+      return {
+        id: job.id,
+        remark: job.remark,
+        enable: job.enable,
+        alistId: job.alistId,
+        alistName: engine?.remark || engine?.url || `引擎 #${job.alistId}`,
+        method: job.method,
+        isCron: job.isCron,
+        interval: job.interval,
+        srcPath: job.srcPath,
+        dstPath: job.dstPath,
+        running: Boolean(current),
+        queued: false,
+        currentTaskId: current?.taskId ?? 0,
+        pendingApproval: current?.approval ?? null,
+        liveNum: current?.num ?? null,
+        liveProgress: total > 0 ? (done * 100) / total : 0,
+        nextRunTime: job.nextRunTime ?? 0,
+        windowEnable: Number(job.windowEnable ?? 0),
+        windowStart: job.windowStart ?? "00:00",
+        windowEnd: job.windowEnd ?? "06:00",
+        lastTask: latest
+          ? {
+              id: latest.id,
+              status: latest.status,
+              createTime: latest.createTime ?? 0,
+              runTime: latest.runTime ?? 0,
+              successNum: latest.successNum ?? 0,
+              failNum: latest.failNum ?? 0,
+              allNum: latest.allNum ?? 0,
+              sumSize: latest.sumSize ?? 0,
+              errMsg: latest.errMsg ?? null,
+            }
+          : null,
+      };
+    });
+    const healths = this.listAllEngineHealth(false);
+    let totalRuns = 0;
+    let successRuns = 0;
+    let failRuns = 0;
+    let stoppedRuns = 0;
+    let totalFiles = 0;
+    let totalBytes = 0;
+    for (const records of this.histories.values()) {
+      for (const rec of records) {
+        totalRuns += 1;
+        if (rec.status === 2 || rec.status === 8) successRuns += 1;
+        else if (rec.status === 4) stoppedRuns += 1;
+        else failRuns += 1;
+        totalFiles += rec.successNum ?? 0;
+        totalBytes += rec.sumSize ?? 0;
+      }
+    }
+    return {
+      kpi: {
+        totalJobs: this.jobs.length,
+        enabledJobs,
+        runningJobs,
+        queuedJobs: 0,
+        pendingApprovals: pendingApprovals.length,
+        totalEngines: this.engines.length,
+        onlineEngines: healths.filter((h) => h.status === "online").length,
+        offlineEngines: healths.filter((h) => h.status === "offline").length,
+      },
+      recent7d: {
+        totalRuns,
+        successRuns,
+        failRuns,
+        stoppedRuns,
+        totalFiles,
+        totalBytes,
+      },
+      pendingApprovals,
+      jobs: jobSummaries,
+    };
+  }
+
+  batchJobAction(action: string, ids?: number[]): BatchJobActionResult {
+    const targetIds =
+      action === "run_all" || action === "stop_all" || !ids?.length
+        ? this.jobs.map((j) => j.id)
+        : ids;
+    const results: BatchJobActionResult["results"] = [];
+    let succeeded = 0;
+    let failed = 0;
+    for (const id of targetIds) {
+      const job = this.jobs.find((j) => j.id === id);
+      if (!job) {
+        failed += 1;
+        results.push({ jobId: id, ok: false, error: "任务不存在" });
+        continue;
+      }
+      if (action === "run" || action === "run_all") this.runJob(id);
+      else if (action === "stop" || action === "stop_all") this.abortJob(id);
+      else if (action === "enable") job.enable = 1;
+      else if (action === "disable") this.pauseJob(id);
+      succeeded += 1;
+      results.push({ jobId: id, ok: true });
+    }
+    return { action, succeeded, failed, results };
+  }
+
+  deleteTasksBatch(taskIds: number[]): number {
+    let deleted = 0;
+    for (const id of taskIds) {
+      if (this.removeTaskRecord(id) === "deleted") deleted += 1;
+    }
+    return deleted;
+  }
+
+  clearJobHistory(jobId: number): number {
+    const records = this.histories.get(jobId) || [];
+    const count = records.length;
+    for (const rec of records) this.taskItems.delete(rec.id);
+    this.histories.set(jobId, []);
+    return count;
+  }
+
+  startDryRun(jobId: number): DryRunResult | null {
+    const job = this.jobs.find((j) => j.id === jobId);
+    if (!job) return null;
+    const result: DryRunResult = {
+      jobId,
+      status: "completed",
+      method: job.method,
+      startedAt: now() - 1,
+      finishedAt: now(),
+      scannedDirs: 6,
+      copyCount: 2,
+      copySize: 18 * 1024 * 1024,
+      updateCount: 1,
+      updateSize: 4 * 1024 * 1024,
+      deleteCount: job.method === 1 ? 1 : 0,
+      deleteSize: job.method === 1 ? 2 * 1024 * 1024 : 0,
+      moveCount: job.method === 2 ? 2 : 0,
+      moveSize: job.method === 2 ? 18 * 1024 * 1024 : 0,
+      mkdirCount: 1,
+      skipCount: 12,
+      totalItems: job.method === 1 ? 5 : 4,
+      itemsTruncated: false,
+      items: [
+        {
+          action: "mkdir",
+          srcPath: "/Photos/2026",
+          dstPath: "/Backup/Nightly/2026",
+          fileName: "2026",
+          fileSize: 0,
+          isPath: true,
+        },
+        {
+          action: job.method === 2 ? "move" : "copy",
+          srcPath: "/Photos/2026",
+          dstPath: "/Backup/Nightly/2026",
+          fileName: "IMG_001.jpg",
+          fileSize: 8 * 1024 * 1024,
+          isPath: false,
+        },
+        {
+          action: "update",
+          srcPath: "/Photos",
+          dstPath: "/Backup/Nightly",
+          fileName: "catalog.db",
+          fileSize: 4 * 1024 * 1024,
+          isPath: false,
+          reason: "文件已更新",
+        },
+        ...(job.method === 1
+          ? [
+              {
+                action: "delete",
+                dstPath: "/Backup/Nightly",
+                fileName: "obsolete.mov",
+                fileSize: 2 * 1024 * 1024,
+                isPath: false,
+                reason: "目标端多余项",
+              },
+            ]
+          : []),
+      ],
+    };
+    this.dryRuns.set(jobId, result);
+    return result;
+  }
+
+  getDryRun(jobId: number): DryRunResult | null {
+    return this.dryRuns.get(jobId) ?? null;
+  }
+
+  cancelDryRun(jobId: number): void {
+    const existing = this.dryRuns.get(jobId);
+    if (existing) this.dryRuns.set(jobId, { ...existing, status: "cancelled" });
+  }
+
+  testJobFilter(body: Record<string, unknown>): FilterTestResult {
+    const samplePath = stringValue(body.samplePath).trim();
+    const exclude = stringValue(body.exclude);
+    const include = stringValue(body.include);
+    const filterMode = numberValue(body.filterMode, 0);
+    const sampleSize = numberValue(body.sampleSize, 0);
+    const minSize = numberValue(body.minFileSize, 0);
+    const maxSize = numberValue(body.maxFileSize, 0);
+    const minAge = numberValue(body.minFileAgeMinutes, 0);
+    const sampleAge = numberValue(body.sampleAgeMinutes, 60);
+    const baseName = samplePath.split("/").pop() || samplePath;
+    for (const rawLine of exclude.split("\n")) {
+      const rule = rawLine.trim();
+      if (!rule || rule.startsWith("# ")) continue;
+      if (rule.endsWith("/") && samplePath.includes(rule.slice(0, -1))) {
+        return { willSync: false, reason: `命中排除规则：${rule}`, matchedRule: rule };
+      }
+      if (rule.startsWith("*.") && baseName.toLowerCase().endsWith(rule.slice(1).toLowerCase())) {
+        return { willSync: false, reason: `命中排除规则：${rule}`, matchedRule: rule };
+      }
+      if (rule === baseName) {
+        return { willSync: false, reason: `命中排除规则：${rule}`, matchedRule: rule };
+      }
+    }
+    if (filterMode === 1) {
+      const rules = include
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l && !l.startsWith("# "));
+      const matched = rules.find((r) =>
+        r.startsWith("*.")
+          ? baseName.toLowerCase().endsWith(r.slice(1).toLowerCase())
+          : r === baseName,
+      );
+      if (!matched) {
+        return { willSync: false, reason: "未命中白名单包含规则", matchedRule: "" };
+      }
+    }
+    if (minSize > 0 && sampleSize < minSize) {
+      return { willSync: false, reason: "文件小于最小限制", matchedRule: "minFileSize" };
+    }
+    if (maxSize > 0 && sampleSize > maxSize) {
+      return { willSync: false, reason: "文件大于最大限制", matchedRule: "maxFileSize" };
+    }
+    if (minAge > 0 && sampleAge < minAge) {
+      return { willSync: false, reason: `文件修改时间不足 ${minAge} 分钟`, matchedRule: "minFileAgeMinutes" };
+    }
+    return { willSync: true, reason: "通过全部过滤规则，将被同步", matchedRule: "" };
+  }
+
+  exportConfig(includeSecrets: boolean): SystemBackupPayload {
+    return {
+      version: 1,
+      exportedAt: now(),
+      hasSecrets: includeSecrets,
+      settings: this.getSettings(),
+      engines: this.engines.map((e) => ({
+        ...e,
+        token: includeSecrets ? "mock-token" : "",
+      })),
+      notifications: (includeSecrets ? this.notifications : this.listNotifications()).map(
+        (n) => ({ ...n }),
+      ),
+      jobs: this.jobs.map((j) => ({ ...j })),
+    };
+  }
+
+  importConfig(
+    payload: SystemBackupPayload,
+    conflictMode: string,
+  ): SystemImportSummary {
+    if (payload.settings) this.updateSettings(payload.settings);
+    let enginesCreated = 0;
+    let enginesSkipped = 0;
+    for (const eng of payload.engines || []) {
+      const url = stringValue(eng.url);
+      if (this.engines.some((e) => e.url === url) && conflictMode !== "overwrite") {
+        enginesSkipped += 1;
+      } else {
+        this.saveEngine(eng);
+        enginesCreated += 1;
+      }
+    }
+    return {
+      settingsUpdated: Boolean(payload.settings),
+      enginesCreated,
+      enginesUpdated: 0,
+      enginesSkipped,
+      notifiesCreated: 0,
+      notifiesUpdated: 0,
+      notifiesSkipped: (payload.notifications || []).length,
+      jobsCreated: 0,
+      jobsUpdated: 0,
+      jobsSkipped: (payload.jobs || []).length,
+      warnings: payload.hasSecrets ? [] : ["导入文件不含凭据，请在引擎和通知页面补填 Token / 密钥"],
+    };
+  }
+
+  getLogs(lines = 200, level = "", keyword = ""): AppLogsResponse {
+    const sample = [
+      "2026/11/24 08:00:01 INFO OpenSync mock server started",
+      "2026/11/24 08:05:12 WARN engine #1 latency elevated: 410ms",
+      "2026/11/24 08:10:33 ERROR copy failed for /Photos/raw.dng: connection reset",
+    ];
+    let filtered = sample;
+    if (level && level !== "all") {
+      filtered = filtered.filter((l) => l.toLowerCase().includes(level.toLowerCase()));
+    }
+    if (keyword) {
+      filtered = filtered.filter((l) =>
+        l.toLowerCase().includes(keyword.toLowerCase()),
+      );
+    }
+    return {
+      lines: filtered.slice(-lines),
+      total: filtered.length,
+      fileSize: filtered.join("\n").length,
+      source: "memory",
+    };
   }
 }
 

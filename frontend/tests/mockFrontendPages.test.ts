@@ -153,6 +153,8 @@ describe("mock settings contract", () => {
       scanConcurrency: 16,
       maxRetries: 2,
       scheduledFullSyncConfirm: 0,
+      fullSyncApprovalTimeout: 30,
+      engineHealthCheckInterval: 15,
     });
   });
 

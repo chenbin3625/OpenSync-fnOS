@@ -18,13 +18,15 @@ import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
 import {
   IconChevronRightStroked,
   IconCloudStroked,
+  IconCopy,
+  IconDeleteStroked,
   IconEditStroked,
+  IconEyeOpenedStroked,
   IconPause,
   IconPlay,
   IconPlusStroked,
   IconServerStroked,
   IconSettingStroked,
-  IconDeleteStroked,
 } from "@douyinfe/semi-icons";
 import { api } from "../api/client";
 import {
@@ -43,15 +45,20 @@ import {
   errorToast,
   type MenuAction,
 } from "../components/common";
+import { DryRunModal } from "../components/DryRunModal";
 import { useAction, useResource } from "../lib/hooks";
 import { buildSyncPathPreview } from "../lib/syncPathPreview";
 import {
+  cloneJobToForm,
   resolveJobSelection,
   resolveTaskTab,
   summarizeJobFilters,
+  type JobForm,
 } from "../lib/taskForm";
 import type { TaskEditorSavedResult } from "./TaskEditor";
 import {
+  compareModeLabel,
+  conflictPolicyLabel,
   formatDuration,
   formatNextRun,
   formatSize,
@@ -71,7 +78,6 @@ const History = lazy(() =>
 );
 const JobEditor = lazy(() => import("./TaskEditor"));
 const currentTaskPollMs = 3000;
-// Keep approval detection responsive while on the realtime tab as well.
 const currentTaskRealtimePollMs = 3000;
 const currentTaskFollowUpMs = 1000;
 
@@ -80,9 +86,6 @@ export default function Tasks() {
   const [params, setParams] = useSearchParams();
   const jobIdParam = params.get("jobId");
   const parsedJobId = jobIdParam === null ? null : Number(jobIdParam);
-  // -1 is a deliberate "explicit but invalid id" sentinel: selectJob finds no
-  // match and the page shows its empty state. Treating it as "no selection"
-  // silently displayed an unrelated task (the first one in the list).
   const selectedId =
     jobIdParam === null
       ? null
@@ -96,16 +99,19 @@ export default function Tasks() {
     : "overview";
   const jobs = useResource((signal) => api.jobMenu(signal));
   const engines = useResource((signal) => api.engines(signal));
-  const [editor, setEditor] = useState<{ open: boolean; job: JobItem | null }>({
+  const [editor, setEditor] = useState<{
+    open: boolean;
+    job: JobItem | null;
+    initialDraft?: JobForm;
+  }>({
     open: false,
     job: null,
   });
+  const [dryRunOpen, setDryRunOpen] = useState(false);
   const mobileJobButtons = useRef<Array<HTMLButtonElement | null>>([]);
   const actions = useAction();
   const list = jobs.data?.dataList || [];
   const { job: selected, replaceWith } = resolveJobSelection(list, selectedId);
-  // A stale jobId (deleted elsewhere, old bookmark) shows the first task; the
-  // URL is rewritten in place so the address bar and sidebar match the screen.
   useEffect(() => {
     if (replaceWith === null) return;
     const next = new URLSearchParams(params);
@@ -114,9 +120,6 @@ export default function Tasks() {
   }, [replaceWith, params, setParams]);
   const selectedJobId = selected?.id;
   const deletedJobIdsRef = useRef<Set<number>>(new Set());
-  // Tracks which job actually completed an `api.current` request (not a
-  // deduplicated silent refresh) and whether it succeeded, so transient errors
-  // or job switches never prematurely reconcile `tab=realtime` to `overview`.
   const [snapshotState, setSnapshotState] = useState<{
     jobId: number;
     ok: boolean;
@@ -182,9 +185,6 @@ export default function Tasks() {
       clearInterval(interval);
     };
   }, [selectedJobId, realtimeTab, refreshCurrentTask]);
-  // Reconcile the tab with reality once a snapshot for *this* job has settled
-  // cleanly without error. Transient network errors must not kick users back
-  // to the overview tab.
   const currentTaskSettled =
     !!selectedJobId &&
     snapshotState?.jobId === selectedJobId &&
@@ -226,8 +226,6 @@ export default function Tasks() {
     }
   }, [selectedJobId, refreshCurrentTask]);
   const refreshJobs = async (options?: { skipCurrentTask?: boolean }) => {
-    // Silent: the confirm dialog/editor is already closing; a full-page
-    // spinner for the reload just made the workspace blink.
     await jobs.refresh(true);
     window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
     if (options?.skipCurrentTask) {
@@ -235,8 +233,6 @@ export default function Tasks() {
       return;
     }
     await currentTask.refresh(true);
-    // Starting or stopping is asynchronous on the backend: the immediate
-    // re-fetch usually still sees the previous state.
     clearTimeout(followUp.current);
     followUp.current = setTimeout(
       () => void refreshCurrentTask(true),
@@ -369,8 +365,6 @@ export default function Tasks() {
         }
       />
       {engines.error && !engines.loading && (
-        // Without engines the editor's engine select is empty and a new task
-        // would be saved without alistId; say so instead of failing silently.
         <InlineNotice
           className="engine-load-error"
           role="alert"
@@ -384,9 +378,6 @@ export default function Tasks() {
           role="tablist"
           aria-label="任务列表"
           onKeyDown={(event) => {
-            // WAI-ARIA tabs pattern: arrow keys move between chips, Home/End
-            // jump to the edges. Without this the roles promised keyboard
-            // behaviour the widget did not have.
             if (
               !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)
             )
@@ -457,6 +448,14 @@ export default function Tasks() {
                     running={!!currentTask.data}
                     runKey={String(currentTask.data?.taskId ?? "idle")}
                     onRun={() => triggerRunJob(selected.id, selected.method)}
+                    onDryRun={() => setDryRunOpen(true)}
+                    onClone={() =>
+                      setEditor({
+                        open: true,
+                        job: null,
+                        initialDraft: cloneJobToForm(selected),
+                      })
+                    }
                     onStop={() => {
                       if (!currentTask.data) return;
                       const { taskId } = currentTask.data;
@@ -470,9 +469,6 @@ export default function Tasks() {
                     onToggle={() => {
                       const pausing = selected.enable === 1;
                       if (pausing && currentTask.data) {
-                        // The backend PauseJob stops the running task as well;
-                        // asking first avoids killing an in-progress sync as a
-                        // side effect of "just disable the schedule".
                         confirmAction({
                           title: "停用任务并中止当前执行？",
                           content:
@@ -527,7 +523,6 @@ export default function Tasks() {
                     <Realtime
                       key={selected.id}
                       jobId={selected.id}
-                      // A finished task must not leave an empty realtime tab.
                       onTaskEnded={handleRealtimeEnded}
                       onApprovalDetected={handleApprovalDetected}
                     />
@@ -545,10 +540,6 @@ export default function Tasks() {
                 )}
               </div>
             ) : jobs.loading || jobs.error ? null : (
-              // Only a genuinely empty result gets the empty state. While
-              // loading, `selected` is falsy too, so this branch used to render
-              // "空空如也" underneath the spinner; on error it repeated the
-              // message LoadState already shows.
               <div className="task-empty-detail">
                 <EmptyState />
               </div>
@@ -556,10 +547,19 @@ export default function Tasks() {
           </section>
         )}
       </div>
+      {dryRunOpen && selected && (
+        <DryRunModal
+          jobId={selected.id}
+          jobName={getJobName(selected)}
+          onClose={() => setDryRunOpen(false)}
+          onRunReal={() => triggerRunJob(selected.id, selected.method)}
+        />
+      )}
       {editor.open && (
         <Suspense fallback={<LoadingPanel />}>
           <JobEditor
             job={editor.job}
+            initialDraft={editor.initialDraft}
             engines={engines.data || []}
             existingJobs={list}
             enginesError={engines.error}
@@ -643,7 +643,11 @@ function FullSyncApprovalModal({
         </p>
         <div className="full-sync-approval-list" role="list">
           {visiblePaths.map((item) => (
-            <div className="full-sync-approval-item" role="listitem" key={`${item.action}:${item.path}`}>
+            <div
+              className="full-sync-approval-item"
+              role="listitem"
+              key={`${item.action}:${item.path}`}
+            >
               <Tag
                 size="small"
                 type="light"
@@ -651,7 +655,7 @@ function FullSyncApprovalModal({
               >
                 {item.action}
               </Tag>
-              <span className="mono">{item.path}</span>
+              <span className="full-sync-approval-path">{item.path}</span>
               <span className="muted">
                 {item.isPath
                   ? `${item.count} 项${item.size > 0 ? ` · ${formatSize(item.size)}` : ""}`
@@ -660,8 +664,12 @@ function FullSyncApprovalModal({
             </div>
           ))}
         </div>
-        {remaining > 0 && <div className="field-hint">还有 {remaining} 个路径未展开。</div>}
-        <div className="field-hint">任务 #{taskId} 已暂停，确认后才会开始写入和删除。</div>
+        {remaining > 0 && (
+          <div className="field-hint">还有 {remaining} 个路径未展开。</div>
+        )}
+        <div className="field-hint">
+          任务 #{taskId} 已暂停，确认后才会开始写入和删除。
+        </div>
       </div>
     </Modal>
   );
@@ -674,6 +682,8 @@ function Overview({
   running,
   runKey,
   onRun,
+  onDryRun,
+  onClone,
   onStop,
   onToggle,
   onEdit,
@@ -683,22 +693,19 @@ function Overview({
   engines: AlistItem[];
   busy: boolean;
   running: boolean;
-  /** Identifies the running task (or none); a change means a run started or ended. */
   runKey: string;
   onRun: () => void;
+  onDryRun: () => void;
+  onClone: () => void;
   onStop: () => void;
   onToggle: () => void;
   onEdit: () => void;
   onDelete: () => void;
 }) {
   const latestExecution = useResource(
-    (signal) =>
-      api.history(job.id, { pageNum: 1, pageSize: 1 }, signal),
+    (signal) => api.history(job.id, { pageNum: 1, pageSize: 1 }, signal),
     [job.id],
   );
-  // Starting a run adds a history row and stopping/finishing one changes its
-  // time: re-read silently whenever the running task changes, instead of
-  // showing the value fetched when the job was first selected.
   const refreshLatest = latestExecution.refresh;
   const firstRunKey = useRef(runKey);
   useEffect(() => {
@@ -717,6 +724,15 @@ function Overview({
     job.useCacheS ? "源端缓存" : "",
     job.useCacheT ? "目标缓存" : "",
   ].filter(Boolean);
+  const throttleLabels = [
+    Number(job.scanIntervalS || 0) > 0 ? `源扫描间隔 ${job.scanIntervalS}s` : "",
+    Number(job.scanIntervalT || 0) > 0 ? `目标扫描间隔 ${job.scanIntervalT}s` : "",
+    Number(job.copyConcurrency || 0) > 0 ? `操作并发 ${job.copyConcurrency}` : "",
+    Number(job.scanConcurrency || 0) > 0 ? `扫描并发 ${job.scanConcurrency}` : "",
+    job.maxRetries !== undefined && Number(job.maxRetries) >= 0
+      ? `重试 ${job.maxRetries} 次`
+      : "",
+  ].filter(Boolean);
   const pathPreview = useMemo(
     () =>
       buildSyncPathPreview({
@@ -731,6 +747,16 @@ function Overview({
     pathPreview.items.length > 1 ||
     pathPreview.items.some((item) => Boolean(item.appendedSuffix));
   const menu: MenuAction[] = [
+    {
+      label: "模拟运行预览",
+      icon: <IconEyeOpenedStroked aria-hidden="true" />,
+      onClick: onDryRun,
+    },
+    {
+      label: "复制任务",
+      icon: <IconCopy aria-hidden="true" />,
+      onClick: onClone,
+    },
     {
       label: "设置",
       icon: <IconSettingStroked aria-hidden="true" />,
@@ -748,12 +774,41 @@ function Overview({
     : !enabled
       ? "任务未启用，请先启用"
       : "启动任务";
+
+  const notifyBindingText = (() => {
+    const mode = Number(job.notifyMode ?? 0);
+    if (mode === 2) return "已关闭此任务通知";
+    if (mode === 1) {
+      let count = 0;
+      if (Array.isArray(job.notifyIds)) count = job.notifyIds.length;
+      else if (typeof job.notifyIds === "string") {
+        try {
+          const arr = JSON.parse(job.notifyIds);
+          if (Array.isArray(arr)) count = arr.length;
+        } catch {
+          count = 0;
+        }
+      }
+      return `已绑定 ${count} 个指定通知渠道`;
+    }
+    return "";
+  })();
+
   return (
     <div className="overview">
       <SectionCard
         className="overview-card"
         headClassName="overview-head"
-        title={<h2 title={getJobName(job)}>{getJobName(job)}</h2>}
+        title={
+          <span className="engine-title-row">
+            <h2 title={getJobName(job)}>{getJobName(job)}</h2>
+            {job.queued && (
+              <Tag size="small" type="light" color="cyan">
+                同引擎排队等待中
+              </Tag>
+            )}
+          </span>
+        }
         extra={
           <div className="overview-head-actions">
             {job.isCron !== 2 && (
@@ -764,6 +819,12 @@ function Overview({
                 onChange={() => onToggle()}
               />
             )}
+            <IconButton
+              label="模拟运行预览（只读）"
+              icon={<IconEyeOpenedStroked aria-hidden="true" />}
+              disabled={busy}
+              onClick={onDryRun}
+            />
             <Tooltip content={runActionLabel} position="top">
               <Button
                 aria-label={runActionLabel}
@@ -796,7 +857,7 @@ function Overview({
               <IconServerStroked aria-hidden="true" />
               源目录
             </div>
-            <div className="flow-sub mono">
+            <div className="flow-sub flow-paths">
               {parseJobPathList(job.srcPath).join("\n") || "—"}
             </div>
           </div>
@@ -806,7 +867,7 @@ function Overview({
               <IconCloudStroked aria-hidden="true" />
               目标目录
             </div>
-            <div className="flow-sub mono">
+            <div className="flow-sub flow-paths">
               {parseJobPathList(job.dstPath).join("\n") || "—"}
             </div>
           </div>
@@ -821,14 +882,39 @@ function Overview({
             <Info label="存储引擎">
               <span className="overview-engine">
                 <span>{engineName}</span>
-                {engineHost && <span className="muted mono">{engineHost}</span>}
+                {engineHost && <span className="muted">{engineHost}</span>}
               </span>
             </Info>
             <Info label="同步方式">{methodLabel(job.method)}</Info>
             <Info label="执行计划">{formatSchedulePlan(job)}</Info>
+            {Boolean(job.windowEnable) && (
+              <Info label="运行窗口">
+                每日 {job.windowStart || "00:00"} – {job.windowEnd || "06:00"}
+                {job.windowStopOutside ? "（超出窗口自动停止）" : ""}
+              </Info>
+            )}
+            {(Number(job.compareMode || 0) !== 0 ||
+              Number(job.conflictPolicy || 0) !== 0) && (
+              <Info label="比对与冲突">
+                {compareModeLabel(job.compareMode)} ·{" "}
+                {conflictPolicyLabel(job.conflictPolicy)}
+              </Info>
+            )}
+            {Boolean(job.trashEnable) && (
+              <Info label="目标回收站">
+                已开启（目录 {job.trashDir || ".opensync-trash"}
+                {Number(job.trashRetentionDays ?? 30) > 0
+                  ? `，保留 ${job.trashRetentionDays ?? 30} 天`
+                  : "，永久保留"}
+                ）
+              </Info>
+            )}
+            {job.method === 2 && Boolean(job.deleteEmptySrcDirs) && (
+              <Info label="空目录清理">移动完成后自动清理空源子目录</Info>
+            )}
             {showPathMapping && (
               <Info label="目标映射">
-                <div className="overview-path-mapping mono">
+                <div className="overview-path-mapping">
                   {pathPreview.items.map((item) => (
                     <div key={item.key}>
                       {item.srcDir} → {item.resolvedDst}
@@ -852,6 +938,12 @@ function Overview({
             </Info>
             {cacheLabels.length > 0 && (
               <Info label="目录缓存">{cacheLabels.join("、")}</Info>
+            )}
+            {throttleLabels.length > 0 && (
+              <Info label="并发与限流">{throttleLabels.join(" · ")}</Info>
+            )}
+            {notifyBindingText && (
+              <Info label="通知绑定">{notifyBindingText}</Info>
             )}
             <Info label="最近一次执行">
               <LatestExecution
@@ -889,6 +981,12 @@ function LatestExecution({
     <div className="latest-execution">
       <span>{formatTimestamp(record.createTime)}</span>
       {duration && <span>{duration}</span>}
+      {record.allNum !== undefined && (
+        <span className="muted">
+          {record.successNum ?? 0}/{record.allNum} 项
+          {(record.sumSize ?? 0) > 0 ? ` · ${formatSize(record.sumSize || 0)}` : ""}
+        </span>
+      )}
     </div>
   );
 }

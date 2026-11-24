@@ -1,10 +1,18 @@
 import type {
   ApiResponse,
   AlistItem,
+  AppLogsResponse,
+  BatchJobActionResult,
+  CurrentTaskData,
+  DashboardOverview,
+  DryRunResult,
+  EngineHealth,
+  FilterTestResult,
   JobItem,
   NotifyItem,
   PageData,
-  CurrentTaskData,
+  SystemBackupPayload,
+  SystemImportSummary,
   SystemSettings,
   TaskItem,
   TaskRecord,
@@ -184,7 +192,7 @@ const jobsCacheTTL = 5000;
 let jobsCache: { at: number; promise: ReturnType<typeof fetchAllJobs> } | null =
   null;
 
-function invalidateJobsCache() {
+export function invalidateJobsCache() {
   jobsCache = null;
 }
 
@@ -218,6 +226,11 @@ export function requestCurrentTask<T>(
   });
 }
 
+export function buildApiUrl(path: string, params?: Record<string, unknown>) {
+  const query = params ? serializeParams(params) : "";
+  return `${apiBase}${path}${query ? `?${query}` : ""}`;
+}
+
 export const api = {
   session: (signal?: AbortSignal) =>
     request<{ uid: number; development: boolean; version: string }>("/session", {
@@ -230,7 +243,15 @@ export const api = {
       params: refresh ? { refresh: 1 } : undefined,
       signal,
     }),
+  dashboard: (signal?: AbortSignal) =>
+    request<DashboardOverview>("/dashboard", { signal, cache: "no-store" }),
   engines: (signal?: AbortSignal) => request<AlistItem[]>("/alist", { signal }),
+  engineHealth: (params?: { id?: number; refresh?: number }, signal?: AbortSignal) =>
+    request<EngineHealth | EngineHealth[]>("/alist/health", {
+      params: params as Record<string, unknown> | undefined,
+      signal,
+      cache: "no-store",
+    }),
   paths: (alistId: number, path: string, signal?: AbortSignal) =>
     request<{ name?: string; path?: string }[]>("/alist", {
       params: { alistId, path },
@@ -241,7 +262,7 @@ export const api = {
   deleteEngine: (id: number) =>
     request("/alist", { method: "DELETE", params: { id } }),
   testEngine: (id: number) =>
-    request("/alist/test", { method: "POST", params: { id } }),
+    request<EngineHealth | null>("/alist/test", { method: "POST", params: { id } }),
   jobMenu: (signal?: AbortSignal) => requestAllJobs(signal),
   saveJob: (data: unknown, signal?: AbortSignal) =>
     request<{ id?: number } | null>("/job", { method: "POST", data, signal }).then(
@@ -252,6 +273,17 @@ export const api = {
     ),
   jobAction: (data: unknown) =>
     request("/job", { method: "PUT", data }).then((result) => {
+      invalidateJobsCache();
+      return result;
+    }),
+  batchJobAction: (
+    action: "run" | "stop" | "enable" | "disable" | "run_all" | "stop_all",
+    ids?: number[],
+  ) =>
+    request<BatchJobActionResult>("/job/batch", {
+      method: "POST",
+      data: ids ? { action, ids } : { action },
+    }).then((result) => {
       invalidateJobsCache();
       return result;
     }),
@@ -285,13 +317,48 @@ export const api = {
       params: { taskId, ...params },
       signal,
     }),
-  taskAction: (taskId: number, action: "stop" | "retry" | "approve" | "reject") =>
+  exportTaskItemsUrl: (
+    taskId: number | string,
+    format: "csv" | "txt",
+    params: Record<string, unknown> = {},
+  ) => buildApiUrl("/job/items/export", { taskId, format, ...params }),
+  taskAction: (
+    taskId: number,
+    action: "stop" | "retry" | "approve" | "reject",
+    itemIds?: number[],
+  ) =>
     request("/job", {
       method: "PUT",
-      data: { taskId: String(taskId), action },
+      data: {
+        taskId: String(taskId),
+        action,
+        ...(itemIds && itemIds.length > 0 ? { itemIds } : {}),
+      },
     }),
   deleteTask: (taskId: number) =>
     request("/job", { method: "DELETE", params: { taskId } }),
+  deleteTasksBatch: (taskIds: number[]) =>
+    request<{ deleted: number }>("/job/tasks/delete", {
+      method: "POST",
+      data: { taskIds },
+    }),
+  clearJobHistory: (jobId: number) =>
+    request<{ deleted: number }>("/job/tasks/delete", {
+      method: "POST",
+      data: { clearJobId: jobId },
+    }),
+  startDryRun: (id: number) =>
+    request<DryRunResult>("/job/dry-run", { method: "POST", data: { id } }),
+  getDryRun: (id: number, signal?: AbortSignal) =>
+    request<DryRunResult | null>("/job/dry-run", {
+      params: { id },
+      signal,
+      cache: "no-store",
+    }),
+  cancelDryRun: (id: number) =>
+    request("/job/dry-run", { method: "DELETE", params: { id } }),
+  testJobFilter: (data: Record<string, unknown>) =>
+    request<FilterTestResult>("/job/filter/test", { method: "POST", data }),
   notifications: (signal?: AbortSignal) =>
     request<NotifyItem[]>("/notify", { signal }),
   saveNotification: (notify: unknown, edit: boolean) =>
@@ -306,4 +373,33 @@ export const api = {
     request<SystemSettings>("/system/config", { signal }),
   saveSettings: (data: SystemSettings) =>
     request<SystemSettings>("/system/config", { method: "PUT", data }),
+  exportConfig: (includeSecrets: boolean) =>
+    request<SystemBackupPayload>("/system/export", {
+      params: { includeSecrets: includeSecrets ? 1 : 0 },
+      cache: "no-store",
+    }),
+  exportConfigUrl: (includeSecrets: boolean) =>
+    buildApiUrl("/system/export", {
+      includeSecrets: includeSecrets ? 1 : 0,
+      download: 1,
+    }),
+  importConfig: (payload: SystemBackupPayload, conflictMode: "skip" | "overwrite") =>
+    request<SystemImportSummary>("/system/import", {
+      method: "POST",
+      data: { conflictMode, payload },
+    }),
+  systemLogs: (
+    params: { lines?: number; level?: string; keyword?: string },
+    signal?: AbortSignal,
+  ) =>
+    request<AppLogsResponse>("/system/logs", {
+      params: params as Record<string, unknown>,
+      signal,
+      cache: "no-store",
+    }),
+  downloadSystemLogsUrl: (params: {
+    lines?: number;
+    level?: string;
+    keyword?: string;
+  }) => buildApiUrl("/system/logs/download", params as Record<string, unknown>),
 };

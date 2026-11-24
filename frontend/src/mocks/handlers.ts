@@ -36,6 +36,8 @@ const systemSettingRanges: Record<string, { name: string; min: number; max: numb
   scheduledFullSyncConfirm: { name: "定时全量同步删除确认", min: 0, max: 1 },
   taskTimeout: { name: "任务超时时间", min: 0, max: 8760 },
   taskSave: { name: "历史任务保留", min: 0, max: 3650 },
+  fullSyncApprovalTimeout: { name: "删除审批超时时间", min: 0, max: 1440 },
+  engineHealthCheckInterval: { name: "引擎健康检查周期", min: 0, max: 1440 },
 };
 
 function validateSettingsPatch(
@@ -112,6 +114,7 @@ export const handlers = [
     }),
   ),
 
+  http.get(`${apiBase}/dashboard`, () => ok(mockStore.getDashboard())),
   http.get(`${apiBase}/system/config`, () => ok(mockStore.getSettings())),
   http.put(`${apiBase}/system/config`, async ({ request }) => {
     const body = await readBody(request);
@@ -120,6 +123,51 @@ export const handlers = [
     const invalid = validateSettingsPatch(body);
     if (invalid) return fail(invalid);
     return ok(mockStore.updateSettings(body));
+  }),
+  http.get(`${apiBase}/system/export`, ({ request }) => {
+    const query = new URL(request.url).searchParams;
+    const includeSecrets = query.get("includeSecrets") === "1";
+    const data = mockStore.exportConfig(includeSecrets);
+    if (query.get("download") === "1") {
+      return new HttpResponse(JSON.stringify(data, null, 2), {
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          "Content-Disposition": 'attachment; filename="opensync-backup.json"',
+        },
+      });
+    }
+    return ok(data);
+  }),
+  http.post(`${apiBase}/system/import`, async ({ request }) => {
+    const body = await readBody(request);
+    if (!body) return fail("请求内容无效", 400);
+    const payload = (recordBody(body.payload) || body) as unknown as import("../types").SystemBackupPayload;
+    const conflictMode = typeof body.conflictMode === "string" ? body.conflictMode : "skip";
+    return ok(mockStore.importConfig(payload, conflictMode));
+  }),
+  http.get(`${apiBase}/system/logs`, ({ request }) => {
+    const query = new URL(request.url).searchParams;
+    return ok(
+      mockStore.getLogs(
+        numberParam(query, "lines", 200),
+        query.get("level") || "",
+        query.get("keyword") || "",
+      ),
+    );
+  }),
+  http.get(`${apiBase}/system/logs/download`, ({ request }) => {
+    const query = new URL(request.url).searchParams;
+    const data = mockStore.getLogs(
+      numberParam(query, "lines", 2000),
+      query.get("level") || "",
+      query.get("keyword") || "",
+    );
+    return new HttpResponse(data.lines.join("\n") + "\n", {
+      headers: {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Content-Disposition": 'attachment; filename="opensync-logs.log"',
+      },
+    });
   }),
 
   http.get(`${apiBase}/alist`, ({ request }) => {
@@ -141,12 +189,23 @@ export const handlers = [
     mockStore.saveEngine(body);
     return ok(null);
   }),
+  http.get(`${apiBase}/alist/health`, ({ request }) => {
+    const query = new URL(request.url).searchParams;
+    const id = numberParam(query, "id");
+    const refresh = query.get("refresh") === "1";
+    if (id !== undefined) {
+      if (!mockStore.listEngines().some((e) => e.id === id))
+        return fail("引擎不存在", 404);
+      return ok(mockStore.getEngineHealth(id, refresh));
+    }
+    return ok(mockStore.listAllEngineHealth(refresh));
+  }),
   http.post(`${apiBase}/alist/test`, ({ request }) => {
     const query = new URL(request.url).searchParams;
     const id = numberParam(query, "id");
     if (id === undefined) return fail("缺少引擎 ID");
     return mockStore.listEngines().some((engine) => engine.id === id)
-      ? ok(null)
+      ? ok(mockStore.getEngineHealth(id, true))
       : fail("引擎不存在", 404);
   }),
   http.delete(`${apiBase}/alist`, ({ request }) => {
@@ -161,6 +220,63 @@ export const handlers = [
     return ok(null);
   }),
 
+  http.post(`${apiBase}/job/batch`, async ({ request }) => {
+    const body = await readBody(request);
+    if (!body || typeof body.action !== "string") return fail("缺少必要参数");
+    const ids = Array.isArray(body.ids) ? body.ids.map(Number).filter(Number.isFinite) : undefined;
+    return ok(mockStore.batchJobAction(body.action, ids));
+  }),
+  http.post(`${apiBase}/job/tasks/delete`, async ({ request }) => {
+    const body = await readBody(request);
+    if (!body) return fail("请求内容无效");
+    if (body.clearJobId !== undefined) {
+      return ok({ deleted: mockStore.clearJobHistory(Number(body.clearJobId)) });
+    }
+    if (Array.isArray(body.taskIds)) {
+      return ok({ deleted: mockStore.deleteTasksBatch(body.taskIds.map(Number)) });
+    }
+    return fail("缺少必要参数");
+  }),
+  http.get(`${apiBase}/job/items/export`, ({ request }) => {
+    const query = new URL(request.url).searchParams;
+    const taskId = numberParam(query, "taskId");
+    if (taskId === undefined) return fail("缺少任务 ID");
+    const format = query.get("format") === "txt" ? "txt" : "csv";
+    const rows = mockStore.listTaskItems(taskId, { pageNum: 1, pageSize: 500 }).dataList;
+    const text =
+      format === "csv"
+        ? "\uFEFF文件名,源路径,目标路径,大小,状态\n" +
+          rows.map((r) => `${r.fileName || ""},${r.srcPath || ""},${r.dstPath || ""},${r.fileSize || 0},${r.status}`).join("\n")
+        : rows.map((r) => `${r.fileName || ""} -> ${r.dstPath || ""}`).join("\n");
+    return new HttpResponse(text, {
+      headers: {
+        "Content-Type": format === "csv" ? "text/csv; charset=utf-8" : "text/plain; charset=utf-8",
+        "Content-Disposition": `attachment; filename="task-${taskId}.${format}"`,
+      },
+    });
+  }),
+  http.post(`${apiBase}/job/dry-run`, async ({ request }) => {
+    const body = await readBody(request);
+    if (!body || body.id === undefined) return fail("缺少任务 ID");
+    const res = mockStore.startDryRun(Number(body.id));
+    return res ? ok(res) : fail("任务不存在");
+  }),
+  http.get(`${apiBase}/job/dry-run`, ({ request }) => {
+    const id = numberParam(new URL(request.url).searchParams, "id");
+    if (id === undefined) return fail("缺少任务 ID");
+    return ok(mockStore.getDryRun(id));
+  }),
+  http.delete(`${apiBase}/job/dry-run`, ({ request }) => {
+    const id = numberParam(new URL(request.url).searchParams, "id");
+    if (id === undefined) return fail("缺少任务 ID");
+    mockStore.cancelDryRun(id);
+    return ok(null);
+  }),
+  http.post(`${apiBase}/job/filter/test`, async ({ request }) => {
+    const body = await readBody(request);
+    if (!body) return fail("请求内容无效");
+    return ok(mockStore.testJobFilter(body));
+  }),
   http.get(`${apiBase}/job/stream`, ({ request }) => {
     const query = new URL(request.url).searchParams;
     const jobId = numberParam(query, "id");

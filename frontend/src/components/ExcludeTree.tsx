@@ -156,7 +156,7 @@ export function ExcludeTree({
                   removeExcluded(rel);
                 }}
               >
-                <span className="mono">{rel}</span>
+                {rel}
               </Tag>
             ))}
           </div>

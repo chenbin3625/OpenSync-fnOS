@@ -56,26 +56,70 @@ const (
 	SettingsTaskSave        = "SettingsTaskSave"
 	SettingsCopyConcurrency = "SettingsCopyConcurrency"
 	SettingsScanConcurrency = "SettingsScanConcurrency"
-	SettingsMaxRetries      = "SettingsMaxRetries"
-	SettingsSchedConfirm    = "SettingsSchedConfirm"
-	InternalError           = "InternalError"
-	RequestTooLarge         = "RequestTooLarge"
-	SSEConnLimit            = "SSEConnLimit"
-	SSEStreamLimit          = "SSEStreamLimit"
-	InvalidConfigParams     = "InvalidConfigParams"
-	ConfigSaveFail          = "ConfigSaveFail"
-	ConfigChangedOnDisk     = "ConfigChangedOnDisk"
-	CredentialUnreadable    = "CredentialUnreadable"
-	VersionCheckFail        = "VersionCheckFail"
+	SettingsMaxRetries          = "SettingsMaxRetries"
+	SettingsSchedConfirm        = "SettingsSchedConfirm"
+	SettingsApprovalTimeout     = "SettingsApprovalTimeout"
+	SettingsHealthCheckInterval = "SettingsHealthCheckInterval"
+	InternalError               = "InternalError"
+	RequestTooLarge             = "RequestTooLarge"
+	SSEConnLimit                = "SSEConnLimit"
+	SSEStreamLimit              = "SSEStreamLimit"
+	InvalidConfigParams         = "InvalidConfigParams"
+	ConfigSaveFail              = "ConfigSaveFail"
+	ConfigChangedOnDisk         = "ConfigChangedOnDisk"
+	CredentialUnreadable        = "CredentialUnreadable"
+	VersionCheckFail            = "VersionCheckFail"
 	// Gateway identity/origin rejections, used by platform.GatewayRequired.
 	CrossSiteWriteRejected = "CrossSiteWriteRejected"
 	GatewayLoginRequired   = "GatewayLoginRequired"
 	AdminOnly              = "AdminOnly"
+
+	// Extended job / queue / filter / backup / dry-run / history messages
+	ScanIntervalInvalid      = "ScanIntervalInvalid"
+	CopyConcurrencyInvalid   = "CopyConcurrencyInvalid"
+	ScanConcurrencyInvalid   = "ScanConcurrencyInvalid"
+	MaxRetriesInvalid        = "MaxRetriesInvalid"
+	CompareModeInvalid       = "CompareModeInvalid"
+	ConflictPolicyInvalid    = "ConflictPolicyInvalid"
+	TrashDirInvalid          = "TrashDirInvalid"
+	TrashRetentionInvalid    = "TrashRetentionInvalid"
+	FilterModeInvalid        = "FilterModeInvalid"
+	TimeFilterInvalid        = "TimeFilterInvalid"
+	TimeFilterRangeConflict  = "TimeFilterRangeConflict"
+	TimeWindowInvalid        = "TimeWindowInvalid"
+	NotifyModeInvalid        = "NotifyModeInvalid"
+	NotifyIdsInvalid         = "NotifyIdsInvalid"
+	MaxConcurrentJobsInvalid = "MaxConcurrentJobsInvalid"
+	BatchActionInvalid       = "BatchActionInvalid"
+	BackupPayloadInvalid     = "BackupPayloadInvalid"
+	BackupConflictModeInvalid = "BackupConflictModeInvalid"
+	DryRunAlreadyRunning     = "DryRunAlreadyRunning"
+	DryRunNotFound           = "DryRunNotFound"
+	TaskRunningCannotDelete  = "TaskRunningCannotDelete"
+	NoRetryItemSelected      = "NoRetryItemSelected"
+
+	// Localized notification labels
+	NotifyApprovalTitle         = "NotifyApprovalTitle"
+	NotifyApprovalContent       = "NotifyApprovalContent"
+	NotifyEngineOfflineTitle    = "NotifyEngineOfflineTitle"
+	NotifyEngineOnlineTitle     = "NotifyEngineOnlineTitle"
+	NotifyEngineStorageErrTitle = "NotifyEngineStorageErrTitle"
+	NotifyStatusSuccess         = "NotifyStatusSuccess"
+	NotifyStatusNoSync          = "NotifyStatusNoSync"
+	NotifyStatusPartialFail     = "NotifyStatusPartialFail"
+	NotifyStatusFail            = "NotifyStatusFail"
+	NotifyStatusStopped         = "NotifyStatusStopped"
+	NotifyStatusTimeout         = "NotifyStatusTimeout"
+	NotifyStatusUnknown         = "NotifyStatusUnknown"
+	NotifyMethodIncremental     = "NotifyMethodIncremental"
+	NotifyMethodFull            = "NotifyMethodFull"
+	NotifyMethodMove            = "NotifyMethodMove"
 )
 
 // Format-string keys
 const (
 	FmtExcludeRulesUnsupported = "FmtExcludeRulesUnsupported"
+	FmtIncludeRulesUnsupported = "FmtIncludeRulesUnsupported"
 	FmtMirrorDeleteGuard       = "FmtMirrorDeleteGuard"
 	FmtUnsafeDeleteTarget      = "FmtUnsafeDeleteTarget"
 	FmtScanError               = "FmtScanError"
@@ -140,22 +184,64 @@ var translations = map[string]map[string]string{
 		SettingsTaskSave:        "历史任务保留",
 		SettingsCopyConcurrency: "操作并发数",
 		SettingsScanConcurrency: "扫描并发数",
-		SettingsMaxRetries:      "最大重试次数",
-		SettingsSchedConfirm:    "定时全量同步删除确认",
-		InternalError:           "操作失败，请检查引擎连接或查看服务日志",
-		RequestTooLarge:         "请求内容过大",
-		SSEConnLimit:            "连接数已达上限，请关闭其他页面后重试",
-		SSEStreamLimit:          "该任务的进度订阅数已达上限，请关闭其他页面后重试",
-		InvalidConfigParams:     "配置参数无效",
-		ConfigSaveFail:          "配置保存失败，请查看服务日志",
-		ConfigChangedOnDisk:     "配置文件已被手动修改（%s），为避免覆盖您的修改已拒绝保存，请重启应用后重试",
-		CredentialUnreadable:    "已保存的凭据无法解密（secret.key 可能已丢失或被替换），请删除该配置后重新添加",
-		VersionCheckFail:        "暂时无法检查最新版本",
-		CrossSiteWriteRejected:  "不允许跨站操作",
-		GatewayLoginRequired:    "请从飞牛桌面打开应用",
-		AdminOnly:               "仅管理员可使用此应用",
+		SettingsMaxRetries:          "最大重试次数",
+		SettingsSchedConfirm:        "定时全量同步删除确认",
+		SettingsApprovalTimeout:     "全量同步审批超时",
+		SettingsHealthCheckInterval: "引擎健康检查间隔",
+		InternalError:               "操作失败，请检查引擎连接或查看服务日志",
+		RequestTooLarge:             "请求内容过大",
+		SSEConnLimit:                "连接数已达上限，请关闭其他页面后重试",
+		SSEStreamLimit:              "该任务的进度订阅数已达上限，请关闭其他页面后重试",
+		InvalidConfigParams:         "配置参数无效",
+		ConfigSaveFail:              "配置保存失败，请查看服务日志",
+		ConfigChangedOnDisk:         "配置文件已被手动修改（%s），为避免覆盖您的修改已拒绝保存，请重启应用后重试",
+		CredentialUnreadable:        "已保存的凭据无法解密（secret.key 可能已丢失或被替换），请删除该配置后重新添加",
+		VersionCheckFail:            "暂时无法检查最新版本",
+		CrossSiteWriteRejected:      "不允许跨站操作",
+		GatewayLoginRequired:        "请从飞牛桌面打开应用",
+		AdminOnly:                   "仅管理员可使用此应用",
+
+		ScanIntervalInvalid:      "扫描间隔必须是 0 到 300 之间的整数（秒）",
+		CopyConcurrencyInvalid:   "操作并发数必须是 0（跟随全局）或 1 到 100 之间的整数",
+		ScanConcurrencyInvalid:   "扫描并发数必须是 0（跟随全局）或 1 到 50 之间的整数",
+		MaxRetriesInvalid:        "最大重试次数必须是 -1（跟随全局）或 0 到 10 之间的整数",
+		CompareModeInvalid:       "文件比对方式不支持",
+		ConflictPolicyInvalid:    "文件冲突策略不支持",
+		TrashDirInvalid:          "回收站目录名无效（不能包含路径穿越、绝对路径或非法字符）",
+		TrashRetentionInvalid:    "回收站保留天数必须是 0 到 3650 之间的整数",
+		FilterModeInvalid:        "过滤模式不支持",
+		TimeFilterInvalid:        "时间过滤参数必须是大于等于 0 的整数",
+		TimeFilterRangeConflict:  "时间过滤范围冲突：仅同步早于 N 天的天数不能大于等于仅同步最近 M 天的天数",
+		TimeWindowInvalid:        "允许运行时间窗口格式无效，请使用 HH:MM 且开始与结束时间不能相同",
+		NotifyModeInvalid:        "通知绑定模式不支持",
+		NotifyIdsInvalid:         "指定的通知渠道列表无效",
+		MaxConcurrentJobsInvalid: "单引擎最大并发任务数必须是 0 到 50 之间的整数",
+		BatchActionInvalid:       "批量操作类型不支持",
+		BackupPayloadInvalid:     "导入的配置备份数据格式无效",
+		BackupConflictModeInvalid: "导入冲突处理模式仅支持 skip 或 overwrite",
+		DryRunAlreadyRunning:     "该任务已有模拟运行正在进行中",
+		DryRunNotFound:           "未找到该任务的模拟运行记录",
+		TaskRunningCannotDelete:  "正在运行中的任务记录不能删除",
+		NoRetryItemSelected:      "未选中可重试的失败项",
+
+		NotifyApprovalTitle:         "全量同步待确认",
+		NotifyApprovalContent:       "任务「%s」检测到目标端存在 %d 个待删除项（%d 个文件，%d 个目录），已暂停等待确认。请在 OpenSync 中查看清单并确认或跳过删除。",
+		NotifyEngineOfflineTitle:    "存储引擎连接异常",
+		NotifyEngineOnlineTitle:     "存储引擎已恢复在线",
+		NotifyEngineStorageErrTitle: "存储引擎挂载状态异常",
+		NotifyStatusSuccess:         "同步成功",
+		NotifyStatusNoSync:          "无需同步",
+		NotifyStatusPartialFail:     "部分失败",
+		NotifyStatusFail:            "执行失败",
+		NotifyStatusStopped:         "已停止",
+		NotifyStatusTimeout:         "执行超时",
+		NotifyStatusUnknown:         "未知状态",
+		NotifyMethodIncremental:     "增量同步",
+		NotifyMethodFull:            "全量同步",
+		NotifyMethodMove:            "移动同步",
 
 		FmtExcludeRulesUnsupported: "以下过滤规则不受支持，已拒绝保存：%s。仅支持三种写法：文件名（可含 * 通配）、*.后缀、相对目录/",
+		FmtIncludeRulesUnsupported: "以下白名单规则不受支持，已拒绝保存：%s。仅支持文件名（可含 * 通配）或 *.后缀",
 		FmtMirrorDeleteGuard:       "为防止误删，已跳过本次全量同步的删除阶段：%s。请确认来源目录可正常列举后重试",
 		FmtUnsafeDeleteTarget:      "已拒绝删除 %q（位于 %q）：名称不是单个文件或目录",
 		FmtScanError:               "%s目录扫描失败，原因为: %s",
@@ -213,22 +299,64 @@ var translations = map[string]map[string]string{
 		SettingsTaskSave:        "Task history retention",
 		SettingsCopyConcurrency: "Copy concurrency",
 		SettingsScanConcurrency: "Scan concurrency",
-		SettingsMaxRetries:      "Max retries",
-		SettingsSchedConfirm:    "Scheduled full-sync deletion confirmation",
-		InternalError:           "Operation failed, please check engine connection or view service logs",
-		RequestTooLarge:         "Request body too large",
-		SSEConnLimit:            "Connection limit reached, please close other pages and try again",
-		SSEStreamLimit:          "Too many progress streams for this task, please close other pages and try again",
-		InvalidConfigParams:     "Invalid configuration parameters",
-		ConfigSaveFail:          "Failed to save configuration, please check the service logs",
-		ConfigChangedOnDisk:     "The configuration file was edited manually (%s); refusing to overwrite those changes. Restart the app and try again",
-		CredentialUnreadable:    "The stored credential cannot be decrypted (secret.key may have been lost or replaced), please delete this entry and add it again",
-		VersionCheckFail:        "Unable to check for the latest version right now",
-		CrossSiteWriteRejected:  "Cross-site operations are not allowed",
-		GatewayLoginRequired:    "Please open this app from the fnOS desktop",
-		AdminOnly:               "Only administrators can use this app",
+		SettingsMaxRetries:          "Max retries",
+		SettingsSchedConfirm:        "Scheduled full-sync deletion confirmation",
+		SettingsApprovalTimeout:     "Full-sync approval timeout",
+		SettingsHealthCheckInterval: "Engine health check interval",
+		InternalError:               "Operation failed, please check engine connection or view service logs",
+		RequestTooLarge:             "Request body too large",
+		SSEConnLimit:                "Connection limit reached, please close other pages and try again",
+		SSEStreamLimit:              "Too many progress streams for this task, please close other pages and try again",
+		InvalidConfigParams:         "Invalid configuration parameters",
+		ConfigSaveFail:              "Failed to save configuration, please check the service logs",
+		ConfigChangedOnDisk:         "The configuration file was edited manually (%s); refusing to overwrite those changes. Restart the app and try again",
+		CredentialUnreadable:        "The stored credential cannot be decrypted (secret.key may have been lost or replaced), please delete this entry and add it again",
+		VersionCheckFail:            "Unable to check for the latest version right now",
+		CrossSiteWriteRejected:      "Cross-site operations are not allowed",
+		GatewayLoginRequired:        "Please open this app from the fnOS desktop",
+		AdminOnly:                   "Only administrators can use this app",
+
+		ScanIntervalInvalid:       "Scan interval must be an integer between 0 and 300 seconds",
+		CopyConcurrencyInvalid:    "Copy concurrency must be 0 (follow global) or between 1 and 100",
+		ScanConcurrencyInvalid:    "Scan concurrency must be 0 (follow global) or between 1 and 50",
+		MaxRetriesInvalid:         "Max retries must be -1 (follow global) or between 0 and 10",
+		CompareModeInvalid:        "Unsupported file comparison mode",
+		ConflictPolicyInvalid:     "Unsupported conflict policy",
+		TrashDirInvalid:           "Invalid trash directory name (path traversal, absolute paths, and illegal characters are not allowed)",
+		TrashRetentionInvalid:     "Trash retention days must be an integer between 0 and 3650",
+		FilterModeInvalid:         "Unsupported filter mode",
+		TimeFilterInvalid:         "Time filter values must be integers >= 0",
+		TimeFilterRangeConflict:   "Conflicting time filter range: olderThanDays must be less than newerThanDays",
+		TimeWindowInvalid:         "Invalid time window: use HH:MM format and distinct start/end times",
+		NotifyModeInvalid:         "Unsupported notification binding mode",
+		NotifyIdsInvalid:          "Invalid notification channel ID list",
+		MaxConcurrentJobsInvalid:  "Max concurrent jobs per engine must be between 0 and 50",
+		BatchActionInvalid:        "Unsupported batch action",
+		BackupPayloadInvalid:      "Invalid configuration backup payload",
+		BackupConflictModeInvalid: "Backup conflict mode must be skip or overwrite",
+		DryRunAlreadyRunning:      "A dry-run preview is already running for this job",
+		DryRunNotFound:            "No dry-run preview found for this job",
+		TaskRunningCannotDelete:   "Cannot delete a task while it is running",
+		NoRetryItemSelected:       "No retryable failed items selected",
+
+		NotifyApprovalTitle:         "Full Sync Awaiting Approval",
+		NotifyApprovalContent:       "Job \"%s\" detected %d destination items to delete (%d files, %d folders) and paused awaiting approval. Open OpenSync to review and confirm or skip deletion.",
+		NotifyEngineOfflineTitle:    "Storage Engine Offline",
+		NotifyEngineOnlineTitle:     "Storage Engine Recovered",
+		NotifyEngineStorageErrTitle: "Storage Mount Alert",
+		NotifyStatusSuccess:         "Succeeded",
+		NotifyStatusNoSync:          "No Changes",
+		NotifyStatusPartialFail:     "Partially Failed",
+		NotifyStatusFail:            "Failed",
+		NotifyStatusStopped:         "Stopped",
+		NotifyStatusTimeout:         "Timed Out",
+		NotifyStatusUnknown:         "Unknown",
+		NotifyMethodIncremental:     "Incremental Sync",
+		NotifyMethodFull:            "Full Sync",
+		NotifyMethodMove:            "Move Sync",
 
 		FmtExcludeRulesUnsupported: "The following filter rules are not supported and were rejected: %s. Only three formats are supported: filename (with * wildcard), *.extension, relative/directory/",
+		FmtIncludeRulesUnsupported: "The following whitelist rules are not supported and were rejected: %s. Only filename (with * wildcard) or *.extension are supported",
 		FmtMirrorDeleteGuard:       "To prevent accidental deletion, the delete phase of this full sync was skipped: %s. Please verify the source directory can be listed correctly and try again",
 		FmtUnsafeDeleteTarget:      "Refused to delete %q in %q: the name is not a single file or directory",
 		FmtScanError:               "%s directory scan failed: %s",
@@ -301,6 +429,10 @@ func Locale() string {
 
 func ExcludeRulesUnsupported(rules []string) string {
 	return fmt.Sprintf(T(FmtExcludeRulesUnsupported), strings.Join(rules, ", "))
+}
+
+func IncludeRulesUnsupported(rules []string) string {
+	return fmt.Sprintf(T(FmtIncludeRulesUnsupported), strings.Join(rules, ", "))
 }
 
 func MirrorDeleteGuard(reason string) string {

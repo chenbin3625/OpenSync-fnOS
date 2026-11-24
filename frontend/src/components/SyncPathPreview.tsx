@@ -38,13 +38,13 @@ function PreviewRow({
     >
       <div className="sync-path-preview-row">
         <span className="sync-path-preview-role">源</span>
-        <span className="sync-path-preview-path mono">{item.srcDir}</span>
+        <span className="sync-path-preview-path">{item.srcDir}</span>
       </div>
       <div className="sync-path-preview-row sync-path-preview-row--dst">
         <span className="sync-path-preview-role sync-path-preview-role--dst">
           至
         </span>
-        <span className="sync-path-preview-path mono">
+        <span className="sync-path-preview-path">
           <span className="sync-path-preview-dst-base">
             {item.dstBasePrefix}
           </span>
@@ -59,7 +59,7 @@ function PreviewRow({
         )}
       </div>
       {showDirectExample && (
-        <div className="sync-path-preview-example mono">
+        <div className="sync-path-preview-example">
           例：{item.srcDir}a.jpg → {item.resolvedDst}a.jpg
         </div>
       )}
@@ -168,7 +168,9 @@ export function SyncPathPreview({
                     >
                       <div className="sync-path-preview-group-title">
                         <span>目标目录</span>
-                        <span className="mono">{group.dstBaseDir}</span>
+                        <span className="sync-path-preview-group-path">
+                          {group.dstBaseDir}
+                        </span>
                       </div>
                       {group.items.map((item) => (
                         <PreviewRow

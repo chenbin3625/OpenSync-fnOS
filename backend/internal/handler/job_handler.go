@@ -3,6 +3,8 @@ package handler
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
 	"opensync/internal/msg"
 	"opensync/internal/service"
 	"opensync/pkg/util"
@@ -215,11 +217,12 @@ func UpdateJob(c *gin.Context) {
 	var req struct {
 		// ids arrive as strings from the bundled UI and as numbers from
 		// other clients; both are accepted, fractions and junk are not.
-		ID     *flexibleID `json:"id"`
-		TaskID *flexibleID `json:"taskId"`
-		Action *string     `json:"action"`
-		Pause  *bool       `json:"pause"`
-		Abort  *bool       `json:"abort"`
+		ID      *flexibleID  `json:"id"`
+		TaskID  *flexibleID  `json:"taskId"`
+		Action  *string      `json:"action"`
+		Pause   *bool        `json:"pause"`
+		Abort   *bool        `json:"abort"`
+		ItemIDs []flexibleID `json:"itemIds"`
 	}
 	if !bindJSONStrict(c, &req) {
 		return
@@ -227,6 +230,10 @@ func UpdateJob(c *gin.Context) {
 
 	if req.TaskID != nil {
 		if req.ID != nil || req.Pause != nil || req.Abort != nil || req.Action == nil {
+			respondError(c, msg.T(msg.LostPart))
+			return
+		}
+		if len(req.ItemIDs) > 0 && *req.Action != "retry" {
 			respondError(c, msg.T(msg.LostPart))
 			return
 		}
@@ -239,7 +246,19 @@ func UpdateJob(c *gin.Context) {
 		case "stop":
 			handleServiceVoid(c, func() error { return stopTaskService(taskID) })
 		case "retry":
-			handleServiceVoid(c, func() error { return service.RetryFailedTask(taskID) })
+			var itemIDs []int64
+			if len(req.ItemIDs) > 0 {
+				itemIDs = make([]int64, 0, len(req.ItemIDs))
+				for i := range req.ItemIDs {
+					itemID, err := req.ItemIDs[i].parse()
+					if err != nil {
+						respondError(c, err.Error())
+						return
+					}
+					itemIDs = append(itemIDs, itemID)
+				}
+			}
+			handleServiceVoid(c, func() error { return service.RetryFailedTaskItems(taskID, itemIDs) })
 		case "approve":
 			handleServiceVoid(c, func() error { return service.ApproveFullSyncTask(taskID) })
 		case "reject":
@@ -250,7 +269,7 @@ func UpdateJob(c *gin.Context) {
 		return
 	}
 
-	if req.Action != nil {
+	if req.Action != nil || len(req.ItemIDs) > 0 {
 		respondError(c, msg.T(msg.LostPart))
 		return
 	}
@@ -330,4 +349,173 @@ func DeleteJob(c *gin.Context) {
 	} else {
 		respondError(c, msg.T(msg.LostPart))
 	}
+}
+
+// BatchJobAction handles POST /svr/job/batch
+func BatchJobAction(c *gin.Context) {
+	var req struct {
+		Action string       `json:"action"`
+		IDs    []flexibleID `json:"ids"`
+	}
+	if !bindJSONStrict(c, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Action) == "" {
+		respondError(c, msg.T(msg.BatchActionInvalid))
+		return
+	}
+	jobIDs := make([]int64, 0, len(req.IDs))
+	for i := range req.IDs {
+		id, err := req.IDs[i].parse()
+		if err != nil {
+			respondError(c, err.Error())
+			return
+		}
+		jobIDs = append(jobIDs, id)
+	}
+	handleService(c, func() (interface{}, error) {
+		return service.BatchJobAction(req.Action, jobIDs)
+	})
+}
+
+// DeleteTasksBatch handles POST /svr/job/tasks/delete
+func DeleteTasksBatch(c *gin.Context) {
+	var req struct {
+		TaskIDs    []flexibleID `json:"taskIds"`
+		ClearJobID *flexibleID  `json:"clearJobId"`
+	}
+	if !bindJSONStrict(c, &req) {
+		return
+	}
+	if req.ClearJobID != nil {
+		jobID, err := req.ClearJobID.parse()
+		if err != nil {
+			respondError(c, err.Error())
+			return
+		}
+		handleService(c, func() (interface{}, error) {
+			deleted, err := service.ClearJobHistory(jobID)
+			if err != nil {
+				return nil, err
+			}
+			return gin.H{"deleted": deleted}, nil
+		})
+		return
+	}
+	if len(req.TaskIDs) == 0 {
+		respondError(c, msg.T(msg.LostPart))
+		return
+	}
+	taskIDs := make([]int64, 0, len(req.TaskIDs))
+	for i := range req.TaskIDs {
+		tid, err := req.TaskIDs[i].parse()
+		if err != nil {
+			respondError(c, err.Error())
+			return
+		}
+		taskIDs = append(taskIDs, tid)
+	}
+	handleService(c, func() (interface{}, error) {
+		deleted, err := service.RemoveTasksBatch(taskIDs)
+		if err != nil {
+			return nil, err
+		}
+		return gin.H{"deleted": deleted}, nil
+	})
+}
+
+// ExportTaskItems handles GET /svr/job/items/export
+func ExportTaskItems(c *gin.Context) {
+	taskIDStr := c.Query("taskId")
+	if _, err := parseRequiredID(taskIDStr); err != nil {
+		respondError(c, msg.T(msg.LostPart))
+		return
+	}
+	req := map[string]interface{}{
+		"taskId":   taskIDStr,
+		"status":   c.Query("status"),
+		"type":     c.Query("type"),
+		"isPath":   c.Query("isPath"),
+		"hasError": c.Query("hasError"),
+		"keyword":  c.Query("keyword"),
+	}
+	removeEmptyStringValues(req)
+	format := c.Query("format")
+	filename, contentType, data, err := service.ExportTaskItems(req, format)
+	if err != nil {
+		respondServiceError(c, err)
+		return
+	}
+	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+	c.Header("Cache-Control", "no-store")
+	c.Data(http.StatusOK, contentType, data)
+}
+
+// StartDryRun handles POST /svr/job/dry-run
+func StartDryRun(c *gin.Context) {
+	var jobID int64
+	if idStr := c.Query("id"); idStr != "" {
+		id, err := parseRequiredID(idStr)
+		if err != nil {
+			respondError(c, err.Error())
+			return
+		}
+		jobID = id
+	} else {
+		var req struct {
+			ID *flexibleID `json:"id"`
+		}
+		if !bindJSONStrict(c, &req) {
+			return
+		}
+		id, err := req.ID.parse()
+		if err != nil {
+			respondError(c, err.Error())
+			return
+		}
+		jobID = id
+	}
+	handleService(c, func() (interface{}, error) {
+		return service.StartDryRun(jobID)
+	})
+}
+
+// GetDryRun handles GET /svr/job/dry-run
+func GetDryRun(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	id, err := parseRequiredID(c.Query("id"))
+	if err != nil {
+		respondError(c, err.Error())
+		return
+	}
+	handleService(c, func() (interface{}, error) {
+		return service.GetDryRun(id)
+	})
+}
+
+// CancelDryRun handles DELETE /svr/job/dry-run
+func CancelDryRun(c *gin.Context) {
+	id, err := parseRequiredID(c.Query("id"))
+	if err != nil {
+		respondError(c, err.Error())
+		return
+	}
+	handleServiceVoid(c, func() error {
+		return service.CancelDryRun(id)
+	})
+}
+
+// TestJobFilter handles POST /svr/job/filter/test
+func TestJobFilter(c *gin.Context) {
+	var req map[string]interface{}
+	if !bindJSON(c, &req) {
+		return
+	}
+	if req == nil {
+		respondError(c, msg.T(msg.LostPart))
+		return
+	}
+	handleService(c, func() (interface{}, error) {
+		return service.TestJobFilter(req)
+	})
 }

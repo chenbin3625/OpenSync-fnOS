@@ -834,6 +834,24 @@ func (c *AlistClient) MoveFileContext(ctx context.Context, srcDir, dstDir, name 
 	return c.copyOrMoveFileContext(ctx, "/api/fs/move", srcDir, dstDir, name)
 }
 
+// RenameFileContext renames a single file or directory in-place via /api/fs/rename.
+func (c *AlistClient) RenameFileContext(ctx context.Context, filePath, newName string, scanInterval int) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if strings.TrimSpace(filePath) == "" || strings.TrimSpace(newName) == "" || strings.ContainsAny(newName, "/\\") {
+		return fmt.Errorf("invalid rename target %q -> %q", filePath, newName)
+	}
+	if err := c.CheckWaitContext(ctx, filePath, scanInterval); err != nil {
+		return err
+	}
+	_, err := c.PostContext(ctx, "/api/fs/rename", map[string]string{
+		"path": filePath,
+		"name": newName,
+	}, nil)
+	return err
+}
+
 func alistTaskGroup(copyType taskItemType) string {
 	if copyType == taskItemTypeMove {
 		return "move"

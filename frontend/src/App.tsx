@@ -22,6 +22,8 @@ import {
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import {
+  IconAlertTriangle,
+  IconApps,
   IconBellStroked,
   IconCloudStroked,
   IconFolderStroked,
@@ -42,12 +44,19 @@ import { applyTheme, connectHost } from "./lib/host";
 import { useResource } from "./lib/hooks";
 import { createGuardedRefresh } from "./lib/sessionGuard";
 import { getJobName } from "./pages/Home/homeUtils";
+import type { JobItem } from "./types";
 
+const Dashboard = lazy(() => import("./pages/Dashboard"));
 const Tasks = lazy(() => import("./pages/Tasks"));
 const Engines = lazy(() => import("./pages/Engines"));
 const Notifications = lazy(() => import("./pages/Notifications"));
 const Settings = lazy(() => import("./pages/Settings"));
 const sections = [
+  {
+    path: "/dashboard",
+    label: "总览看板",
+    icon: <IconApps aria-hidden="true" />,
+  },
   {
     path: "/tasks",
     label: "任务管理",
@@ -73,6 +82,16 @@ export const SessionContext = createContext<{ development: boolean }>({
   development: false,
 });
 
+function jobStatusDotClass(job: JobItem): string {
+  if (job.pendingApproval) return "job-dot job-dot--approval";
+  if (job.running) return "job-dot job-dot--running";
+  if (job.queued) return "job-dot job-dot--queued";
+  if (job.lastStatus && [3, 5, 6, 7].includes(job.lastStatus))
+    return "job-dot job-dot--error";
+  if (job.enable !== 1 && job.isCron !== 2) return "job-dot job-dot--disabled";
+  return "";
+}
+
 function Shell({ children, version }: { children: ReactNode; version: string }) {
   const { pathname, search } = useLocation();
   const navigate = useNavigate();
@@ -87,6 +106,10 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
   const notifiedRelease = useRef<string | null>(null);
   const taskItems = taskMenu.data?.dataList || [];
   const hasTaskItems = taskItems.length > 0;
+  const pendingApprovalJobs = useMemo(
+    () => taskItems.filter((job) => Boolean(job.pendingApproval)),
+    [taskItems],
+  );
   const rawJobId = new URLSearchParams(search).get("jobId");
   const currentTaskId = rawJobId && /^\d+$/.test(rawJobId) ? rawJobId : null;
   // Tasks.selectJob() falls back to the first job when the URL has no jobId, so
@@ -131,17 +154,25 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
     return () => window.removeEventListener("opensync:jobs-changed", refresh);
   }, [taskMenu.refresh]);
   useEffect(() => {
-    // Jobs can be changed from the Tasks page, another tab or the scheduler.
-    // Refreshing on focus keeps the sidebar list from going stale indefinitely.
+    // Poll job states gently while visible so sidebar status dots and global
+    // pending-approval alerts stay current across all pages.
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === "visible") {
+        void taskMenu.refresh(true);
+      }
+    }, 15_000);
     let lastRefresh = Date.now();
     const refresh = () => {
       if (document.visibilityState !== "visible") return;
-      if (Date.now() - lastRefresh < 60_000) return;
+      if (Date.now() - lastRefresh < 10_000) return;
       lastRefresh = Date.now();
       void taskMenu.refresh(true);
     };
     document.addEventListener("visibilitychange", refresh);
-    return () => document.removeEventListener("visibilitychange", refresh);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", refresh);
+    };
   }, [taskMenu.refresh]);
   useEffect(() => {
     // 后端成功结果缓存 30 分钟（backend/cmd/server/version_checker.go），前端按
@@ -204,6 +235,13 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
   }, [latest.setData, version]);
   useEffect(() => () => checkInFlight.current?.abort(), []);
   const tasksSelected = pathname.startsWith("/tasks") && !hasTaskItems;
+  const showGlobalApprovalStrip =
+    pendingApprovalJobs.length > 0 &&
+    !pathname.startsWith("/dashboard") &&
+    !(
+      pathname.startsWith("/tasks") &&
+      pendingApprovalJobs.some((j) => String(j.id) === activeTaskId)
+    );
   return (
     <VersionContext
       value={{
@@ -217,6 +255,23 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
       <div className="app-shell">
         <aside className="app-sidebar" aria-label="主菜单">
           <nav aria-label="主导航">
+            <NavLink
+              to="/dashboard"
+              className={({ isActive }) =>
+                `nav-link${isActive ? " selected" : ""}`
+              }
+            >
+              {sections[0].icon}
+              <span className="nav-label">{sections[0].label}</span>
+              {pendingApprovalJobs.length > 0 && (
+                <span
+                  className="nav-badge"
+                  aria-label={`${pendingApprovalJobs.length} 个待审批`}
+                >
+                  {pendingApprovalJobs.length}
+                </span>
+              )}
+            </NavLink>
             {hasTaskItems ? (
               <button
                 type="button"
@@ -253,7 +308,7 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
                   `nav-link${isActive ? " selected" : ""}`
                 }
               >
-                {sections[0].icon}
+                {sections[1].icon}
                 <span className="nav-label">任务管理</span>
               </NavLink>
             )}
@@ -267,26 +322,32 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
             )}
             {hasTaskItems && taskMenuOpen && (
               <div className="nav-submenu" id="task-menu">
-                {taskItems.map((job) => (
-                  // A plain Link: NavLink ignores the query string, so every
-                  // /tasks?jobId=… entry was marked aria-current="page".
-                  <Link
-                    key={job.id}
-                    to={taskHref(job.id)}
-                    className={`task-sub-link${activeTaskId === String(job.id) ? " selected" : ""}`}
-                    aria-current={activeTaskId === String(job.id) ? "page" : undefined}
-                    title={getJobName(job)}
-                  >
-                    <IconFolderStroked
-                      className="task-sub-icon"
-                      aria-hidden="true"
-                    />
-                    {getJobName(job)}
-                  </Link>
-                ))}
+                {taskItems.map((job) => {
+                  const dotClass = jobStatusDotClass(job);
+                  return (
+                    // A plain Link: NavLink ignores the query string, so every
+                    // /tasks?jobId=… entry was marked aria-current="page".
+                    <Link
+                      key={job.id}
+                      to={taskHref(job.id)}
+                      className={`task-sub-link${activeTaskId === String(job.id) ? " selected" : ""}`}
+                      aria-current={
+                        activeTaskId === String(job.id) ? "page" : undefined
+                      }
+                      title={getJobName(job)}
+                    >
+                      <IconFolderStroked
+                        className="task-sub-icon"
+                        aria-hidden="true"
+                      />
+                      <span className="task-sub-name">{getJobName(job)}</span>
+                      {dotClass && <span className={dotClass} aria-hidden="true" />}
+                    </Link>
+                  );
+                })}
               </div>
             )}
-            {sections.slice(1, -1).map((section) => (
+            {sections.slice(2, -1).map((section) => (
               <NavLink
                 key={section.path}
                 to={section.path}
@@ -313,6 +374,26 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
           </div>
         </aside>
         <main className="app-workspace">
+          {showGlobalApprovalStrip && (
+            <div className="global-approval-strip" role="alert">
+              <IconAlertTriangle aria-hidden="true" size="small" />
+              <span>
+                有 {pendingApprovalJobs.length} 个全量同步任务（
+                {getJobName(pendingApprovalJobs[0])}
+                {pendingApprovalJobs.length > 1 ? " 等" : ""}）正在等待删除确认
+              </span>
+              <Button
+                size="small"
+                type="danger"
+                theme="solid"
+                onClick={() =>
+                  navigate(`/tasks?jobId=${pendingApprovalJobs[0].id}&tab=overview`)
+                }
+              >
+                立即审批
+              </Button>
+            </div>
+          )}
           <Suspense fallback={<LoadingPanel />}>{children}</Suspense>
         </main>
         <nav className="mobile-navigation" aria-label="主导航">
@@ -378,6 +459,7 @@ function Workspace() {
     <SessionContext value={session.data}>
       <Shell version={session.data.version}>
         <Routes>
+          <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/tasks" element={<Tasks />} />
           <Route path="/engines" element={<Engines />} />
           <Route path="/notifications" element={<Notifications />} />

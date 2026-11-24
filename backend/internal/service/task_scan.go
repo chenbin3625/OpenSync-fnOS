@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"opensync/internal/mapper"
 	"opensync/internal/msg"
 	"opensync/pkg/util"
 	"path"
@@ -132,10 +133,7 @@ func (jt *JobTask) configuredScanWorks(dstPaths []string) []scanWork {
 }
 
 func (jt *JobTask) runScanPhases(works []scanWork, fullSync bool) {
-	var spec *excludeMatcher
-	if exclude := util.StringValue(jt.Job["exclude"]); exclude != "" {
-		spec = newExcludeMatcher(exclude)
-	}
+	spec := buildJobExcludeMatcher(jt.Job)
 	// Two phases. The first destination of every source refreshes the source
 	// listing; the other destinations reuse it (listDir's useCache), so they
 	// may only start once those scans have returned. Starting every pair at
@@ -264,12 +262,25 @@ func (jt *JobTask) markScanFinished() {
 func (jt *JobTask) syncRetryItems() {
 	defer jt.markScanFinished()
 	statuses := taskStatusValues(jt.RetryStatuses...)
+	selectedIDs := jt.RetryItemIDs
+	countItems := func() (int64, error) {
+		if len(selectedIDs) > 0 {
+			return mapper.CountJobTaskItemsByIDs(jt.RetrySourceTaskID, selectedIDs, statuses)
+		}
+		return jobDeps.CountJobTaskItemsByStatuses(jt.RetrySourceTaskID, statuses)
+	}
+	forEachItems := func(fn func([]map[string]interface{}) error) error {
+		if len(selectedIDs) > 0 {
+			return mapper.ForEachJobTaskItemsByIDs(jt.RetrySourceTaskID, selectedIDs, statuses, retryTaskItemBatchSize, fn)
+		}
+		return jobDeps.ForEachJobTaskItemsByStatuses(jt.RetrySourceTaskID, statuses, retryTaskItemBatchSize, fn)
+	}
 	// Snapshot how many items the source task advertises before replaying. A
 	// concurrent deletion of the source task's history makes
 	// ForEachJobTaskItemsByStatuses stop early, and the replayed prefix used to
 	// look exactly like "everything was retried" — no error, no log, and a task
 	// status that claimed the failures were fixed.
-	expected, countErr := jobDeps.CountJobTaskItemsByStatuses(jt.RetrySourceTaskID, statuses)
+	expected, countErr := countItems()
 	method := util.ToInt(jt.Job["method"])
 	dstPaths := parsePathList(jt.Job["dstPath"])
 	var roots []scanWork
@@ -278,7 +289,7 @@ func (jt *JobTask) syncRetryItems() {
 	}
 	rescan := make(map[scanWork]struct{})
 	if len(roots) > 0 {
-		err := jobDeps.ForEachJobTaskItemsByStatuses(jt.RetrySourceTaskID, statuses, retryTaskItemBatchSize, func(items []map[string]interface{}) error {
+		err := forEachItems(func(items []map[string]interface{}) error {
 			for _, item := range items {
 				if jt.isBreak() || jt.context().Err() != nil {
 					return errScanAborted
@@ -298,7 +309,7 @@ func (jt *JobTask) syncRetryItems() {
 		}
 	}
 	replayed := 0
-	err := jobDeps.ForEachJobTaskItemsByStatuses(jt.RetrySourceTaskID, statuses, retryTaskItemBatchSize, func(items []map[string]interface{}) error {
+	err := forEachItems(func(items []map[string]interface{}) error {
 	itemsLoop:
 		for _, item := range items {
 			if jt.isBreak() || jt.context().Err() != nil {
@@ -618,7 +629,7 @@ func (jt *JobTask) copyFile(srcPath, dstPath, fileName string, fileSize interfac
 	if jt.isBreak() {
 		return
 	}
-	jt.queueCopyFile(srcPath, dstPath, fileName, fileSize, jt.scanCopyType(), nil)
+	jt.queueCopyFileWithConflict(srcPath, dstPath, "", fileName, fileSize, jt.scanCopyType(), nil, false)
 }
 
 func (jt *JobTask) scanCopyType() taskItemType {
@@ -629,10 +640,16 @@ func (jt *JobTask) scanCopyType() taskItemType {
 }
 
 func (jt *JobTask) queueCopyFile(srcPath, dstPath, fileName string, fileSize interface{}, copyType taskItemType, fullWriteFailed *fullSyncWriteFailures) {
+	jt.queueCopyFileWithConflict(srcPath, dstPath, "", fileName, fileSize, copyType, fullWriteFailed, false)
+}
+
+func (jt *JobTask) queueCopyFileWithConflict(srcPath, dstPath, dstRoot, fileName string, fileSize interface{}, copyType taskItemType, fullWriteFailed *fullSyncWriteFailures, isOverwrite bool) {
 	if jt.isBreak() {
 		return
 	}
 	ci := newCopyItem(jt, jt.AlistClient, srcPath, dstPath, fileName, fileSize, copyType)
+	ci.DstRoot = dstRoot
+	ci.IsOverwrite = isOverwrite
 	ci.fullWriteFailed = fullWriteFailed
 	if !jt.Waiting.pushWait(jt.context(), ci) {
 		ci.setStatus(taskStatusStopped)
@@ -671,6 +688,10 @@ func unsafeDeleteTargetMessage(dir, fileName string) string {
 }
 
 func (jt *JobTask) delFile(path, fileName string, size interface{}) taskStatus {
+	return jt.delFileWithRoot("", path, fileName, size)
+}
+
+func (jt *JobTask) delFileWithRoot(dstRoot, path, fileName string, size interface{}) taskStatus {
 	if jt.isBreak() {
 		return taskStatusStopped
 	}
@@ -689,8 +710,13 @@ func (jt *JobTask) delFile(path, fileName string, size interface{}) taskStatus {
 	if isPath {
 		name = fileName[:len(fileName)-1]
 	}
-	scanIntervalT := util.ToInt(jt.Job["scanIntervalT"])
-	err := jt.AlistClient.DeleteFileContext(jt.context(), path, []string{name}, scanIntervalT)
+	var err error
+	if trashEnabled(jt.Job) && dstRoot != "" {
+		err = jt.moveItemToTrash(dstRoot, path, fileName)
+	} else {
+		scanIntervalT := util.ToInt(jt.Job["scanIntervalT"])
+		err = jt.AlistClient.DeleteFileContext(jt.context(), path, []string{name}, scanIntervalT)
+	}
 	if err != nil {
 		status = taskStatusFailed
 		e := err.Error()
@@ -979,21 +1005,36 @@ func (jt *JobTask) syncWithHave(work scanWork, spec *excludeMatcher) {
 		return
 	}
 
+	jt.recordMoveSrcSubdir(work.SrcPath, work.SrcRootPath)
+
 	children := make([]scanWork, 0)
 	dstIndex := newDstNameMatchIndex(dstFiles)
 	srcIndex := newSrcNameMatchIndex(srcFiles)
+	includeM := buildJobIncludeMatcher(jt.Job)
+	compareMode := util.ToInt(jt.Job["compareMode"])
+	conflictPolicy := util.ToInt(jt.Job["conflictPolicy"])
+	method := util.ToInt(jt.Job["method"])
+	now := time.Now()
 	for key, srcVal := range srcFiles {
 		if jt.isBreak() {
 			break
 		}
 		if !strings.HasSuffix(key, "/") {
 			// File
+			checkPath := excludeMatchPath(work.SrcRootPath, work.SrcPath, key)
+			if includeM != nil && !includeM.matchesListed(checkPath) {
+				continue
+			}
 			srcSize := fileSize(srcVal)
-			if !jobAllowsFileSize(jt.Job, srcSize) {
+			if !jobAllowsFileMeta(jt.Job, srcVal, now) {
 				continue
 			}
 			_, dstVal, exists := dstIndex.find(key, srcIndex)
-			if util.ToInt(jt.Job["method"]) == 2 || !exists || fileChanged(srcVal, dstVal) {
+			if method != 2 && exists && conflictPolicy == 1 {
+				// Conflict policy: skip existing destination file.
+				continue
+			}
+			if method == 2 || !exists || fileChangedWithMode(srcVal, dstVal, compareMode) {
 				if dstKey, conflict := dstIndex.findDirForFile(key); conflict {
 					// The destination holds a directory under the file's name. A
 					// copy cannot replace it, so report the type conflict instead
@@ -1002,7 +1043,7 @@ func (jt *JobTask) syncWithHave(work scanWork, spec *excludeMatcher) {
 						fmt.Sprintf("destination %q is a directory but the source entry is a file", work.DstPath+dstKey))
 					continue
 				}
-				jt.copyFile(work.SrcPath, work.DstPath, key, srcSize)
+				jt.queueCopyFileWithConflict(work.SrcPath, work.DstPath, work.DstRootPath, key, srcSize, jt.scanCopyType(), nil, exists && method != 2)
 			}
 		} else {
 			// Directory
@@ -1108,7 +1149,11 @@ func (jt *JobTask) syncWithoutHave(work scanWork, spec *excludeMatcher) {
 		return
 	}
 
+	jt.recordMoveSrcSubdir(work.SrcPath, work.SrcRootPath)
+
 	children := make([]scanWork, 0)
+	includeM := buildJobIncludeMatcher(jt.Job)
+	now := time.Now()
 	for key, srcVal := range srcFiles {
 		if jt.isBreak() {
 			break
@@ -1123,8 +1168,12 @@ func (jt *JobTask) syncWithoutHave(work scanWork, spec *excludeMatcher) {
 				Mode:        scanWorkMissingDst,
 			})
 		} else {
+			checkPath := excludeMatchPath(work.SrcRootPath, work.SrcPath, key)
+			if includeM != nil && !includeM.matchesListed(checkPath) {
+				continue
+			}
 			srcSize := fileSize(srcVal)
-			if !jobAllowsFileSize(jt.Job, srcSize) {
+			if !jobAllowsFileMeta(jt.Job, srcVal, now) {
 				continue
 			}
 			jt.copyFile(work.SrcPath, work.DstPath, key, srcSize)
@@ -1150,6 +1199,14 @@ func jobAllowsFileSize(job map[string]interface{}, size int64) bool {
 }
 
 func fileChanged(srcVal, dstVal interface{}) bool {
+	return fileChangedWithMode(srcVal, dstVal, 0)
+}
+
+// fileChangedWithMode compares source and destination metadata according to compareMode:
+//   - 0 (default): size -> MD5 -> mtime + 2s tolerance
+//   - 1 (size only): size difference only
+//   - 2 (size + MD5): size -> MD5 (ignore mtime)
+func fileChangedWithMode(srcVal, dstVal interface{}, compareMode int) bool {
 	src := toFileMetadata(srcVal)
 	dst := toFileMetadata(dstVal)
 	// Size is checked first and unconditionally: differing sizes always mean the
@@ -1160,8 +1217,14 @@ func fileChanged(srcVal, dstVal interface{}) bool {
 	if src.Size != dst.Size {
 		return true
 	}
+	if compareMode == 1 {
+		return false
+	}
 	if isMD5Digest(src.MD5) && isMD5Digest(dst.MD5) {
 		return src.MD5 != dst.MD5
+	}
+	if compareMode == 2 {
+		return false
 	}
 	// No usable digest on at least one side. Without a further signal a
 	// same-size in-place edit is invisible, and many drivers never return a

@@ -286,12 +286,18 @@ func GetNotifyList() ([]map[string]interface{}, error) {
 // body is included because request-body templates commonly embed tokens; the
 // stored value is restored for editing via resolveNotifyParams.
 var notifySecretKeys = map[int][]string{
-	0: {"url", "webhook", "headers", "body"}, // custom webhook: URL/webhook may embed token, headers/body carry auth
-	1: {"sendKey"},                           // Server酱
-	2: {"url", "webhook", "secret"},          // 钉钉 (access_token in URL query, 加签 secret)
-	3: {"corpsecret", "corpSecret"},          // 企业微信应用密钥
-	4: {"url", "webhook", "secret"},          // 飞书 (token in URL path, 签名校验 secret)
-	5: {"server", "deviceKey"},               // Bark: server 是投递目标（可能内嵌凭据），deviceKey 是设备密钥
+	0:  {"url", "webhook", "headers", "body"}, // custom webhook: URL/webhook may embed token, headers/body carry auth
+	1:  {"sendKey"},                           // Server酱
+	2:  {"url", "webhook", "secret"},          // 钉钉 (access_token in URL query, 加签 secret)
+	3:  {"corpsecret", "corpSecret"},          // 企业微信应用密钥
+	4:  {"url", "webhook", "secret"},          // 飞书 (token in URL path, 签名校验 secret)
+	5:  {"server", "deviceKey"},               // Bark: server 是投递目标（可能内嵌凭据），deviceKey 是设备密钥
+	6:  {"botToken", "apiBase"},               // Telegram Bot
+	7:  {"url", "webhook"},                    // 企业微信群机器人 Webhook
+	8:  {"password"},                          // SMTP 邮件
+	9:  {"server", "token"},                   // ntfy
+	10: {"server", "token"},                   // Gotify
+	11: {"token"},                             // PushPlus
 }
 
 // allNotifySecretKeys is the union over every method. It is used when a stored
@@ -301,6 +307,7 @@ var notifySecretKeys = map[int][]string{
 var allNotifySecretKeys = []string{
 	"url", "webhook", "headers", "body", "sendKey", "secret",
 	"corpsecret", "corpSecret", "deviceKey", "server",
+	"botToken", "apiBase", "password", "token",
 }
 
 const notifyRedactionMarker = "****"
@@ -462,10 +469,8 @@ func redactNotifyParams(method int, paramsStr string) string {
 			// Unlike sendKey-style masks, no suffix is kept: a body template
 			// may embed a token at any position.
 			params[key] = notifyBodyRedacted
-		case "url", "webhook", "server":
-			// server is Bark's target URL; masking it like url keeps userinfo
-			// and query credentials out of the list response while the host
-			// stays visible.
+		case "url", "webhook", "server", "apiBase":
+			// server / apiBase may carry embedded credentials or query tokens.
 			params[key] = maskNotifyURL(s)
 		default:
 			params[key] = maskSecretValue(s)
@@ -716,6 +721,12 @@ func resolveNotifyParams(notify map[string]interface{}) (map[string]interface{},
 		// change — instead of an empty stored server never counting as one.
 		compareIncoming = withDefaultBarkServer(incoming)
 		compareExisting = withDefaultBarkServer(existingParams)
+	} else if method == 6 {
+		compareIncoming = withDefaultParamURL(incoming, "apiBase", defaultTelegramAPIBase)
+		compareExisting = withDefaultParamURL(existingParams, "apiBase", defaultTelegramAPIBase)
+	} else if method == 9 {
+		compareIncoming = withDefaultParamURL(incoming, "server", defaultNtfyServer)
+		compareExisting = withDefaultParamURL(existingParams, "server", defaultNtfyServer)
 	}
 	if notifyTargetChanged(method, compareIncoming, compareExisting) {
 		return incoming, nil
@@ -736,10 +747,10 @@ func resolveNotifyParams(notify map[string]interface{}) (map[string]interface{},
 		}
 		s, isStr := v.(string)
 		if isStr {
-			// secret (DingTalk 加签 / Lark 签名校验) is optional: an empty value
-			// is the user turning signing off, not an untouched field. Only the
-			// masked placeholder restores the stored one.
-			if key == "secret" && s == "" {
+			// secret (DingTalk 加签 / Lark 签名校验) and optional ntfy token /
+			// telegram apiBase: an empty string clears the optional field,
+			// while a masked placeholder restores the stored value.
+			if (key == "secret" || (method == 9 && key == "token") || (method == 6 && key == "apiBase")) && s == "" {
 				delete(incoming, key)
 				continue
 			}
@@ -819,7 +830,7 @@ func resolveWeComSecretAliases(incoming, existingParams map[string]interface{}) 
 
 func notifyTargetChanged(method int, incoming, existing map[string]interface{}) bool {
 	switch method {
-	case 0, 2, 4:
+	case 0, 2, 4, 7:
 		incomingURL := paramString(incoming, "url", "webhook")
 		if incomingURL != "" && !isMaskedSecretValue(incomingURL) {
 			existingURL := paramString(existing, "url", "webhook")
@@ -828,7 +839,7 @@ func notifyTargetChanged(method int, incoming, existing map[string]interface{}) 
 			}
 		}
 		return false
-	case 1:
+	case 1, 11:
 		return false
 	case 3:
 		incomingCorp := paramString(incoming, "corpid", "corpId")
@@ -839,11 +850,29 @@ func notifyTargetChanged(method int, incoming, existing map[string]interface{}) 
 			}
 		}
 		return false
-	case 5:
+	case 5, 9, 10:
 		incomingServer := paramString(incoming, "server")
 		if incomingServer != "" && !isMaskedSecretValue(incomingServer) {
 			existingServer := paramString(existing, "server")
 			if existingServer == "" || incomingServer != existingServer {
+				return true
+			}
+		}
+		return false
+	case 6:
+		incomingBase := paramString(incoming, "apiBase")
+		if incomingBase != "" && !isMaskedSecretValue(incomingBase) {
+			existingBase := paramString(existing, "apiBase")
+			if existingBase == "" || incomingBase != existingBase {
+				return true
+			}
+		}
+		return false
+	case 8:
+		for _, field := range []string{"host", "port", "username"} {
+			inc := paramString(incoming, field)
+			ext := paramString(existing, field)
+			if inc != "" && inc != ext {
 				return true
 			}
 		}
@@ -854,6 +883,9 @@ func notifyTargetChanged(method int, incoming, existing map[string]interface{}) 
 }
 
 func validateNotifyParams(method int, params map[string]interface{}) error {
+	if err := validateNotifyEventFilter(params); err != nil {
+		return err
+	}
 	switch method {
 	case 0:
 		if err := validateNotifyWebhookURL(paramString(params, "url", "webhook")); err != nil {
@@ -868,7 +900,7 @@ func validateNotifyParams(method int, params map[string]interface{}) error {
 			return errors.New(msg.T(msg.NotifyParamInvalid))
 		}
 		return nil
-	case 2, 4:
+	case 2, 4, 7:
 		return validateNotifyHTTPSURL(paramString(params, "url", "webhook"))
 	case 3:
 		if paramString(params, "corpid", "corpId") == "" ||
@@ -884,6 +916,67 @@ func validateNotifyParams(method int, params map[string]interface{}) error {
 		// server is optional; an empty value means the public Bark service.
 		if server := paramString(params, "server"); server != "" {
 			return validateNotifyWebhookURL(server)
+		}
+		return nil
+	case 6: // Telegram Bot
+		if paramString(params, "botToken") == "" || paramString(params, "chatId") == "" {
+			return errors.New(msg.T(msg.NotifyParamInvalid))
+		}
+		if apiBase := paramString(params, "apiBase"); apiBase != "" {
+			if err := validateNotifyWebhookURL(apiBase); err != nil {
+				return err
+			}
+		}
+		if parseMode := paramString(params, "parseMode"); parseMode != "" &&
+			parseMode != "Markdown" && parseMode != "MarkdownV2" && parseMode != "HTML" {
+			return errors.New(msg.T(msg.NotifyParamInvalid))
+		}
+		return nil
+	case 8: // SMTP
+		host := paramString(params, "host")
+		from := paramString(params, "from")
+		toRaw := paramString(params, "to")
+		if !validateEmailHeaderValue(host) || !validateEmailHeaderValue(from) || !strings.Contains(from, "@") {
+			return errors.New(msg.T(msg.NotifyParamInvalid))
+		}
+		recipients := parseEmailRecipients(toRaw)
+		if len(recipients) == 0 {
+			return errors.New(msg.T(msg.NotifyParamInvalid))
+		}
+		for _, r := range recipients {
+			if !validateEmailHeaderValue(r) || !strings.Contains(r, "@") {
+				return errors.New(msg.T(msg.NotifyParamInvalid))
+			}
+		}
+		if _, err := smtpPortFromParams(params); err != nil {
+			return err
+		}
+		tlsMode := strings.ToLower(paramString(params, "tls"))
+		if tlsMode != "" && tlsMode != "starttls" && tlsMode != "ssl" && tlsMode != "none" {
+			return errors.New(msg.T(msg.NotifyParamInvalid))
+		}
+		return nil
+	case 9: // ntfy
+		if paramString(params, "topic") == "" {
+			return errors.New(msg.T(msg.NotifyParamInvalid))
+		}
+		if server := paramString(params, "server"); server != "" {
+			if err := validateNotifyWebhookURL(server); err != nil {
+				return err
+			}
+		}
+		return nil
+	case 10: // Gotify
+		if err := validateNotifyWebhookURL(paramString(params, "server")); err != nil {
+			return err
+		}
+		if paramString(params, "token") == "" {
+			return errors.New(msg.T(msg.NotifyParamInvalid))
+		}
+		return nil
+	case 11: // PushPlus
+		if paramString(params, "token") == "" {
+			return errors.New(msg.T(msg.NotifyParamInvalid))
 		}
 		return nil
 	default:
@@ -1111,6 +1204,73 @@ func TestNotify(notify map[string]interface{}) error {
 	return nil
 }
 
+func buildApprovalNotifyVars(taskID, jobID int64, job map[string]interface{}, approval *FullSyncApproval) map[string]string {
+	jobName := ""
+	srcPath := ""
+	dstPath := ""
+	methodLabel := localizedMethodLabel(1)
+	if job != nil {
+		if r := strings.TrimSpace(util.StringValue(job["remark"])); r != "" {
+			jobName = r
+		}
+		srcPath = strings.Join(parsePathList(job["srcPath"]), "、")
+		dstPath = strings.Join(parsePathList(job["dstPath"]), "、")
+		methodLabel = localizedMethodLabel(util.ToInt(job["method"]))
+	}
+	if jobName == "" {
+		jobName = fmt.Sprintf("#%d", jobID)
+	}
+	deleteFiles := 0
+	deleteDirs := 0
+	for _, p := range approval.Paths {
+		if p.IsPath {
+			deleteDirs++
+		} else {
+			deleteFiles++
+		}
+	}
+	return map[string]string{
+		"jobName":     jobName,
+		"jobId":       strconv.FormatInt(jobID, 10),
+		"taskId":      strconv.FormatInt(taskID, 10),
+		"method":      methodLabel,
+		"status":      msg.T(msg.NotifyApprovalTitle),
+		"event":       "approval",
+		"srcPath":     srcPath,
+		"dstPath":     dstPath,
+		"deleteCount": strconv.Itoa(approval.DeleteCount),
+		"deleteFiles": strconv.Itoa(deleteFiles),
+		"deleteDirs":  strconv.Itoa(deleteDirs),
+		"deleteSize":  util.ConvertBytes(approval.DeleteSize),
+		"time":        time.Now().In(schedulerLocation()).Format("2006-01-02 15:04:05"),
+	}
+}
+
+func buildFailedErrorSummary(taskID int64) string {
+	items, err := mapper.GetTopFailedTaskItems(taskID, 3)
+	if err != nil || len(items) == 0 {
+		return ""
+	}
+	lines := make([]string, 0, len(items))
+	for _, item := range items {
+		name := strings.TrimSpace(util.StringValue(item["fileName"]))
+		if name == "" {
+			name = strings.TrimSpace(util.StringValue(item["dstPath"]))
+		}
+		reason := strings.TrimSpace(util.StringValue(item["errMsg"]))
+		if reason == "" {
+			reason = msg.T(msg.NotifyStatusFail)
+		}
+		reason = sanitizeNotifyError(reason)
+		if name != "" {
+			lines = append(lines, fmt.Sprintf("- %s: %s", name, reason))
+		} else {
+			lines = append(lines, "- "+reason)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 // SendTaskNotification sends notification after task completion.
 //
 // This is the synchronous delivery path. The task completion path does not call
@@ -1135,13 +1295,9 @@ func SendTaskNotification(taskID int64, status int, taskNum map[string]interface
 		return
 	}
 
-	statusNames := map[int]string{
-		0: "Waiting", 1: "Running", 2: "Success", 3: "Partial Success",
-		4: "Stopped", 5: "Timeout", 6: "System Failed", 7: "Failed", 8: "No sync needed",
-	}
-	statusName := statusNames[status]
-	if status < 0 || status > 8 {
-		statusName = "Unknown"
+	notifyList = filterNotifyListForJob(notifyList, job)
+	if len(notifyList) == 0 {
+		return
 	}
 
 	needNotSync := status == taskStatusNoSync.Int()
@@ -1151,59 +1307,136 @@ func SendTaskNotification(taskID int64, status int, taskNum map[string]interface
 			needNotSync = true
 		}
 	}
-	if needNotSync {
-		statusName = statusNames[8]
+
+	event := notifyEventForTask(status, needNotSync)
+	statusLabel := localizedTaskStatusLabel(status, needNotSync)
+	methodLabel := localizedMethodLabel(util.ToInt(job["method"]))
+	jobID := util.ToInt64(job["id"])
+
+	remark := strings.TrimSpace(util.StringValue(job["remark"]))
+	jobName := remark
+	if jobName == "" {
+		jobName = fmt.Sprintf("#%d", jobID)
 	}
 
-	remark := ""
-	if r, ok := job["remark"]; ok && r != nil {
-		remark = fmt.Sprintf("%v", r)
-	}
+	title := fmt.Sprintf("OpenSync - %s", statusLabel)
 	if remark != "" {
-		statusName = remark + ": " + statusName
+		title = fmt.Sprintf("OpenSync - %s: %s", remark, statusLabel)
 	}
-
-	title := fmt.Sprintf("OpenSync - %s", statusName)
 
 	successNum := util.ToInt(taskNum["successNum"])
 	failNum := util.ToInt(taskNum["failNum"])
 	allNum := util.ToInt(taskNum["allNum"])
+	sumSize := util.ToInt64(taskNum["sumSize"])
 	srcPath := strings.Join(parsePathList(job["srcPath"]), "、")
 	dstPath := strings.Join(parsePathList(job["dstPath"]), "、")
 
-	content := fmt.Sprintf("Source: %s | Target: %s | Total: %d | Success: %d | Fail: %d",
-		srcPath, dstPath, allNum, successNum, failNum)
-
-	if createTime > 0 && duration > 0 {
+	durationText := "0s"
+	if duration > 0 {
 		hours, minutes, seconds := util.ConvertSeconds(duration)
-		durationText := fmt.Sprintf("%dh %dm %ds", hours, minutes, seconds)
-		sumSize := util.ToInt64(taskNum["sumSize"])
-		content += fmt.Sprintf(" | Duration: %s | Size: %s", durationText, util.ConvertBytes(sumSize))
+		if hours > 0 {
+			durationText = fmt.Sprintf("%dh %dm %ds", hours, minutes, seconds)
+		} else if minutes > 0 {
+			durationText = fmt.Sprintf("%dm %ds", minutes, seconds)
+		} else {
+			durationText = fmt.Sprintf("%ds", seconds)
+		}
 	}
 
-	if (status > 3 && status < 6) || status == 7 {
-		content += fmt.Sprintf(" | Status: %s", statusName)
+	errSummary := ""
+	if failNum > 0 || status == taskStatusPartialFail.Int() || status == taskStatusFailed.Int() || status == taskStatusSystemFailed.Int() {
+		errSummary = buildFailedErrorSummary(taskID)
 	}
 
-	sendNotifyFanOut(notifyList, title, content, needNotSync)
+	sizeText := util.ConvertBytes(sumSize)
+	var content string
+	if msg.Locale() == "en" {
+		content = fmt.Sprintf("Job: %s (%s)\nStatus: %s\nSource: %s\nTarget: %s\nResult: Total %d | Success %d | Fail %d\nDuration: %s | Size: %s",
+			jobName, methodLabel, statusLabel, srcPath, dstPath, allNum, successNum, failNum, durationText, sizeText)
+		if errSummary != "" {
+			content += "\nFailure Summary:\n" + errSummary
+		}
+	} else {
+		content = fmt.Sprintf("任务：%s（%s）\n状态：%s\n来源：%s\n目标：%s\n结果：总计 %d | 成功 %d | 失败 %d\n耗时：%s | 大小：%s",
+			jobName, methodLabel, statusLabel, srcPath, dstPath, allNum, successNum, failNum, durationText, sizeText)
+		if errSummary != "" {
+			content += "\n失败摘要：\n" + errSummary
+		}
+	}
+
+	vars := map[string]string{
+		"jobName":    jobName,
+		"jobId":      strconv.FormatInt(jobID, 10),
+		"taskId":     strconv.FormatInt(taskID, 10),
+		"method":     methodLabel,
+		"status":     statusLabel,
+		"event":      event,
+		"srcPath":    srcPath,
+		"dstPath":    dstPath,
+		"allNum":     strconv.Itoa(allNum),
+		"successNum": strconv.Itoa(successNum),
+		"failNum":    strconv.Itoa(failNum),
+		"sumSize":    sizeText,
+		"duration":   durationText,
+		"errSummary": errSummary,
+		"time":       time.Now().In(schedulerLocation()).Format("2006-01-02 15:04:05"),
+	}
+
+	sendNotifyFanOutWithEvent(notifyList, title, content, event, vars, needNotSync)
 }
 
-// deliverTaskNotification is the dispatcher worker's entry point: it runs the
-// same delivery as SendTaskNotification for one queued job.
+func deliverApprovalNotification(job notifyJob) {
+	if notifyBaseContext().Err() != nil {
+		return
+	}
+	notifyList, err := mapper.GetNotifyList(true)
+	if err != nil || len(notifyList) == 0 {
+		return
+	}
+	notifyList = filterNotifyListForJob(notifyList, job.jobData)
+	if len(notifyList) == 0 {
+		return
+	}
+	vars := job.vars
+	jobName := vars["jobName"]
+	deleteCount, _ := strconv.Atoi(vars["deleteCount"])
+	deleteFiles, _ := strconv.Atoi(vars["deleteFiles"])
+	deleteDirs, _ := strconv.Atoi(vars["deleteDirs"])
+	title := fmt.Sprintf("OpenSync - %s: %s", jobName, msg.T(msg.NotifyApprovalTitle))
+	content := fmt.Sprintf(msg.T(msg.NotifyApprovalContent), jobName, deleteCount, deleteFiles, deleteDirs)
+	sendNotifyFanOutWithEvent(notifyList, title, content, "approval", vars, false)
+}
+
+func deliverSystemAlertNotification(job notifyJob) {
+	if notifyBaseContext().Err() != nil {
+		return
+	}
+	notifyList, err := mapper.GetNotifyList(true)
+	if err != nil || len(notifyList) == 0 {
+		return
+	}
+	sendNotifyFanOutWithEvent(notifyList, job.title, job.content, job.event, job.vars, false)
+}
+
+// deliverTaskNotification is the dispatcher worker's entry point: it dispatches
+// task completion, full-sync approval, and system alert notifications.
 func deliverTaskNotification(job notifyJob) {
-	SendTaskNotification(job.taskID, job.status, job.taskNum, job.duration, job.createTime)
+	switch job.kind {
+	case "approval":
+		deliverApprovalNotification(job)
+	case "system_alert":
+		deliverSystemAlertNotification(job)
+	default:
+		SendTaskNotification(job.taskID, job.status, job.taskNum, job.duration, job.createTime)
+	}
 }
 
 // sendNotifyFanOut delivers one notification per config concurrently.
-//
-// Sending serially meant the slowest destination decided how long a finished
-// task stayed in its wrap-up phase: notifyHTTPClient allows 30s per request, so
-// five unreachable webhooks held the task for two and a half minutes. The sends
-// are independent HTTP posts to different hosts and nothing depends on their
-// order, so the total wait is now the slowest single destination rather than
-// their sum. Each send keeps its own recover: one bad config must not take down
-// the goroutine and with it the remaining notifications.
 func sendNotifyFanOut(notifyList []map[string]interface{}, title, content string, needNotSync bool) {
+	sendNotifyFanOutWithEvent(notifyList, title, content, "", nil, needNotSync)
+}
+
+func sendNotifyFanOutWithEvent(notifyList []map[string]interface{}, title, content, event string, vars map[string]string, needNotSync bool) {
 	var wg sync.WaitGroup
 	slots := make(chan struct{}, notifySendConcurrency)
 	for _, notify := range notifyList {
@@ -1215,7 +1448,7 @@ func sendNotifyFanOut(notifyList []map[string]interface{}, title, content string
 			if notifyBaseContext().Err() != nil {
 				return
 			}
-			sent, sendErr := trySendNotify(notify, title, content, needNotSync)
+			sent, sendErr := trySendNotifyWithEvent(notify, title, content, event, vars, needNotSync)
 			recordNotifySendResult(notify, sent, sendErr)
 		}(notify)
 	}
@@ -1224,19 +1457,18 @@ func sendNotifyFanOut(notifyList []map[string]interface{}, title, content string
 	wg.Wait()
 }
 
-// trySendNotify turns the send path into a value. The outcome has to survive as
-// data, not just as a log line: a config whose token expired kept reporting
-// nothing at all through the API, so the UI showed a healthy channel while every
-// message was being rejected. The defer/recover is kept as a safety net for any
-// unexpected panic that might still escape.
 func trySendNotify(notify map[string]interface{}, title, content string, needNotSync bool) (sent bool, err error) {
+	return trySendNotifyWithEvent(notify, title, content, "", nil, needNotSync)
+}
+
+func trySendNotifyWithEvent(notify map[string]interface{}, title, content, event string, vars map[string]string, needNotSync bool) (sent bool, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			sent = false
 			err = notifySendFailure(r)
 		}
 	}()
-	return sendNotify(notify, title, content, needNotSync)
+	return sendNotifyWithEvent(notify, title, content, event, vars, needNotSync)
 }
 
 func notifySendFailure(recovered interface{}) error {
@@ -1307,9 +1539,13 @@ func maskNotifyErrorURL(rawURL string) string {
 }
 
 // sendNotify sends a notification via the configured method. It reports whether
-// a message was actually sent, so a config skipped by notSendNull is not
-// recorded as a successful delivery.
+// a message was actually sent, so a config skipped by event filtering or
+// notSendNull is not recorded as a successful delivery.
 func sendNotify(notify map[string]interface{}, title, content string, needNotSync bool) (bool, error) {
+	return sendNotifyWithEvent(notify, title, content, "", nil, needNotSync)
+}
+
+func sendNotifyWithEvent(notify map[string]interface{}, title, content, event string, vars map[string]string, needNotSync bool) (bool, error) {
 	params, err := notifyParamsValue(notify["params"])
 	if err != nil {
 		return false, fmt.Errorf("parse notify params: %w", err)
@@ -1331,14 +1567,11 @@ func sendNotify(notify map[string]interface{}, title, content string, needNotSyn
 		return false, publicError(err.Error())
 	}
 
-	// Check notSendNull flag
-	if needNotSync {
-		if v, ok := params["notSendNull"]; ok {
-			if util.ToBool(v) {
-				return false, nil
-			}
-		}
+	if !shouldSendNotifyForEvent(params, event, needNotSync) {
+		return false, nil
 	}
+
+	title, content = applyNotifyTemplates(params, title, content, vars)
 
 	var sendErr error
 	switch method {
@@ -1348,12 +1581,24 @@ func sendNotify(notify map[string]interface{}, title, content string, needNotSyn
 		sendErr = sendServerChan(notifyHTTPClient, params, title, content)
 	case 2: // DingTalk
 		sendErr = sendDingTalk(notifyHTTPClient, params, title, content)
-	case 3: // WeCom (Enterprise WeChat)
+	case 3: // WeCom (Enterprise WeChat App)
 		sendErr = sendWeCom(notifyHTTPClient, params, title, content)
 	case 4: // Lark (Feishu)
 		sendErr = sendLark(notifyHTTPClient, params, title, content)
 	case 5: // Bark
 		sendErr = sendBark(notifyHTTPClient, params, title, content)
+	case 6: // Telegram Bot
+		sendErr = sendTelegram(notifyHTTPClient, params, title, content)
+	case 7: // WeCom Group Bot Webhook
+		sendErr = sendWeComWebhook(notifyHTTPClient, params, title, content)
+	case 8: // SMTP Email
+		sendErr = sendSMTP(params, title, content)
+	case 9: // ntfy
+		sendErr = sendNtfy(notifyHTTPClient, params, title, content)
+	case 10: // Gotify
+		sendErr = sendGotify(notifyHTTPClient, params, title, content)
+	case 11: // PushPlus
+		sendErr = sendPushPlus(notifyHTTPClient, params, title, content)
 	default:
 		// validateNotifyParams rejects unknown methods, so this is unreachable
 		// unless a new method is added without a send branch. Reporting it as a

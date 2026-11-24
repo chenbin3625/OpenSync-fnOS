@@ -71,8 +71,38 @@ func TestAlist(c *gin.Context) {
 		respondError(c, err.Error())
 		return
 	}
-	handleServiceVoid(c, func() error {
-		return service.TestClient(c.Request.Context(), id)
+	handleService(c, func() (interface{}, error) {
+		return service.TestClientWithHealth(c.Request.Context(), id)
+	})
+}
+
+// GetAlistHealth handles GET /svr/alist/health
+func GetAlistHealth(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	refresh := c.Query("refresh") == "1" || c.Query("refresh") == "true"
+	if idStr := c.Query("id"); idStr != "" {
+		id, err := parseRequiredID(idStr)
+		if err != nil {
+			respondError(c, err.Error())
+			return
+		}
+		if refresh {
+			handleService(c, func() (interface{}, error) {
+				return service.CheckEngineHealth(c.Request.Context(), id)
+			})
+			return
+		}
+		respondOK(c, service.GetEngineHealth(id))
+		return
+	}
+	if refresh {
+		handleService(c, func() (interface{}, error) {
+			return service.CheckAllEnginesHealth(c.Request.Context())
+		})
+		return
+	}
+	handleService(c, func() (interface{}, error) {
+		return service.GetClientList()
 	})
 }
 

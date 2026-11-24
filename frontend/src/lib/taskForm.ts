@@ -22,6 +22,34 @@ import {
   type ExistingJobPathSummary,
 } from "./syncPathPreview";
 
+function parseNotifyIdList(value: unknown): number[] {
+  if (Array.isArray(value)) {
+    return Array.from(
+      new Set(
+        value
+          .map((item) => Number(item))
+          .filter((id) => Number.isInteger(id) && id > 0),
+      ),
+    );
+  }
+  if (typeof value === "string" && value.trim()) {
+    try {
+      const parsed: unknown = JSON.parse(value);
+      if (Array.isArray(parsed)) return parseNotifyIdList(parsed);
+    } catch {
+      return Array.from(
+        new Set(
+          value
+            .split(",")
+            .map((part) => Number(part.trim()))
+            .filter((id) => Number.isInteger(id) && id > 0),
+        ),
+      );
+    }
+  }
+  return [];
+}
+
 export function defaultJobForm(alistId?: number) {
   return {
     id: undefined as number | undefined,
@@ -42,6 +70,26 @@ export function defaultJobForm(alistId?: number) {
     maxFileSize: 0 as number | string,
     maxFileSizeUnit: "MB",
     exclude: defaultExclude,
+    compareMode: 0,
+    conflictPolicy: 0,
+    trashEnable: false,
+    trashDir: ".opensync-trash",
+    trashRetentionDays: 30,
+    deleteEmptySrcDirs: false,
+    filterMode: 0,
+    include: "",
+    minFileAgeMinutes: 0,
+    olderThanDays: 0,
+    newerThanDays: 0,
+    copyConcurrency: 0,
+    scanConcurrency: 0,
+    maxRetries: -1,
+    windowEnable: false,
+    windowStart: "00:00",
+    windowEnd: "06:00",
+    windowStopOutside: false,
+    notifyMode: 0,
+    notifyIds: [] as number[],
     ...defaultCronFields,
   };
 }
@@ -118,6 +166,26 @@ export function jobToForm(job: JobItem): JobForm {
     // default template silently added filters the user never configured (and
     // saved them back on the next edit).
     exclude: job.exclude ?? "",
+    compareMode: Number(job.compareMode ?? 0),
+    conflictPolicy: Number(job.conflictPolicy ?? 0),
+    trashEnable: Boolean(job.trashEnable),
+    trashDir: (job.trashDir || ".opensync-trash").trim() || ".opensync-trash",
+    trashRetentionDays: Number(job.trashRetentionDays ?? 30),
+    deleteEmptySrcDirs: Boolean(job.deleteEmptySrcDirs),
+    filterMode: Number(job.filterMode ?? 0),
+    include: job.include ?? "",
+    minFileAgeMinutes: Number(job.minFileAgeMinutes ?? 0),
+    olderThanDays: Number(job.olderThanDays ?? 0),
+    newerThanDays: Number(job.newerThanDays ?? 0),
+    copyConcurrency: Number(job.copyConcurrency ?? 0),
+    scanConcurrency: Number(job.scanConcurrency ?? 0),
+    maxRetries: job.maxRetries === undefined || job.maxRetries === null ? -1 : Number(job.maxRetries),
+    windowEnable: Boolean(job.windowEnable),
+    windowStart: (job.windowStart || "00:00").trim() || "00:00",
+    windowEnd: (job.windowEnd || "06:00").trim() || "06:00",
+    windowStopOutside: Boolean(job.windowStopOutside),
+    notifyMode: Number(job.notifyMode ?? 0),
+    notifyIds: parseNotifyIdList(job.notifyIds),
     second: job.second || "0",
     minute: job.minute || "0",
     hour: job.hour || "2",
@@ -126,17 +194,64 @@ export function jobToForm(job: JobItem): JobForm {
     day_of_week: job.day_of_week || "*",
   };
 }
+
+/** Creates a brand-new draft form cloned from an existing job (without id). */
+export function cloneJobToForm(job: JobItem): JobForm {
+  const form = jobToForm(job);
+  const baseName = form.remark.trim() || `同步任务 #${job.id}`;
+  return {
+    ...form,
+    id: undefined,
+    remark: `${baseName} - 副本`,
+  };
+}
+
 export function buildJobPayload(form: JobForm) {
   const { minFileSizeUnit, maxFileSizeUnit, ...data } = form;
+  // Strip any read-only runtime decoration fields if spread from a stored JobItem
+  const runtimeStripped = { ...data } as typeof data & {
+    running?: unknown;
+    queued?: unknown;
+    pendingApproval?: unknown;
+    lastStatus?: unknown;
+    nextRunTime?: unknown;
+  };
+  delete runtimeStripped.running;
+  delete runtimeStripped.queued;
+  delete runtimeStripped.pendingApproval;
+  delete runtimeStripped.lastStatus;
+  delete runtimeStripped.nextRunTime;
   return {
-    ...data,
+    ...runtimeStripped,
     remark: form.remark.trim() || null,
     exclude: form.exclude.trim() || null,
+    include: form.include.trim() || null,
     enable: form.isCron === 2 ? 1 : Number(form.enable),
     useCacheS: Number(form.useCacheS),
     useCacheT: Number(form.useCacheT),
+    scanIntervalS: Math.max(0, Math.min(300, Math.trunc(Number(form.scanIntervalS) || 0))),
+    scanIntervalT: Math.max(0, Math.min(300, Math.trunc(Number(form.scanIntervalT) || 0))),
     minFileSize: fileSizeToBytes(form.minFileSize, minFileSizeUnit),
     maxFileSize: fileSizeToBytes(form.maxFileSize, maxFileSizeUnit),
+    compareMode: Number(form.compareMode) || 0,
+    conflictPolicy: Number(form.conflictPolicy) || 0,
+    trashEnable: Number(Boolean(form.trashEnable)),
+    trashDir: form.trashDir.trim() || ".opensync-trash",
+    trashRetentionDays: Math.max(0, Math.trunc(Number(form.trashRetentionDays) || 0)),
+    deleteEmptySrcDirs: Number(Boolean(form.deleteEmptySrcDirs)),
+    filterMode: Number(form.filterMode) || 0,
+    minFileAgeMinutes: Math.max(0, Math.trunc(Number(form.minFileAgeMinutes) || 0)),
+    olderThanDays: Math.max(0, Math.trunc(Number(form.olderThanDays) || 0)),
+    newerThanDays: Math.max(0, Math.trunc(Number(form.newerThanDays) || 0)),
+    copyConcurrency: Math.max(0, Math.trunc(Number(form.copyConcurrency) || 0)),
+    scanConcurrency: Math.max(0, Math.trunc(Number(form.scanConcurrency) || 0)),
+    maxRetries: Number.isFinite(Number(form.maxRetries)) ? Math.trunc(Number(form.maxRetries)) : -1,
+    windowEnable: Number(Boolean(form.windowEnable)),
+    windowStart: form.windowStart.trim() || "00:00",
+    windowEnd: form.windowEnd.trim() || "06:00",
+    windowStopOutside: Number(Boolean(form.windowStopOutside)),
+    notifyMode: Number(form.notifyMode) || 0,
+    notifyIds: form.notifyMode === 1 ? form.notifyIds : [],
   };
 }
 export interface JobValidationOptions {
@@ -150,11 +265,15 @@ export type JobFieldErrorKey =
   | "alistId"
   | "srcPath"
   | "dstPath"
+  | "trashDir"
   | "interval"
+  | "window"
+  | "notifyIds"
   | CronFieldKey
   | "minFileSize"
   | "maxFileSize"
-  | "fileSizeRange";
+  | "fileSizeRange"
+  | "include";
 
 function resolveValidationOptions(
   storedDstMapOrOptions?: string | null | JobValidationOptions,
@@ -235,8 +354,15 @@ export function validateJobFormFields(
       step0Errors.push(pathError);
     }
   }
+  if (form.trashEnable) {
+    const trimmedTrash = form.trashDir.trim().replace(/^\/+|\/+$/g, "");
+    if (!trimmedTrash || trimmedTrash.includes("..") || trimmedTrash.includes("\\")) {
+      fields.trashDir = "回收站目录名不能包含 .. 或反斜杠";
+      step0Errors.push(fields.trashDir);
+    }
+  }
 
-  // Step 1: 执行计划（固定间隔 / Cron / 仅手动）
+  // Step 1: 执行计划（固定间隔 / Cron / 仅手动 / 时间窗口 / 通知绑定）
   const step1Errors: string[] = [];
   if (form.isCron === 0) {
     if (!Number.isInteger(form.interval) || form.interval < 1) {
@@ -254,6 +380,22 @@ export function validateJobFormFields(
       fields[key] = message;
       step1Errors.push(message);
     }
+  }
+  if (form.windowEnable) {
+    const hhmm = /^([01]\d|2[0-3]):([0-5]\d)$/;
+    const s = form.windowStart.trim();
+    const e = form.windowEnd.trim();
+    if (!hhmm.test(s) || !hhmm.test(e)) {
+      fields.window = "时间窗口格式必须为 HH:MM（如 23:00）";
+      step1Errors.push(fields.window);
+    } else if (s === e) {
+      fields.window = "时间窗口的开始时间与结束时间不能相同";
+      step1Errors.push(fields.window);
+    }
+  }
+  if (form.notifyMode === 1 && form.notifyIds.length === 0) {
+    fields.notifyIds = "已选择指定通知渠道，请至少选择一个渠道";
+    step1Errors.push(fields.notifyIds);
   }
 
   // Step 2: 过滤规则（文件大小上下限）
@@ -309,6 +451,21 @@ export function validateJobFormFields(
       fields.fileSizeRange = "最大文件大小必须大于等于最小文件大小";
       step2Errors.push(fields.fileSizeRange);
     }
+  }
+
+  if (
+    form.olderThanDays > 0 &&
+    form.newerThanDays > 0 &&
+    form.olderThanDays > form.newerThanDays
+  ) {
+    fields.fileSizeRange =
+      fields.fileSizeRange ||
+      "「仅同步早于 N 天」不能大于「仅同步最近 N 天」";
+    step2Errors.push(fields.fileSizeRange);
+  }
+  if (form.filterMode === 1 && !form.include.trim()) {
+    fields.include = "白名单模式下请至少填写一条包含规则（如 *.jpg）";
+    step2Errors.push(fields.include);
   }
 
   return {
@@ -830,13 +987,36 @@ export function shouldClearExcludeFoldersOnSrcChange(
  * 生成任务总览页展示的过滤规则摘要标签。
  */
 export function summarizeJobFilters(
-  job: Pick<JobItem, "exclude" | "minFileSize" | "maxFileSize">,
+  job: Pick<
+    JobItem,
+    | "exclude"
+    | "minFileSize"
+    | "maxFileSize"
+    | "filterMode"
+    | "include"
+    | "minFileAgeMinutes"
+    | "olderThanDays"
+    | "newerThanDays"
+  >,
 ): string[] {
   const items: string[] = [];
+  if (Number(job.filterMode || 0) === 1) {
+    const includeLines = (job.include || "")
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith("# "));
+    items.push(`白名单 ${includeLines.length} 条`);
+  }
   const minBytes = Number(job.minFileSize || 0);
   const maxBytes = Number(job.maxFileSize || 0);
   if (minBytes > 0) items.push(`排除 < ${formatSize(minBytes)}`);
   if (maxBytes > 0) items.push(`排除 > ${formatSize(maxBytes)}`);
+  if (Number(job.minFileAgeMinutes || 0) > 0)
+    items.push(`稳定 ≥ ${Number(job.minFileAgeMinutes)} 分钟`);
+  if (Number(job.olderThanDays || 0) > 0)
+    items.push(`早于 ${Number(job.olderThanDays)} 天`);
+  if (Number(job.newerThanDays || 0) > 0)
+    items.push(`最近 ${Number(job.newerThanDays)} 天`);
 
   const exclude = job.exclude || "";
   const presetFileCount = fileTypeFilterGroups.reduce(

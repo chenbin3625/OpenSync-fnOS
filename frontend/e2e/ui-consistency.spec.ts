@@ -230,3 +230,34 @@ test("320px settings and overview labels keep a single line", async ({
     }),
   ).toBe(1);
 });
+
+test("unified Latin-first UI font applies consistently across body, Semi components, and paths", async ({
+  page,
+}) => {
+  await routeTaskWorkspace(page, activeTask);
+  await page.goto("/app/opensync/tasks?jobId=1&tab=overview");
+  await expect(page.locator(".overview-card")).toBeVisible();
+
+  const fonts = await page.evaluate(() => {
+    const familyOf = (selector: string) => {
+      const el = document.querySelector<HTMLElement>(selector);
+      return el ? getComputedStyle(el).fontFamily : null;
+    };
+    return {
+      body: getComputedStyle(document.body).fontFamily,
+      tab: familyOf(".page-tabs .semi-tabs-tab"),
+      button: familyOf(".page-actions .semi-button"),
+      paths: familyOf(".flow-paths"),
+    };
+  });
+
+  expect(fonts.body).not.toMatch(/\bInter\b/i);
+  expect(fonts.body.indexOf("Segoe UI")).toBeGreaterThan(-1);
+  expect(fonts.body.indexOf("Segoe UI")).toBeLessThan(
+    fonts.body.indexOf("Microsoft YaHei"),
+  );
+  expect(fonts.tab).toBe(fonts.body);
+  expect(fonts.button).toBe(fonts.body);
+  expect(fonts.paths).toBe(fonts.body);
+  expect(fonts.paths).not.toMatch(/monospace/i);
+});

@@ -86,18 +86,31 @@ func newRouterWithVersionChecker(development bool, allowedOrigins []string, chec
 		}
 		c.JSON(http.StatusOK, model.Success(result))
 	})
+	api.GET("/dashboard", handler.GetDashboard)
 	api.GET("/system/config", handler.GetSystemConfig)
 	api.PUT("/system/config", handler.UpdateSystemConfig)
+	api.GET("/system/export", handler.ExportSystemConfig)
+	api.POST("/system/import", handler.ImportSystemConfig)
+	api.GET("/system/logs", handler.GetSystemLogs)
+	api.GET("/system/logs/download", handler.DownloadSystemLogs)
 	api.GET("/alist", handler.GetAlist)
+	api.GET("/alist/health", handler.GetAlistHealth)
 	api.POST("/alist", handler.AddAlist)
 	api.POST("/alist/test", handler.TestAlist)
 	api.PUT("/alist", handler.UpdateAlist)
 	api.DELETE("/alist", handler.DeleteAlist)
 	api.GET("/job", handler.GetJob)
 	api.GET("/job/stream", handler.StreamJobCurrent)
+	api.GET("/job/items/export", handler.ExportTaskItems)
+	api.GET("/job/dry-run", handler.GetDryRun)
 	api.POST("/job", handler.AddJob)
+	api.POST("/job/batch", handler.BatchJobAction)
+	api.POST("/job/tasks/delete", handler.DeleteTasksBatch)
+	api.POST("/job/dry-run", handler.StartDryRun)
+	api.POST("/job/filter/test", handler.TestJobFilter)
 	api.PUT("/job", handler.UpdateJob)
 	api.DELETE("/job", handler.DeleteJob)
+	api.DELETE("/job/dry-run", handler.CancelDryRun)
 	api.GET("/notify", handler.GetNotify)
 	api.POST("/notify", handler.AddNotify)
 	api.POST("/notify/test", handler.TestNotify)
@@ -202,6 +215,9 @@ func acceptsGzip(request *http.Request) bool {
 }
 
 func main() {
+	logOut := service.SetupAppLogOutput()
+	gin.DefaultWriter = logOut
+	gin.DefaultErrorWriter = logOut
 	development := flag.Bool("dev", false, "local development mode")
 	port := flag.String("port", "8040", "development port")
 	flag.Parse()
@@ -237,6 +253,8 @@ func main() {
 	// Completion notifications are delivered by background workers so a slow or
 	// unreachable webhook cannot hold up a finishing task.
 	service.StartNotifyDispatcher()
+	service.StartEngineHealthChecker()
+	defer service.StopEngineHealthChecker()
 	stopRetention := service.StartTaskRetentionScheduler()
 	defer stopRetention()
 	if err := publish.commit(); err != nil {

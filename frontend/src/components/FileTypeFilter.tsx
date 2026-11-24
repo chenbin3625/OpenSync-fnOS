@@ -253,7 +253,7 @@ export function FileTypeFilter({
                       onChange(removeCustomFileTypeFilter(value, item.pattern));
                     }}
                   >
-                    <span className="mono">{item.pattern}</span>
+                    {item.pattern}
                   </Tag>
                 ))}
               </div>

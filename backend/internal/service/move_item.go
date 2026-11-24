@@ -196,7 +196,8 @@ func (ci *CopyItem) removeVerifiedMoveSource(runtime copyItemRuntime, client cop
 	source := snapshot.source
 	statClient := client.(moveStatClient)
 	ctx := runtime.context()
-	for attempt := 0; attempt <= runtimeTaskLimits().MaxRetries; attempt++ {
+	maxRetries := taskRuntimeLimitsForJob(runtime.jobConfig()).MaxRetries
+	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if runtime.isBreak() || ctx.Err() != nil {
 			return context.Canceled
 		}
@@ -246,7 +247,7 @@ func (ci *CopyItem) removeVerifiedMoveSource(runtime copyItemRuntime, client cop
 		if removeErr == nil {
 			return errors.New("move source still exists or reappeared after successful removal; refusing retry")
 		}
-		if attempt == runtimeTaskLimits().MaxRetries {
+		if attempt == maxRetries {
 			return fmt.Errorf("move source removal failed: %w", removeErr)
 		}
 		if !runtime.waitForBreak(jobDeps.CopyRetryDelay(attempt)) {

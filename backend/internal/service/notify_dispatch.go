@@ -24,14 +24,21 @@ const (
 	notifySendConcurrency = 4
 )
 
-// notifyJob is one task-completion notification, already detached from the task
-// runtime so the worker never reads task state that has moved on.
+// notifyJob is one notification event, already detached from the task runtime
+// so the worker never reads state that has moved on.
 type notifyJob struct {
+	kind       string // "" / "task" | "approval" | "system_alert"
 	taskID     int64
+	jobID      int64
 	status     int
 	taskNum    map[string]interface{}
 	duration   int
 	createTime float64
+	event      string
+	title      string
+	content    string
+	vars       map[string]string
+	jobData    map[string]interface{}
 }
 
 type notifyDispatcher struct {
@@ -99,6 +106,7 @@ func ShutdownNotifyDispatcher(ctx context.Context) {
 // a log line, which is the lesser evil compared to stalling task completion.
 func QueueTaskNotification(taskID int64, status int, taskNum map[string]interface{}, duration int, createTime float64) {
 	queued := notifyDispatch.enqueue(notifyJob{
+		kind:       "task",
 		taskID:     taskID,
 		status:     status,
 		taskNum:    copyTaskNum(taskNum),
@@ -107,6 +115,44 @@ func QueueTaskNotification(taskID int64, status int, taskNum map[string]interfac
 	})
 	if !queued {
 		log.Printf("Dropped completion notification for task %d: notify queue is full or shutting down", taskID)
+	}
+}
+
+// QueueApprovalNotification queues an immediate notification when a full sync
+// pauses awaiting user confirmation of destination deletions.
+func QueueApprovalNotification(taskID, jobID int64, job map[string]interface{}, approval *FullSyncApproval) {
+	if approval == nil {
+		return
+	}
+	queued := notifyDispatch.enqueue(notifyJob{
+		kind:    "approval",
+		taskID:  taskID,
+		jobID:   jobID,
+		event:   "approval",
+		jobData: copyTaskNum(job),
+		vars:    buildApprovalNotifyVars(taskID, jobID, job, approval),
+	})
+	if !queued {
+		log.Printf("Dropped approval notification for task %d: notify queue is full or shutting down", taskID)
+	}
+}
+
+// QueueSystemAlertNotification queues a system-level alert (such as storage
+// engine offline/online or mount error) across matching enabled channels.
+func QueueSystemAlertNotification(event, title, content string, vars map[string]string) {
+	clonedVars := make(map[string]string, len(vars))
+	for k, v := range vars {
+		clonedVars[k] = v
+	}
+	queued := notifyDispatch.enqueue(notifyJob{
+		kind:    "system_alert",
+		event:   event,
+		title:   title,
+		content: content,
+		vars:    clonedVars,
+	})
+	if !queued {
+		log.Printf("Dropped system alert notification (%s): notify queue is full or shutting down", event)
 	}
 }
 

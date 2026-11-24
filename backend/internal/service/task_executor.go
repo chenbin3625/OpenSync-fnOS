@@ -20,21 +20,28 @@ func (jt *JobTask) taskSubmit() {
 	// end of the task and dropping whatever was still buffered.
 	jt.drainCopyExecutor()
 	jt.runFullSyncDeletes()
+	jt.cleanupExpiredTrash()
+	jt.cleanupEmptyMoveSrcDirs()
 	persistErr := jt.persistRemainingTaskItems()
 	jt.finishSubmittedTask(persistErr)
 }
 
 // cancelTaskRuntime releases the task-scoped resources that are not tied to a
-// finished work item: the debounced persist flush and the task context (whose
-// WithTimeout timer otherwise stays armed until the configured deadline, one
-// per finished task).
+// finished work item: the debounced persist flush, the engine concurrency slot,
+// and the task context (whose WithTimeout timer otherwise stays armed until the
+// configured deadline, one per finished task).
 func (jt *JobTask) cancelTaskRuntime() {
 	jt.cancelPersistFlush()
 	jt.runtimeMu.Lock()
 	cancel := jt.cancel
+	releaseSlot := jt.releaseEngineSlot
+	jt.releaseEngineSlot = nil
 	jt.runtimeMu.Unlock()
 	if cancel != nil {
 		cancel()
+	}
+	if releaseSlot != nil {
+		releaseSlot()
 	}
 }
 

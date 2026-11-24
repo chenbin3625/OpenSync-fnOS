@@ -44,14 +44,29 @@ func CountJobsByAlistID(alistID int64) (int64, error) {
 
 // AddAlist inserts a new alist entry
 func AddAlist(remark, url, userName, token string) (int64, error) {
+	return AddAlistWithConcurrency(remark, url, userName, token, 0)
+}
+
+// AddAlistWithConcurrency inserts a new alist entry with an optional per-engine
+// maxConcurrentJobs cap when the schema supports it.
+func AddAlistWithConcurrency(remark, url, userName, token string, maxConcurrentJobs int) (int64, error) {
 	encryptedToken, err := encryptCredential(token)
 	if err != nil {
 		return 0, err
 	}
-	id, err := ExecuteInsert(
-		"INSERT INTO alist_list (remark, url, userName, token) VALUES (?, ?, ?, ?)",
-		remark, url, userName, encryptedToken,
-	)
+	hasCol, _ := tableHasColumnDBErr(GetDB(), "alist_list", "maxConcurrentJobs")
+	var id int64
+	if hasCol {
+		id, err = ExecuteInsert(
+			"INSERT INTO alist_list (remark, url, userName, token, maxConcurrentJobs) VALUES (?, ?, ?, ?, ?)",
+			remark, url, userName, encryptedToken, maxConcurrentJobs,
+		)
+	} else {
+		id, err = ExecuteInsert(
+			"INSERT INTO alist_list (remark, url, userName, token) VALUES (?, ?, ?, ?)",
+			remark, url, userName, encryptedToken,
+		)
+	}
 	if isUniqueConstraintError(err) {
 		return 0, alistExistsError()
 	}
@@ -60,18 +75,36 @@ func AddAlist(remark, url, userName, token string) (int64, error) {
 
 // UpdateAlist updates an alist entry
 func UpdateAlist(id int64, remark, url string, token *string) error {
+	return UpdateAlistWithConcurrency(id, remark, url, token, nil)
+}
+
+// UpdateAlistWithConcurrency updates an alist entry and optionally its
+// maxConcurrentJobs limit when non-nil and supported by the schema.
+func UpdateAlistWithConcurrency(id int64, remark, url string, token *string, maxConcurrentJobs *int) error {
 	var (
 		affected int64
 		err      error
 	)
+	hasCol := false
+	if maxConcurrentJobs != nil {
+		hasCol, _ = tableHasColumnDBErr(GetDB(), "alist_list", "maxConcurrentJobs")
+	}
 	if token != nil {
 		encryptedToken, encErr := encryptCredential(*token)
 		if encErr != nil {
 			return encErr
 		}
-		affected, err = executeUpdateAffected("UPDATE alist_list SET remark=?, url=?, token=? WHERE id=?", remark, url, encryptedToken, id)
+		if hasCol {
+			affected, err = executeUpdateAffected("UPDATE alist_list SET remark=?, url=?, token=?, maxConcurrentJobs=? WHERE id=?", remark, url, encryptedToken, *maxConcurrentJobs, id)
+		} else {
+			affected, err = executeUpdateAffected("UPDATE alist_list SET remark=?, url=?, token=? WHERE id=?", remark, url, encryptedToken, id)
+		}
 	} else {
-		affected, err = executeUpdateAffected("UPDATE alist_list SET remark=?, url=? WHERE id=?", remark, url, id)
+		if hasCol {
+			affected, err = executeUpdateAffected("UPDATE alist_list SET remark=?, url=?, maxConcurrentJobs=? WHERE id=?", remark, url, *maxConcurrentJobs, id)
+		} else {
+			affected, err = executeUpdateAffected("UPDATE alist_list SET remark=?, url=? WHERE id=?", remark, url, id)
+		}
 	}
 	if isUniqueConstraintError(err) {
 		return alistExistsError()

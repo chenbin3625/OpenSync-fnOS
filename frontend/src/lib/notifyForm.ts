@@ -7,10 +7,50 @@ export const channelNames = [
   "企业微信",
   "飞书 / Lark",
   "Bark",
+  "Telegram 机器人",
+  "企业微信群机器人",
+  "SMTP 邮件",
+  "ntfy",
+  "Gotify",
+  "PushPlus",
 ];
 /** Bark 未填写服务器地址时使用的官方服务。 */
 export const defaultBarkServer = "https://api.day.app";
+export const defaultTelegramApiBase = "https://api.telegram.org";
+export const defaultNtfyServer = "https://ntfy.sh";
 export const supportedWebhookMethods = ["POST", "GET", "PUT"] as const;
+
+export const notifyEventModeOptions = [
+  { value: "all", label: "全部事件" },
+  { value: "errors_only", label: "仅异常 / 失败 / 待审批" },
+  { value: "custom", label: "自定义事件" },
+] as const;
+
+export const notifyEventOptions = [
+  { value: "success", label: "同步成功" },
+  { value: "no_sync", label: "无需同步" },
+  { value: "partial_fail", label: "部分失败" },
+  { value: "fail", label: "同步失败" },
+  { value: "stopped", label: "已停止" },
+  { value: "timeout", label: "任务超时" },
+  { value: "approval", label: "全量删除待审批" },
+  { value: "engine_alert", label: "存储引擎健康告警" },
+] as const;
+
+export const notifyTemplateVariables = [
+  { token: "{jobName}", label: "任务名称" },
+  { token: "{status}", label: "执行状态" },
+  { token: "{method}", label: "同步方式" },
+  { token: "{allNum}", label: "总项数" },
+  { token: "{successNum}", label: "成功数" },
+  { token: "{failNum}", label: "失败数" },
+  { token: "{sumSize}", label: "传输大小" },
+  { token: "{duration}", label: "耗时" },
+  { token: "{errSummary}", label: "失败原因摘要" },
+  { token: "{deleteCount}", label: "待删数量" },
+  { token: "{deleteSize}", label: "待删大小" },
+  { token: "{time}", label: "当前时间" },
+] as const;
 
 /** 与后端 notifySendStatus* 常量一致。 */
 export const notifySendStatus = { unknown: 0, success: 1, failed: 2 } as const;
@@ -41,10 +81,17 @@ export function notifyDeliveryState(
   }
   return null;
 }
+
 export interface NotifyForm {
   method: number;
   enable: boolean;
   notSendNull?: boolean;
+  // Event filtering & custom templates
+  eventMode?: string;
+  events?: string[];
+  titleTemplate?: string;
+  contentTemplate?: string;
+  // Webhook / DingTalk / Lark / WeComBot
   url?: string;
   httpMethod?: string;
   contentType?: string;
@@ -53,24 +100,53 @@ export interface NotifyForm {
   contentName?: string;
   body?: string;
   headers?: string;
+  // ServerChan
   sendKey?: string;
   version?: string;
+  // WeCom App
   corpid?: string;
   corpsecret?: string;
   agentid?: string;
   touser?: string;
-  /** 钉钉加签 / 飞书签名校验密钥，留空表示不签名。 */
+  // DingTalk / Lark signing secret
   secret?: string;
+  // Bark / ntfy / Gotify
   server?: string;
   deviceKey?: string;
   group?: string;
   sound?: string;
+  // Telegram (6)
+  botToken?: string;
+  chatId?: string;
+  apiBase?: string;
+  parseMode?: string;
+  // WeCom Bot Webhook (7)
+  msgtype?: string;
+  // SMTP (8)
+  host?: string;
+  port?: string | number;
+  username?: string;
+  password?: string;
+  from?: string;
+  to?: string;
+  tls?: string;
+  // ntfy (9) / Gotify (10) / PushPlus (11)
+  topic?: string;
+  token?: string;
+  priority?: string | number;
+  tags?: string;
+  template?: string;
 }
+
 export function defaultNotifyForm(): NotifyForm {
   return {
     method: -1,
     enable: true,
     notSendNull: false,
+    eventMode: "all",
+    events: ["fail", "partial_fail", "timeout", "approval", "engine_alert"],
+    titleTemplate: "",
+    contentTemplate: "",
     httpMethod: "POST",
     contentType: "application/json",
     needContent: true,
@@ -78,8 +154,14 @@ export function defaultNotifyForm(): NotifyForm {
     contentName: "content",
     version: "v3",
     touser: "@all",
+    msgtype: "text",
+    port: "587",
+    tls: "starttls",
+    priority: "3",
+    template: "txt",
   };
 }
+
 // The backend replaces a redacted headers/body value with the marker in full
 // ("****" / "******"), never with JSON that merely contains it. Matching the
 // whole trimmed value — instead of `includes("****")` — keeps the untouched
@@ -112,8 +194,27 @@ function parseObject(value?: unknown): unknown {
     throw new Error("请输入有效 JSON 对象");
   return parsed;
 }
+
+function buildSharedOptions(form: NotifyForm): Record<string, unknown> {
+  const common: Record<string, unknown> = {
+    notSendNull: Boolean(form.notSendNull),
+  };
+  const mode = trimText(form.eventMode);
+  if (mode && mode !== "all") {
+    common.eventMode = mode;
+    if (mode === "custom") {
+      common.events = Array.isArray(form.events) ? form.events : [];
+    }
+  }
+  const titleTpl = trimText(form.titleTemplate);
+  if (titleTpl) common.titleTemplate = titleTpl;
+  const contentTpl = trimText(form.contentTemplate);
+  if (contentTpl) common.contentTemplate = contentTpl;
+  return common;
+}
+
 export function buildNotifyParams(form: NotifyForm) {
-  const common = { notSendNull: Boolean(form.notSendNull) };
+  const common = buildSharedOptions(form);
   switch (form.method) {
     case 0: {
       parseObject(form.body);
@@ -171,6 +272,61 @@ export function buildNotifyParams(form: NotifyForm) {
         group: trimText(form.group) || undefined,
         sound: trimText(form.sound) || undefined,
       };
+    case 6:
+      return {
+        ...common,
+        botToken: trimText(form.botToken) || undefined,
+        chatId: trimText(form.chatId) || undefined,
+        apiBase: trimText(form.apiBase) || undefined,
+        parseMode: trimText(form.parseMode) || undefined,
+      };
+    case 7:
+      return {
+        ...common,
+        url: trimText(form.url) || undefined,
+        msgtype: trimText(form.msgtype) || "text",
+      };
+    case 8: {
+      const parsedPort = Number(trimText(form.port) || "587");
+      return {
+        ...common,
+        host: trimText(form.host) || undefined,
+        port: Number.isInteger(parsedPort) ? parsedPort : 587,
+        username: trimText(form.username) || undefined,
+        password:
+          form.password === null || form.password === undefined
+            ? undefined
+            : String(form.password),
+        from: trimText(form.from) || undefined,
+        to: trimText(form.to) || undefined,
+        tls: trimText(form.tls) || "starttls",
+      };
+    }
+    case 9:
+      return {
+        ...common,
+        server: trimText(form.server) || defaultNtfyServer,
+        topic: trimText(form.topic) || undefined,
+        token: trimText(form.token) || undefined,
+        priority: trimText(form.priority) || undefined,
+        tags: trimText(form.tags) || undefined,
+      };
+    case 10: {
+      const p = Number(trimText(form.priority));
+      return {
+        ...common,
+        server: trimText(form.server) || undefined,
+        token: trimText(form.token) || undefined,
+        priority: Number.isFinite(p) && trimText(form.priority) !== "" ? p : 5,
+      };
+    }
+    case 11:
+      return {
+        ...common,
+        token: trimText(form.token) || undefined,
+        topic: trimText(form.topic) || undefined,
+        template: trimText(form.template) || "txt",
+      };
     default:
       throw new Error("通知渠道无效");
   }
@@ -197,10 +353,17 @@ export function notifyToForm(
   item: Pick<NotifyItem, "id" | "method" | "enable" | "params">,
 ): NotifyForm {
   const params = parseStoredNotifyParams(item.params);
+  const events = Array.isArray(params.events)
+    ? params.events.map((v) => String(v))
+    : defaultNotifyForm().events;
   return {
     ...defaultNotifyForm(),
     ...params,
     method: item.method,
+    eventMode: asOptionalString(params.eventMode) || "all",
+    events,
+    titleTemplate: asOptionalString(params.titleTemplate),
+    contentTemplate: asOptionalString(params.contentTemplate),
     httpMethod:
       asOptionalString(params.method) ||
       asOptionalString(params.httpMethod) ||
@@ -226,11 +389,37 @@ export function notifyToForm(
     secret: asOptionalString(params.secret),
     server:
       asOptionalString(params.server) ||
-      (item.method === 5 ? defaultBarkServer : ""),
+      (item.method === 5
+        ? defaultBarkServer
+        : item.method === 9
+          ? defaultNtfyServer
+          : ""),
     deviceKey: asOptionalString(params.deviceKey),
     group: asOptionalString(params.group) || undefined,
     sound: asOptionalString(params.sound) || undefined,
     sendKey: asOptionalString(params.sendKey),
+    botToken: asOptionalString(params.botToken),
+    chatId: asOptionalString(params.chatId),
+    apiBase: asOptionalString(params.apiBase),
+    parseMode: asOptionalString(params.parseMode),
+    msgtype: asOptionalString(params.msgtype) || "text",
+    host: asOptionalString(params.host),
+    port: params.port !== undefined ? String(params.port) : "587",
+    username: asOptionalString(params.username),
+    password: asOptionalString(params.password),
+    from: asOptionalString(params.from),
+    to: asOptionalString(params.to),
+    tls: asOptionalString(params.tls) || "starttls",
+    topic: asOptionalString(params.topic),
+    token: asOptionalString(params.token),
+    priority:
+      params.priority !== undefined
+        ? String(params.priority)
+        : item.method === 10
+          ? "5"
+          : "3",
+    tags: asOptionalString(params.tags),
+    template: asOptionalString(params.template) || "txt",
     body:
       params.body && typeof params.body === "object"
         ? JSON.stringify(params.body, null, 2)
@@ -241,13 +430,32 @@ export function notifyToForm(
         : asOptionalString(params.headers),
   };
 }
+
 /** Methods whose webhook URL is allowed to be plain HTTP (custom webhook). */
 const httpWebhookMethods = new Set([0]);
 /** Methods whose URL carries a credential and therefore requires TLS. */
-const httpsOnlyWebhookMethods = new Set([2, 4]);
+const httpsOnlyWebhookMethods = new Set([2, 4, 7]);
+
+function validateHttpUrl(raw: string, label: string, requireHttps = false): string {
+  try {
+    const url = new URL(raw);
+    if (requireHttps) {
+      if (url.protocol !== "https:") return `${label}必须使用 HTTPS 地址`;
+    } else if (!["http:", "https:"].includes(url.protocol)) {
+      return `请输入有效的 HTTP / HTTPS ${label}`;
+    }
+    return "";
+  } catch {
+    return `请输入有效的${label}`;
+  }
+}
 
 export function validateNotifyForm(form: NotifyForm) {
-  if (form.method < 0) return "请选择通知渠道";
+  if (form.method < 0 || form.method >= channelNames.length)
+    return "请选择通知渠道";
+  if (form.eventMode === "custom" && (!form.events || form.events.length === 0)) {
+    return "自定义事件模式下请至少选择一个通知事件";
+  }
   if (httpWebhookMethods.has(form.method) || httpsOnlyWebhookMethods.has(form.method)) {
     let url: URL;
     try {
@@ -256,11 +464,11 @@ export function validateNotifyForm(form: NotifyForm) {
       return "请输入有效的 Webhook URL";
     }
     if (httpsOnlyWebhookMethods.has(form.method)) {
-      // DingTalk / Lark put the access token in the URL, so the backend rejects
-      // plain HTTP for them (validateNotifyHTTPSURL); accepting it here only
-      // produced a server error after the form said it was fine.
-      if (url.protocol !== "https:")
-        return "钉钉 / 飞书 Webhook 必须使用 HTTPS 地址";
+      if (url.protocol !== "https:") {
+        return form.method === 7
+          ? "企业微信群机器人 Webhook 必须使用 HTTPS 地址"
+          : "钉钉 / 飞书 Webhook 必须使用 HTTPS 地址";
+      }
     } else if (!["http:", "https:"].includes(url.protocol)) {
       return "请输入有效的 HTTP / HTTPS Webhook URL";
     }
@@ -292,10 +500,68 @@ export function validateNotifyForm(form: NotifyForm) {
       }
     }
   }
+  if (form.method === 6) {
+    if (!trimText(form.botToken)) return "请输入 Telegram Bot Token";
+    if (!trimText(form.chatId)) return "请输入 Telegram Chat ID";
+    const apiBase = trimText(form.apiBase);
+    if (apiBase) {
+      const err = validateHttpUrl(apiBase, "API 地址");
+      if (err) return err;
+    }
+  }
+  if (form.method === 8) {
+    if (!trimText(form.host)) return "请输入 SMTP 服务器地址";
+    const port = Number(trimText(form.port) || "587");
+    if (!Number.isInteger(port) || port < 1 || port > 65535)
+      return "SMTP 端口必须在 1–65535 之间";
+    if (!trimText(form.from)) return "请输入发件人邮箱";
+    if (!trimText(form.to)) return "请输入收件人邮箱";
+  }
+  if (form.method === 9) {
+    if (!trimText(form.topic)) return "请输入 ntfy 主题（Topic）";
+    const server = trimText(form.server);
+    if (server) {
+      const err = validateHttpUrl(server, "服务器地址");
+      if (err) return err;
+    }
+  }
+  if (form.method === 10) {
+    if (!trimText(form.server)) return "请输入 Gotify 服务器地址";
+    const err = validateHttpUrl(trimText(form.server), "服务器地址");
+    if (err) return err;
+    if (!trimText(form.token)) return "请输入 Gotify App Token";
+  }
+  if (form.method === 11) {
+    if (!trimText(form.token)) return "请输入 PushPlus Token";
+  }
   try {
     buildNotifyParams(form);
   } catch {
     return "请求体和请求头必须是有效 JSON 对象";
   }
   return "";
+}
+
+export function getNotifyEndpointSummary(item: Pick<NotifyItem, "method" | "params">): string {
+  try {
+    const parsed = JSON.parse(item.params || "{}") as Record<string, unknown>;
+    switch (item.method) {
+      case 6:
+        return parsed.chatId ? `Chat ID: ${String(parsed.chatId)}` : "Telegram Bot";
+      case 8:
+        return parsed.host
+          ? `${String(parsed.host)}:${String(parsed.port || 587)} → ${String(parsed.to || "")}`
+          : "—";
+      case 9:
+        return `${String(parsed.server || defaultNtfyServer)}/${String(parsed.topic || "")}`;
+      case 10:
+        return String(parsed.server || "—");
+      case 11:
+        return parsed.topic ? `群组 ${String(parsed.topic)}` : "PushPlus 推送";
+      default:
+        return String(parsed.url || parsed.webhook || parsed.server || "—");
+    }
+  } catch {
+    return "—";
+  }
 }
