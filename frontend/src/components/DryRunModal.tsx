@@ -45,27 +45,65 @@ export function DryRunModal({
   const [error, setError] = useState("");
   const [filterAction, setFilterAction] = useState("all");
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollAbortRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(true);
+  const cancelledRef = useRef(false);
+  const runGenRef = useRef(0);
+  const startingRef = useRef(false);
 
   const stopPolling = () => {
     if (pollRef.current !== null) {
       clearInterval(pollRef.current);
       pollRef.current = null;
     }
+    if (pollAbortRef.current) {
+      pollAbortRef.current.abort();
+      pollAbortRef.current = null;
+    }
   };
 
   const start = async () => {
+    const gen = ++runGenRef.current;
+    cancelledRef.current = false;
     stopPolling();
+    startingRef.current = true;
     setStarting(true);
     setError("");
     setFilterAction("all");
     try {
       const initial = await api.startDryRun(jobId);
+      if (runGenRef.current === gen) {
+        startingRef.current = false;
+      }
+      if (!mountedRef.current || cancelledRef.current || runGenRef.current !== gen) {
+        if ((!mountedRef.current || cancelledRef.current) && initial?.status === "running") {
+          void api.cancelDryRun(jobId).catch(() => {
+            /* best-effort cleanup after late start response */
+          });
+        }
+        return;
+      }
       setResult(initial);
       setStarting(false);
       if (initial.status === "running") {
         pollRef.current = setInterval(async () => {
+          if (!mountedRef.current || cancelledRef.current || runGenRef.current !== gen) {
+            stopPolling();
+            return;
+          }
+          pollAbortRef.current?.abort();
+          const controller = new AbortController();
+          pollAbortRef.current = controller;
           try {
-            const latest = await api.getDryRun(jobId);
+            const latest = await api.getDryRun(jobId, controller.signal);
+            if (
+              controller.signal.aborted ||
+              !mountedRef.current ||
+              cancelledRef.current ||
+              runGenRef.current !== gen
+            ) {
+              return;
+            }
             if (latest) {
               setResult(latest);
               if (latest.status !== "running") stopPolling();
@@ -76,22 +114,35 @@ export function DryRunModal({
         }, 1200);
       }
     } catch (err) {
+      if (runGenRef.current === gen) {
+        startingRef.current = false;
+      }
+      if (!mountedRef.current || cancelledRef.current || runGenRef.current !== gen) {
+        return;
+      }
       setStarting(false);
       setError(err instanceof Error ? err.message : "启动模拟运行失败");
     }
   };
 
   useEffect(() => {
+    mountedRef.current = true;
     void start();
     return () => {
+      mountedRef.current = false;
+      cancelledRef.current = true;
+      runGenRef.current += 1;
       stopPolling();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobId]);
 
   const handleCancel = async () => {
+    cancelledRef.current = true;
+    runGenRef.current += 1;
     stopPolling();
-    if (result?.status === "running") {
+    if (startingRef.current || result?.status === "running") {
+      startingRef.current = false;
       try {
         await api.cancelDryRun(jobId);
       } catch (err) {

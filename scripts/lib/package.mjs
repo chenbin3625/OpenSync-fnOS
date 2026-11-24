@@ -1,10 +1,11 @@
 // 飞牛 fpk 打包：前端构建一次 + 按架构交叉编译 Go 二进制 + fnpack 组装。
 // build.mjs 与 release.mjs 共用这里的实现，避免两条打包路径产生差异。
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
   cpSync,
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   openSync,
@@ -38,41 +39,90 @@ const isProcessAlive = (pid) => {
   }
 };
 
+const UNINITIALIZED_LOCK_GRACE_MS = 5000;
+
+const publishLockFile = (lockDir, lockPath, payload, token) => {
+  const tmpPath = join(lockDir, `.build.lock.tmp.${process.pid}.${token}`);
+  writeFileSync(tmpPath, payload, { flag: "wx", mode: 0o600 });
+  try {
+    try {
+      // linkSync publishes the already-populated file atomically with EEXIST
+      // semantics, so lockPath never appears empty between open and write.
+      linkSync(tmpPath, lockPath);
+    } catch (error) {
+      if (
+        error?.code === "EPERM" ||
+        error?.code === "ENOTSUP" ||
+        error?.code === "EXDEV"
+      ) {
+        const fd = openSync(lockPath, "wx", 0o600);
+        try {
+          writeFileSync(fd, payload);
+        } finally {
+          closeSync(fd);
+        }
+        return;
+      }
+      throw error;
+    }
+  } finally {
+    rmSync(tmpPath, { force: true });
+  }
+};
+
 /** 串行化打包过程，避免并发构建同时改写 backend/cmd/server/web 或 dist 产物。 */
 export const withBuildLock = (fn, lockDir = join(root, "dist")) => {
   mkdirSync(lockDir, { recursive: true });
   const lockPath = join(lockDir, ".build.lock");
+  const token = randomBytes(8).toString("hex");
+  const payload = JSON.stringify({
+    pid: process.pid,
+    startedAt: Date.now(),
+    token,
+  });
   let acquired = false;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const fd = openSync(lockPath, "wx");
-      try {
-        writeFileSync(
-          fd,
-          JSON.stringify({ pid: process.pid, startedAt: Date.now() }),
-        );
-      } finally {
-        closeSync(fd);
-      }
+      publishLockFile(lockDir, lockPath, payload, token);
       acquired = true;
       break;
     } catch (error) {
       if (error?.code !== "EEXIST") throw error;
       let existingPid = null;
+      let lockAgeMs = 0;
+      let lockMissing = false;
       try {
-        existingPid = Number(
-          JSON.parse(readFileSync(lockPath, "utf8")).pid,
-        );
-      } catch {
-        existingPid = null;
+        const stat = statSync(lockPath);
+        lockAgeMs = Math.max(0, Date.now() - stat.mtimeMs);
+        const parsed = JSON.parse(readFileSync(lockPath, "utf8"));
+        const pid = Number(parsed?.pid);
+        if (Number.isInteger(pid) && pid > 0) {
+          existingPid = pid;
+        }
+      } catch (readErr) {
+        if (readErr?.code === "ENOENT") {
+          lockMissing = true;
+        }
       }
-      if (!isProcessAlive(existingPid)) {
+      if (lockMissing) {
+        continue;
+      }
+      if (existingPid !== null) {
+        if (!isProcessAlive(existingPid)) {
+          rmSync(lockPath, { force: true });
+          continue;
+        }
+        throw new Error(
+          `已有另一个打包进程正在运行（PID ${existingPid}），请等待其完成后重试`,
+        );
+      }
+      // Unparseable or empty lock file: do not delete a freshly created lock
+      // that another process may still be initializing.
+      if (lockAgeMs >= UNINITIALIZED_LOCK_GRACE_MS) {
         rmSync(lockPath, { force: true });
         continue;
       }
-      throw new Error(
-        `已有另一个打包进程正在运行（PID ${existingPid}），请等待其完成后重试`,
-      );
+      throw new Error("已有另一个打包进程正在运行，请等待其完成后重试");
     }
   }
   if (!acquired) {
@@ -83,7 +133,9 @@ export const withBuildLock = (fn, lockDir = join(root, "dist")) => {
     acquired = false;
     try {
       const current = JSON.parse(readFileSync(lockPath, "utf8"));
-      if (current?.pid === process.pid) unlinkSync(lockPath);
+      if (current?.pid === process.pid && current?.token === token) {
+        unlinkSync(lockPath);
+      }
     } catch {
       /* 已清理或不存在 */
     }

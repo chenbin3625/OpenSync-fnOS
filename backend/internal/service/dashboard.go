@@ -28,9 +28,24 @@ func GetDashboardOverview() (map[string]interface{}, error) {
 		latestTasks = map[int64]map[string]interface{}{}
 	}
 	since7d := time.Now().AddDate(0, 0, -7).Unix()
-	recentTasks, err := mapper.GetRecentTasks(since7d)
-	if err != nil {
-		recentTasks = nil
+	var totalRuns, successRuns, failRuns, stoppedRuns, totalFiles, totalBytes int64
+	if err := mapper.ForEachRecentTask(since7d, func(status int, taskNum string) error {
+		totalRuns++
+		switch status {
+		case 2, 8:
+			successRuns++
+		case 3, 5, 6, 7, 10:
+			failRuns++
+		case 4:
+			stoppedRuns++
+		}
+		if parsed := parseTaskNumJSON(taskNum); parsed != nil {
+			totalFiles += util.ToInt64(parsed["successNum"])
+			totalBytes += util.ToInt64(parsed["sumSize"])
+		}
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("dashboard load recent tasks: %w", err)
 	}
 
 	engineNameByID := make(map[int64]string, len(engines))
@@ -159,25 +174,6 @@ func GetDashboardOverview() (map[string]interface{}, error) {
 			"liveProgress":    liveProgress,
 			"lastTask":        lastTaskSummary,
 		})
-	}
-
-	// Recent 7-day execution totals
-	var totalRuns, successRuns, failRuns, stoppedRuns, totalFiles, totalBytes int64
-	for _, task := range recentTasks {
-		totalRuns++
-		st := util.ToInt(task["status"])
-		switch st {
-		case 2, 8:
-			successRuns++
-		case 3, 5, 6, 7, 10:
-			failRuns++
-		case 4:
-			stoppedRuns++
-		}
-		if parsed := parseTaskNumJSON(task["taskNum"]); parsed != nil {
-			totalFiles += util.ToInt64(parsed["successNum"])
-			totalBytes += util.ToInt64(parsed["sumSize"])
-		}
 	}
 
 	return map[string]interface{}{

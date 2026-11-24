@@ -435,6 +435,40 @@ func TestBodyLimitMiddlewareAnswers413ForChunkedBody(t *testing.T) {
 	}
 }
 
+func TestSystemImportAllowsUpTo12MiBAndRejectsLarger(t *testing.T) {
+	router := newRouter(true, nil)
+
+	// 2 MiB payload to /system/import must pass body-limit middleware (not 413).
+	// Use version=999 so ImportSystemBackup rejects validation before touching DB.
+	twoMiB := `{"conflictMode":"skip","payload":{"version":999,"padding":"` + strings.Repeat("a", 2<<20) + `"}}`
+	req := httptest.NewRequest(http.MethodPost, "/app/opensync/svr/system/import", strings.NewReader(twoMiB))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code == http.StatusRequestEntityTooLarge {
+		t.Fatalf("2 MiB import was rejected with 413: %s", w.Body.String())
+	}
+
+	// Same 2 MiB payload to normal endpoint must still be rejected with 413.
+	reqNormal := httptest.NewRequest(http.MethodPost, "/app/opensync/svr/alist", strings.NewReader(twoMiB))
+	reqNormal.Header.Set("Content-Type", "application/json")
+	wNormal := httptest.NewRecorder()
+	router.ServeHTTP(wNormal, reqNormal)
+	if wNormal.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("2 MiB /alist status = %d, want 413", wNormal.Code)
+	}
+
+	// >12 MiB payload to /system/import must be rejected with 413.
+	tooBig := `{"conflictMode":"skip","payload":{"version":1,"padding":"` + strings.Repeat("b", (12<<20)+1024) + `"}}`
+	reqBig := httptest.NewRequest(http.MethodPost, "/app/opensync/svr/system/import", strings.NewReader(tooBig))
+	reqBig.Header.Set("Content-Type", "application/json")
+	wBig := httptest.NewRecorder()
+	router.ServeHTTP(wBig, reqBig)
+	if wBig.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf(">12 MiB import status = %d, want 413", wBig.Code)
+	}
+}
+
 // stopServer hitting its budget must force-close the server and leave the rest
 // of the non-notify phase budget for stopJobs, and stopRetention must run
 // before stopJobs.

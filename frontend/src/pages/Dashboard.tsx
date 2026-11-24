@@ -7,14 +7,22 @@ import Select from "@douyinfe/semi-ui/lib/es/select";
 import Tag from "@douyinfe/semi-ui/lib/es/tag";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import {
+  IconActivity,
   IconAlertTriangle,
+  IconArrowRight,
+  IconBarChartVStroked,
+  IconChevronRight,
+  IconClockStroked,
+  IconCloudStroked,
   IconCopy,
   IconEyeOpenedStroked,
   IconPause,
   IconPlay,
   IconPlusStroked,
   IconRefresh,
+  IconServerStroked,
 } from "@douyinfe/semi-icons";
+import dayjs from "dayjs";
 import { api } from "../api/client";
 import {
   EmptyState,
@@ -30,7 +38,7 @@ import {
 } from "../components/common";
 import { DryRunModal } from "../components/DryRunModal";
 import { useAction, useResource } from "../lib/hooks";
-import { cloneJobToForm } from "../lib/taskForm";
+import { cloneJobToForm, findBatchMoveJobs } from "../lib/taskForm";
 import {
   formatSize,
   methodLabel,
@@ -50,6 +58,46 @@ type StatusFilter =
   | "approval"
   | "failed"
   | "disabled";
+
+const FAILED_STATUSES = [3, 5, 6, 7];
+
+function isJobFailed(job: DashboardJobItem): boolean {
+  return Boolean(job.lastTask && FAILED_STATUSES.includes(job.lastTask.status));
+}
+
+function methodTagColor(method: number): "blue" | "violet" | "cyan" | "grey" {
+  if (method === 0) return "blue";
+  if (method === 1) return "violet";
+  if (method === 2) return "cyan";
+  return "grey";
+}
+
+function jobDotTone(job: DashboardJobItem): string {
+  if (job.pendingApproval) return "kpi-dot kpi-dot--warning";
+  if (job.running) return "kpi-dot kpi-dot--primary kpi-dot--pulse";
+  if (job.queued) return "kpi-dot kpi-dot--primary";
+  if (isJobFailed(job)) return "kpi-dot kpi-dot--danger";
+  if (job.enable !== 1) return "kpi-dot";
+  if (job.lastTask && (job.lastTask.status === 2 || job.lastTask.status === 8))
+    return "kpi-dot kpi-dot--success";
+  return "kpi-dot";
+}
+
+function formatShortTime(seconds?: number | null): string {
+  const ts = Number(seconds || 0);
+  if (ts <= 0) return "—";
+  const d = dayjs.unix(ts);
+  const sameYear = d.year() === dayjs().year();
+  return d.format(sameYear ? "MM-DD HH:mm" : "YYYY-MM-DD HH:mm");
+}
+
+function formatScheduleHint(job: DashboardJobItem): string {
+  if (job.nextRunTime > 0) return `下次 ${formatShortTime(job.nextRunTime)}`;
+  if (job.enable !== 1) return "已停用";
+  if (job.isCron === 2) return "仅手动触发";
+  if (job.isCron === 0 && job.interval > 0) return `每 ${job.interval} 分钟`;
+  return "定时计划";
+}
 
 export default function Dashboard() {
   const navigate = useNavigate();
@@ -103,6 +151,29 @@ export default function Dashboard() {
     return map;
   }, [jobsList.data]);
 
+  const statusCounts = useMemo(() => {
+    let running = 0;
+    let queued = 0;
+    let approval = 0;
+    let failed = 0;
+    let disabled = 0;
+    for (const job of allJobs) {
+      if (job.running) running += 1;
+      if (job.queued) queued += 1;
+      if (job.pendingApproval) approval += 1;
+      if (isJobFailed(job)) failed += 1;
+      if (job.enable !== 1) disabled += 1;
+    }
+    return {
+      all: allJobs.length,
+      running,
+      queued,
+      approval,
+      failed,
+      disabled,
+    };
+  }, [allJobs]);
+
   const filteredJobs = useMemo(() => {
     const kw = keyword.trim().toLowerCase();
     return allJobs.filter((job) => {
@@ -113,11 +184,7 @@ export default function Dashboard() {
       if (statusFilter === "running" && !job.running) return false;
       if (statusFilter === "queued" && !job.queued) return false;
       if (statusFilter === "approval" && !job.pendingApproval) return false;
-      if (
-        statusFilter === "failed" &&
-        (!job.lastTask || ![3, 5, 6, 7].includes(job.lastTask.status))
-      )
-        return false;
+      if (statusFilter === "failed" && !isJobFailed(job)) return false;
       if (statusFilter === "disabled" && job.enable === 1) return false;
       if (kw) {
         const hay = `${job.remark || ""} #${job.id} ${job.alistName} ${job.srcPath} ${job.dstPath}`.toLowerCase();
@@ -126,6 +193,20 @@ export default function Dashboard() {
       return true;
     });
   }, [allJobs, engineFilter, methodFilter, statusFilter, keyword]);
+
+  const hasActiveFilters =
+    Boolean(keyword.trim()) ||
+    engineFilter !== "all" ||
+    methodFilter !== "all" ||
+    statusFilter !== "all";
+
+  const resetFilters = () => {
+    setSearchInput("");
+    setKeyword("");
+    setEngineFilter("all");
+    setMethodFilter("all");
+    setStatusFilter("all");
+  };
 
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const visibleAllSelected =
@@ -151,6 +232,11 @@ export default function Dashboard() {
           : [...prev, id]
         : prev.filter((item) => item !== id),
     );
+  };
+
+  const openJobDetail = (job: DashboardJobItem) => {
+    const tab = job.running && !job.pendingApproval ? "realtime" : "overview";
+    navigate(`/tasks?jobId=${job.id}&tab=${tab}`);
   };
 
   const runBatch = (
@@ -186,6 +272,21 @@ export default function Dashboard() {
             ? "停用任务将同时中止其中正在运行的同步任务。"
             : "将中止目标任务的当前执行，已完成的文件不会撤销。",
         okText: "确认",
+        onOk: execute,
+      });
+      return;
+    }
+    const moveJobs = findBatchMoveJobs(act, allJobs, ids);
+    if (moveJobs.length > 0) {
+      const names = moveJobs
+        .slice(0, 3)
+        .map((j) => (j.remark || "").trim() || `任务 #${j.id}`)
+        .join("、");
+      const suffix = moveJobs.length > 3 ? ` 等 ${moveJobs.length} 个` : "";
+      confirmAction({
+        title: `确认执行「${label || "批量运行"}」？`,
+        content: `本次将启动移动模式任务（${names}${suffix}）。移动模式会在文件复制到目标目录并校验后删除源目录中的对应文件，是否确认立即执行？`,
+        okText: "确认移动并启动",
         onOk: execute,
       });
       return;
@@ -256,6 +357,132 @@ export default function Dashboard() {
     });
   };
 
+  const statusPills: Array<{
+    key: StatusFilter;
+    label: string;
+    count: number;
+    tone?: "warning" | "danger";
+    alwaysShow?: boolean;
+  }> = [
+    { key: "all", label: "全部", count: statusCounts.all, alwaysShow: true },
+    {
+      key: "running",
+      label: "运行中",
+      count: statusCounts.running,
+      alwaysShow: true,
+    },
+    {
+      key: "queued",
+      label: "排队中",
+      count: statusCounts.queued,
+    },
+    {
+      key: "approval",
+      label: "待审批",
+      count: statusCounts.approval,
+      tone: statusCounts.approval > 0 ? "warning" : undefined,
+    },
+    {
+      key: "failed",
+      label: "最近失败",
+      count: statusCounts.failed,
+      tone: statusCounts.failed > 0 ? "danger" : undefined,
+      alwaysShow: true,
+    },
+    {
+      key: "disabled",
+      label: "已停用",
+      count: statusCounts.disabled,
+      alwaysShow: true,
+    },
+  ];
+
+  const kpi = data?.kpi;
+  const recent = data?.recent7d;
+  const disabledJobsCount = kpi
+    ? Math.max(0, kpi.totalJobs - kpi.enabledJobs)
+    : 0;
+  const enabledPct =
+    kpi && kpi.totalJobs > 0
+      ? Math.round((kpi.enabledJobs / kpi.totalJobs) * 100)
+      : 0;
+  const activeRunningCount = kpi
+    ? Math.max(0, kpi.runningJobs - kpi.pendingApprovals)
+    : 0;
+  const liveRunPct =
+    kpi && kpi.totalJobs > 0
+      ? Math.min(100, (activeRunningCount / kpi.totalJobs) * 100)
+      : 0;
+  const liveApprovalPct =
+    kpi && kpi.totalJobs > 0
+      ? Math.min(100 - liveRunPct, (kpi.pendingApprovals / kpi.totalJobs) * 100)
+      : 0;
+  const liveQueuedPct =
+    kpi && kpi.totalJobs > 0
+      ? Math.min(
+          100 - liveRunPct - liveApprovalPct,
+          (kpi.queuedJobs / kpi.totalJobs) * 100,
+        )
+      : 0;
+  const onlinePct =
+    kpi && kpi.totalEngines > 0
+      ? (kpi.onlineEngines / kpi.totalEngines) * 100
+      : 0;
+  const offlinePct =
+    kpi && kpi.totalEngines > 0
+      ? (kpi.offlineEngines / kpi.totalEngines) * 100
+      : 0;
+  const unknownEnginesCount = kpi
+    ? Math.max(0, kpi.totalEngines - kpi.onlineEngines - kpi.offlineEngines)
+    : 0;
+  const recentSuccessPct =
+    recent && recent.totalRuns > 0
+      ? (recent.successRuns / recent.totalRuns) * 100
+      : 0;
+  const recentFailPct =
+    recent && recent.totalRuns > 0
+      ? (recent.failRuns / recent.totalRuns) * 100
+      : 0;
+  const recentStoppedPct =
+    recent && recent.totalRuns > 0
+      ? (recent.stoppedRuns / recent.totalRuns) * 100
+      : 0;
+
+  const liveCardTargetFilter: StatusFilter = kpi?.pendingApprovals
+    ? "approval"
+    : kpi?.runningJobs
+      ? "running"
+      : kpi?.queuedJobs
+        ? "queued"
+        : "running";
+
+  const emptyJobAction =
+    !engines.loading && !engines.error && (engines.data?.length ?? 0) === 0 ? (
+      <div className="empty-guide">
+        <span className="muted">
+          还没有配置存储引擎，先添加引擎即可创建同步任务
+        </span>
+        <Button
+          type="primary"
+          theme="solid"
+          onClick={() => navigate("/engines")}
+        >
+          前往添加存储引擎
+        </Button>
+      </div>
+    ) : !engines.loading ? (
+      <Button
+        type="primary"
+        theme="solid"
+        icon={<IconPlusStroked aria-hidden="true" />}
+        onClick={() =>
+          setEditorState({ open: true, job: null, initialDraft: null })
+        }
+      >
+        新建同步任务
+      </Button>
+    ) : undefined;
+
   return (
     <div className="page dashboard-page">
       <Header
@@ -284,12 +511,13 @@ export default function Dashboard() {
               icon={<IconPause aria-hidden="true" />}
               disabled={
                 action.busy ||
-                !((data?.kpi.runningJobs || 0) + (data?.kpi.queuedJobs || 0))
+                !((kpi?.runningJobs || 0) + (kpi?.queuedJobs || 0))
               }
               onClick={() => runBatch("stop_all", undefined, "停止全部运行中任务")}
             >
               全部停止
             </Button>
+            <span className="dashboard-header-divider" aria-hidden="true" />
             <Button
               theme="solid"
               icon={<IconPlusStroked aria-hidden="true" />}
@@ -308,15 +536,22 @@ export default function Dashboard() {
         error={dashboard.error}
         retry={dashboard.refresh}
       >
-        {data && (
+        {data && kpi && recent && (
           <div className="dashboard-content">
             {data.pendingApprovals.length > 0 && (
               <div className="approval-alert-banner" role="alert">
                 <div className="approval-alert-head">
-                  <IconAlertTriangle aria-hidden="true" />
-                  <strong>
-                    有 {data.pendingApprovals.length} 个全量同步任务正在等待删除审批
-                  </strong>
+                  <span className="approval-alert-icon" aria-hidden="true">
+                    <IconAlertTriangle />
+                  </span>
+                  <div className="approval-alert-copy">
+                    <strong>
+                      有 {data.pendingApprovals.length} 个全量同步任务正在等待删除审批
+                    </strong>
+                    <span className="approval-alert-sub">
+                      审批通过前相关任务保持暂停，确认影响范围后才会执行目标端删除。
+                    </span>
+                  </div>
                 </div>
                 <div className="approval-alert-list">
                   {data.pendingApprovals.map((item) => (
@@ -324,13 +559,18 @@ export default function Dashboard() {
                       key={`${item.jobId}-${item.taskId}`}
                       className="approval-alert-row"
                     >
-                      <span>
-                        <strong>{item.jobName}</strong>（任务 #{item.taskId}）：预计删除{" "}
-                        {item.deleteCount} 项
-                        {item.deleteSize > 0
-                          ? `（${formatSize(item.deleteSize)}）`
-                          : ""}
-                      </span>
+                      <div className="approval-alert-item-main">
+                        <strong>{item.jobName}</strong>
+                        <Tag size="small" type="light" color="grey">
+                          任务 #{item.taskId}
+                        </Tag>
+                        <span className="approval-alert-impact">
+                          预计删除 <strong>{item.deleteCount} 项</strong>
+                          {item.deleteSize > 0
+                            ? ` · ${formatSize(item.deleteSize)}`
+                            : ""}
+                        </span>
+                      </div>
                       <Button
                         size="small"
                         type="danger"
@@ -348,65 +588,353 @@ export default function Dashboard() {
             )}
 
             <div className="dashboard-kpi-grid">
-              <div className="dashboard-kpi-card">
-                <span className="dashboard-kpi-label">同步任务</span>
-                <div className="dashboard-kpi-value">{data.kpi.totalJobs}</div>
-                <span className="muted">
-                  已启用 {data.kpi.enabledJobs} · 已停用{" "}
-                  {Math.max(0, data.kpi.totalJobs - data.kpi.enabledJobs)}
-                </span>
-              </div>
-              <div className="dashboard-kpi-card">
-                <span className="dashboard-kpi-label">实时执行</span>
-                <div className="dashboard-kpi-value">
-                  {data.kpi.runningJobs}
-                  {data.kpi.queuedJobs > 0 && (
-                    <span className="dashboard-kpi-sub">
-                      {" "}
-                      / 排队 {data.kpi.queuedJobs}
+              <button
+                type="button"
+                className="dashboard-kpi-card"
+                onClick={() => setStatusFilter("all")}
+              >
+                <div className="dashboard-kpi-head">
+                  <span className="dashboard-kpi-label">同步任务</span>
+                  <span
+                    className="dashboard-kpi-icon dashboard-kpi-icon--primary"
+                    aria-hidden="true"
+                  >
+                    <IconCloudStroked />
+                  </span>
+                </div>
+                <div className="dashboard-kpi-value-row">
+                  <span className="dashboard-kpi-value">{kpi.totalJobs}</span>
+                </div>
+                {kpi.totalJobs > 0 && (
+                  <div className="dashboard-kpi-bar" aria-hidden="true">
+                    <span
+                      className="dashboard-kpi-bar-seg dashboard-kpi-bar-seg--primary"
+                      style={{ width: `${enabledPct}%` }}
+                    />
+                  </div>
+                )}
+                <div className="dashboard-kpi-foot">
+                  <span className="dashboard-kpi-stat">
+                    <span className="kpi-dot kpi-dot--primary" aria-hidden="true" />
+                    已启用 {kpi.enabledJobs}
+                  </span>
+                  <span className="dashboard-kpi-stat">
+                    <span className="kpi-dot" aria-hidden="true" />
+                    已停用 {disabledJobsCount}
+                  </span>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                className={[
+                  "dashboard-kpi-card",
+                  kpi.pendingApprovals > 0 ? "is-warning" : "",
+                  statusFilter === liveCardTargetFilter ? "is-active" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                onClick={() =>
+                  setStatusFilter((prev) =>
+                    prev === liveCardTargetFilter ? "all" : liveCardTargetFilter,
+                  )
+                }
+              >
+                <div className="dashboard-kpi-head">
+                  <span className="dashboard-kpi-label">实时执行</span>
+                  <span
+                    className={`dashboard-kpi-icon ${
+                      kpi.pendingApprovals > 0
+                        ? "dashboard-kpi-icon--warning"
+                        : kpi.runningJobs > 0
+                          ? "dashboard-kpi-icon--primary"
+                          : ""
+                    }`}
+                    aria-hidden="true"
+                  >
+                    <IconActivity />
+                  </span>
+                </div>
+                <div className="dashboard-kpi-value-row">
+                  <span className="dashboard-kpi-value">{kpi.runningJobs}</span>
+                  {kpi.queuedJobs > 0 && (
+                    <span className="dashboard-kpi-pill">
+                      排队 {kpi.queuedJobs}
                     </span>
                   )}
                 </div>
-                <span className="muted">
-                  {data.kpi.pendingApprovals > 0
-                    ? `${data.kpi.pendingApprovals} 个待审批`
-                    : "无待审批项"}
-                </span>
-              </div>
-              <div className="dashboard-kpi-card">
-                <span className="dashboard-kpi-label">存储引擎健康</span>
-                <div className="dashboard-kpi-value">
-                  {data.kpi.onlineEngines} / {data.kpi.totalEngines}
+                {kpi.totalJobs > 0 && (
+                  <div className="dashboard-kpi-bar" aria-hidden="true">
+                    {liveRunPct > 0 && (
+                      <span
+                        className="dashboard-kpi-bar-seg dashboard-kpi-bar-seg--primary"
+                        style={{ width: `${liveRunPct}%` }}
+                      />
+                    )}
+                    {liveApprovalPct > 0 && (
+                      <span
+                        className="dashboard-kpi-bar-seg dashboard-kpi-bar-seg--warning"
+                        style={{ width: `${liveApprovalPct}%` }}
+                      />
+                    )}
+                    {liveQueuedPct > 0 && (
+                      <span
+                        className="dashboard-kpi-bar-seg dashboard-kpi-bar-seg--muted"
+                        style={{ width: `${liveQueuedPct}%` }}
+                      />
+                    )}
+                  </div>
+                )}
+                <div className="dashboard-kpi-foot">
+                  {kpi.pendingApprovals > 0 ? (
+                    <span className="dashboard-kpi-stat is-warning">
+                      <span
+                        className="kpi-dot kpi-dot--warning"
+                        aria-hidden="true"
+                      />
+                      {kpi.pendingApprovals} 个待审批
+                    </span>
+                  ) : kpi.runningJobs > 0 ? (
+                    <span className="dashboard-kpi-stat is-primary">
+                      <span
+                        className="kpi-dot kpi-dot--primary kpi-dot--pulse"
+                        aria-hidden="true"
+                      />
+                      正在同步 · 无待审批
+                    </span>
+                  ) : kpi.queuedJobs > 0 ? (
+                    <span className="dashboard-kpi-stat is-primary">
+                      <span
+                        className="kpi-dot kpi-dot--primary"
+                        aria-hidden="true"
+                      />
+                      {kpi.queuedJobs} 个排队等待中
+                    </span>
+                  ) : (
+                    <span className="dashboard-kpi-stat">
+                      <span className="kpi-dot" aria-hidden="true" />
+                      当前空闲 · 无待审批
+                    </span>
+                  )}
                 </div>
-                <span
-                  className={
-                    data.kpi.offlineEngines > 0 ? "inline-error" : "muted"
-                  }
-                >
-                  {data.kpi.offlineEngines > 0
-                    ? `${data.kpi.offlineEngines} 个引擎连接异常`
-                    : "引擎状态正常"}
-                </span>
-              </div>
-              <div className="dashboard-kpi-card">
-                <span className="dashboard-kpi-label">近 7 天同步</span>
-                <div className="dashboard-kpi-value">
-                  {formatSize(data.recent7d.totalBytes)}
+              </button>
+
+              <button
+                type="button"
+                className={[
+                  "dashboard-kpi-card",
+                  kpi.offlineEngines > 0 ? "is-danger" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                onClick={() => navigate("/engines")}
+              >
+                <div className="dashboard-kpi-head">
+                  <span className="dashboard-kpi-label">
+                    存储引擎健康
+                    <IconChevronRight
+                      size="small"
+                      className="dashboard-kpi-link-arrow"
+                      aria-hidden="true"
+                    />
+                  </span>
+                  <span
+                    className={`dashboard-kpi-icon ${
+                      kpi.offlineEngines > 0
+                        ? "dashboard-kpi-icon--danger"
+                        : kpi.totalEngines > 0 &&
+                            kpi.onlineEngines === kpi.totalEngines
+                          ? "dashboard-kpi-icon--success"
+                          : ""
+                    }`}
+                    aria-hidden="true"
+                  >
+                    <IconServerStroked />
+                  </span>
                 </div>
-                <span className="muted">
-                  执行 {data.recent7d.totalRuns} 次（成功 {data.recent7d.successRuns} ·
-                  异常 {data.recent7d.failRuns}）· {data.recent7d.totalFiles} 文件
-                </span>
-              </div>
+                <div className="dashboard-kpi-value-row">
+                  <span className="dashboard-kpi-value">
+                    {kpi.onlineEngines}
+                  </span>
+                  <span className="dashboard-kpi-denom">
+                    / {kpi.totalEngines}
+                  </span>
+                </div>
+                {kpi.totalEngines > 0 && (
+                  <div className="dashboard-kpi-bar" aria-hidden="true">
+                    {onlinePct > 0 && (
+                      <span
+                        className="dashboard-kpi-bar-seg dashboard-kpi-bar-seg--success"
+                        style={{ width: `${onlinePct}%` }}
+                      />
+                    )}
+                    {offlinePct > 0 && (
+                      <span
+                        className="dashboard-kpi-bar-seg dashboard-kpi-bar-seg--danger"
+                        style={{ width: `${offlinePct}%` }}
+                      />
+                    )}
+                  </div>
+                )}
+                <div className="dashboard-kpi-foot">
+                  {kpi.totalEngines === 0 ? (
+                    <span className="dashboard-kpi-stat">
+                      <span className="kpi-dot" aria-hidden="true" />
+                      尚未配置存储引擎
+                    </span>
+                  ) : kpi.offlineEngines > 0 ? (
+                    <span className="dashboard-kpi-stat is-danger">
+                      <span
+                        className="kpi-dot kpi-dot--danger"
+                        aria-hidden="true"
+                      />
+                      {kpi.offlineEngines} 个引擎连接异常
+                    </span>
+                  ) : unknownEnginesCount > 0 ? (
+                    <span className="dashboard-kpi-stat">
+                      <span className="kpi-dot" aria-hidden="true" />
+                      {unknownEnginesCount} 个引擎待检测
+                    </span>
+                  ) : (
+                    <span className="dashboard-kpi-stat is-success">
+                      <span
+                        className="kpi-dot kpi-dot--success"
+                        aria-hidden="true"
+                      />
+                      全部引擎连接正常
+                    </span>
+                  )}
+                </div>
+              </button>
+
+              {(() => {
+                const recentCardBody = (
+                  <>
+                    <div className="dashboard-kpi-head">
+                      <span className="dashboard-kpi-label">近 7 天同步</span>
+                      <span
+                        className="dashboard-kpi-icon dashboard-kpi-icon--primary"
+                        aria-hidden="true"
+                      >
+                        <IconBarChartVStroked />
+                      </span>
+                    </div>
+                    <div className="dashboard-kpi-value-row">
+                      <span className="dashboard-kpi-value">
+                        {formatSize(recent.totalBytes)}
+                      </span>
+                    </div>
+                    {recent.totalRuns > 0 && (
+                      <div className="dashboard-kpi-bar" aria-hidden="true">
+                        {recentSuccessPct > 0 && (
+                          <span
+                            className="dashboard-kpi-bar-seg dashboard-kpi-bar-seg--success"
+                            style={{ width: `${recentSuccessPct}%` }}
+                          />
+                        )}
+                        {recentFailPct > 0 && (
+                          <span
+                            className="dashboard-kpi-bar-seg dashboard-kpi-bar-seg--danger"
+                            style={{ width: `${recentFailPct}%` }}
+                          />
+                        )}
+                        {recentStoppedPct > 0 && (
+                          <span
+                            className="dashboard-kpi-bar-seg dashboard-kpi-bar-seg--muted"
+                            style={{ width: `${recentStoppedPct}%` }}
+                          />
+                        )}
+                      </div>
+                    )}
+                    <div className="dashboard-kpi-foot">
+                      <span>执行 {recent.totalRuns} 次</span>
+                      <span
+                        className={
+                          recent.failRuns > 0
+                            ? "dashboard-kpi-stat is-success"
+                            : undefined
+                        }
+                      >
+                        成功 {recent.successRuns}
+                      </span>
+                      {recent.failRuns > 0 && (
+                        <span className="dashboard-kpi-stat is-danger">
+                          异常 {recent.failRuns}
+                        </span>
+                      )}
+                      <span>{recent.totalFiles} 文件</span>
+                    </div>
+                  </>
+                );
+                return recent.failRuns > 0 ? (
+                  <button
+                    type="button"
+                    className={[
+                      "dashboard-kpi-card",
+                      statusFilter === "failed" ? "is-active" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                    onClick={() =>
+                      setStatusFilter((prev) =>
+                        prev === "failed" ? "all" : "failed",
+                      )
+                    }
+                  >
+                    {recentCardBody}
+                  </button>
+                ) : (
+                  <div className="dashboard-kpi-card">{recentCardBody}</div>
+                );
+              })()}
             </div>
 
             <SectionCard
               className="dashboard-jobs-card"
-              title="全部同步任务"
+              title={
+                <div className="dashboard-jobs-title">
+                  <h2>全部同步任务</h2>
+                  <span className="dashboard-count-pill">
+                    {hasActiveFilters
+                      ? `${filteredJobs.length} / ${allJobs.length}`
+                      : `共 ${allJobs.length} 项`}
+                  </span>
+                </div>
+              }
               extra={
-                <span className="muted">
-                  显示 {filteredJobs.length} / {allJobs.length} 项
-                </span>
+                <div
+                  className="dashboard-status-pills"
+                  role="group"
+                  aria-label="按运行状态筛选"
+                >
+                  {statusPills
+                    .filter(
+                      (pill) =>
+                        pill.alwaysShow ||
+                        pill.count > 0 ||
+                        statusFilter === pill.key,
+                    )
+                    .map((pill) => (
+                      <button
+                        key={pill.key}
+                        type="button"
+                        aria-pressed={statusFilter === pill.key}
+                        className={[
+                          "dashboard-status-pill",
+                          statusFilter === pill.key ? "is-active" : "",
+                          pill.tone ? `is-${pill.tone}` : "",
+                        ]
+                          .filter(Boolean)
+                          .join(" ")}
+                        onClick={() => setStatusFilter(pill.key)}
+                      >
+                        <span>{pill.label}</span>
+                        <span className="dashboard-status-pill-count">
+                          {pill.count}
+                        </span>
+                      </button>
+                    ))}
+                </div>
               }
             >
               <div className="dashboard-filters">
@@ -421,11 +949,18 @@ export default function Dashboard() {
                 >
                   全选
                 </Checkbox>
+                <span
+                  className="dashboard-filters-divider"
+                  aria-hidden="true"
+                />
                 <SearchFilterInput
                   ariaLabel="搜索任务名称、路径或引擎"
                   placeholder="搜索任务名 / 路径 / 引擎"
                   value={searchInput}
-                  onChange={setSearchInput}
+                  onChange={(next) => {
+                    setSearchInput(next);
+                    setKeyword(next);
+                  }}
                   onSearch={setKeyword}
                 />
                 <Select
@@ -451,24 +986,23 @@ export default function Dashboard() {
                     { label: "移动", value: "2" },
                   ]}
                 />
-                <Select
-                  aria-label="按运行状态筛选"
-                  value={statusFilter}
-                  onChange={(v) => setStatusFilter(String(v) as StatusFilter)}
-                  optionList={[
-                    { label: "全部状态", value: "all" },
-                    { label: "运行中", value: "running" },
-                    { label: "排队中", value: "queued" },
-                    { label: "待审批", value: "approval" },
-                    { label: "最近失败", value: "failed" },
-                    { label: "已停用", value: "disabled" },
-                  ]}
-                />
+                {hasActiveFilters && (
+                  <Button
+                    size="small"
+                    theme="borderless"
+                    type="tertiary"
+                    onClick={resetFilters}
+                  >
+                    重置筛选
+                  </Button>
+                )}
               </div>
 
               {selectedIds.length > 0 && (
                 <div className="batch-action-bar">
-                  <span>已选中 {selectedIds.length} 个任务</span>
+                  <span className="batch-action-summary">
+                    已选中 <strong>{selectedIds.length}</strong> 个任务
+                  </span>
                   <div className="batch-action-buttons">
                     <Button
                       size="small"
@@ -514,36 +1048,96 @@ export default function Dashboard() {
                 </div>
               )}
 
-              {!filteredJobs.length ? (
-                <EmptyState />
+              {!allJobs.length ? (
+                <EmptyState action={emptyJobAction} />
+              ) : !filteredJobs.length ? (
+                <div className="dashboard-filter-empty" role="status">
+                  <span className="muted">没有符合当前筛选条件的同步任务</span>
+                  <Button size="small" type="tertiary" onClick={resetFilters}>
+                    重置筛选条件
+                  </Button>
+                </div>
               ) : (
                 <div className="dashboard-job-list">
                   {filteredJobs.map((job) => {
                     const jobName = job.remark || `同步任务 #${job.id}`;
                     const srcList = parseJobPathList(job.srcPath);
                     const dstList = parseJobPathList(job.dstPath);
+                    const srcSummary =
+                      (srcList[0] || "—") +
+                      (srcList.length > 1 ? ` 等 ${srcList.length} 项` : "");
+                    const dstSummary =
+                      (dstList[0] || "—") +
+                      (dstList.length > 1 ? ` 等 ${dstList.length} 项` : "");
+                    const fullRouteTitle = `${srcList.join(", ") || "—"} → ${dstList.join(", ") || "—"}`;
+                    const isSelected = selectedSet.has(job.id);
+                    const failed = isJobFailed(job);
+                    const livePct = Math.min(
+                      100,
+                      Math.max(0, Math.round(job.liveProgress || 0)),
+                    );
+                    const liveTotal = job.liveNum
+                      ? (job.liveNum.wait || 0) +
+                        (job.liveNum.running || 0) +
+                        (job.liveNum.success || 0) +
+                        (job.liveNum.fail || 0) +
+                        (job.liveNum.other || 0)
+                      : 0;
+
+                    const rowClassName = [
+                      "dashboard-job-row",
+                      isSelected ? "is-selected" : "",
+                      job.pendingApproval
+                        ? "is-approval"
+                        : job.running
+                          ? "is-running"
+                          : failed
+                            ? "is-failed"
+                            : "",
+                      job.enable !== 1 && !job.running ? "is-disabled" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ");
+
                     return (
-                      <div key={job.id} className="dashboard-job-row">
+                      <div key={job.id} className={rowClassName}>
                         <div className="dashboard-job-check">
                           <Checkbox
                             aria-label={`选择 ${jobName}`}
-                            checked={selectedSet.has(job.id)}
+                            checked={isSelected}
                             onChange={(e) =>
                               toggleSelect(job.id, Boolean(e.target.checked))
                             }
                           />
                         </div>
+
                         <div
-                          className="dashboard-job-main"
-                          onClick={() =>
-                            navigate(
-                              `/tasks?jobId=${job.id}&tab=${job.running ? "realtime" : "overview"}`,
-                            )
-                          }
+                          className="dashboard-job-info"
+                          onClick={() => openJobDetail(job)}
                         >
                           <div className="dashboard-job-title-line">
-                            <strong>{jobName}</strong>
-                            <Tag size="small" type="light" color="blue">
+                            <span className="dashboard-job-name-wrap">
+                              <span
+                                className={jobDotTone(job)}
+                                aria-hidden="true"
+                              />
+                              <button
+                                type="button"
+                                className="dashboard-job-title-btn"
+                                title={jobName}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  openJobDetail(job);
+                                }}
+                              >
+                                {jobName}
+                              </button>
+                            </span>
+                            <Tag
+                              size="small"
+                              type="light"
+                              color={methodTagColor(job.method)}
+                            >
                               {methodLabel(job.method)}
                             </Tag>
                             {job.pendingApproval && (
@@ -551,17 +1145,12 @@ export default function Dashboard() {
                                 待审批删除
                               </Tag>
                             )}
-                            {job.running && !job.pendingApproval && (
-                              <Tag size="small" type="light" color="blue">
-                                运行中 {Math.round(job.liveProgress || 0)}%
-                              </Tag>
-                            )}
                             {job.queued && (
                               <Tag size="small" type="light" color="cyan">
                                 排队等待中
                               </Tag>
                             )}
-                            {job.enable !== 1 && job.isCron !== 2 && (
+                            {job.enable !== 1 && (
                               <Tag size="small" type="light" color="grey">
                                 已停用
                               </Tag>
@@ -572,51 +1161,152 @@ export default function Dashboard() {
                               </Tag>
                             )}
                           </div>
+
                           <div className="dashboard-job-meta">
-                            <span>{job.alistName || `引擎 #${job.alistId}`}</span>
-                            <span>
-                              {srcList[0] || "—"}
-                              {srcList.length > 1 ? ` 等 ${srcList.length} 项` : ""} →{" "}
-                              {dstList[0] || "—"}
+                            <span
+                              className="dashboard-meta-engine"
+                              title={job.alistName || `引擎 #${job.alistId}`}
+                            >
+                              <IconServerStroked size="small" aria-hidden="true" />
+                              <span>{job.alistName || `引擎 #${job.alistId}`}</span>
                             </span>
-                            {job.nextRunTime > 0 && (
-                              <span>
-                                下次 {formatTimestamp(job.nextRunTime, true)}
+                            <span
+                              className="dashboard-path-route"
+                              title={fullRouteTitle}
+                            >
+                              <span className="dashboard-path-seg">
+                                {srcSummary}
                               </span>
-                            )}
+                              <IconArrowRight
+                                size="small"
+                                className="dashboard-path-arrow"
+                                aria-hidden="true"
+                              />
+                              <span className="dashboard-path-seg">
+                                {dstSummary}
+                              </span>
+                            </span>
                           </div>
-                          {job.running && (
+                        </div>
+
+                        <div
+                          className="dashboard-job-status-col"
+                          onClick={() => openJobDetail(job)}
+                        >
+                          {job.pendingApproval ? (
+                            <div className="dashboard-job-approval-note">
+                              <span className="dashboard-job-approval-title">
+                                <IconAlertTriangle
+                                  size="small"
+                                  aria-hidden="true"
+                                />
+                                预计删除 {job.pendingApproval.deleteCount} 项
+                                {job.pendingApproval.deleteSize > 0
+                                  ? ` · ${formatSize(job.pendingApproval.deleteSize)}`
+                                  : ""}
+                              </span>
+                              <span className="dashboard-job-approval-action">
+                                点击查看删除清单并审批
+                              </span>
+                            </div>
+                          ) : job.running ? (
                             <div className="dashboard-job-progress">
+                              <div className="dashboard-job-progress-head">
+                                <span className="dashboard-job-progress-label">
+                                  正在同步
+                                </span>
+                                <span className="dashboard-job-progress-pct">
+                                  {livePct}%
+                                </span>
+                              </div>
                               <Progress
-                                percent={Math.round(job.liveProgress || 0)}
+                                percent={livePct}
                                 showInfo={false}
                                 stroke="var(--semi-color-primary)"
                               />
+                              <div className="dashboard-job-progress-sub">
+                                {liveTotal > 0 ? (
+                                  <>
+                                    <span>
+                                      已完成 {job.liveNum?.success ?? 0} /{" "}
+                                      {liveTotal} 项
+                                    </span>
+                                    {(job.liveNum?.fail ?? 0) > 0 && (
+                                      <span className="inline-error">
+                                        失败 {job.liveNum?.fail}
+                                      </span>
+                                    )}
+                                  </>
+                                ) : (
+                                  <span>正在扫描文件列表…</span>
+                                )}
+                              </div>
                             </div>
-                          )}
-                          {!job.running && job.lastTask && (
-                            <div className="dashboard-job-last">
-                              <Status
-                                status={job.lastTask.status}
-                                label={
-                                  taskRecordStatusNames[job.lastTask.status] ||
-                                  String(job.lastTask.status)
-                                }
-                                error={job.lastTask.errMsg}
-                              />
-                              <span className="muted">
-                                {formatTimestamp(job.lastTask.createTime, true)}
-                                {job.lastTask.allNum !== undefined
-                                  ? ` · ${job.lastTask.successNum ?? 0}/${job.lastTask.allNum} 项`
-                                  : ""}
-                                {(job.lastTask.sumSize ?? 0) > 0
-                                  ? ` · ${formatSize(job.lastTask.sumSize || 0)}`
-                                  : ""}
-                              </span>
-                            </div>
+                          ) : (
+                            <>
+                              {job.lastTask ? (
+                                <div className="dashboard-job-last">
+                                  <Status
+                                    status={job.lastTask.status}
+                                    label={
+                                      taskRecordStatusNames[
+                                        job.lastTask.status
+                                      ] || String(job.lastTask.status)
+                                    }
+                                    error={job.lastTask.errMsg}
+                                  />
+                                  <span
+                                    className="muted"
+                                    title={formatTimestamp(
+                                      job.lastTask.createTime,
+                                      true,
+                                    )}
+                                  >
+                                    {formatShortTime(job.lastTask.createTime)}
+                                  </span>
+                                </div>
+                              ) : (
+                                <div className="dashboard-job-last">
+                                  <span className="muted">暂无执行记录</span>
+                                </div>
+                              )}
+                              <div className="dashboard-job-schedule">
+                                <span
+                                  className="dashboard-job-schedule-item"
+                                  title={
+                                    job.nextRunTime > 0
+                                      ? formatTimestamp(job.nextRunTime, true)
+                                      : undefined
+                                  }
+                                >
+                                  <IconClockStroked
+                                    size="small"
+                                    aria-hidden="true"
+                                  />
+                                  {formatScheduleHint(job)}
+                                </span>
+                                {job.lastTask &&
+                                  (job.lastTask.allNum !== undefined ||
+                                    (job.lastTask.sumSize ?? 0) > 0) && (
+                                    <span className="dashboard-job-last-metrics">
+                                      {job.lastTask.allNum !== undefined
+                                        ? `${job.lastTask.successNum ?? 0}/${job.lastTask.allNum} 项`
+                                        : ""}
+                                      {job.lastTask.allNum !== undefined &&
+                                      (job.lastTask.sumSize ?? 0) > 0
+                                        ? " · "
+                                        : ""}
+                                      {(job.lastTask.sumSize ?? 0) > 0
+                                        ? formatSize(job.lastTask.sumSize || 0)
+                                        : ""}
+                                    </span>
+                                  )}
+                              </div>
+                            </>
                           )}
                         </div>
-                        <div className="row-actions">
+
+                        <div className="row-actions dashboard-job-actions">
                           <IconButton
                             label="模拟运行预览"
                             icon={<IconEyeOpenedStroked aria-hidden="true" />}
@@ -626,7 +1316,9 @@ export default function Dashboard() {
                             }
                           />
                           <IconButton
-                            label={job.running || job.queued ? "停止任务" : "启动任务"}
+                            label={
+                              job.running || job.queued ? "停止任务" : "启动任务"
+                            }
                             icon={
                               job.running || job.queued ? (
                                 <IconPause aria-hidden="true" />
@@ -650,6 +1342,11 @@ export default function Dashboard() {
                             icon={<IconCopy aria-hidden="true" />}
                             disabled={action.busy}
                             onClick={() => handleClone(job.id)}
+                          />
+                          <IconButton
+                            label="查看任务详情"
+                            icon={<IconChevronRight aria-hidden="true" />}
+                            onClick={() => openJobDetail(job)}
                           />
                         </div>
                       </div>
@@ -692,11 +1389,41 @@ export default function Dashboard() {
             }
             onSaved={(result: TaskEditorSavedResult) => {
               setEditorState({ open: false, job: null, initialDraft: null });
-              void refreshAll(true).then(() => {
-                if (result.createdId) {
-                  navigate(`/tasks?jobId=${result.createdId}&tab=overview`);
+              const createdId = result.createdId;
+              const goToCreated = () => {
+                if (createdId) {
+                  navigate(`/tasks?jobId=${createdId}&tab=overview`);
                 }
-              });
+              };
+              if (result.runNow && createdId) {
+                const startCreated = () =>
+                  action.run(async () => {
+                    try {
+                      await api.jobAction({ id: String(createdId) });
+                      Toast.success("已提交执行");
+                    } catch (err) {
+                      errorToast(err);
+                    }
+                    await refreshAll(true);
+                    goToCreated();
+                  });
+                if (result.method === 2) {
+                  confirmAction({
+                    title: "确认启动移动同步？",
+                    content:
+                      "移动模式会在文件复制到目标目录并校验后删除源目录中的对应文件，是否确认立即执行？",
+                    okText: "确认移动",
+                    onOk: startCreated,
+                    onCancel: () => {
+                      void refreshAll(true).then(goToCreated);
+                    },
+                  });
+                  return;
+                }
+                void startCreated();
+                return;
+              }
+              void refreshAll(true).then(goToCreated);
             }}
           />
         </Suspense>

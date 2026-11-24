@@ -305,22 +305,24 @@ func ImportSystemBackup(payload SystemBackupPayload, conflictMode string) (map[s
 		delete(job, "id")
 		delete(job, "createTime")
 		oldAlistID := util.ToInt64(job["alistId"])
-		mappedAlistID := oldAlistID
-		if newAlistID, ok := engineIDMap[oldAlistID]; ok {
-			mappedAlistID = newAlistID
-		} else {
-			// Verify the original engine ID actually exists in DB
-			if _, err := mapper.GetAlistByID(oldAlistID); err != nil {
-				warnings = append(warnings, fmt.Sprintf("任务 %q 引用了未导入的引擎 #%d，已跳过", util.StringValue(job["remark"]), oldAlistID))
-				jobsSkipped++
-				continue
-			}
+		mappedAlistID, ok := engineIDMap[oldAlistID]
+		if !ok || mappedAlistID <= 0 {
+			warnings = append(warnings, fmt.Sprintf("任务 %q 引用的引擎 #%d 未导入或未匹配到相同引擎，已跳过（为防止误操作目标存储，不会按旧 ID 自动绑定）", util.StringValue(job["remark"]), oldAlistID))
+			jobsSkipped++
+			continue
 		}
 		job["alistId"] = mappedAlistID
 
-		// Remap notifyIds if notifyMode == 1
-		if util.ToInt(job["notifyMode"]) == 1 && job["notifyIds"] != nil {
-			if oldIDs, err := parseNotifyIDList(job["notifyIds"]); err == nil {
+		// Remap notifyIds if notifyMode == 1. Never fall back to notifyMode=0
+		// ("all enabled channels") when specified channels could not be
+		// imported: that would broadcast job details to unintended recipients.
+		if util.ToInt(job["notifyMode"]) == 1 {
+			oldIDs, err := parseNotifyIDList(job["notifyIds"])
+			if err != nil || len(oldIDs) == 0 {
+				job["notifyMode"] = 2
+				job["notifyIds"] = nil
+				warnings = append(warnings, fmt.Sprintf("任务 %q 指定的通知渠道无效或为空，已关闭该任务通知，请手动重新配置", util.StringValue(job["remark"])))
+			} else {
 				remapped := make([]int64, 0, len(oldIDs))
 				for _, nid := range oldIDs {
 					if mapped, ok := notifyIDMap[nid]; ok {
@@ -330,9 +332,13 @@ func ImportSystemBackup(payload SystemBackupPayload, conflictMode string) (map[s
 				if len(remapped) > 0 {
 					enc, _ := json.Marshal(remapped)
 					job["notifyIds"] = string(enc)
+					if len(remapped) < len(oldIDs) {
+						warnings = append(warnings, fmt.Sprintf("任务 %q 部分指定的通知渠道未导入，已仅保留成功匹配的 %d/%d 个渠道", util.StringValue(job["remark"]), len(remapped), len(oldIDs)))
+					}
 				} else {
-					job["notifyMode"] = 0
+					job["notifyMode"] = 2
 					job["notifyIds"] = nil
+					warnings = append(warnings, fmt.Sprintf("任务 %q 指定的通知渠道均未导入，已自动关闭该任务通知以防误发，请手动重新绑定", util.StringValue(job["remark"])))
 				}
 			}
 		}

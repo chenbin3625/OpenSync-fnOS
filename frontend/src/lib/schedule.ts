@@ -131,7 +131,12 @@ export function parseCronFieldValues(
     if (hasStar && match[2]) return null;
 
     const start = hasStar ? low : Number(match[1]);
-    const end = match[2] !== undefined ? Number(match[2]) : hasStar ? high : start;
+    const end =
+      match[2] !== undefined
+        ? Number(match[2])
+        : hasStar || match[3] !== undefined
+          ? high
+          : start;
     const step = match[3] !== undefined ? Number(match[3]) : 1;
 
     if (

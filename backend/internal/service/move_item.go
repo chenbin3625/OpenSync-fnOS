@@ -134,18 +134,16 @@ func (ci *CopyItem) snapshotMove(runtime copyItemRuntime, client copyItemClient)
 			return moveSnapshot{}, errors.New("move destination already holds a different file; source retained")
 		}
 		sourceMD5, targetMD5 := validMoveMD5(source.MD5), validMoveMD5(target.MD5)
-		switch {
-		case sourceMD5 != "" && targetMD5 != "":
+		if sourceMD5 != "" && targetMD5 != "" {
 			if sourceMD5 != targetMD5 {
 				return moveSnapshot{}, errors.New("move destination already holds a different file; source retained")
 			}
 			identical = true
-		case source.Modified > 0 && target.Modified > 0 && source.Modified == target.Modified:
-			// Without hashes, an identical modification time plus an identical
-			// size is the strongest evidence available that this is the same
-			// file written by an earlier move attempt.
-			identical = true
-		default:
+		} else {
+			// Without content hashes on both sides, matching size and mtime do
+			// not prove identical content (same-second writes, copied metadata,
+			// or coarse filesystem timestamps can collide). Refuse to skip
+			// copy and delete the source.
 			return moveSnapshot{}, errors.New("move destination holds a same-size file that cannot be verified as identical; source retained")
 		}
 	}
@@ -204,6 +202,12 @@ func (ci *CopyItem) removeVerifiedMoveSource(runtime copyItemRuntime, client cop
 		target, err := ci.verifyMoveTarget(ctx, statClient, source)
 		if err != nil {
 			return err
+		}
+		if snapshot.targetIdentical {
+			sourceMD5, targetMD5 := validMoveMD5(source.MD5), validMoveMD5(target.MD5)
+			if sourceMD5 == "" || targetMD5 == "" || sourceMD5 != targetMD5 {
+				return errors.New("move destination hash no longer matches source; source retained")
+			}
 		}
 		// No task ID is not proof that a synchronous copy ran. Require new
 		// destination metadata or matching content hashes before removing source.

@@ -81,7 +81,10 @@ type JobTask struct {
 	RetryItemIDs              []int64
 	releaseEngineSlot         func()
 	trashDirMu                sync.Mutex
-	trashDirsCreated          map[string]struct{}
+	trashDirReady             map[string]struct{}
+	trashDirBusy              map[string]*trashDirState
+	trashRunBucket            string
+	trashItemCounts           map[string]int
 	moveSrcDirMu              sync.Mutex
 	moveSrcSubdirs            map[string]string
 	FatalMu                   sync.Mutex
@@ -515,8 +518,9 @@ func (jt *JobTask) finishCopyItem(item *CopyItem) {
 	copyType := item.CopyType
 	isPath := item.IsPath
 	createTime := item.CreateTime
+	skipped := item.skipped
 	item.mu.RUnlock()
-	if item.fullWriteFailed != nil {
+	if item.fullWriteFailed != nil && !skipped {
 		item.fullWriteFailed.record(dstPath, fileName, fileSize, status)
 	}
 
@@ -527,6 +531,11 @@ func (jt *JobTask) finishCopyItem(item *CopyItem) {
 	jt.DoingMu.Lock()
 	delete(jt.Doing, item.DoingKey)
 	jt.DoingMu.Unlock()
+
+	if skipped {
+		jt.notifyProgressChange()
+		return
+	}
 
 	if copyType == taskItemTypeDelete {
 		jt.DelHook(dstPath, fileName, fileSize, status, errMsg, isPath, createTime)

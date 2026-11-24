@@ -642,21 +642,33 @@ func (jc *JobClient) DoRetrySelectedTaskItems(sourceTaskID int64, itemIDs []int6
 	if jc.isClosing() {
 		return publicError(msg.T(msg.JobNotFound))
 	}
+	// Coordinate with retention history cleanup under historyCleanupMu so a
+	// cleanup batch cannot be mid-deletion of sourceTaskID when the retry
+	// starts, and cleanup cannot select sourceTaskID once claimed here.
+	historyCleanupMu.Lock()
+	if _, deleting := historyDeletingTasks[sourceTaskID]; deleting {
+		historyCleanupMu.Unlock()
+		return publicError(msg.T(msg.TaskNotFound))
+	}
 	if !jc.tryMarkDoing() {
+		historyCleanupMu.Unlock()
 		return publicError(msg.T(msg.JobRunning))
 	}
 	if jc.isClosing() {
 		jc.markDone()
+		historyCleanupMu.Unlock()
 		return publicError(msg.T(msg.JobNotFound))
 	}
 	if !jc.enabled() {
 		jc.markDone()
+		historyCleanupMu.Unlock()
 		return publicError(msg.T(msg.DisabledJobCannotRun))
 	}
-	// Claim the source task before counting or starting the goroutine: RemoveTask
-	// checks this claim, so the source cannot disappear between validation and the
-	// replay.
+	// Claim the source task before releasing historyCleanupMu and before
+	// counting or starting the goroutine: RemoveTask and retention cleanup both
+	// honor this claim, so the source cannot disappear mid-replay.
 	jc.setRetrySource(sourceTaskID)
+	historyCleanupMu.Unlock()
 	var (
 		count int64
 		err   error

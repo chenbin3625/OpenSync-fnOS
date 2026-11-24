@@ -541,9 +541,57 @@ func dryRunFullSyncWork(
 
 	relocations := plan.relocations()
 	writes := plan.writeIndex()
+	guardReason, deletesUnsafe := plan.unsafeDeleteVolume(plan.plannedDeleteWeight(relocations, writes))
+	suspiciousCounts := plan.suspiciousEmptySourceDirs()
+	suspicious := make(map[string]struct{}, len(suspiciousCounts))
+	for dir := range suspiciousCounts {
+		suspicious[dir] = struct{}{}
+	}
+
+	delReason := "目标端多余项"
+	if trashEnabled(job) {
+		delReason = "移入目标回收站"
+	}
+
+	blocked := make(map[string]struct{})
+	for _, key := range sortedDeleteKeys(plan.blockers, false) {
+		item := plan.blockers[key]
+		if item.protected {
+			blocked[normalizeBlockedPath(item.blocksPath)] = struct{}{}
+			continue
+		}
+		if _, col := writes.collision(item.dir, item.name); col {
+			blocked[normalizeBlockedPath(item.blocksPath)] = struct{}{}
+			continue
+		}
+		if deletesUnsafe {
+			blocked[normalizeBlockedPath(item.blocksPath)] = struct{}{}
+			sess.addItem(DryRunItem{
+				Action:   "skip",
+				DstPath:  item.dir,
+				FileName: item.name,
+				FileSize: plan.dst.deleteSize(item),
+				IsPath:   strings.HasSuffix(item.name, "/"),
+				Reason:   "触发批量删除保护，已保留目标项（" + guardReason + "）",
+			})
+			continue
+		}
+		sess.addItem(DryRunItem{
+			Action:   "delete",
+			DstPath:  item.dir,
+			FileName: item.name,
+			FileSize: plan.dst.deleteSize(item),
+			IsPath:   strings.HasSuffix(item.name, "/"),
+			Reason:   "类型冲突清理（" + delReason + "）",
+		})
+	}
+
 	movedTargets := make(map[string]struct{}, len(relocations))
 	consumedDeletes := make(map[string]struct{}, len(relocations))
 	for _, rel := range relocations {
+		if fullSyncPathBlocked(rel.target.target, blocked) {
+			continue
+		}
 		movedTargets[rel.target.target] = struct{}{}
 		if rel.source.deleteRoot == rel.source.object {
 			consumedDeletes[rel.source.deleteRoot] = struct{}{}
@@ -559,6 +607,9 @@ func dryRunFullSyncWork(
 	}
 	for _, key := range sortedDirKeys(plan.newDirs) {
 		dir := plan.newDirs[key]
+		if fullSyncPathBlocked(dir.dstDir, blocked) {
+			continue
+		}
 		sess.addItem(DryRunItem{
 			Action:   "mkdir",
 			SrcPath:  dir.srcDir,
@@ -572,6 +623,9 @@ func dryRunFullSyncWork(
 			continue
 		}
 		file := plan.newFiles[target]
+		if fullSyncPathBlocked(file.target, blocked) {
+			continue
+		}
 		sess.addItem(DryRunItem{
 			Action:   "copy",
 			SrcPath:  file.srcDir,
@@ -581,6 +635,9 @@ func dryRunFullSyncWork(
 		})
 	}
 	for _, file := range sortedFullSyncFiles(plan.changed) {
+		if fullSyncPathBlocked(file.target, blocked) {
+			continue
+		}
 		reason := "内容/元数据变化"
 		if util.ToInt(job["conflictPolicy"]) == 2 {
 			reason = "冲突保留两者（目标旧文件将重命名备份）"
@@ -596,33 +653,34 @@ func dryRunFullSyncWork(
 			Reason:   reason,
 		})
 	}
-	delReason := "目标端多余项"
-	if trashEnabled(job) {
-		delReason = "移入目标回收站"
-	}
-	for _, key := range sortedDeleteKeys(plan.blockers, false) {
-		item := plan.blockers[key]
-		if item.protected {
-			continue
-		}
-		if _, col := writes.collision(item.dir, item.name); col {
-			continue
-		}
-		sess.addItem(DryRunItem{
-			Action:   "delete",
-			DstPath:  item.dir,
-			FileName: item.name,
-			FileSize: plan.dst.deleteSize(item),
-			IsPath:   strings.HasSuffix(item.name, "/"),
-			Reason:   "类型冲突清理（" + delReason + "）",
-		})
-	}
 	for _, key := range sortedDeleteKeys(plan.extraDeletes, true) {
 		if _, moved := consumedDeletes[key]; moved {
 			continue
 		}
 		item := plan.extraDeletes[key]
 		if _, col := writes.collision(item.dir, item.name); col {
+			continue
+		}
+		if deletesUnsafe {
+			sess.addItem(DryRunItem{
+				Action:   "skip",
+				DstPath:  item.dir,
+				FileName: item.name,
+				FileSize: plan.dst.deleteSize(item),
+				IsPath:   strings.HasSuffix(item.name, "/"),
+				Reason:   "触发批量删除保护，已保留目标项（" + guardReason + "）",
+			})
+			continue
+		}
+		if fullSyncPathBlocked(key, suspicious) {
+			sess.addItem(DryRunItem{
+				Action:   "skip",
+				DstPath:  item.dir,
+				FileName: item.name,
+				FileSize: plan.dst.deleteSize(item),
+				IsPath:   strings.HasSuffix(item.name, "/"),
+				Reason:   "源目录为空触发空源保护，已保留目标项",
+			})
 			continue
 		}
 		sess.addItem(DryRunItem{

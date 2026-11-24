@@ -556,7 +556,9 @@ func GetLatestTaskPerJob() (map[int64]map[string]interface{}, error) {
 
 // GetRecentTasks returns tasks whose effective time is >= sinceUnix.
 func GetRecentTasks(sinceUnix int64) ([]map[string]interface{}, error) {
-	return FetchAllToTable(
+	return fetchAllToTableWithLimit(
+		GetDB(),
+		0,
 		`SELECT id, jobId, status, runTime, taskNum, createTime
 		 FROM job_task
 		 WHERE COALESCE(NULLIF(runTime, 0), createTime) >= ?`,
@@ -564,16 +566,58 @@ func GetRecentTasks(sinceUnix int64) ([]map[string]interface{}, error) {
 	)
 }
 
+// ForEachRecentTask streams status and taskNum for every task whose effective
+// time is >= sinceUnix, without materializing all rows or tripping maxFetchAllRows.
+func ForEachRecentTask(sinceUnix int64, fn func(status int, taskNum string) error) error {
+	rows, err := GetDB().Query(
+		`SELECT COALESCE(status, 0), COALESCE(taskNum, '')
+		 FROM job_task
+		 WHERE COALESCE(NULLIF(runTime, 0), createTime) >= ?`,
+		sinceUnix,
+	)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var status int
+		var taskNum string
+		if err := rows.Scan(&status, &taskNum); err != nil {
+			return err
+		}
+		if err := fn(status, taskNum); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+// TaskHistoryCleanupGuard coordinates retention cleanup with running sync/retry
+// tasks so an expired task currently being replayed is never deleted mid-retry.
+type TaskHistoryCleanupGuard struct {
+	Blocked          func() bool
+	ProtectedTaskIDs func() []int64
+	BeginDeleteBatch func(taskIDs []int64) []int64
+	EndDeleteBatch   func(taskIDs []int64)
+}
+
 // DeleteJobTaskByRunTimeContext deletes finished tasks older than runTime, then
 // reclaims space. ctx is checked between every short delete batch, so shutdown
 // can stop a cleanup of years of history without waiting for it to finish.
 //
-// maintenanceBlocked reports whether a sync is running. The WAL truncate and
-// VACUUM hold the write lock for as long as they take, and a running task's
-// item writes give up after busy_timeout; both are skipped while it returns
-// true, and a VACUUM already under way is interrupted when it turns true.
+// maintenanceBlocked reports whether a sync is running. Both expired-task
+// deletion and database maintenance (WAL truncate, VACUUM) are deferred while
+// it returns true so an in-progress retry never loses its source task mid-replay
+// and running item writes are never starved by a write lock.
 // A nil maintenanceBlocked never blocks.
 func DeleteJobTaskByRunTimeContext(ctx context.Context, runTime int64, maintenanceBlocked func() bool) error {
+	return DeleteJobTaskByRunTimeWithGuardContext(ctx, runTime, TaskHistoryCleanupGuard{
+		Blocked: maintenanceBlocked,
+	})
+}
+
+func DeleteJobTaskByRunTimeWithGuardContext(ctx context.Context, runTime int64, guard TaskHistoryCleanupGuard) error {
+	maintenanceBlocked := guard.Blocked
 	if maintenanceBlocked == nil {
 		maintenanceBlocked = func() bool { return false }
 	}
@@ -581,15 +625,33 @@ func DeleteJobTaskByRunTimeContext(ctx context.Context, runTime int64, maintenan
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		taskIDs, err := expiredJobTaskIDs(runTime, expiredTaskDeleteBatchSize)
+		if maintenanceBlocked() {
+			log.Printf("Deferring task history cleanup: a sync task is running")
+			return nil
+		}
+		var excludeIDs []int64
+		if guard.ProtectedTaskIDs != nil {
+			excludeIDs = guard.ProtectedTaskIDs()
+		}
+		taskIDs, err := expiredJobTaskIDsExcluding(runTime, expiredTaskDeleteBatchSize, excludeIDs)
 		if err != nil {
 			return err
 		}
 		if len(taskIDs) == 0 {
 			break
 		}
-		if err := deleteJobTasksByIDs(ctx, taskIDs); err != nil {
-			return err
+		if guard.BeginDeleteBatch != nil {
+			taskIDs = guard.BeginDeleteBatch(taskIDs)
+			if len(taskIDs) == 0 {
+				return nil
+			}
+		}
+		deleteErr := deleteJobTasksByIDs(ctx, taskIDs)
+		if guard.EndDeleteBatch != nil {
+			guard.EndDeleteBatch(taskIDs)
+		}
+		if deleteErr != nil {
+			return deleteErr
 		}
 	}
 	if maintenanceBlocked() {
@@ -756,17 +818,28 @@ func watchMaintenanceBlocked(ctx context.Context, cancel context.CancelFunc, blo
 }
 
 func expiredJobTaskIDs(cutoff int64, limit int) ([]int64, error) {
+	return expiredJobTaskIDsExcluding(cutoff, limit, nil)
+}
+
+func expiredJobTaskIDsExcluding(cutoff int64, limit int, excludeIDs []int64) ([]int64, error) {
 	if limit <= 0 {
 		limit = expiredTaskDeleteBatchSize
 	}
+	args := []interface{}{cutoff}
+	excludeSQL := ""
+	if len(excludeIDs) > 0 {
+		clause, exArgs := int64InClause(excludeIDs)
+		excludeSQL = " AND id NOT IN (" + clause + ")"
+		args = append(args, exArgs...)
+	}
+	args = append(args, limit)
 	rows, err := GetDB().Query(
 		`SELECT id FROM job_task
 		 WHERE COALESCE(NULLIF(runTime, 0), createTime) < ?
-		   AND status NOT IN (0, 1)
+		   AND status NOT IN (0, 1)`+excludeSQL+`
 		 ORDER BY COALESCE(NULLIF(runTime, 0), createTime), id
 		 LIMIT ?`,
-		cutoff,
-		limit,
+		args...,
 	)
 	if err != nil {
 		return nil, err
@@ -983,15 +1056,17 @@ func GetJobTaskItemList(params map[string]interface{}) (map[string]interface{}, 
 	return FetchAllToPageWithCount(baseSQL, countSQL, params, where.args...)
 }
 
+const maxExportTaskItemRows = 50000
+
 // GetJobTaskItemsForExport fetches filtered task items bounded by limit for CSV/TXT export.
 func GetJobTaskItemsForExport(params map[string]interface{}, limit int) ([]map[string]interface{}, error) {
-	if limit <= 0 {
-		limit = 50000
+	if limit <= 0 || limit > maxExportTaskItemRows {
+		limit = maxExportTaskItemRows
 	}
 	where := buildJobTaskItemWhere(params)
 	query := fmt.Sprintf("SELECT %s FROM job_task_item %s ORDER BY createTime DESC, id DESC LIMIT ?", jobTaskItemListColumns, where.clause)
 	args := appendSQLArgs(where.args, limit)
-	return FetchAllToTable(query, args...)
+	return fetchAllToTableWithLimit(GetDB(), limit, query, args...)
 }
 
 // GetTopFailedTaskItems returns up to limit failed items for notification error summaries.

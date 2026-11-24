@@ -72,4 +72,58 @@ describe("remoteDirCache", () => {
     await Promise.resolve();
     expect(observedSignal?.aborted).toBe(true);
   });
+
+  it("ignores a slower pre-force request that resolves after a newer force refresh", async () => {
+    let resolveSlow!: (rows: { name: string }[]) => void;
+    let resolveFast!: (rows: { name: string }[]) => void;
+    let call = 0;
+    const loader = vi.fn(() => {
+      call += 1;
+      if (call === 1) {
+        return new Promise<{ name: string }[]>((resolve) => {
+          resolveSlow = resolve;
+        });
+      }
+      return new Promise<{ name: string }[]>((resolve) => {
+        resolveFast = resolve;
+      });
+    });
+    const cache = createRemoteDirCache(loader);
+
+    const pSlow = cache.fetchPaths(1, "/Photos");
+    const pFast = cache.fetchPaths(1, "/Photos", { force: true });
+    expect(loader).toHaveBeenCalledTimes(2);
+
+    resolveFast([{ name: "fresh" }]);
+    expect(await pFast).toEqual([{ name: "fresh" }]);
+
+    // Older slower response settles after the forced refresh — it must not clobber cache.
+    resolveSlow([{ name: "stale" }]);
+    await pSlow;
+
+    expect(await cache.fetchPaths(1, "/Photos")).toEqual([{ name: "fresh" }]);
+    expect(loader).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not populate cache from an in-flight request invalidated by invalidateEngine", async () => {
+    let resolveOld!: (rows: { name: string }[]) => void;
+    const loader = vi.fn(() => {
+      return new Promise<{ name: string }[]>((resolve) => {
+        resolveOld = resolve;
+      });
+    });
+    const cache = createRemoteDirCache(loader);
+
+    const pOld = cache.fetchPaths(2, "/Docs");
+    cache.invalidateEngine(2);
+
+    resolveOld([{ name: "stale-after-invalidate" }]);
+    await pOld;
+
+    loader.mockResolvedValueOnce([{ name: "fresh-after-invalidate" }]);
+    expect(await cache.fetchPaths(2, "/Docs")).toEqual([
+      { name: "fresh-after-invalidate" },
+    ]);
+    expect(loader).toHaveBeenCalledTimes(2);
+  });
 });

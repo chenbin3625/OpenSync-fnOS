@@ -452,13 +452,14 @@ func (jt *JobTask) retryTaskItem(item map[string]interface{}) {
 		// could write outside the current destination or — for a move-type
 		// record — delete a source the current job no longer moves. The next
 		// regular run re-decides the work from the current configuration.
-		if !jt.retryItemMatchesConfiguration(copyType, srcPath, dstPath) || !isSafeListedName(fileName) {
+		dstRoot, ok := jt.retryItemDstRoot(copyType, srcPath, dstPath)
+		if !ok || !isSafeListedName(fileName) {
 			errMsg := "任务配置已变更，无法安全重试该记录，请重新执行同步任务"
 			log.Printf("Task %d refused to replay %q in %q as type %d under the current job configuration", jt.TaskID, fileName, dstPath, copyType)
 			jt.CopyHook(srcPath, dstPath, fileName, fileSize, "", taskStatusFailed, &errMsg, taskItemFile, copyType, time.Now().Unix())
 			return
 		}
-		jt.queueCopyFile(srcPath, dstPath, fileName, fileSize, copyType, nil)
+		jt.queueRetryCopyFile(srcPath, dstPath, dstRoot, fileName, fileSize, copyType)
 	default:
 		errMsg := fmt.Sprintf("unsupported retry task type: %d", copyType)
 		jt.CopyHook(srcPath, dstPath, fileName, fileSize, "", taskStatusFailed, &errMsg, boolToTaskItemObject(isPath), copyType, time.Now().Unix())
@@ -472,13 +473,18 @@ func (jt *JobTask) retryTaskItem(item map[string]interface{}) {
 // still mean the same operation: a Transfer record only replays while the job
 // is in move mode, and a destination relocation only in mirror mode.
 func (jt *JobTask) retryItemMatchesConfiguration(copyType taskItemType, srcPath, dstPath string) bool {
+	_, ok := jt.retryItemDstRoot(copyType, srcPath, dstPath)
+	return ok
+}
+
+func (jt *JobTask) retryItemDstRoot(copyType taskItemType, srcPath, dstPath string) (string, bool) {
 	if srcPath == "" || dstPath == "" {
-		return false
+		return "", false
 	}
 	srcPaths := parsePathList(jt.Job["srcPath"])
 	dstPaths := parsePathList(jt.Job["dstPath"])
 	if len(srcPaths) == 0 || len(dstPaths) == 0 {
-		return false
+		return "", false
 	}
 	method := util.ToInt(jt.Job["method"])
 	switch copyType {
@@ -486,20 +492,20 @@ func (jt *JobTask) retryItemMatchesConfiguration(copyType taskItemType, srcPath,
 		// A move record copies first and then removes the source, so both
 		// paths must still belong to the current move configuration.
 		if method != 2 {
-			return false
+			return "", false
 		}
 	case taskItemTypeMove:
 		// Relocation records move entries inside the destination tree.
 		if method != 1 {
-			return false
+			return "", false
 		}
 		for _, dstRoot := range dstPaths {
 			dstRoot = normalizeDirPath(dstRoot)
 			if syncPathContains(dstRoot, srcPath) && syncPathContains(dstRoot, dstPath) {
-				return true
+				return dstRoot, true
 			}
 		}
-		return false
+		return "", false
 	}
 	for _, srcRoot := range srcPaths {
 		srcRoot = normalizeDirPath(srcRoot)
@@ -510,11 +516,11 @@ func (jt *JobTask) retryItemMatchesConfiguration(copyType taskItemType, srcPath,
 			dstRoot = normalizeDirPath(dstRoot)
 			resolved := jt.dstRootFor(srcRoot, dstRoot)
 			if syncPathContains(resolved, dstPath) {
-				return true
+				return resolved, true
 			}
 		}
 	}
-	return false
+	return "", false
 }
 
 // dstRootFor resolves the destination root of one (source, destination)
@@ -641,6 +647,20 @@ func (jt *JobTask) scanCopyType() taskItemType {
 
 func (jt *JobTask) queueCopyFile(srcPath, dstPath, fileName string, fileSize interface{}, copyType taskItemType, fullWriteFailed *fullSyncWriteFailures) {
 	jt.queueCopyFileWithConflict(srcPath, dstPath, "", fileName, fileSize, copyType, fullWriteFailed, false)
+}
+
+func (jt *JobTask) queueRetryCopyFile(srcPath, dstPath, dstRoot, fileName string, fileSize interface{}, copyType taskItemType) {
+	if jt.isBreak() {
+		return
+	}
+	ci := newCopyItem(jt, jt.AlistClient, srcPath, dstPath, fileName, fileSize, copyType)
+	ci.DstRoot = dstRoot
+	ci.CheckDstConflict = copyType == taskItemTypeCopy
+	if !jt.Waiting.pushWait(jt.context(), ci) {
+		ci.setStatus(taskStatusStopped)
+		jt.CopyHook(ci.SrcPath, ci.DstPath, ci.FileName, ci.FileSize, ci.AlistTaskID,
+			ci.Status, ci.ErrMsg, taskItemFile, ci.CopyType, ci.CreateTime)
+	}
 }
 
 func (jt *JobTask) queueCopyFileWithConflict(srcPath, dstPath, dstRoot, fileName string, fileSize interface{}, copyType taskItemType, fullWriteFailed *fullSyncWriteFailures, isOverwrite bool) {

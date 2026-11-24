@@ -324,3 +324,60 @@ func TestDeleteJobTaskByRunTimeContextTruncatesWALAfterVacuum(t *testing.T) {
 		t.Fatalf("WAL size after post-VACUUM checkpoint = %d bytes, want 0", info.Size())
 	}
 }
+
+func TestDeleteJobTaskByRunTimeWithGuardProtectsActiveRetryAndRunningTasks(t *testing.T) {
+	testDB := newRetentionTestDB(t, ":memory:")
+	restore := SetDBForTest(testDB)
+	defer restore()
+
+	insertTaskWithItems(t, testDB, 10, 100, 3, 5) // expired, failed (retry source)
+	insertTaskWithItems(t, testDB, 11, 100, 2, 5) // expired, finished (deletable)
+	insertTaskWithItems(t, testDB, 12, 100, 3, 5) // expired, blocked dynamically in BeginDeleteBatch
+
+	// When Blocked is true, no expired tasks are deleted at all.
+	if err := DeleteJobTaskByRunTimeWithGuardContext(context.Background(), 1000, TaskHistoryCleanupGuard{
+		Blocked: func() bool { return true },
+	}); err != nil {
+		t.Fatalf("DeleteJobTaskByRunTimeWithGuardContext(blocked) error: %v", err)
+	}
+	if n := countRows(t, testDB, "SELECT COUNT(*) FROM job_task"); n != 3 {
+		t.Fatalf("task count while blocked = %d, want 3", n)
+	}
+
+	// When not globally blocked, ProtectedTaskIDs and BeginDeleteBatch keep protected tasks intact.
+	var ended []int64
+	err := DeleteJobTaskByRunTimeWithGuardContext(context.Background(), 1000, TaskHistoryCleanupGuard{
+		Blocked:          func() bool { return false },
+		ProtectedTaskIDs: func() []int64 { return []int64{10} },
+		BeginDeleteBatch: func(ids []int64) []int64 {
+			allowed := make([]int64, 0, len(ids))
+			for _, id := range ids {
+				if id != 12 {
+					allowed = append(allowed, id)
+				}
+			}
+			return allowed
+		},
+		EndDeleteBatch: func(ids []int64) {
+			ended = append(ended, ids...)
+		},
+	})
+	if err != nil {
+		t.Fatalf("DeleteJobTaskByRunTimeWithGuardContext() error: %v", err)
+	}
+	if n := countRows(t, testDB, "SELECT COUNT(*) FROM job_task WHERE id=10"); n != 1 {
+		t.Fatalf("protected retry source task 10 count = %d, want 1", n)
+	}
+	if n := countRows(t, testDB, "SELECT COUNT(*) FROM job_task_item WHERE taskId=10"); n != 5 {
+		t.Fatalf("protected retry source task 10 items = %d, want 5", n)
+	}
+	if n := countRows(t, testDB, "SELECT COUNT(*) FROM job_task WHERE id=12"); n != 1 {
+		t.Fatalf("BeginDeleteBatch-filtered task 12 count = %d, want 1", n)
+	}
+	if n := countRows(t, testDB, "SELECT COUNT(*) FROM job_task WHERE id=11"); n != 0 {
+		t.Fatalf("unprotected expired task 11 count = %d, want 0", n)
+	}
+	if len(ended) != 1 || ended[0] != 11 {
+		t.Fatalf("EndDeleteBatch ids = %v, want [11]", ended)
+	}
+}

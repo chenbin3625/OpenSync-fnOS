@@ -616,6 +616,7 @@ export function confirmAction({
   okText,
   okLabel,
   onOk,
+  onCancel,
   variant = "confirm",
 }: {
   title: string;
@@ -623,6 +624,7 @@ export function confirmAction({
   okText: string;
   okLabel?: string;
   onOk: () => void | Promise<unknown>;
+  onCancel?: () => void;
   variant?: "error" | "confirm";
 }) {
   const method = variant === "error" ? Modal.error : Modal.confirm;
@@ -642,6 +644,7 @@ export function confirmAction({
     },
     cancelButtonProps: { "aria-label": "取消" },
     onOk,
+    onCancel,
   });
 }
 

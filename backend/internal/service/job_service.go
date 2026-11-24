@@ -16,10 +16,12 @@ import (
 )
 
 var (
-	jobClientList   = make(map[int64]*JobClient)
-	jobClientListMu sync.RWMutex
-	jobClientLoadMu sync.Mutex
-	jobClientLoads  = make(map[int64]*sync.Mutex)
+	jobClientList        = make(map[int64]*JobClient)
+	jobClientListMu      sync.RWMutex
+	jobClientLoadMu      sync.Mutex
+	jobClientLoads       = make(map[int64]*sync.Mutex)
+	historyCleanupMu     sync.Mutex
+	historyDeletingTasks = make(map[int64]struct{})
 )
 
 var (
@@ -115,13 +117,80 @@ func cleanupExpiredTasksContext(ctx context.Context, logger *log.Logger, taskSav
 	if !ok {
 		return
 	}
-	if err := mapper.DeleteJobTaskByRunTimeContext(ctx, cutoff, anyJobTaskRunning); err != nil {
+	guard := mapper.TaskHistoryCleanupGuard{
+		Blocked:          anyJobTaskRunning,
+		ProtectedTaskIDs: activeProtectedHistoryTaskIDs,
+		BeginDeleteBatch: beginHistoryDeleteBatch,
+		EndDeleteBatch:   endHistoryDeleteBatch,
+	}
+	if err := mapper.DeleteJobTaskByRunTimeWithGuardContext(ctx, cutoff, guard); err != nil {
 		if ctx.Err() != nil {
 			logger.Printf("Task history cleanup stopped: %v", err)
 			return
 		}
 		logger.Printf("Failed to delete expired task history: %v", err)
 	}
+}
+
+// activeProtectedHistoryTaskIDs returns task IDs that retention cleanup must
+// never delete: any currently running task and any historical task currently
+// being replayed as a retry source.
+func activeProtectedHistoryTaskIDs() []int64 {
+	jobClientListMu.RLock()
+	clients := make([]*JobClient, 0, len(jobClientList))
+	for _, client := range jobClientList {
+		clients = append(clients, client)
+	}
+	jobClientListMu.RUnlock()
+
+	seen := make(map[int64]struct{})
+	var ids []int64
+	add := func(id int64) {
+		if id <= 0 {
+			return
+		}
+		if _, dup := seen[id]; dup {
+			return
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	for _, client := range clients {
+		if cur := client.currentTask(); cur != nil {
+			add(cur.TaskID)
+		}
+		add(client.retrySource())
+	}
+	return ids
+}
+
+func beginHistoryDeleteBatch(taskIDs []int64) []int64 {
+	historyCleanupMu.Lock()
+	defer historyCleanupMu.Unlock()
+	if anyJobTaskRunning() {
+		return nil
+	}
+	protected := make(map[int64]struct{})
+	for _, id := range activeProtectedHistoryTaskIDs() {
+		protected[id] = struct{}{}
+	}
+	allowed := make([]int64, 0, len(taskIDs))
+	for _, id := range taskIDs {
+		if _, skip := protected[id]; skip {
+			continue
+		}
+		historyDeletingTasks[id] = struct{}{}
+		allowed = append(allowed, id)
+	}
+	return allowed
+}
+
+func endHistoryDeleteBatch(taskIDs []int64) {
+	historyCleanupMu.Lock()
+	for _, id := range taskIDs {
+		delete(historyDeletingTasks, id)
+	}
+	historyCleanupMu.Unlock()
 }
 
 // anyJobTaskRunning reports whether any job is executing a task. Database
@@ -751,17 +820,15 @@ func addJobClient(job map[string]interface{}, isInit bool) (int64, error) {
 		return 0, err
 	}
 	if !isInit {
+		// Interactive add: hold alistRefMu across destination conflict
+		// validation, engine existence check, and job row insertion so
+		// concurrent creates/edits cannot bypass destination conflict checks
+		// and a concurrent RemoveClient cannot delete the engine in between.
+		alistRefMu.Lock()
+		defer alistRefMu.Unlock()
 		if err := validateJobDestinationConflicts(job); err != nil {
 			return 0, err
 		}
-	}
-	if !isInit {
-		// Interactive add: validate that the engine exists and hold the
-		// reference lock until the job row is inserted, so a concurrent
-		// RemoveClient cannot delete the engine in between and leave a job
-		// pointing at nothing.
-		alistRefMu.Lock()
-		defer alistRefMu.Unlock()
 		if _, err := alistDeps.GetAlistByID(util.ToInt64(job["alistId"])); err != nil {
 			if err := publicErrorIf(err, msg.T(msg.AlistNotFound)); err != nil {
 				return 0, err
@@ -794,9 +861,6 @@ func EditJobClient(job map[string]interface{}) error {
 	if err := ValidateJobInput(job); err != nil {
 		return err
 	}
-	if err := validateJobDestinationConflicts(job); err != nil {
-		return err
-	}
 	client, err := GetJobClientByID(jobID)
 	if err != nil {
 		return err
@@ -818,17 +882,25 @@ func EditJobClient(job map[string]interface{}) error {
 		nextScheduler.Stop()
 		return fmt.Errorf("schedule job: %w", err)
 	}
-	// The engine reference check and the row update commit under the same lock
-	// RemoveClient uses: otherwise an edit could point the job at an engine that
-	// is being deleted right now, leaving a dangling reference that only fails
-	// when the next task starts.
+	// Destination conflict validation, the engine reference check, and the row
+	// update all commit under alistRefMu: concurrent creates/edits cannot both
+	// pass conflict validation and persist overlapping destination roots, and
+	// RemoveClient cannot delete the referenced engine in between.
 	alistRefMu.Lock()
-	_, alistErr := alistDeps.GetAlistByID(util.ToInt64(job["alistId"]))
+	conflictErr := validateJobDestinationConflicts(job)
+	var alistErr error
 	var updateErr error
-	if alistErr == nil {
-		updateErr = mapper.UpdateJob(job)
+	if conflictErr == nil {
+		_, alistErr = alistDeps.GetAlistByID(util.ToInt64(job["alistId"]))
+		if alistErr == nil {
+			updateErr = mapper.UpdateJob(job)
+		}
 	}
 	alistRefMu.Unlock()
+	if conflictErr != nil {
+		nextScheduler.Stop()
+		return conflictErr
+	}
 	if alistErr != nil {
 		nextScheduler.Stop()
 		return publicErrorIf(alistErr, msg.T(msg.AlistNotFound))

@@ -41,6 +41,9 @@ var appVersion = "dev"
 
 const prefix = "/app/opensync"
 const maxRequestBodyBytes = 1 << 20
+// maxBackupImportBodyBytes matches the 10 MiB backup file limit in Settings UI
+// plus JSON envelope overhead ({conflictMode, payload}).
+const maxBackupImportBodyBytes = 12 << 20
 const shutdownTimeout = 30 * time.Second
 
 func newRouter(development bool, allowedOrigins []string) *gin.Engine {
@@ -64,11 +67,15 @@ func newRouterWithVersionChecker(development bool, allowedOrigins []string, chec
 		c.Header("X-Content-Type-Options", "nosniff")
 		c.Header("Referrer-Policy", "same-origin")
 		c.Header("Content-Security-Policy", "frame-ancestors 'self'; object-src 'none'; base-uri 'self'")
-		if c.Request.ContentLength > maxRequestBodyBytes {
+		bodyLimit := int64(maxRequestBodyBytes)
+		if c.Request.Method == http.MethodPost && c.Request.URL.Path == prefix+"/svr/system/import" {
+			bodyLimit = maxBackupImportBodyBytes
+		}
+		if c.Request.ContentLength > bodyLimit {
 			c.AbortWithStatusJSON(413, gin.H{"code": 413, "msg": msg.T(msg.RequestTooLarge)})
 			return
 		}
-		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxRequestBodyBytes)
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, bodyLimit)
 		c.Next()
 	})
 	api := r.Group(prefix+"/svr", platform.GatewayRequired(development, allowedOrigins))

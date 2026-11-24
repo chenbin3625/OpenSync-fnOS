@@ -418,6 +418,13 @@ func FetchAllToTable(query string, args ...interface{}) ([]map[string]interface{
 // fetchAllToTable is FetchAllToTable against an explicit querier, so a caller
 // holding a transaction can read several statements from one snapshot.
 func fetchAllToTable(q querier, query string, args ...interface{}) ([]map[string]interface{}, error) {
+	return fetchAllToTableWithLimit(q, maxFetchAllRows, query, args...)
+}
+
+// fetchAllToTableWithLimit reads rows up to maxRows (<=0 means unlimited).
+// Unbounded queries should still use pagination or streaming; this helper lets
+// explicitly LIMIT-bounded callers such as export specify their own ceiling.
+func fetchAllToTableWithLimit(q querier, maxRows int, query string, args ...interface{}) ([]map[string]interface{}, error) {
 	rows, err := q.Query(query, args...)
 	if err != nil {
 		return nil, err
@@ -450,9 +457,9 @@ func fetchAllToTable(q querier, query string, args ...interface{}) ([]map[string
 			}
 		}
 		results = append(results, row)
-		if len(results) > maxFetchAllRows {
+		if maxRows > 0 && len(results) > maxRows {
 			rows.Close()
-			return nil, fmt.Errorf("query returned more than %d rows; use pagination", maxFetchAllRows)
+			return nil, fmt.Errorf("query returned more than %d rows; use pagination", maxRows)
 		}
 	}
 	if err := rows.Err(); err != nil {

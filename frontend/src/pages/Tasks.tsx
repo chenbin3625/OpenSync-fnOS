@@ -108,10 +108,14 @@ export default function Tasks() {
     job: null,
   });
   const [dryRunOpen, setDryRunOpen] = useState(false);
+  const [pendingCreatedId, setPendingCreatedId] = useState<number | null>(null);
   const mobileJobButtons = useRef<Array<HTMLButtonElement | null>>([]);
   const actions = useAction();
   const list = jobs.data?.dataList || [];
-  const { job: selected, replaceWith } = resolveJobSelection(list, selectedId);
+  const { job: selected, replaceWith } = resolveJobSelection(list, selectedId, {
+    pendingId: pendingCreatedId,
+    refreshing: jobs.loading,
+  });
   useEffect(() => {
     if (replaceWith === null) return;
     const next = new URLSearchParams(params);
@@ -539,7 +543,7 @@ export default function Tasks() {
                   </Suspense>
                 )}
               </div>
-            ) : jobs.loading || jobs.error ? null : (
+            ) : jobs.loading || jobs.error || pendingCreatedId !== null ? null : (
               <div className="task-empty-detail">
                 <EmptyState />
               </div>
@@ -571,14 +575,33 @@ export default function Tasks() {
             onClose={() => setEditor({ open: false, job: null })}
             onSaved={(result: TaskEditorSavedResult) => {
               setEditor({ open: false, job: null });
-              if (result.createdId) {
-                update({ jobId: result.createdId, tab: "overview" });
+              const createdId = result.createdId;
+              if (createdId) {
+                setPendingCreatedId(createdId);
+                update({ jobId: createdId, tab: "overview" });
               }
-              void refreshJobs().then(() => {
-                if (result.runNow && result.createdId) {
-                  triggerRunJob(result.createdId, result.method);
+              void (async () => {
+                try {
+                  if (createdId) {
+                    const fresh = await api.jobMenu();
+                    jobs.setData(fresh);
+                    window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
+                  } else {
+                    await refreshJobs();
+                  }
+                } catch {
+                  await refreshJobs({ skipCurrentTask: Boolean(createdId) });
+                } finally {
+                  if (createdId) {
+                    setPendingCreatedId((cur) =>
+                      cur === createdId ? null : cur,
+                    );
+                  }
                 }
-              });
+                if (result.runNow && createdId) {
+                  triggerRunJob(createdId, result.method);
+                }
+              })();
             }}
           />
         </Suspense>

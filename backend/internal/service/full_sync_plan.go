@@ -484,12 +484,62 @@ func newFullSyncPlan(src, dst *fullSyncSnapshot, branchGate chan struct{}) *full
 }
 
 func (plan *fullSyncPlan) build(job map[string]interface{}) {
+	// Under conflictPolicy=2 (keep both), OpenSync renames replaced destination
+	// files to *.conflict-YYYYMMDD-HHMMSS.*. Mirror mode must never treat its
+	// own conflict backups as extra files to delete on subsequent runs.
+	if util.ToInt(job["conflictPolicy"]) == 2 && plan.dst != nil {
+		plan.dst.protectConflictBackups()
+	}
 	plan.compareDir(job, "", "")
 }
 
+func (snapshot *fullSyncSnapshot) protectConflictBackups() {
+	snapshot.mu.Lock()
+	defer snapshot.mu.Unlock()
+	var added bool
+	for relDir, items := range snapshot.dirs {
+		for name := range items {
+			if strings.HasSuffix(name, "/") || !isConflictBackupName(name) {
+				continue
+			}
+			relPath := relDir + name
+			if snapshot.excluded == nil {
+				snapshot.excluded = make(map[string]struct{})
+			}
+			if snapshot.specExcluded == nil {
+				snapshot.specExcluded = make(map[string]struct{})
+			}
+			if snapshot.protectedDirs == nil {
+				snapshot.protectedDirs = make(map[string]struct{})
+			}
+			snapshot.excluded[relPath] = struct{}{}
+			snapshot.specExcluded[relPath] = struct{}{}
+			delete(snapshot.sizeExcluded, relPath)
+			for ancestor := relDir; ancestor != ""; {
+				if _, protected := snapshot.protectedDirs[ancestor]; protected {
+					break
+				}
+				snapshot.protectedDirs[ancestor] = struct{}{}
+				ancestor = ancestor[:strings.LastIndex(strings.TrimSuffix(ancestor, "/"), "/")+1]
+			}
+			added = true
+		}
+	}
+	if added {
+		snapshot.subtreeCounts = nil
+	}
+}
+
 func (plan *fullSyncPlan) compareDir(job map[string]interface{}, srcRelDir, dstRelDir string) {
-	srcItems := plan.src.dirs[srcRelDir]
-	dstItems := plan.dst.dirs[dstRelDir]
+	srcItems, srcListed := plan.src.dirs[srcRelDir]
+	dstItems, dstListed := plan.dst.dirs[dstRelDir]
+	// Never compare against an unlisted directory: a failed destination listing
+	// (e.g. 403) leaves dstRelDir absent from plan.dst.dirs, and treating a
+	// missing map entry as an empty directory would enqueue every source file as
+	// an unconditional new copy and bypass conflict/trash rules.
+	if !srcListed || !dstListed {
+		return
+	}
 	dstIndex := newDstNameMatchIndex(dstItems)
 	srcIndex := newSrcNameMatchIndex(srcItems)
 	matchedDst := make(map[string]struct{})
@@ -685,13 +735,17 @@ func (plan *fullSyncPlan) releaseBranchSlot() {
 }
 
 func (plan *fullSyncPlan) collectSourceOnly(job map[string]interface{}, srcRelDir, dstRelDir string) {
+	srcItems, listed := plan.src.dirs[srcRelDir]
+	if !listed {
+		return
+	}
 	srcDir := plan.src.root + srcRelDir
 	dstDir := plan.dst.root + dstRelDir
 	plan.addNewDir(normalizeDirPath(dstDir), fullSyncDir{srcDir: srcDir, dstDir: dstDir})
 	now := time.Now()
 
-	for _, name := range sortedFileListKeys(plan.src.dirs[srcRelDir]) {
-		metadata := plan.src.dirs[srcRelDir][name]
+	for _, name := range sortedFileListKeys(srcItems) {
+		metadata := srcItems[name]
 		if strings.HasSuffix(name, "/") {
 			plan.collectSourceOnly(job, srcRelDir+name, dstRelDir+name)
 			continue
@@ -1409,6 +1463,9 @@ func (plan *fullSyncPlan) suspiciousEmptySourceDirs() map[string]int {
 		if rel == "" {
 			// subtreeEntryCount does not credit the root itself.
 			count = plan.dst.entryCount()
+		}
+		if count <= 0 {
+			continue
 		}
 		// A subdirectory needs the floor to be considered anomalous; the root
 		// does not. While a small emptied directory is ordinary mirror

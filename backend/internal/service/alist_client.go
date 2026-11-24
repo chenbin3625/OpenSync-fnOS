@@ -735,11 +735,23 @@ func (c *AlistClient) MkdirContext(ctx context.Context, path string, scanInterva
 // CreateEmptyFileContext writes a known zero-byte file without asking the
 // storage driver to download the source through /api/fs/copy.
 func (c *AlistClient) CreateEmptyFileContext(ctx context.Context, dir, name string) error {
+	return c.createEmptyFileWithOverwriteContext(ctx, dir, name, true)
+}
+
+func (c *AlistClient) CreateEmptyFileNoOverwriteContext(ctx context.Context, dir, name string) error {
+	return c.createEmptyFileWithOverwriteContext(ctx, dir, name, false)
+}
+
+func (c *AlistClient) createEmptyFileWithOverwriteContext(ctx context.Context, dir, name string, overwrite bool) error {
 	filePath := strings.TrimRight(dir, "/") + "/" + name
+	overwriteVal := "true"
+	if !overwrite {
+		overwriteVal = "false"
+	}
 	resp, err := c.startRequestBody(ctx, http.MethodPut, "/api/fs/put", http.NoBody, nil, http.Header{
 		"Content-Type": []string{"application/octet-stream"},
 		"File-Path":    []string{url.PathEscape(filePath)},
-		"Overwrite":    []string{"true"},
+		"Overwrite":    []string{overwriteVal},
 	})
 	if err != nil {
 		return err
@@ -800,13 +812,17 @@ func (c *AlistClient) DeleteFileContext(ctx context.Context, path string, names 
 }
 
 func (c *AlistClient) copyOrMoveFileContext(ctx context.Context, apiPath, srcDir, dstDir, name string) (string, error) {
+	return c.copyOrMoveFileWithOverwriteContext(ctx, apiPath, srcDir, dstDir, name, true)
+}
+
+func (c *AlistClient) copyOrMoveFileWithOverwriteContext(ctx context.Context, apiPath, srcDir, dstDir, name string, overwrite bool) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	data, err := c.PostContext(withAlistLongOperation(ctx), apiPath, alistCopyMoveRequest{
 		SrcDir:    srcDir,
 		DstDir:    dstDir,
-		Overwrite: true,
+		Overwrite: overwrite,
 		Names:     []string{name},
 	}, nil)
 	if err != nil {
@@ -827,11 +843,19 @@ func (c *AlistClient) copyOrMoveFileContext(ctx context.Context, apiPath, srcDir
 }
 
 func (c *AlistClient) CopyFileContext(ctx context.Context, srcDir, dstDir, name string) (string, error) {
-	return c.copyOrMoveFileContext(ctx, "/api/fs/copy", srcDir, dstDir, name)
+	return c.copyOrMoveFileWithOverwriteContext(ctx, "/api/fs/copy", srcDir, dstDir, name, true)
+}
+
+func (c *AlistClient) CopyFileNoOverwriteContext(ctx context.Context, srcDir, dstDir, name string) (string, error) {
+	return c.copyOrMoveFileWithOverwriteContext(ctx, "/api/fs/copy", srcDir, dstDir, name, false)
 }
 
 func (c *AlistClient) MoveFileContext(ctx context.Context, srcDir, dstDir, name string) (string, error) {
-	return c.copyOrMoveFileContext(ctx, "/api/fs/move", srcDir, dstDir, name)
+	return c.copyOrMoveFileWithOverwriteContext(ctx, "/api/fs/move", srcDir, dstDir, name, true)
+}
+
+func (c *AlistClient) MoveFileNoOverwriteContext(ctx context.Context, srcDir, dstDir, name string) (string, error) {
+	return c.copyOrMoveFileWithOverwriteContext(ctx, "/api/fs/move", srcDir, dstDir, name, false)
 }
 
 // RenameFileContext renames a single file or directory in-place via /api/fs/rename.

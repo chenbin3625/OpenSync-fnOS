@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pickNodeDir, root, MIN_NODE } from "./lib/toolchain.mjs";
@@ -109,6 +109,33 @@ test("withBuildLock 阻止并发打包并在异常后释放锁", () => {
     // 异常退出后锁必须已释放，允许后续打包继续。
     const result = withBuildLock(() => "ok", lockDir);
     assert.equal(result, "ok");
+  } finally {
+    rmSync(lockDir, { recursive: true, force: true });
+  }
+});
+
+test("withBuildLock 不会删除刚创建的空锁文件，并能回收超时空锁与已退出进程锁", () => {
+  const lockDir = mkdtempSync(join(tmpdir(), "opensync-build-lock-race-"));
+  const lockPath = join(lockDir, ".build.lock");
+  try {
+    // 刚创建的空锁文件（模拟另一进程仍在初始化）不得被误删或抢占。
+    writeFileSync(lockPath, "");
+    assert.throws(
+      () => withBuildLock(() => "should-not-run", lockDir),
+      /已有另一个打包进程正在运行/,
+    );
+    assert.ok(existsSync(lockPath), "刚创建的空锁文件必须保持存在");
+
+    // 超过宽限期的空锁文件视为异常残留，允许自动清理并重新加锁。
+    const staleDate = new Date(Date.now() - 10_000);
+    utimesSync(lockPath, staleDate, staleDate);
+    assert.equal(withBuildLock(() => "recovered-empty", lockDir), "recovered-empty");
+    assert.equal(existsSync(lockPath), false, "完成后锁文件应已清理");
+
+    // 已退出 PID 留下的陈旧锁文件应自动清理并重新加锁。
+    writeFileSync(lockPath, JSON.stringify({ pid: 999_999_999, startedAt: 1, token: "dead" }));
+    assert.equal(withBuildLock(() => "recovered-dead-pid", lockDir), "recovered-dead-pid");
+    assert.equal(existsSync(lockPath), false);
   } finally {
     rmSync(lockDir, { recursive: true, force: true });
   }

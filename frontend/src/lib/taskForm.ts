@@ -123,12 +123,40 @@ export function selectJob<T extends { id: number }>(
 export function resolveJobSelection<T extends { id: number }>(
   jobs: T[],
   selectedId: number | null,
+  options?: { pendingId?: number | null; refreshing?: boolean },
 ): { job: T | undefined; replaceWith: number | null } {
   const job = selectJob(jobs, selectedId);
   if (job || selectedId === null || selectedId <= 0 || !jobs.length) {
     return { job, replaceWith: null };
   }
+  if (
+    options?.refreshing ||
+    (options?.pendingId != null && options.pendingId === selectedId)
+  ) {
+    return { job: undefined, replaceWith: null };
+  }
   return { job: jobs[0], replaceWith: jobs[0].id };
+}
+
+/**
+ * Returns the move-mode (method === 2) jobs affected by a batch start action
+ * so the UI can require confirmation before deleting source files.
+ */
+export function findBatchMoveJobs<
+  T extends { id: number; method: number; enable?: number },
+>(
+  action: "run" | "stop" | "enable" | "disable" | "run_all" | "stop_all",
+  jobs: readonly T[],
+  ids?: readonly number[],
+): T[] {
+  if (action === "run_all") {
+    return jobs.filter((job) => job.enable === 1 && job.method === 2);
+  }
+  if (action === "run") {
+    const idSet = new Set(ids || []);
+    return jobs.filter((job) => idSet.has(job.id) && job.method === 2);
+  }
+  return [];
 }
 
 /**

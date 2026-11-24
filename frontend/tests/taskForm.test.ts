@@ -3,6 +3,7 @@ import {
   buildJobPayload,
   defaultJobForm,
   fileTypeFilterGroups,
+  findBatchMoveJobs,
   isExcludePatternEnabled,
   jobToForm,
   normalizeCustomFileTypePattern,
@@ -377,6 +378,36 @@ describe("existing synchronization contracts", () => {
     // malformed id sentinel stays an explicit empty selection
     expect(resolveJobSelection(jobs, -1)).toEqual({ job: undefined, replaceWith: null });
     expect(resolveJobSelection([], 5)).toEqual({ job: undefined, replaceWith: null });
+  });
+
+  it("does not clobber a newly created task selection while the list is still refreshing", () => {
+    const staleList = [{ id: 1 }];
+    // Newly created job #2 is not yet in staleList; pendingId holds URL intact.
+    expect(resolveJobSelection(staleList, 2, { pendingId: 2 })).toEqual({
+      job: undefined,
+      replaceWith: null,
+    });
+    expect(resolveJobSelection(staleList, 2, { refreshing: true })).toEqual({
+      job: undefined,
+      replaceWith: null,
+    });
+    // Once fresh list arrives, job #2 is selected cleanly.
+    expect(resolveJobSelection([{ id: 1 }, { id: 2 }], 2, { pendingId: 2 })).toEqual({
+      job: { id: 2 },
+      replaceWith: null,
+    });
+  });
+
+  it("identifies move-mode jobs affected by Dashboard batch runs", () => {
+    const jobs = [
+      { id: 1, method: 0, enable: 1, remark: "增量" },
+      { id: 2, method: 2, enable: 1, remark: "移动启用" },
+      { id: 3, method: 2, enable: 0, remark: "移动停用" },
+    ];
+    expect(findBatchMoveJobs("run_all", jobs).map((j) => j.id)).toEqual([2]);
+    expect(findBatchMoveJobs("run", jobs, [1, 3]).map((j) => j.id)).toEqual([3]);
+    expect(findBatchMoveJobs("run", jobs, [1]).map((j) => j.id)).toEqual([]);
+    expect(findBatchMoveJobs("stop_all", jobs)).toEqual([]);
   });
 
   it("never renders the disabled realtime tab once the task check settles", () => {

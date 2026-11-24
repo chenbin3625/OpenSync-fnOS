@@ -62,6 +62,10 @@ export function createRemoteDirCache(
 ): RemoteDirCache {
   const entries = new Map<string, RemoteDirEntry[]>();
   const inFlight = new Map<string, InFlightRequest>();
+  const keyVersion = new Map<string, number>();
+  const engineVersion = new Map<number, number>();
+  let allVersion = 0;
+  let seq = 0;
 
   const startFetch = (
     key: string,
@@ -74,10 +78,19 @@ export function createRemoteDirCache(
     let flight = inFlight.get(key);
     if (!flight) {
       const controller = new AbortController();
+      const requestVersion = ++seq;
+      keyVersion.set(key, requestVersion);
       const promise = loader(engineId, path, controller.signal).then(
         (result) => {
           const normalized = result || [];
-          entries.set(key, normalized);
+          const isLatest =
+            !controller.signal.aborted &&
+            requestVersion >= (keyVersion.get(key) ?? 0) &&
+            requestVersion > (engineVersion.get(engineId) ?? 0) &&
+            requestVersion > allVersion;
+          if (isLatest) {
+            entries.set(key, normalized);
+          }
           if (inFlight.get(key)?.controller === controller) {
             inFlight.delete(key);
           }
@@ -129,6 +142,7 @@ export function createRemoteDirCache(
       const normalized = normalizeCachePath(path);
       const key = cacheKey(engineId, normalized);
       if (options?.force) {
+        keyVersion.set(key, ++seq);
         entries.delete(key);
         const existing = inFlight.get(key);
         if (existing) {
@@ -143,11 +157,13 @@ export function createRemoteDirCache(
     },
     invalidateEngine(engineId) {
       if (engineId === undefined) {
+        allVersion = ++seq;
         entries.clear();
         for (const flight of inFlight.values()) flight.controller.abort();
         inFlight.clear();
         return;
       }
+      engineVersion.set(engineId, ++seq);
       const prefix = `${engineId}:`;
       for (const key of [...entries.keys()]) {
         if (key.startsWith(prefix)) entries.delete(key);

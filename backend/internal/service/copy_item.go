@@ -61,27 +61,39 @@ type copyItemRenameClient interface {
 	RenameFileContext(context.Context, string, string, int) error
 }
 
+type copyItemNoOverwriteClient interface {
+	CopyFileNoOverwriteContext(context.Context, string, string, string) (string, error)
+}
+
+type copyItemEmptyNoOverwriteClient interface {
+	CreateEmptyFileNoOverwriteContext(context.Context, string, string) error
+}
+
+var errConflictSkipped = errors.New("destination already exists and conflict policy is skip")
+
 type CopyItem struct {
-	mu          sync.RWMutex
-	SrcPath     string
-	DstPath     string
-	DstRoot     string
-	FileName    string
-	FileSize    interface{}
-	CopyType    taskItemType
-	IsPath      taskItemObject
-	IsOverwrite bool
-	AlistTaskID string
-	Status      taskStatus
-	Progress    float64
-	ErrMsg      *string
-	CreateTime  int64
-	DoingKey    int64
+	mu               sync.RWMutex
+	SrcPath          string
+	DstPath          string
+	DstRoot          string
+	FileName         string
+	FileSize         interface{}
+	CopyType         taskItemType
+	IsPath           taskItemObject
+	IsOverwrite      bool
+	CheckDstConflict bool
+	AlistTaskID      string
+	Status           taskStatus
+	Progress         float64
+	ErrMsg           *string
+	CreateTime       int64
+	DoingKey         int64
 	// submittedAt is the Unix time the current transfer attempt was sent to
 	// AList (guarded by mu). When the remote task record later vanishes, a
 	// copy only counts as done if the destination was written since then.
 	submittedAt      int64
 	conflictPrepared bool
+	skipped          bool
 
 	runtime         copyItemRuntime
 	client          copyItemClient
@@ -182,6 +194,21 @@ func (ci *CopyItem) status() taskStatus {
 	ci.mu.RLock()
 	defer ci.mu.RUnlock()
 	return ci.Status
+}
+
+func (ci *CopyItem) isSkipped() bool {
+	ci.mu.RLock()
+	defer ci.mu.RUnlock()
+	return ci.skipped
+}
+
+func (ci *CopyItem) markSkipped() {
+	ci.mu.Lock()
+	ci.skipped = true
+	ci.Status = taskStatusStopped
+	ci.Progress = 0
+	ci.ErrMsg = nil
+	ci.mu.Unlock()
 }
 
 func (ci *CopyItem) setSubmittedAt(unix int64) {
@@ -314,6 +341,10 @@ func (ci *CopyItem) DoIt() {
 		submittedAt := time.Now().Unix()
 		ci.setSubmittedAt(submittedAt)
 		taskID, err := ci.startTransfer(runtime.context(), client)
+		if errors.Is(err, errConflictSkipped) {
+			ci.markSkipped()
+			break
+		}
 		if err != nil && ci.CopyType != taskItemTypeDelete && isAmbiguousTransferError(err) && !runtime.isBreak() {
 			// The request may have reached AList even though no answer came
 			// back (header timeout, connection reset). Copy/move are not
@@ -422,12 +453,13 @@ func (ci *CopyItem) startTransfer(ctx context.Context, client copyItemClient) (s
 	case taskItemTypeMove:
 		return client.MoveFileContext(ctx, ci.SrcPath, ci.DstPath, ci.FileName)
 	default:
-		if ci.CopyType == taskItemTypeCopy && ci.IsOverwrite && !ci.conflictPrepared {
+		if ci.CopyType == taskItemTypeCopy && (ci.IsOverwrite || ci.CheckDstConflict) && !ci.conflictPrepared {
 			if err := ci.prepareDestinationConflict(ctx, client); err != nil {
 				return "", err
 			}
 			ci.conflictPrepared = true
 		}
+		noOverwrite := ci.CopyType == taskItemTypeCopy && ci.conflictPolicy() == 1
 		if size, known := ci.expectedSize(); known && size == 0 {
 			if emptyClient, ok := client.(copyItemEmptyFileClient); ok {
 				interval := util.ToInt(ci.copyRuntime().jobConfig()["scanIntervalS"])
@@ -439,6 +471,11 @@ func (ci *CopyItem) startTransfer(ctx context.Context, client copyItemClient) (s
 						// whose downstream Range construction can produce bytes=0--1.
 						// Keep the copy path when a supplied digest contradicts the size.
 						if source.MD5 == "" || source.MD5 == emptyFileMD5 {
+							if noOverwrite {
+								if emptyNoOW, ok := client.(copyItemEmptyNoOverwriteClient); ok {
+									return "", emptyNoOW.CreateEmptyFileNoOverwriteContext(ctx, ci.DstPath, ci.FileName)
+								}
+							}
 							return "", emptyClient.CreateEmptyFileContext(ctx, ci.DstPath, ci.FileName)
 						}
 					} else {
@@ -447,6 +484,11 @@ func (ci *CopyItem) startTransfer(ctx context.Context, client copyItemClient) (s
 						ci.mu.Unlock()
 					}
 				}
+			}
+		}
+		if noOverwrite {
+			if noOWClient, ok := client.(copyItemNoOverwriteClient); ok {
+				return noOWClient.CopyFileNoOverwriteContext(ctx, ci.SrcPath, ci.DstPath, ci.FileName)
 			}
 		}
 		return client.CopyFileContext(ctx, ci.SrcPath, ci.DstPath, ci.FileName)
@@ -773,6 +815,36 @@ func (ci *CopyItem) stopRemoteTask(client copyItemClient, cause error) {
 	}
 }
 
+func (ci *CopyItem) conflictPolicy() int {
+	runtime := ci.copyRuntime()
+	if runtime == nil {
+		return 0
+	}
+	job := runtime.jobConfig()
+	if job == nil {
+		return 0
+	}
+	return util.ToInt(job["conflictPolicy"])
+}
+
+func (ci *CopyItem) destinationExistsForConflict(ctx context.Context, client copyItemClient) (bool, error) {
+	if statClient, ok := client.(copyItemStatClient); ok {
+		stat, err := statClient.FileStatContext(ctx, ci.DstPath, ci.FileName)
+		if err != nil {
+			return false, fmt.Errorf("check destination conflict %q: %w", ci.FileName, err)
+		}
+		if stat.Exists && stat.IsDir {
+			return false, fmt.Errorf("destination %q is a directory", strings.TrimRight(ci.DstPath, "/")+"/"+ci.FileName)
+		}
+		return stat.Exists, nil
+	}
+	exists, err := client.FileExistsContext(ctx, ci.DstPath, ci.FileName)
+	if err != nil {
+		return false, fmt.Errorf("check destination conflict %q: %w", ci.FileName, err)
+	}
+	return exists, nil
+}
+
 func (ci *CopyItem) prepareDestinationConflict(ctx context.Context, client copyItemClient) error {
 	runtime := ci.copyRuntime()
 	if runtime == nil {
@@ -785,7 +857,27 @@ func (ci *CopyItem) prepareDestinationConflict(ctx context.Context, client copyI
 	policy := util.ToInt(job["conflictPolicy"])
 	scanIntervalT := util.ToInt(job["scanIntervalT"])
 
+	// On retried copy items (CheckDstConflict), we did not scan the destination
+	// directory up front. Probe destination existence before applying skip,
+	// keep-both, or move-to-trash so a file that appeared at the destination is
+	// never silently overwritten.
+	if ci.CheckDstConflict && !ci.IsOverwrite {
+		needsCheck := policy == 1 || policy == 2 || (policy == 0 && trashEnabled(job))
+		if !needsCheck {
+			return nil
+		}
+		exists, err := ci.destinationExistsForConflict(ctx, client)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return nil
+		}
+	}
+
 	switch policy {
+	case 1: // Skip: never overwrite an existing destination file
+		return errConflictSkipped
 	case 2: // Keep both: rename existing destination file before copying
 		renamer, ok := client.(copyItemRenameClient)
 		if !ok {
@@ -795,14 +887,20 @@ func (ci *CopyItem) prepareDestinationConflict(ctx context.Context, client copyI
 		newName := conflictBackupName(ci.FileName, time.Now())
 		if err := renamer.RenameFileContext(ctx, filePath, newName, scanIntervalT); err != nil {
 			if isAlistObjectNotFound(err) {
-				return nil
+				exists, probeErr := ci.destinationExistsForConflict(ctx, client)
+				if probeErr == nil && !exists {
+					return nil
+				}
 			}
 			return fmt.Errorf("keep-both rename existing destination %q: %w", ci.FileName, err)
 		}
 		return nil
 	case 0: // Overwrite: if target trash enabled, move old destination copy to trash first
-		if !trashEnabled(job) || ci.DstRoot == "" {
+		if !trashEnabled(job) {
 			return nil
+		}
+		if ci.DstRoot == "" {
+			return errors.New("destination root unavailable for trash-before-overwrite")
 		}
 		if jt, ok := runtime.(*JobTask); ok {
 			return jt.moveItemToTrash(ci.DstRoot, ci.DstPath, ci.FileName)

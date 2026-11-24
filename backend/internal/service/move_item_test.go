@@ -461,13 +461,13 @@ func TestSafeMoveSkipsCopyWhenDestinationIsIdentical(t *testing.T) {
 		}
 	})
 
-	t.Run("matching modification time", func(t *testing.T) {
+	t.Run("matching modification time without hashes must not delete source", func(t *testing.T) {
 		pinCopyTestDeps(t)
 		c := newSafeMoveTestClient()
 		c.before = FileStat{Exists: true, SizeKnown: true, Size: 10, Modified: c.source.Modified}
 		item := runSafeMoveTest(c, copyItemTestRuntime{})
-		if item.status() != taskStatusSuccess || c.copyCalls != 0 || c.removes != 1 {
-			t.Fatalf("status=%d copy=%d removes=%d; same size and mtime identify the earlier move", item.status(), c.copyCalls, c.removes)
+		if item.status() != taskStatusFailed || c.copyCalls != 0 || c.removes != 0 {
+			t.Fatalf("status=%d copy=%d removes=%d; same size and mtime without hashes must retain source", item.status(), c.copyCalls, c.removes)
 		}
 	})
 }

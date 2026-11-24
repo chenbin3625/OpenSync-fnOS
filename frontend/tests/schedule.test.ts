@@ -173,5 +173,45 @@ describe("schedule preset, interval and cron helpers", () => {
       now,
     );
     expect(impossibleRuns).toEqual([]);
+
+    // Step syntax with explicit start value (e.g. 5/15 -> 5, 20, 35, 50)
+    expect(validateCronField("minute", "5/15")).toBe("");
+    const stepFromStartRuns = computeNextCronRuns(
+      {
+        second: "0",
+        minute: "5/15",
+        hour: "*",
+        day: "*",
+        month: "*",
+        day_of_week: "*",
+      },
+      4,
+      new Date(2026, 4, 10, 1, 0, 0),
+    );
+    expect(stepFromStartRuns.map(formatCronRunTime)).toEqual([
+      "2026-05-10 01:05:00",
+      "2026-05-10 01:20:00",
+      "2026-05-10 01:35:00",
+      "2026-05-10 01:50:00",
+    ]);
+
+    const hourStepRuns = computeNextCronRuns(
+      {
+        second: "0",
+        minute: "0",
+        hour: "2/6",
+        day: "*",
+        month: "*",
+        day_of_week: "*",
+      },
+      4,
+      new Date(2026, 4, 10, 0, 0, 0),
+    );
+    expect(hourStepRuns.map(formatCronRunTime)).toEqual([
+      "2026-05-10 02:00:00",
+      "2026-05-10 08:00:00",
+      "2026-05-10 14:00:00",
+      "2026-05-10 20:00:00",
+    ]);
   });
 });
