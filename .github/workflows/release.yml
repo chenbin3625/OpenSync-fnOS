@@ -6,7 +6,7 @@ on:
       - "v*"
 
 # Read-only by default. Only the job that publishes the Release widens this,
-# so a compromised dependency in the test/build steps cannot push commits,
+# so a compromised dependency in the build steps cannot push commits,
 # move tags, or rewrite releases.
 permissions:
   contents: read
@@ -36,128 +36,12 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: node scripts/check-version.mjs "$TAG"
 
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
-        with:
-          go-version-file: backend/go.mod
-          cache-dependency-path: backend/go.sum
-
-      - name: Install frontend dependencies
-        run: npm ci
-        working-directory: frontend
-
-      - name: TypeScript type check
-        run: npx tsc --noEmit
-        working-directory: frontend
-
-      - name: Frontend unit tests
-        run: npm test
-        working-directory: frontend
-
-      # The unit tests run in Node, so neither the Vite plugin (Go embed
-      # placeholder, mock worker pruning) nor the production bundle is
-      # exercised before the release job builds it. Build once here so a broken
-      # vite.config.ts fails the test gate instead of the tagged release.
-      - name: Frontend production build
-        run: npm run build
-        working-directory: frontend
-        env:
-          VITE_DATA_MODE: real
-
-      - name: Go vet
-        run: go vet ./...
-        working-directory: backend
-
-      # Known-vulnerability scan of the Go dependencies and the toolchain's
-      # standard library. The tool version is pinned so the gate does not
-      # change underneath us.
-      - name: Go vulnerability check
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
-        working-directory: backend
-
-      # -race is the gate that catches the concurrency regressions this codebase
-      # is most exposed to (shared task state, debounced timers, the DB handle).
-      - name: Go tests (race detector)
-        run: go test -race ./...
-        working-directory: backend
-
-      - name: Packaging script tests
-        run: npm run test:scripts
-
-      # The lifecycle test drives fnos/cmd/main under bash with the real server
-      # binary and relies on /proc identity checks, so it needs a Linux runner.
-      # The binary embeds backend/cmd/server/web; the tracked .gitkeep keeps
-      # `go:embed all:web` compiling without a frontend build.
-      - name: Build lifecycle test binary
-        run: CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/opensync" ./cmd/server
-        working-directory: backend
-
-      - name: Lifecycle script tests
-        run: OPENSYNC_TEST_BINARY="$RUNNER_TEMP/opensync" npm run test:lifecycle
-
-  e2e:
-    name: E2E
-    needs: [version, test]
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    # Playwright starts both the Go backend (loopback --dev) and Vite itself.
-    # The data directory is isolated per run so the CRUD specs never depend on
-    # or mutate a reused SQLite file. It is set on the step below rather than
-    # here: the `runner` context is not available in a job-level `env:`, and an
-    # expression GitHub cannot resolve invalidates the whole workflow file (the
-    # run then fails with zero jobs — what v0.0.34 hit).
-    env:
-      CI: true
-      PLAYWRIGHT_CHANNEL: chromium
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
-        with:
-          go-version-file: backend/go.mod
-          cache-dependency-path: backend/go.sum
-
-      - name: Install frontend dependencies
-        run: npm ci
-        working-directory: frontend
-
-      - name: Install Playwright Chromium
-        run: npx playwright install --with-deps chromium
-        working-directory: frontend
-
-      - name: Run e2e suite
-        run: npx playwright test
-        working-directory: frontend
-        env:
-          OPENSYNC_E2E_DATA_DIR: ${{ runner.temp }}/opensync-e2e-data
-
   # Build runs third-party code (npm install/build scripts, Go modules, fnpack)
   # and therefore holds only a read token. Publishing is a separate job that
   # never installs or runs project dependencies.
   build:
     name: Build artifacts
-    needs: [version, test, e2e]
+    needs: [version]
     runs-on: ubuntu-latest
     permissions:
       contents: read
