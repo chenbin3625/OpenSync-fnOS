@@ -2,6 +2,7 @@ import type { JobItem } from "../types";
 import {
   defaultCronFields,
   defaultExclude,
+  formatSize,
   parseJobPathList,
 } from "../pages/Home/homeUtils";
 import {
@@ -10,6 +11,16 @@ import {
   parseFileSizeInput,
   splitBytesToFileSize,
 } from "../pages/Home/fileSizeUnits";
+import {
+  maxJobIntervalMinutes,
+  validateCronFields,
+  type CronFieldKey,
+} from "./schedule";
+import {
+  cleanPathList,
+  validateSyncPathSelection,
+  type ExistingJobPathSummary,
+} from "./syncPathPreview";
 
 export function defaultJobForm(alistId?: number) {
   return {
@@ -128,131 +139,203 @@ export function buildJobPayload(form: JobForm) {
     maxFileSize: fileSizeToBytes(form.maxFileSize, maxFileSizeUnit),
   };
 }
-const ranges = {
-  second: [0, 59, "秒"],
-  minute: [0, 59, "分"],
-  hour: [0, 23, "时"],
-  day: [1, 31, "日"],
-  month: [1, 12, "月"],
-  day_of_week: [0, 6, "周"],
-} as const;
-/** Directory spelling used for overlap checks: absolute, no duplicate or trailing slashes. */
-function comparableDirPath(path: string): string {
-  const trimmed = String(path || "").trim();
-  if (!trimmed) return "/";
-  const absolute = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
-  const collapsed = absolute.replace(/\/+/g, "/");
-  return collapsed.length > 1 ? collapsed.replace(/\/+$/, "") : "/";
+export interface JobValidationOptions {
+  storedDstMap?: string | null;
+  existingJobs?: readonly ExistingJobPathSummary[];
+  sizeEnabled?: { min?: boolean; max?: boolean };
 }
 
-function pathContains(parent: string, child: string): boolean {
-  return parent === "/" || child === parent || child.startsWith(`${parent}/`);
-}
+export type JobFieldErrorKey =
+  | "remark"
+  | "alistId"
+  | "srcPath"
+  | "dstPath"
+  | "interval"
+  | CronFieldKey
+  | "minFileSize"
+  | "maxFileSize"
+  | "fileSizeRange";
 
-function findOverlappingPaths(
-  left: string[],
-  right: string[],
-): [string, string] | undefined {
-  for (const a of left) {
-    for (const b of right) {
-      if (pathContains(a, b) || pathContains(b, a)) return [a, b];
-    }
+function resolveValidationOptions(
+  storedDstMapOrOptions?: string | null | JobValidationOptions,
+): JobValidationOptions {
+  if (
+    storedDstMapOrOptions &&
+    typeof storedDstMapOrOptions === "object"
+  ) {
+    return storedDstMapOrOptions;
   }
-}
-
-function findNestedPath(paths: string[]): [string, string] | undefined {
-  for (const parent of paths) {
-    for (const child of paths) {
-      if (parent === child) continue;
-      if (pathContains(parent, child)) return [parent, child];
-    }
-  }
+  return { storedDstMap: storedDstMapOrOptions };
 }
 
 // Mirrors validateJobInput in backend/internal/service/job_service.go: same or
-// nested source/destination roots would make two scan works mutate one tree,
-// and in mirror mode delete each other's files. Catching it here keeps the
-// error on the field instead of surfacing it only after the final save.
-function validateJobPaths(form: JobForm): string {
-  const srcPaths = form.srcPath.map(comparableDirPath);
-  const dstPaths = form.dstPath.map(comparableDirPath);
-  const overlap = findOverlappingPaths(srcPaths, dstPaths);
-  if (overlap)
-    return `源目录与目标目录不能相同或互相包含（${overlap[0]} / ${overlap[1]}）`;
-  const nestedSrc = findNestedPath(srcPaths);
-  if (nestedSrc)
-    return `多个源目录之间不能互相包含（${nestedSrc[0]} / ${nestedSrc[1]}）`;
-  const nestedDst = findNestedPath(dstPaths);
-  if (nestedDst)
-    return `多个目标目录之间不能互相包含（${nestedDst[0]} / ${nestedDst[1]}）`;
-  return "";
+// nested source/destination roots (including derived or preserved destination
+// subdirectories) would make two scan works mutate one tree, and in mirror mode
+// delete each other's files. Catching it here keeps the error on the field
+// instead of surfacing it only after the final save.
+function validateJobPaths(
+  form: JobForm,
+  options?: JobValidationOptions,
+): string {
+  const effectiveDstMap =
+    options?.storedDstMap !== undefined
+      ? options.storedDstMap
+      : (form as JobForm & { dstMap?: string | null }).dstMap;
+  return validateSyncPathSelection({
+    srcPaths: form.srcPath,
+    dstPaths: form.dstPath,
+    storedDstMap: effectiveDstMap,
+    method: form.method,
+    existingJobs: options?.existingJobs,
+    currentJobId: form.id,
+    engineId: form.alistId,
+  });
 }
 
-export function validateJobFormStep(form: JobForm, step: number) {
-  switch (step) {
-    case 0:
-      if (!form.remark.trim()) return "请输入任务名称";
-      if (!form.alistId) return "请选择存储引擎";
-      if (!form.srcPath.length) return "请选择源目录";
-      if (!form.dstPath.length) return "请选择目标目录";
-      if (form.method === 2 && form.dstPath.length !== 1) return "移动模式只允许一个目标目录";
-      return validateJobPaths(form);
-    case 1:
-      if (
-        form.isCron === 0 &&
-        (!Number.isInteger(form.interval) || form.interval < 1)
-      ) {
-        return "执行间隔必须是大于 0 的整数";
+export function validateJobFormFields(
+  form: JobForm,
+  storedDstMapOrOptions?: string | null | JobValidationOptions,
+): {
+  fields: Partial<Record<JobFieldErrorKey, string>>;
+  stepErrors: [string, string, string];
+} {
+  const options = resolveValidationOptions(storedDstMapOrOptions);
+  const fields: Partial<Record<JobFieldErrorKey, string>> = {};
+
+  // Step 0: 基础与路径（任务名称、存储引擎、同步方式、源路径、目标路径与跨任务冲突）
+  const step0Errors: string[] = [];
+  if (!form.remark.trim()) {
+    fields.remark = "请输入任务名称";
+    step0Errors.push(fields.remark);
+  }
+  if (!form.alistId) {
+    fields.alistId = "请选择存储引擎";
+    step0Errors.push(fields.alistId);
+  }
+  if (!form.srcPath.length) {
+    fields.srcPath = "请选择源目录";
+    step0Errors.push(fields.srcPath);
+  }
+  if (!form.dstPath.length) {
+    fields.dstPath = "请选择目标目录";
+    step0Errors.push(fields.dstPath);
+  }
+  if (form.method === 2 && form.dstPath.length > 1) {
+    fields.dstPath = "移动模式只允许一个目标目录";
+    step0Errors.push(fields.dstPath);
+  }
+  if (form.srcPath.length > 0 && form.dstPath.length > 0) {
+    const pathError = validateJobPaths(form, options);
+    if (pathError) {
+      if (pathError.includes("多个源目录")) {
+        fields.srcPath = fields.srcPath || pathError;
+      } else {
+        fields.dstPath = fields.dstPath || pathError;
       }
-      if (form.isCron === 1) {
-        for (const [key, [low, high, label]] of Object.entries(ranges)) {
-          const value = form[key as keyof typeof ranges];
-          if (
-            !value ||
-            !value.split(",").every((part) => {
-              if (part.trim() === "*") return true;
-              const match = part
-                .trim()
-                .match(/^(\*|\d+)(?:-(\d+))?(?:\/(\d+))?$/);
-              if (!match) return false;
-              const start = match[1] === "*" ? low : Number(match[1]),
-                end = match[2] ? Number(match[2]) : start;
-              return (
-                start >= low &&
-                end <= high &&
-                start <= end &&
-                (!match[3] || (Number(match[3]) > 0 && Number(match[3]) <= high))
-              );
-            })
-          ) {
-            return `Cron「${label}」字段无效，范围 ${low}-${high}`;
-          }
-        }
-      }
-      return "";
-    case 2: {
-      const minValue = parseFileSizeInput(form.minFileSize);
-      const maxValue = parseFileSizeInput(form.maxFileSize);
-      if (minValue === null || maxValue === null) {
-        return "文件大小必须是有效的非负数";
-      }
-      const min = fileSizeInputToBytes(form.minFileSize, form.minFileSizeUnit),
-        max = fileSizeInputToBytes(form.maxFileSize, form.maxFileSizeUnit);
-      if (min === null || max === null)
-        return "文件大小换算后必须是 1 字节到安全整数范围内的值";
-      if (max > 0 && min > max) return "最大文件大小必须大于等于最小文件大小";
-      return "";
+      step0Errors.push(pathError);
     }
-    default:
-      return "";
   }
+
+  // Step 1: 执行计划（固定间隔 / Cron / 仅手动）
+  const step1Errors: string[] = [];
+  if (form.isCron === 0) {
+    if (!Number.isInteger(form.interval) || form.interval < 1) {
+      fields.interval = "执行间隔必须是大于 0 的整数";
+      step1Errors.push(fields.interval);
+    } else if (form.interval > maxJobIntervalMinutes) {
+      fields.interval = `执行间隔不能超过 ${maxJobIntervalMinutes} 分钟`;
+      step1Errors.push(fields.interval);
+    }
+  } else if (form.isCron === 1) {
+    const cronErrors = validateCronFields(form);
+    for (const [key, message] of Object.entries(cronErrors) as Array<
+      [CronFieldKey, string]
+    >) {
+      fields[key] = message;
+      step1Errors.push(message);
+    }
+  }
+
+  // Step 2: 过滤规则（文件大小上下限）
+  const step2Errors: string[] = [];
+  const minValue = parseFileSizeInput(form.minFileSize);
+  const maxValue = parseFileSizeInput(form.maxFileSize);
+  const minRawEmpty =
+    typeof form.minFileSize === "string" && form.minFileSize.trim() === "";
+  const maxRawEmpty =
+    typeof form.maxFileSize === "string" && form.maxFileSize.trim() === "";
+
+  if (minValue === null) {
+    fields.minFileSize = "文件大小必须是有效的非负数";
+    step2Errors.push(fields.minFileSize);
+  } else if (options.sizeEnabled?.min && (minRawEmpty || minValue <= 0)) {
+    fields.minFileSize = "请输入大于 0 的文件大小，或取消勾选以关闭此限制";
+    step2Errors.push(fields.minFileSize);
+  }
+
+  if (maxValue === null) {
+    fields.maxFileSize = "文件大小必须是有效的非负数";
+    step2Errors.push(fields.maxFileSize);
+  } else if (options.sizeEnabled?.max && (maxRawEmpty || maxValue <= 0)) {
+    fields.maxFileSize = "请输入大于 0 的文件大小，或取消勾选以关闭此限制";
+    step2Errors.push(fields.maxFileSize);
+  }
+
+  if (minValue !== null && maxValue !== null) {
+    const minBytes = fileSizeInputToBytes(
+      form.minFileSize,
+      form.minFileSizeUnit,
+    );
+    const maxBytes = fileSizeInputToBytes(
+      form.maxFileSize,
+      form.maxFileSizeUnit,
+    );
+    if (minBytes === null) {
+      fields.minFileSize =
+        fields.minFileSize || "文件大小换算后必须是 1 字节到安全整数范围内的值";
+      step2Errors.push(fields.minFileSize);
+    }
+    if (maxBytes === null) {
+      fields.maxFileSize =
+        fields.maxFileSize || "文件大小换算后必须是 1 字节到安全整数范围内的值";
+      step2Errors.push(fields.maxFileSize);
+    }
+    if (
+      minBytes !== null &&
+      maxBytes !== null &&
+      maxBytes > 0 &&
+      minBytes > maxBytes
+    ) {
+      fields.fileSizeRange = "最大文件大小必须大于等于最小文件大小";
+      step2Errors.push(fields.fileSizeRange);
+    }
+  }
+
+  return {
+    fields,
+    stepErrors: [
+      step0Errors[0] ?? "",
+      step1Errors[0] ?? "",
+      step2Errors[0] ?? "",
+    ],
+  };
 }
-export function validateJobForm(form: JobForm) {
-  for (const step of [0, 1, 2]) {
-    const err = validateJobFormStep(form, step);
-    if (err) return err;
-  }
-  return "";
+
+export function validateJobFormStep(
+  form: JobForm,
+  step: number,
+  storedDstMapOrOptions?: string | null | JobValidationOptions,
+) {
+  const { stepErrors } = validateJobFormFields(form, storedDstMapOrOptions);
+  return stepErrors[step] ?? "";
+}
+
+export function validateJobForm(
+  form: JobForm,
+  storedDstMapOrOptions?: string | null | JobValidationOptions,
+) {
+  const { stepErrors } = validateJobFormFields(form, storedDstMapOrOptions);
+  return stepErrors.find(Boolean) ?? "";
 }
 
 // ---- 文件过滤 ----
@@ -438,8 +521,48 @@ export function updateExcludePatterns(
   return lines.join("\n");
 }
 
+export function validateCustomFilePattern(input: string): {
+  pattern: string;
+  error: string;
+} {
+  const pattern = input.trim();
+  if (!pattern) {
+    return { pattern: "", error: "请输入文件名或文件后缀" };
+  }
+  if (pattern.startsWith("#")) {
+    return { pattern: "", error: "规则不能以 # 开头" };
+  }
+  if (pattern.includes("!")) {
+    return { pattern: "", error: "暂不支持取反规则（!）" };
+  }
+  if (pattern.includes("/") || pattern.includes("\\")) {
+    return {
+      pattern: "",
+      error: "请勿包含路径分隔符，目录请在下方「文件夹过滤」中配置",
+    };
+  }
+  if (pattern === "*" || pattern.includes("**")) {
+    return { pattern: "", error: "暂不支持单独的 * 或 ** 通配符" };
+  }
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(pattern)) {
+    return { pattern: "", error: "包含无效控制字符" };
+  }
+  if (/[?[\]{}]/.test(pattern)) {
+    return { pattern: "", error: "仅支持 * 通配符，暂不支持 ?、[]、{}" };
+  }
+  if (pattern.startsWith("*.")) {
+    return isValidExtensionRule(pattern)
+      ? { pattern, error: "" }
+      : { pattern: "", error: "文件后缀格式无效，例如 *.log、*.mp4" };
+  }
+  if (pattern === "." || pattern === "..") {
+    return { pattern: "", error: "请输入有效的文件名或文件后缀" };
+  }
+  return { pattern, error: "" };
+}
+
 export function normalizeCustomFileTypePattern(input: string) {
-  return normalizeCustomFilePattern(input);
+  return validateCustomFilePattern(input).pattern;
 }
 
 function isValidExtensionRule(pattern: string): boolean {
@@ -454,25 +577,7 @@ function isValidExtensionRule(pattern: string): boolean {
 }
 
 function normalizeCustomFilePattern(input: string) {
-  const pattern = input.trim();
-  if (
-    !pattern ||
-    pattern.startsWith("#") ||
-    pattern.includes("!") ||
-    pattern.includes("/") ||
-    pattern.includes("\\") ||
-    /[\u0000-\u001f\u007f-\u009f?[\]{}]/.test(pattern) ||
-    pattern === "*" ||
-    pattern.includes("**")
-  ) {
-    return "";
-  }
-
-  if (pattern.startsWith("*.")) {
-    return isValidExtensionRule(pattern) ? pattern : "";
-  }
-
-  return pattern.endsWith("/") ? "" : pattern;
+  return validateCustomFilePattern(input).pattern;
 }
 
 function filterRuleKey(pattern: string) {
@@ -704,4 +809,64 @@ export function updateExcludeFolders(
   if (!content) return cleaned === exclude ? exclude : cleaned.trimEnd();
   const trimmed = cleaned.trimEnd();
   return trimmed ? trimmed + "\n\n" + content : content;
+}
+
+/**
+ * 判断源目录变更后是否已完全脱离原有源目录集合，以便自动清理失效的相对文件夹过滤规则。
+ */
+export function shouldClearExcludeFoldersOnSrcChange(
+  prevSrcPaths: readonly string[],
+  nextSrcPaths: readonly string[],
+  exclude: string,
+): boolean {
+  if (!prevSrcPaths.length) return false;
+  if (!parseExcludeFolders(exclude).length) return false;
+  const prevSet = new Set(cleanPathList(prevSrcPaths).map((p) => p.toLowerCase()));
+  const nextClean = cleanPathList(nextSrcPaths).map((p) => p.toLowerCase());
+  return !nextClean.some((p) => prevSet.has(p));
+}
+
+/**
+ * 生成任务总览页展示的过滤规则摘要标签。
+ */
+export function summarizeJobFilters(
+  job: Pick<JobItem, "exclude" | "minFileSize" | "maxFileSize">,
+): string[] {
+  const items: string[] = [];
+  const minBytes = Number(job.minFileSize || 0);
+  const maxBytes = Number(job.maxFileSize || 0);
+  if (minBytes > 0) items.push(`排除 < ${formatSize(minBytes)}`);
+  if (maxBytes > 0) items.push(`排除 > ${formatSize(maxBytes)}`);
+
+  const exclude = job.exclude || "";
+  const presetFileCount = fileTypeFilterGroups.reduce(
+    (sum, group) =>
+      sum +
+      group.patterns.filter((p) => isExcludePatternEnabled(exclude, p)).length,
+    0,
+  );
+  const customFileCount = parseOtherFileTypeFilters(exclude).filter(
+    (item) => item.enabled,
+  ).length;
+  const totalFileRules = presetFileCount + customFileCount;
+  if (totalFileRules > 0) {
+    items.push(`文件规则 ${totalFileRules} 条`);
+  }
+
+  const folderRules = parseExcludeFolders(exclude);
+  if (folderRules.length > 0) {
+    items.push(`排除目录 ${folderRules.length} 个`);
+  }
+
+  const systemDirCount = systemDirFilterGroups.reduce(
+    (sum, group) =>
+      sum +
+      group.patterns.filter((p) => isExcludePatternEnabled(exclude, p)).length,
+    0,
+  );
+  if (systemDirCount > 0) {
+    items.push(`系统目录 ${systemDirCount} 项`);
+  }
+
+  return items;
 }

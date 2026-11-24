@@ -181,12 +181,6 @@ test("creates an engine and manual job, then edits without changing sync mode", 
     await page
       .getByRole("heading", { name: "新建任务", exact: true })
       .click();
-    const sourcePathBox = await trees.nth(0).boundingBox();
-    const sourceCacheBox = await dialog
-      .getByText("源端缓存", { exact: true })
-      .boundingBox();
-    expect(sourceCacheBox!.y).toBeGreaterThan(sourcePathBox!.y);
-    expect(sourceCacheBox!.y).toBeLessThan(sourcePathBox!.y + 120);
     await trees.nth(1).locator('[role="combobox"]').click();
     const targetRoot = page.locator('.semi-tree-option[data-key="/"]').first();
     if ((await targetRoot.getAttribute("aria-expanded")) !== "true")
@@ -198,12 +192,6 @@ test("creates an engine and manual job, then edits without changing sync mode", 
     await page
       .getByRole("heading", { name: "新建任务", exact: true })
       .click();
-    const targetPathBox = await trees.nth(1).boundingBox();
-    const targetCacheBox = await dialog
-      .getByText("目标缓存", { exact: true })
-      .boundingBox();
-    expect(targetCacheBox!.y).toBeGreaterThan(targetPathBox!.y);
-    expect(targetCacheBox!.y).toBeLessThan(targetPathBox!.y + 120);
     await page
       .getByRole("textbox", { name: "任务名称", exact: true })
       .fill(name);
@@ -213,11 +201,17 @@ test("creates an engine and manual job, then edits without changing sync mode", 
     await expect(
       page.getByRole("combobox", { name: "调度方式", exact: true }),
     ).toHaveText("仅手动");
-    await page.getByRole("button", { name: "下一步", exact: true }).click();
+    // 高级选项（目录缓存）折叠收纳在「执行计划」步内
+    await dialog
+      .getByRole("button", { name: /高级选项（目录缓存）/ })
+      .click();
     await expect(
-      page.getByRole("textbox", { name: "高级排除规则", exact: true }),
-    ).toHaveCount(0);
-    await page.getByRole("button", { name: "下一步", exact: true }).click();
+      dialog.locator(".setting-row").filter({ hasText: "源端缓存" }),
+    ).toBeVisible();
+    await expect(
+      dialog.locator(".setting-row").filter({ hasText: "目标缓存" }),
+    ).toBeVisible();
+    // 第 2 步可直接保存，不必强制经过可选的「过滤规则」步
     const posted = page.waitForRequest(
       (r) => r.url().endsWith("/svr/job") && r.method() === "POST",
     );
@@ -241,8 +235,9 @@ test("creates an engine and manual job, then edits without changing sync mode", 
     expect(job.enable).toBe(1);
     expect(job.srcPath).toContain("/Photos");
     expect(job.dstPath).toContain("/Backup");
+    // 创建后自动定位到新建任务
+    await expect(page).toHaveURL(new RegExp(`jobId=${jobId}`));
     const forceMobileClick = testInfo.project.name.includes("mobile");
-    await page.goto(`/app/opensync/tasks?jobId=${jobId}`);
     await page
       .locator(".overview-card")
       .getByRole("button", { name: "更多操作", exact: true })
@@ -253,13 +248,13 @@ test("creates an engine and manual job, then edits without changing sync mode", 
     await expect(editButton).toBeVisible();
     await editButton.click({ force: forceMobileClick });
     await expect(
-      page.getByRole("tab", { name: "文件夹过滤", exact: true }),
+      page.getByRole("tab", { name: "过滤规则", exact: true }),
     ).toBeVisible();
-    await page.getByRole("tab", { name: "文件过滤", exact: true }).click();
+    await page.getByRole("tab", { name: "过滤规则", exact: true }).click();
     await expect(
       page.getByRole("textbox", { name: "高级排除规则", exact: true }),
     ).toHaveCount(0);
-    await page.getByRole("tab", { name: "引擎与路径", exact: true }).click();
+    await page.getByRole("tab", { name: "基础与路径", exact: true }).click();
     await page
       .getByRole("textbox", { name: "任务名称", exact: true })
       .fill(name + "-修改");

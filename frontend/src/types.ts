@@ -41,6 +41,7 @@ export interface JobItem {
   remark?: string | null;
   srcPath: string;
   dstPath: string;
+  dstMap?: string | null;
   alistId: number;
   useCacheT: number | boolean;
   scanIntervalT?: number;

@@ -170,6 +170,7 @@ func pathHasParentSegment(value string) bool {
 
 // AddJob handles POST /svr/job
 var stopTaskService = service.StopTask
+var createJobService = service.CreateJobClient
 
 func AddJob(c *gin.Context) {
 	var req map[string]interface{}
@@ -197,7 +198,15 @@ func AddJob(c *gin.Context) {
 		}
 		handleServiceVoid(c, func() error { return service.EditJobClient(req) })
 	} else {
-		handleServiceVoid(c, func() error { return service.AddJobClient(req, false) })
+		// Return the created id so the UI can navigate straight to the new task
+		// (matching POST /svr/notify).
+		handleService(c, func() (interface{}, error) {
+			id, err := createJobService(req)
+			if err != nil {
+				return nil, err
+			}
+			return gin.H{"id": id}, nil
+		})
 	}
 }
 

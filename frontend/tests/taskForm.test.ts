@@ -431,4 +431,64 @@ describe("existing synchronization contracts", () => {
     expect(parseExcludeFolders(exclude)).toEqual([]);
     expect(updateExcludeFolders(exclude, [])).toBe(exclude);
   });
+
+  it("returns field-level errors, specific custom rule messages, source-change cleanup, and overview filter summaries", () => {
+    const base = {
+      ...defaultJobForm(7),
+      remark: "测试",
+      srcPath: ["/Photos"],
+      dstPath: ["/Backup"],
+    };
+
+    const enabledEmptySize = taskFormModule.validateJobFormFields(
+      { ...base, minFileSize: "" },
+      { sizeEnabled: { min: true, max: false } },
+    );
+    expect(enabledEmptySize.fields.minFileSize).toContain("大于 0");
+    expect(enabledEmptySize.stepErrors[2]).toContain("大于 0");
+
+    expect(taskFormModule.validateCustomFilePattern("dir/a.txt").error).toContain(
+      "路径分隔符",
+    );
+    expect(taskFormModule.validateCustomFilePattern("!keep.txt").error).toContain(
+      "取反",
+    );
+    expect(taskFormModule.validateCustomFilePattern("**/*.log").error).toContain(
+      "路径分隔符",
+    );
+    expect(taskFormModule.validateCustomFilePattern("*.log")).toEqual({
+      pattern: "*.log",
+      error: "",
+    });
+
+    const excludeWithFolder = updateExcludeFolders("*.tmp", ["raw/"]);
+    expect(
+      taskFormModule.shouldClearExcludeFoldersOnSrcChange(
+        ["/Photos"],
+        ["/Photos", "/Docs"],
+        excludeWithFolder,
+      ),
+    ).toBe(false);
+    expect(
+      taskFormModule.shouldClearExcludeFoldersOnSrcChange(
+        ["/Photos"],
+        ["/Videos"],
+        excludeWithFolder,
+      ),
+    ).toBe(true);
+
+    expect(
+      taskFormModule.summarizeJobFilters({
+        minFileSize: 10 * 1024,
+        maxFileSize: 2 * 1024 ** 3,
+        exclude: `${defaultJobForm().exclude}\nraw/`,
+      }),
+    ).toEqual(
+      expect.arrayContaining([
+        "排除 < 10.00 KB",
+        "排除 > 2.00 GB",
+        "排除目录 1 个",
+      ]),
+    );
+  });
 });

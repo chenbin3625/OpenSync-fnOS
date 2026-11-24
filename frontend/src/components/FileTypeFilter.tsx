@@ -2,12 +2,12 @@ import { useState } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Checkbox from "@douyinfe/semi-ui/lib/es/checkbox";
 import Input from "@douyinfe/semi-ui/lib/es/input";
+import Tag from "@douyinfe/semi-ui/lib/es/tag";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import {
   IconArchive,
   IconChevronRight,
   IconCodeStroked,
-  IconDeleteStroked,
   IconDesktop,
   IconFile,
   IconImageStroked,
@@ -19,10 +19,10 @@ import {
   addCustomFileTypeFilter,
   fileTypeFilterGroups,
   isExcludePatternEnabled,
-  normalizeCustomFileTypePattern,
   parseOtherFileTypeFilters,
   removeCustomFileTypeFilter,
   updateExcludePatterns,
+  validateCustomFilePattern,
 } from "../lib/taskForm";
 
 function GroupIcon({ groupKey }: { groupKey: string }) {
@@ -58,9 +58,12 @@ export function FileTypeFilter({
   "aria-labelledby"?: string;
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const [otherExpanded, setOtherExpanded] = useState(false);
+  const [otherExpanded, setOtherExpanded] = useState(true);
   const [customInput, setCustomInput] = useState("");
-  const otherFilters = parseOtherFileTypeFilters(value);
+  const [customError, setCustomError] = useState("");
+  const otherFilters = parseOtherFileTypeFilters(value).filter(
+    (item) => item.enabled,
+  );
 
   const toggleExpanded = (key: string) => {
     setExpanded((current) => {
@@ -70,22 +73,41 @@ export function FileTypeFilter({
     });
   };
   const addCustom = () => {
-    const pattern = normalizeCustomFileTypePattern(customInput);
+    const { pattern, error } = validateCustomFilePattern(customInput);
     if (!pattern) {
-      Toast.warning("请输入有效的文件名或文件后缀");
+      setCustomError(error || "请输入有效的文件名或文件后缀");
       return;
     }
+    setCustomError("");
     if (isExcludePatternEnabled(value, pattern)) {
-      // A valid rule that is already active is not an input error; the old
-      // code showed "请输入有效的文件名或文件后缀" because addCustomFileTypeFilter
-      // returned the text unchanged for an already-enabled rule.
       Toast.info("该规则已启用");
       setCustomInput("");
       return;
     }
-    onChange(addCustomFileTypeFilter(value, pattern));
+    const nextValue = addCustomFileTypeFilter(value, pattern);
+    const matchedPreset = fileTypeFilterGroups.find((group) =>
+      group.patterns.some(
+        (preset) => preset.toLowerCase() === pattern.toLowerCase(),
+      ),
+    );
+    onChange(nextValue);
     setCustomInput("");
+    if (matchedPreset) {
+      Toast.success(`已启用「${matchedPreset.label}」中的预设规则 ${pattern}`);
+    } else {
+      setOtherExpanded(true);
+    }
   };
+
+  const activePresetCount = fileTypeFilterGroups.reduce(
+    (sum, group) =>
+      sum +
+      group.patterns.filter((pattern) =>
+        isExcludePatternEnabled(value, pattern),
+      ).length,
+    0,
+  );
+  const totalActiveCount = activePresetCount + otherFilters.length;
 
   return (
     <div
@@ -97,6 +119,13 @@ export function FileTypeFilter({
       aria-label={ariaLabel}
       aria-labelledby={ariaLabelledBy}
     >
+      <div className="file-type-summary">
+        <span className="muted">
+          {totalActiveCount > 0
+            ? `已启用 ${totalActiveCount} 条文件排除规则`
+            : "当前未启用文件类型过滤"}
+        </span>
+      </div>
       <div className="file-type-groups">
         {fileTypeFilterGroups.map((group) => {
           const selected = group.patterns.filter((pattern) =>
@@ -140,7 +169,9 @@ export function FileTypeFilter({
                   onClick={() => toggleExpanded(group.key)}
                 >
                   <span>{group.label}</span>
-                  <span className="file-type-count">
+                  <span
+                    className={`file-type-count${selected.length > 0 ? " is-active" : ""}`}
+                  >
                     {selected.length}/{group.patterns.length}
                   </span>
                 </button>
@@ -187,8 +218,6 @@ export function FileTypeFilter({
                 aria-expanded={otherExpanded}
                 onClick={() => setOtherExpanded((current) => !current)}
               />
-              {/* 自定义规则没有"禁用"状态：取消勾选即删除（后端保存时会丢掉
-                  "# " 注释），因此这里不提供"全部取消"的批量复选框，避免误删。 */}
               <span className="file-type-group-spacer" aria-hidden="true" />
               <span className="file-type-icon other">
                 <IconFile aria-hidden="true" />
@@ -198,70 +227,68 @@ export function FileTypeFilter({
                 type="button"
                 onClick={() => setOtherExpanded((current) => !current)}
               >
-                <span>其他</span>
-                <span className="file-type-count">
-                  {otherFilters.filter((item) => item.enabled).length}/
-                  {otherFilters.length}
+                <span>自定义规则</span>
+                <span className="file-type-count is-active">
+                  {otherFilters.length} 条
                 </span>
               </button>
             </div>
             {otherExpanded && (
-              <div className="custom-file-types" aria-label="其他文件规则">
+              <div
+                className="custom-file-tags"
+                role="group"
+                aria-label="自定义文件规则列表"
+              >
                 {otherFilters.map((item) => (
-                  <div className="custom-file-type-row" key={item.pattern}>
-                    <Checkbox
-                      aria-label={item.pattern}
-                      checked={item.enabled}
-                      onChange={(event) =>
-                        // No persisted "disabled" state: unchecking removes the
-                        // rule instead of parking a "# " comment the backend
-                        // would drop on save.
-                        onChange(
-                          updateExcludePatterns(
-                            value,
-                            [item.pattern],
-                            Boolean(event.target.checked),
-                          ),
-                        )
-                      }
-                    >
-                      {item.pattern}
-                    </Checkbox>
-                    <Button
-                      size="small"
-                      type="tertiary"
-                      theme="borderless"
-                      icon={<IconDeleteStroked aria-hidden="true" />}
-                      aria-label={`删除 ${item.pattern}`}
-                      onClick={() =>
-                        onChange(removeCustomFileTypeFilter(value, item.pattern))
-                      }
-                    />
-                  </div>
+                  <Tag
+                    key={item.pattern}
+                    className="custom-file-tag"
+                    color="blue"
+                    type="light"
+                    size="large"
+                    closable
+                    aria-label={`已添加规则 ${item.pattern}`}
+                    onClose={(_tag, event) => {
+                      event.preventDefault();
+                      onChange(removeCustomFileTypeFilter(value, item.pattern));
+                    }}
+                  >
+                    <span className="mono">{item.pattern}</span>
+                  </Tag>
                 ))}
               </div>
             )}
           </div>
         )}
       </div>
-      <div className="file-type-add">
-        <Input
-          value={customInput}
-          aria-label="自定义文件规则"
-          placeholder="文件名或文件后缀，如 ipc-socket、a.bcd、*.doc"
-          onChange={setCustomInput}
-          onEnterPress={addCustom}
-        />
-        <Button
-          type="primary"
-          theme="solid"
-          icon={<IconPlusStroked aria-hidden="true" />}
-          aria-label="新增文件规则"
-          onClick={addCustom}
-          disabled={!customInput.trim()}
-        >
-          新增
-        </Button>
+      <div className="file-type-add-block">
+        <div className="file-type-add">
+          <Input
+            value={customInput}
+            aria-label="自定义文件规则"
+            placeholder="文件名或文件后缀，如 ipc-socket、a.bcd、*.log"
+            onChange={(next) => {
+              setCustomInput(next);
+              if (customError) setCustomError("");
+            }}
+            onEnterPress={addCustom}
+          />
+          <Button
+            type="primary"
+            theme="solid"
+            icon={<IconPlusStroked aria-hidden="true" />}
+            aria-label="新增文件规则"
+            onClick={addCustom}
+            disabled={!customInput.trim()}
+          >
+            新增
+          </Button>
+        </div>
+        {customError && (
+          <div className="field-error" role="alert">
+            {customError}
+          </div>
+        )}
       </div>
     </div>
   );

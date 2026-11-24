@@ -72,7 +72,7 @@ export const methodLabel = (method?: number | null) => {
   }
   return methodNames[index];
 };
-export const cronTypeNames = ["间隔(分钟)", "Cron", "仅手动"];
+export const cronTypeNames = ["固定间隔", "定时计划", "仅手动"];
 export const cronFields = [
   { name: "second", label: "秒", placeholder: "0" },
   { name: "minute", label: "分", placeholder: "*" },

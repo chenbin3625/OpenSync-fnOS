@@ -2,19 +2,27 @@ import {
   useEffect,
   useId,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type Dispatch,
   type SetStateAction,
 } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
+import Checkbox from "@douyinfe/semi-ui/lib/es/checkbox";
 import { Form } from "@douyinfe/semi-ui/lib/es/form";
 import Input from "@douyinfe/semi-ui/lib/es/input";
 import Select from "@douyinfe/semi-ui/lib/es/select";
 import Switch from "@douyinfe/semi-ui/lib/es/switch";
-import Checkbox from "@douyinfe/semi-ui/lib/es/checkbox";
 import Tabs from "@douyinfe/semi-ui/lib/es/tabs";
+import Tag from "@douyinfe/semi-ui/lib/es/tag";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
+import {
+  IconAlertTriangle,
+  IconChevronRight,
+  IconInfoCircle,
+  IconTick,
+} from "@douyinfe/semi-icons";
 import { api } from "../api/client";
 import {
   Editor,
@@ -22,22 +30,47 @@ import {
   HelpTip,
   InlineNotice,
   SettingRow,
+  confirmAction,
   errorToast,
 } from "../components/common";
 import { ExcludeTree } from "../components/ExcludeTree";
 import { FileTypeFilter } from "../components/FileTypeFilter";
 import { RemotePaths } from "../components/RemotePaths";
+import { SyncPathPreview } from "../components/SyncPathPreview";
 import { useAction, useEditorForm } from "../lib/hooks";
+import { RemoteDirCacheProvider } from "../lib/remoteDirCache";
+import {
+  applyCronPresetMode,
+  computeNextCronRuns,
+  cronFieldRanges,
+  customCronPresets,
+  detectCronPresetMode,
+  formatCronRunTime,
+  formatIntervalHuman,
+  formatWeekdayCronExpression,
+  intervalInputToMinutes,
+  intervalPresets,
+  intervalUnitOptions,
+  parseWeekdaySelection,
+  splitIntervalMinutes,
+  validateCronFields,
+  weekdayOptions,
+  type CronFieldKey,
+  type IntervalUnit,
+  type SchedulePresetMode,
+} from "../lib/schedule";
 import {
   buildJobPayload,
   defaultJobForm,
+  isExcludePatternEnabled,
   jobToForm,
   parseExcludeFolders,
+  shouldClearExcludeFoldersOnSrcChange,
   systemDirFilterGroups,
   updateExcludeFolders,
-  validateJobFormStep,
-  isExcludePatternEnabled,
   updateExcludePatterns,
+  validateJobFormFields,
+  type JobFieldErrorKey,
   type JobForm,
 } from "../lib/taskForm";
 import {
@@ -58,27 +91,55 @@ import {
 } from "./Home/fileSizeUnits";
 import type { AlistItem, JobItem } from "../types";
 
-type CronFieldName = "second" | "minute" | "hour" | "day" | "month" | "day_of_week";
-
 export { parseIntervalInput };
-
 export { hasPendingFileSizeDraftChange, mergeFileSizeDrafts };
 
+export interface TaskEditorSavedResult {
+  createdId?: number;
+  runNow?: boolean;
+  method: number;
+}
+
 const taskEditorTabs = [
-  { key: "engine", label: "引擎与路径" },
-  { key: "sync", label: "同步与调度" },
-  { key: "filter", label: "文件过滤" },
-  { key: "folder", label: "文件夹过滤" },
+  { key: "basic", label: "基础与路径", optional: false },
+  { key: "schedule", label: "执行计划", optional: false },
+  { key: "filter", label: "过滤规则", optional: true },
+] as const;
+
+const schedulePresetOptions: Array<{ value: SchedulePresetMode; label: string }> = [
+  { value: "daily", label: "每天" },
+  { value: "weekly", label: "每周" },
+  { value: "monthly", label: "每月" },
+  { value: "custom", label: "自定义 Cron" },
 ];
-const taskEditorSteps = taskEditorTabs.map((tab) => tab.label);
+
+const hourOptions = Array.from({ length: 24 }, (_, i) => ({
+  value: String(i),
+  label: `${String(i).padStart(2, "0")} 时`,
+}));
+
+const minuteOptions = Array.from({ length: 60 }, (_, i) => ({
+  value: String(i),
+  label: `${String(i).padStart(2, "0")} 分`,
+}));
+
+const monthDayOptions = Array.from({ length: 31 }, (_, i) => ({
+  value: String(i + 1),
+  label: `每月 ${i + 1} 日`,
+}));
+
 const fileSizeFilterDefaults = {
   min: { label: "排除小于", value: 10, unit: "KB" },
   max: { label: "排除大于", value: 10, unit: "GB" },
-} satisfies Record<"min" | "max", {
-  label: string;
-  value: number;
-  unit: FileSizeUnit;
-}>;
+} satisfies Record<
+  "min" | "max",
+  {
+    label: string;
+    value: number;
+    unit: FileSizeUnit;
+  }
+>;
+
 const syncMethodTip = (
   <div className="sync-method-tip">
     {methodOptions.map((method) => (
@@ -92,38 +153,65 @@ const syncMethodTip = (
 export default function TaskEditor({
   job,
   engines,
+  existingJobs,
   enginesError,
   onRetryEngines,
+  onNavigateEngines,
   onClose,
   onSaved,
 }: {
   job: JobItem | null;
   engines: AlistItem[];
+  existingJobs?: JobItem[];
   /** Load error of the engine list; the select would otherwise just be empty. */
   enginesError?: string;
   onRetryEngines?: () => void;
+  onNavigateEngines?: () => void;
   onClose: () => void;
-  onSaved: () => void;
+  onSaved: (result: TaskEditorSavedResult) => void;
 }) {
-  const { form, dirty, change, patch, setForm, setDirty } = useEditorForm<JobForm>(() =>
-    job ? jobToForm(job) : defaultJobForm(engines[0]?.id),
-  );
+  const { form, dirty, change, patch, setForm, setDirty } =
+    useEditorForm<JobForm>(() =>
+      job ? jobToForm(job) : defaultJobForm(engines[0]?.id),
+    );
   const [fileSizeDrafts, setFileSizeDrafts] = useState<FileSizeDrafts>({});
+  const [sizeEnabled, setSizeEnabled] = useState<{ min: boolean; max: boolean }>(
+    () => ({
+      min: (parseFileSizeInput(job ? jobToForm(job).minFileSize : 0) ?? 0) > 0,
+      max: (parseFileSizeInput(job ? jobToForm(job).maxFileSize : 0) ?? 0) > 0,
+    }),
+  );
   const effectiveDirty =
     dirty || hasPendingFileSizeDraftChange(form, fileSizeDrafts);
   const methodLabelId = useId();
+  const initialInterval = useMemo(
+    () => splitIntervalMinutes(job ? job.interval : defaultJobForm().interval),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+  const [intervalUnit, setIntervalUnit] = useState<IntervalUnit>(
+    initialInterval.unit,
+  );
   const [intervalDraft, setIntervalDraft] = useState<string | null>(null);
+  const [cronPresetMode, setCronPresetMode] = useState<SchedulePresetMode>(() =>
+    detectCronPresetMode(job ? jobToForm(job) : defaultJobForm()),
+  );
+  const [advancedOpen, setAdvancedOpen] = useState<boolean>(() =>
+    Boolean(job && (job.useCacheS || job.useCacheT)),
+  );
+  const [runAfterCreate, setRunAfterCreate] = useState(false);
+
   const isNew = !job;
   const [step, setStep] = useState(0);
-  const [activeTab, setActiveTab] = useState("engine");
+  const [activeTab, setActiveTab] = useState<string>("basic");
+  const [validatedSteps, setValidatedSteps] = useState<Set<number>>(
+    () => new Set(),
+  );
   const action = useAction();
-  const lastStep = step === taskEditorSteps.length - 1;
-  const activePanel = isNew
-    ? taskEditorTabs[step].key
-    : activeTab;
+  const activePanel = isNew ? taskEditorTabs[step].key : activeTab;
+
   // Panels stay mounted once visited: switching tabs used to unmount them, so
-  // every return to the engine/folder tab re-fetched its directory trees and
-  // dropped the tree's expansion state.
+  // every return to basic/filter re-fetched directory trees and dropped expansion state.
   const [visitedPanels, setVisitedPanels] = useState<string[]>([activePanel]);
   useEffect(() => {
     setVisitedPanels((previous) =>
@@ -134,210 +222,398 @@ export default function TaskEditor({
     panel === activePanel || visitedPanels.includes(panel);
   const panelStyle = (panel: string) =>
     panel === activePanel ? undefined : { display: "none" };
-  // 标签栏/步骤条固定在顶部，只有下方内容区滚动。切换标签或步骤时回到内容
-  // 顶部，否则会停在上一个面板的滚动位置。
+
+  // 标签栏/步骤条固定在顶部，只有下方内容区滚动。切换标签或步骤时回到内容顶部。
   const scrollRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = 0;
   }, [activePanel]);
-  const nextStep = () => {
-    const formToValidate = mergeFileSizeDrafts(form, fileSizeDrafts);
-    const validation = validateJobFormStep(formToValidate, step);
-    if (validation) {
-      Toast.warning(validation);
+
+  const mergedForm = useMemo(
+    () => mergeFileSizeDrafts(form, fileSizeDrafts),
+    [form, fileSizeDrafts],
+  );
+  const validationOptions = useMemo(
+    () => ({
+      storedDstMap: job?.dstMap,
+      existingJobs,
+      sizeEnabled,
+    }),
+    [job?.dstMap, existingJobs, sizeEnabled],
+  );
+  const validation = useMemo(
+    () => validateJobFormFields(mergedForm, validationOptions),
+    [mergedForm, validationOptions],
+  );
+
+  const markStepValidated = (stepIndex: number) => {
+    setValidatedSteps((prev) => {
+      if (prev.has(stepIndex)) return prev;
+      const next = new Set(prev);
+      next.add(stepIndex);
+      return next;
+    });
+  };
+
+  const scrollToFirstError = () => {
+    window.requestAnimationFrame(() => {
+      const target = scrollRef.current?.querySelector<HTMLElement>(
+        ".field.has-error, .field-error",
+      );
+      target?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    });
+  };
+
+  const showStepError = (stepIndex: number, key: JobFieldErrorKey): string => {
+    const msg = validation.fields[key];
+    if (!msg) return "";
+    // Range/size errors and cron errors in custom mode are helpful immediately once non-empty
+    if (validatedSteps.has(stepIndex)) return msg;
+    if (key === "fileSizeRange") return msg;
+    if (
+      key === "dstPath" &&
+      form.method === 2 &&
+      form.dstPath.length > 1
+    ) {
+      return msg;
+    }
+    return "";
+  };
+
+  const goToStep = (targetStep: number) => {
+    if (targetStep <= step) {
+      setStep(targetStep);
       return;
     }
-    setStep((s) => Math.min(s + 1, taskEditorSteps.length - 1));
+    for (let i = 0; i < targetStep; i++) {
+      const err = validation.stepErrors[i];
+      if (err) {
+        markStepValidated(i);
+        Toast.warning(err);
+        setStep(i);
+        scrollToFirstError();
+        return;
+      }
+    }
+    setStep(targetStep);
   };
+
+  const nextStep = () => {
+    const err = validation.stepErrors[step];
+    if (err) {
+      markStepValidated(step);
+      Toast.warning(err);
+      scrollToFirstError();
+      return;
+    }
+    setStep((s) => Math.min(s + 1, taskEditorTabs.length - 1));
+  };
+
   const previousStep = () => setStep((s) => Math.max(s - 1, 0));
+
   const save = () => {
-    const formToSave = mergeFileSizeDrafts(form, fileSizeDrafts);
-    // 按步骤顺序校验（与 validateJobForm 一致），同时记下出错的步骤：错误项
-    // 可能在当前没打开的标签里，只弹提示会让人找不到要改哪里。
-    const errors = taskEditorSteps.map((_, index) =>
-      validateJobFormStep(formToSave, index),
-    );
-    const invalidStep = errors.findIndex(Boolean);
+    const invalidStep = validation.stepErrors.findIndex(Boolean);
     if (invalidStep >= 0) {
-      Toast.warning(errors[invalidStep]);
+      setValidatedSteps(new Set([0, 1, 2]));
+      Toast.warning(validation.stepErrors[invalidStep]);
       if (isNew) setStep(invalidStep);
       else setActiveTab(taskEditorTabs[invalidStep].key);
+      scrollToFirstError();
       return;
     }
-    const payload = buildJobPayload(formToSave);
+    const payload = buildJobPayload(mergedForm);
     void action.run(async () => {
       try {
-        await api.saveJob(payload);
+        const result = await api.saveJob(payload);
         setFileSizeDrafts({});
         setDirty(false);
+        const createdId =
+          isNew && result && typeof result.id === "number" && result.id > 0
+            ? result.id
+            : undefined;
         Toast.success(job ? "编辑成功，下次任务生效" : "任务已创建");
-        onSaved();
+        onSaved({
+          createdId,
+          runNow: isNew && runAfterCreate && (mergedForm.isCron === 2 || mergedForm.enable),
+          method: mergedForm.method,
+        });
       } catch (err) {
         errorToast(err);
       }
     });
   };
+
+  const handleEngineChange = (nextValue: unknown) => {
+    const nextEngineId = Number(nextValue);
+    if (nextEngineId === form.alistId) return;
+    const applySwitch = () => {
+      setDirty(true);
+      setForm((current) => ({
+        ...current,
+        alistId: nextEngineId,
+        srcPath: [],
+        dstPath: [],
+        // 文件夹过滤记录的是旧引擎源目录下的相对路径，换引擎后不再对应
+        exclude: updateExcludeFolders(current.exclude, []),
+      }));
+    };
+    const hasDependentSelection =
+      form.srcPath.length > 0 ||
+      form.dstPath.length > 0 ||
+      parseExcludeFolders(form.exclude).length > 0;
+    if (hasDependentSelection) {
+      confirmAction({
+        title: "切换存储引擎？",
+        content:
+          "切换引擎后，当前已选的源路径、目标路径和文件夹过滤规则会被清空。",
+        okText: "切换",
+        onOk: applySwitch,
+      });
+      return;
+    }
+    applySwitch();
+  };
+
+  const handleSrcPathChange = (nextPaths: string[]) => {
+    if (shouldClearExcludeFoldersOnSrcChange(form.srcPath, nextPaths, form.exclude)) {
+      patch({
+        srcPath: nextPaths,
+        exclude: updateExcludeFolders(form.exclude, []),
+      });
+      Toast.info("源目录已更换，已自动清空原有文件夹过滤规则");
+      return;
+    }
+    change("srcPath", nextPaths);
+  };
+
+  const dstMultiple = form.method !== 2 || form.dstPath.length > 1;
+  const activeMethodOption = methodOptions[form.method] ?? methodOptions[0];
+  const isDestructiveMethod = form.method === 1 || form.method === 2;
+
+  // Schedule preview data
+  const cronErrors = useMemo(
+    () => (form.isCron === 1 ? validateCronFields(form) : {}),
+    [form],
+  );
+  const cronErrorMessage = Object.values(cronErrors)[0] ?? "";
+  const upcomingRuns = useMemo(() => {
+    if (form.isCron !== 1 || cronErrorMessage) return [];
+    return computeNextCronRuns(form, 3);
+  }, [
+    form.isCron,
+    form.second,
+    form.minute,
+    form.hour,
+    form.day,
+    form.month,
+    form.day_of_week,
+    cronErrorMessage,
+  ]);
+
+  const intervalDisplayValue = useMemo(() => {
+    if (intervalDraft !== null) return intervalDraft;
+    const factor =
+      intervalUnitOptions.find((u) => u.value === intervalUnit)?.factor ?? 1;
+    if (!Number.isFinite(form.interval) || form.interval <= 0) return "";
+    const scaled = form.interval / factor;
+    return Number.isInteger(scaled) ? String(scaled) : String(form.interval);
+  }, [intervalDraft, intervalUnit, form.interval]);
+
+  const activeCacheCount = (form.useCacheS ? 1 : 0) + (form.useCacheT ? 1 : 0);
+  const excludedFolders = useMemo(
+    () => parseExcludeFolders(form.exclude),
+    [form.exclude],
+  );
+
+  const selectedWeekdays = useMemo(
+    () => parseWeekdaySelection(form.day_of_week) ?? [0],
+    [form.day_of_week],
+  );
+
+  const sizeGroupError =
+    showStepError(2, "fileSizeRange") ||
+    showStepError(2, "minFileSize") ||
+    showStepError(2, "maxFileSize");
+
+  const primaryActionIsNext = isNew && step === 0;
+
   return (
-    <Editor
-      title={job ? "编辑任务" : "新建任务"}
-      visible
-      busy={action.busy}
-      onClose={onClose}
-      onSave={save}
-      dirty={effectiveDirty}
-      className="task-editor-modal"
-      footer={({ close }) => (
-        <div className="editor-actions">
-          {isNew && step > 0 && (
-            <Button
-              type="tertiary"
-              className="editor-actions-start"
-              onClick={previousStep}
-              disabled={action.busy}
-            >
-              上一步
-            </Button>
-          )}
-          <Button type="tertiary" onClick={close} disabled={action.busy}>
-            取消
-          </Button>
-          <Button
-            type="primary"
-            theme="solid"
-            loading={action.busy}
-            onClick={isNew && !lastStep ? nextStep : save}
-          >
-            {isNew && !lastStep ? "下一步" : "保存"}
-          </Button>
-        </div>
-      )}
-    >
-      <Form
-        onSubmit={isNew && !lastStep ? nextStep : save}
-        className="editor-form task-editor-form"
-      >
-        <fieldset disabled={action.busy}>
-          {isNew ? (
-            <div className="task-editor-nav task-editor-nav--steps">
-              <div className="task-editor-stepbar">
-                <h3>{taskEditorSteps[step]}</h3>
-                <div className="task-editor-count" aria-label="当前步骤">
-                  步骤 <strong>{step + 1}</strong> / {taskEditorSteps.length}
-                </div>
-              </div>
-              {/* 分隔线兼作进度条；步数已由上面的文字读出，这里不再重复播报 */}
-              <div className="task-editor-progress" aria-hidden="true">
-                <span
-                  style={{
-                    width: `${((step + 1) / taskEditorSteps.length) * 100}%`,
-                  }}
-                />
-              </div>
-            </div>
-          ) : (
-            <div className="task-editor-nav">
-              <Tabs
-                type="line"
-                activeKey={activeTab}
-                onChange={(key) => setActiveTab(key)}
+    <RemoteDirCacheProvider>
+      <Editor
+        title={job ? "编辑任务" : "新建任务"}
+        visible
+        busy={action.busy}
+        onClose={onClose}
+        onSave={save}
+        dirty={effectiveDirty}
+        width={600}
+        className="task-editor-modal"
+        footer={({ close }) => (
+          <div className="editor-actions">
+            {isNew && step > 0 && (
+              <Button
+                type="tertiary"
+                className="editor-actions-start"
+                onClick={previousStep}
+                disabled={action.busy}
               >
-                {taskEditorTabs.map((tab) => (
-                  <Tabs.TabPane tab={tab.label} itemKey={tab.key} key={tab.key} />
-                ))}
-              </Tabs>
-            </div>
-          )}
-          <div className="task-editor-step" ref={scrollRef}>
-            {panelMounted("engine") && (
-              <div className="form-section" style={panelStyle("engine")}>
-                <Field label="任务名称" required>
-                  <Input
-                    value={form.remark}
-                    onChange={(value) => change("remark", value)}
-                    placeholder="相册每日备份"
-                  />
-                </Field>
-                <Field label="存储引擎" required>
-                  <Select
-                    value={form.alistId}
-                    placeholder="请选择引擎"
-                    optionList={engines.map((engine) => ({
-                      label: `${engine.remark || engine.userName} · ${engine.url}`,
-                      value: engine.id,
-                    }))}
-                    onChange={(value) => {
-                      setDirty(true);
-                      setForm((current) => ({
-                        ...current,
-                        alistId: Number(value),
-                        srcPath: [],
-                        dstPath: [],
-                        // 文件夹过滤记录的是旧引擎源目录下的相对路径，换引擎后不再对应
-                        exclude: updateExcludeFolders(current.exclude, []),
-                      }));
+                上一步
+              </Button>
+            )}
+            <Button type="tertiary" onClick={close} disabled={action.busy}>
+              取消
+            </Button>
+            {isNew && step === 1 && (
+              <Button
+                type="primary"
+                theme="light"
+                onClick={nextStep}
+                disabled={action.busy}
+              >
+                过滤规则
+              </Button>
+            )}
+            <Button
+              type="primary"
+              theme="solid"
+              loading={action.busy}
+              onClick={primaryActionIsNext ? nextStep : save}
+            >
+              {primaryActionIsNext ? "下一步" : "保存"}
+            </Button>
+          </div>
+        )}
+      >
+        <Form
+          onSubmit={primaryActionIsNext ? nextStep : save}
+          className="editor-form task-editor-form"
+        >
+          <fieldset disabled={action.busy}>
+            {isNew ? (
+              <div className="task-editor-nav task-editor-nav--steps">
+                <div className="task-editor-stepbar">
+                  <h3>{taskEditorTabs[step].label}</h3>
+                  <div className="task-editor-count" aria-label="当前步骤">
+                    步骤 <strong>{step + 1}</strong> / {taskEditorTabs.length}
+                  </div>
+                </div>
+                <nav
+                  className="task-editor-stepper"
+                  aria-label="任务配置步骤"
+                >
+                  {taskEditorTabs.map((tab, index) => {
+                    const isCurrent = index === step;
+                    const isDone =
+                      index < step && !validation.stepErrors[index];
+                    return (
+                      <button
+                        key={tab.key}
+                        type="button"
+                        className={`task-step-btn${isCurrent ? " is-active" : ""}${isDone ? " is-done" : ""}`}
+                        aria-current={isCurrent ? "step" : undefined}
+                        onClick={() => goToStep(index)}
+                      >
+                        <span className="task-step-num" aria-hidden="true">
+                          {isDone ? <IconTick size="extra-small" /> : index + 1}
+                        </span>
+                        <span className="task-step-label">{tab.label}</span>
+                        {tab.optional && (
+                          <span className="task-step-optional">可选</span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </nav>
+                <div className="task-editor-progress" aria-hidden="true">
+                  <span
+                    style={{
+                      width: `${((step + 1) / taskEditorTabs.length) * 100}%`,
                     }}
                   />
-                </Field>
-                {enginesError && (
-                  <InlineNotice
-                    role="alert"
-                    message={`存储引擎加载失败：${enginesError}`}
-                    onRetry={onRetryEngines}
-                  />
-                )}
-                <div className="form-grid">
-                  <Field label="源路径" required>
-                    <div className="field-group" role="group">
-                      <RemotePaths
-                        key={`src-${form.alistId}`}
-                        engineId={form.alistId}
-                        value={form.srcPath}
-                        onChange={(paths) => change("srcPath", paths)}
-                        multiple
-                        ariaLabel="选择源目录"
-                      />
-                      <SettingRow
-                        label="源端缓存"
-                        variant="bordered"
-                        tip="开启后优先使用引擎缓存目录列表，减少远程请求次数，提升同步速度"
-                      >
-                        <Switch
-                          aria-label="源端缓存"
-                          checked={form.useCacheS}
-                          onChange={(value) => change("useCacheS", value)}
-                        />
-                      </SettingRow>
-                    </div>
-                  </Field>
-                  <Field label="目标路径" required>
-                    <div className="field-group" role="group">
-                      <RemotePaths
-                        key={`dst-${form.alistId}`}
-                        engineId={form.alistId}
-                        value={form.dstPath}
-                        onChange={(paths) => change("dstPath", paths)}
-                        multiple
-                        ariaLabel="选择目标目录"
-                      />
-                      <SettingRow
-                        label="目标缓存"
-                        variant="bordered"
-                        tip="开启后优先使用引擎缓存目录列表，减少远程请求次数，提升同步速度"
-                      >
-                        <Switch
-                          aria-label="目标缓存"
-                          checked={form.useCacheT}
-                          onChange={(value) => change("useCacheT", value)}
-                        />
-                      </SettingRow>
-                    </div>
-                  </Field>
                 </div>
               </div>
+            ) : (
+              <div className="task-editor-nav">
+                <Tabs
+                  type="line"
+                  activeKey={activeTab}
+                  onChange={(key) => setActiveTab(key)}
+                >
+                  {taskEditorTabs.map((tab) => (
+                    <Tabs.TabPane
+                      tab={tab.label}
+                      itemKey={tab.key}
+                      key={tab.key}
+                    />
+                  ))}
+                </Tabs>
+              </div>
             )}
-            {panelMounted("sync") && (
-              <div className="form-section" style={panelStyle("sync")}>
-                <div className="form-grid">
+
+            <div className="task-editor-step" ref={scrollRef}>
+              {panelMounted("basic") && (
+                <div className="form-section" style={panelStyle("basic")}>
+                  <div className="form-grid form-grid--two">
+                    <Field
+                      label="任务名称"
+                      required
+                      error={showStepError(0, "remark")}
+                      fieldId="remark"
+                    >
+                      <Input
+                        value={form.remark}
+                        onChange={(value) => change("remark", value)}
+                        placeholder="相册每日备份"
+                      />
+                    </Field>
+                    <Field
+                      label="存储引擎"
+                      required
+                      error={showStepError(0, "alistId")}
+                      fieldId="alistId"
+                    >
+                      <Select
+                        value={form.alistId}
+                        placeholder={
+                          engines.length ? "请选择引擎" : "暂无可用存储引擎"
+                        }
+                        disabled={!engines.length}
+                        optionList={engines.map((engine) => ({
+                          label: `${engine.remark || engine.userName} · ${engine.url}`,
+                          value: engine.id,
+                        }))}
+                        onChange={handleEngineChange}
+                      />
+                    </Field>
+                  </div>
+
+                  {enginesError && (
+                    <InlineNotice
+                      role="alert"
+                      message={`存储引擎加载失败：${enginesError}`}
+                      onRetry={onRetryEngines}
+                    />
+                  )}
+
+                  {!enginesError && engines.length === 0 && (
+                    <div className="engine-empty-guide" role="status">
+                      <IconInfoCircle aria-hidden="true" size="small" />
+                      <span>
+                        还未添加存储引擎，请先添加引擎后再配置同步路径。
+                      </span>
+                      {onNavigateEngines && (
+                        <Button
+                          size="small"
+                          type="primary"
+                          theme="light"
+                          onClick={onNavigateEngines}
+                        >
+                          前往引擎管理
+                        </Button>
+                      )}
+                    </div>
+                  )}
+
                   <Field
                     label={
                       <span className="field-label-with-tip">
@@ -347,189 +623,714 @@ export default function TaskEditor({
                     }
                     ariaLabel="同步方式"
                   >
-                    <Select
-                      aria-labelledby={methodLabelId}
-                      value={form.method}
-                      optionList={methodOptions.map((method, value) => ({
-                        value,
-                        label: method.name,
-                      }))}
-                      onChange={(value) => {
-                        change("method", Number(value));
-                      }}
-                    />
+                    <div className="field-group" role="group">
+                      <Select
+                        aria-labelledby={methodLabelId}
+                        value={form.method}
+                        optionList={methodOptions.map((method, value) => ({
+                          value,
+                          label: method.name,
+                        }))}
+                        onChange={(value) => {
+                          change("method", Number(value));
+                        }}
+                      />
+                      <div
+                        className={`sync-method-banner${isDestructiveMethod ? " is-warning" : ""}`}
+                        role={isDestructiveMethod ? "status" : undefined}
+                      >
+                        {isDestructiveMethod ? (
+                          <IconAlertTriangle aria-hidden="true" size="small" />
+                        ) : (
+                          <IconInfoCircle aria-hidden="true" size="small" />
+                        )}
+                        <span>{activeMethodOption.description}</span>
+                      </div>
+                    </div>
                   </Field>
+
+                  <div className="form-grid">
+                    <Field
+                      label="源路径"
+                      required
+                      error={showStepError(0, "srcPath")}
+                      fieldId="srcPath"
+                    >
+                      <RemotePaths
+                        key={`src-${form.alistId}`}
+                        engineId={form.alistId}
+                        value={form.srcPath}
+                        onChange={handleSrcPathChange}
+                        multiple
+                        ariaLabel="选择源目录"
+                      />
+                    </Field>
+                    <Field
+                      label={form.method === 2 ? "目标路径（单选）" : "目标路径"}
+                      required
+                      error={showStepError(0, "dstPath")}
+                      fieldId="dstPath"
+                    >
+                      <RemotePaths
+                        key={`dst-${form.alistId}-${dstMultiple ? "m" : "s"}`}
+                        engineId={form.alistId}
+                        value={form.dstPath}
+                        onChange={(paths) => change("dstPath", paths)}
+                        multiple={dstMultiple}
+                        ariaLabel="选择目标目录"
+                      />
+                    </Field>
+                  </div>
+
+                  <SyncPathPreview
+                    srcPaths={form.srcPath}
+                    dstPaths={form.dstPath}
+                    storedDstMap={job?.dstMap}
+                    method={form.method}
+                    existingJobs={existingJobs}
+                    currentJobId={job?.id}
+                    engineId={form.alistId}
+                    onKeepFirstDst={
+                      form.method === 2 && form.dstPath.length > 1
+                        ? () => change("dstPath", form.dstPath.slice(0, 1))
+                        : undefined
+                    }
+                  />
+                </div>
+              )}
+
+              {panelMounted("schedule") && (
+                <div className="form-section" style={panelStyle("schedule")}>
                   <Field label="调度方式">
                     <Select
                       value={form.isCron}
-                      optionList={cronTypeNames.map((label, value) => ({
+                      optionList={[1, 0, 2].map((value) => ({
                         value,
-                        label,
+                        label: cronTypeNames[value],
                       }))}
-                      onChange={(value) => change("isCron", Number(value))}
-                    />
-                  </Field>
-                </div>
-                {form.isCron === 0 && (
-                  <Field label="执行间隔（分钟）">
-                    <Input
-                      inputMode="numeric"
-                      value={intervalDraft ?? String(form.interval)}
                       onChange={(value) => {
-                        // 保留原始输入，清空或输入到一半时不被强制改写成 0
-                        setIntervalDraft(value);
-                        change("interval", parseIntervalInput(value));
-                      }}
-                      onBlur={() => {
-                        if (
-                          intervalDraft !== null &&
-                          /^\d+$/.test(intervalDraft.trim())
-                        ) {
+                        const nextIsCron = Number(value);
+                        if (nextIsCron === 0) {
+                          const split = splitIntervalMinutes(
+                            form.interval > 0 ? form.interval : 1440,
+                          );
+                          setIntervalUnit(split.unit);
                           setIntervalDraft(null);
+                          if (form.interval <= 0) {
+                            patch({ isCron: 0, interval: 1440 });
+                            return;
+                          }
+                        } else if (nextIsCron === 1) {
+                          setCronPresetMode(detectCronPresetMode(form));
                         }
+                        change("isCron", nextIsCron);
                       }}
                     />
                   </Field>
-                )}
-                {form.isCron === 1 && (
-                  <div className="cron-grid">
-                    {cronFields.map((field) => (
-                      <Field key={field.name} label={field.label}>
-                        <Input
-                          value={form[field.name as CronFieldName]}
-                          placeholder={field.placeholder}
-                          onChange={(value) =>
-                            change(
-                              field.name as CronFieldName,
-                              value,
-                            )
-                          }
-                        />
-                      </Field>
-                    ))}
-                  </div>
-                )}
-                <div className="schedule-preview">
-                  {formatSchedulePlan(form)}
-                </div>
-              </div>
-            )}
-            {panelMounted("filter") && (
-              <div className="form-section" style={panelStyle("filter")}>
-                <div className="file-size-filters" role="group" aria-label="文件大小过滤">
-                  {(["min", "max"] as const).map((kind) => (
-                    <FileSizeFilterRow
-                      key={kind}
-                      kind={kind}
-                      form={form}
-                      change={change}
-                      patch={patch}
-                      drafts={fileSizeDrafts}
-                      setDrafts={setFileSizeDrafts}
-                    />
-                  ))}
-                </div>
-                <Field
-                  label="文件过滤"
-                  hint="仅支持文件名和文件后缀；文件目录请在“文件夹过滤”中配置"
-                >
-                  <FileTypeFilter
-                    value={form.exclude}
-                    onChange={(value) => change("exclude", value)}
-                  />
-                </Field>
-              </div>
-            )}
-            {panelMounted("folder") && (
-              <div className="form-section" style={panelStyle("folder")}>
-                <Field
-                  label="文件夹过滤"
-                  hint="仅针对源目录，勾选要忽略的子文件夹"
-                >
-                  {/* ExcludeTree forwards id/aria-*; the group keeps the
-                      visible Field label associated with the tree region. */}
-                  <div className="field-group" role="group">
-                    <ExcludeTree
-                      engineId={form.alistId}
-                      srcPaths={form.srcPath}
-                      excludedPaths={parseExcludeFolders(form.exclude)}
-                      onChange={(folders) =>
-                        change(
-                          "exclude",
-                          updateExcludeFolders(form.exclude, folders),
-                        )
-                      }
-                    />
-                  </div>
-                </Field>
-                <Field label="系统目录过滤" hint="忽略操作系统和 NAS 的系统目录">
-                  <div className="system-dir-groups" role="group">
-                    {systemDirFilterGroups.map((group) => {
-                      const selected = group.patterns.filter((p) =>
-                        isExcludePatternEnabled(form.exclude, p),
-                      );
-                      const allSelected =
-                        selected.length === group.patterns.length;
-                      return (
-                        <div className="system-dir-group" key={group.key}>
-                          <Checkbox
-                            checked={allSelected}
-                            indeterminate={
-                              selected.length > 0 && !allSelected
-                            }
-                            onChange={(event) =>
+
+                  {form.isCron === 0 && (
+                    <Field
+                      label="执行间隔"
+                      error={showStepError(1, "interval")}
+                      fieldId="interval"
+                    >
+                      <div className="field-group" role="group">
+                        <div className="interval-control">
+                          <Input
+                            aria-label="执行间隔数值"
+                            inputMode="numeric"
+                            value={intervalDisplayValue}
+                            placeholder="输入正整数"
+                            onChange={(value) => {
+                              setIntervalDraft(value);
                               change(
-                                "exclude",
-                                updateExcludePatterns(
-                                  form.exclude,
-                                  group.patterns,
-                                  Boolean(event.target.checked),
-                                ),
-                              )
-                            }
-                          >
-                            {group.label}
-                          </Checkbox>
-                          <span className="system-dir-patterns">
-                            {group.patterns.join("  ")}
-                          </span>
+                                "interval",
+                                intervalInputToMinutes(value, intervalUnit),
+                              );
+                            }}
+                            onBlur={() => {
+                              if (
+                                intervalDraft !== null &&
+                                /^\d+$/.test(intervalDraft.trim())
+                              ) {
+                                setIntervalDraft(null);
+                              }
+                            }}
+                          />
+                          <Select
+                            aria-label="执行间隔单位"
+                            value={intervalUnit}
+                            optionList={intervalUnitOptions.map((u) => ({
+                              value: u.value,
+                              label: u.label,
+                            }))}
+                            onChange={(next) => {
+                              const nextUnit = String(next) as IntervalUnit;
+                              const rawText =
+                                intervalDraft ?? intervalDisplayValue;
+                              setIntervalUnit(nextUnit);
+                              change(
+                                "interval",
+                                intervalInputToMinutes(rawText, nextUnit),
+                              );
+                            }}
+                          />
                         </div>
-                      );
-                    })}
+                        <div
+                          className="schedule-chips"
+                          role="group"
+                          aria-label="常用执行间隔"
+                        >
+                          {intervalPresets.map((preset) => {
+                            const presetMins = intervalInputToMinutes(
+                              String(preset.value),
+                              preset.unit,
+                            );
+                            const active =
+                              intervalDraft === null &&
+                              form.interval === presetMins;
+                            return (
+                              <button
+                                key={preset.label}
+                                type="button"
+                                className={`schedule-chip${active ? " is-active" : ""}`}
+                                onClick={() => {
+                                  setIntervalUnit(preset.unit);
+                                  setIntervalDraft(null);
+                                  change("interval", presetMins);
+                                }}
+                              >
+                                每 {preset.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </Field>
+                  )}
+
+                  {form.isCron === 1 && (
+                    <div className="schedule-cron-section">
+                      <div
+                        className="schedule-preset-bar"
+                        role="group"
+                        aria-label="定时周期"
+                      >
+                        {schedulePresetOptions.map((option) => (
+                          <button
+                            key={option.value}
+                            type="button"
+                            className={`schedule-preset-btn${cronPresetMode === option.value ? " is-active" : ""}`}
+                            aria-pressed={cronPresetMode === option.value}
+                            onClick={() => {
+                              setCronPresetMode(option.value);
+                              patch(applyCronPresetMode(form, option.value));
+                            }}
+                          >
+                            {option.label}
+                          </button>
+                        ))}
+                      </div>
+
+                      {cronPresetMode === "daily" && (
+                        <div className="schedule-time-row">
+                          <Field label="执行小时">
+                            <Select
+                              aria-label="执行小时"
+                              value={String(Number(form.hour || 0))}
+                              optionList={hourOptions}
+                              onChange={(v) =>
+                                patch({
+                                  second: "0",
+                                  hour: String(v),
+                                  day: "*",
+                                  month: "*",
+                                  day_of_week: "*",
+                                })
+                              }
+                            />
+                          </Field>
+                          <Field label="执行分钟">
+                            <Select
+                              aria-label="执行分钟"
+                              value={String(Number(form.minute || 0))}
+                              optionList={minuteOptions}
+                              onChange={(v) =>
+                                patch({
+                                  second: "0",
+                                  minute: String(v),
+                                  day: "*",
+                                  month: "*",
+                                  day_of_week: "*",
+                                })
+                              }
+                            />
+                          </Field>
+                        </div>
+                      )}
+
+                      {cronPresetMode === "weekly" && (
+                        <div className="form-section">
+                          <Field label="每周执行日">
+                            <div
+                              className="weekday-picker"
+                              role="group"
+                              aria-label="选择星期"
+                            >
+                              {weekdayOptions.map((day) => {
+                                const selected = selectedWeekdays.includes(
+                                  day.value,
+                                );
+                                return (
+                                  <button
+                                    key={day.value}
+                                    type="button"
+                                    className={`weekday-chip${selected ? " is-active" : ""}`}
+                                    aria-pressed={selected}
+                                    onClick={() => {
+                                      const next = selected
+                                        ? selectedWeekdays.length > 1
+                                          ? selectedWeekdays.filter(
+                                              (d) => d !== day.value,
+                                            )
+                                          : selectedWeekdays
+                                        : [...selectedWeekdays, day.value];
+                                      patch({
+                                        second: "0",
+                                        day: "*",
+                                        month: "*",
+                                        day_of_week:
+                                          formatWeekdayCronExpression(next),
+                                      });
+                                    }}
+                                  >
+                                    {day.label}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </Field>
+                          <div className="schedule-time-row">
+                            <Field label="执行小时">
+                              <Select
+                                aria-label="执行小时"
+                                value={String(Number(form.hour || 0))}
+                                optionList={hourOptions}
+                                onChange={(v) =>
+                                  patch({ second: "0", hour: String(v) })
+                                }
+                              />
+                            </Field>
+                            <Field label="执行分钟">
+                              <Select
+                                aria-label="执行分钟"
+                                value={String(Number(form.minute || 0))}
+                                optionList={minuteOptions}
+                                onChange={(v) =>
+                                  patch({ second: "0", minute: String(v) })
+                                }
+                              />
+                            </Field>
+                          </div>
+                        </div>
+                      )}
+
+                      {cronPresetMode === "monthly" && (
+                        <div className="form-section">
+                          <div className="schedule-time-row schedule-time-row--monthly">
+                            <Field label="每月日期">
+                              <Select
+                                aria-label="每月日期"
+                                value={String(Number(form.day || 1))}
+                                optionList={monthDayOptions}
+                                onChange={(v) =>
+                                  patch({
+                                    second: "0",
+                                    day: String(v),
+                                    month: "*",
+                                    day_of_week: "*",
+                                  })
+                                }
+                              />
+                            </Field>
+                            <Field label="执行小时">
+                              <Select
+                                aria-label="执行小时"
+                                value={String(Number(form.hour || 0))}
+                                optionList={hourOptions}
+                                onChange={(v) =>
+                                  patch({ second: "0", hour: String(v) })
+                                }
+                              />
+                            </Field>
+                            <Field label="执行分钟">
+                              <Select
+                                aria-label="执行分钟"
+                                value={String(Number(form.minute || 0))}
+                                optionList={minuteOptions}
+                                onChange={(v) =>
+                                  patch({ second: "0", minute: String(v) })
+                                }
+                              />
+                            </Field>
+                          </div>
+                          {Number(form.day) >= 29 && (
+                            <div className="field-hint">
+                              提示：没有 {form.day} 日的月份（如 2 月）将自动跳过。
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {cronPresetMode === "custom" && (
+                        <div className="form-section">
+                          <div
+                            className="schedule-chips"
+                            role="group"
+                            aria-label="常用 Cron 模板"
+                          >
+                            {customCronPresets.map((preset) => (
+                              <button
+                                key={preset.label}
+                                type="button"
+                                className="schedule-chip"
+                                onClick={() => patch(preset.fields)}
+                              >
+                                {preset.label}
+                              </button>
+                            ))}
+                          </div>
+                          <div className="cron-grid">
+                            {cronFields.map((field) => {
+                              const key = field.name as CronFieldKey;
+                              const rangeHint = cronFieldRanges[key][3];
+                              const err = cronErrors[key];
+                              return (
+                                <Field
+                                  key={field.name}
+                                  label={
+                                    <span className="cron-field-label">
+                                      <span>{field.label}</span>
+                                      <span className="cron-field-range">
+                                        {rangeHint}
+                                      </span>
+                                    </span>
+                                  }
+                                  ariaLabel={field.label}
+                                  error={
+                                    validatedSteps.has(1) ? err : undefined
+                                  }
+                                  fieldId={key}
+                                >
+                                  <Input
+                                    value={form[key]}
+                                    placeholder={field.placeholder}
+                                    onChange={(value) => change(key, value)}
+                                  />
+                                </Field>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <div
+                    className={`schedule-preview-card${
+                      (form.isCron === 1 && cronErrorMessage) ||
+                      (form.isCron === 0 && validation.fields.interval)
+                        ? " is-invalid"
+                        : ""
+                    }`}
+                    aria-live="polite"
+                  >
+                    {form.isCron === 1 && cronErrorMessage ? (
+                      <div className="schedule-preview-error" role="alert">
+                        <IconAlertTriangle aria-hidden="true" size="small" />
+                        <span>{cronErrorMessage}</span>
+                      </div>
+                    ) : form.isCron === 0 && validation.fields.interval ? (
+                      <div className="schedule-preview-error" role="alert">
+                        <IconAlertTriangle aria-hidden="true" size="small" />
+                        <span>{validation.fields.interval}</span>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="schedule-preview-plan">
+                          {form.isCron === 0
+                            ? formatIntervalHuman(form.interval)
+                            : formatSchedulePlan(form)}
+                        </div>
+                        {form.isCron === 1 && upcomingRuns.length > 0 && (
+                          <div className="schedule-preview-runs">
+                            <span className="muted">预计接下来执行：</span>
+                            <div className="schedule-preview-run-list mono">
+                              {upcomingRuns.map((date) => (
+                                <span key={date.getTime()}>
+                                  {formatCronRunTime(date)}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {form.isCron === 1 && upcomingRuns.length === 0 && (
+                          <div className="schedule-preview-error" role="alert">
+                            <IconAlertTriangle
+                              aria-hidden="true"
+                              size="small"
+                            />
+                            <span>
+                              该表达式在未来 5 年内没有匹配的执行时间，请检查日期与月份组合
+                            </span>
+                          </div>
+                        )}
+                        {form.isCron === 0 && (
+                          <div className="muted">
+                            保存后按设定间隔自动调度，也可在任务总览随时手动执行。
+                          </div>
+                        )}
+                      </>
+                    )}
                   </div>
-                </Field>
-              </div>
-            )}
-          </div>
-        </fieldset>
-      </Form>
-    </Editor>
+
+                  {form.isCron !== 2 && (
+                    <SettingRow
+                      label="启用定时调度"
+                      variant="bordered"
+                      tip="关闭后仅保存任务配置，不会按计划自动执行；可稍后在任务总览页开启"
+                    >
+                      <Switch
+                        aria-label="启用定时调度"
+                        checked={form.enable}
+                        onChange={(value) => change("enable", value)}
+                      />
+                    </SettingRow>
+                  )}
+
+                  {isNew && (form.isCron === 2 || form.enable) && (
+                    <div className="run-after-create">
+                      <Checkbox
+                        checked={runAfterCreate}
+                        onChange={(event) =>
+                          setRunAfterCreate(Boolean(event.target.checked))
+                        }
+                      >
+                        创建后立即执行一次
+                      </Checkbox>
+                      {runAfterCreate && form.method === 2 && (
+                        <span className="field-hint">
+                          移动模式将在确认后开始执行
+                        </span>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="advanced-options">
+                    <button
+                      type="button"
+                      className={`advanced-options-toggle${advancedOpen ? " is-open" : ""}`}
+                      aria-expanded={advancedOpen}
+                      onClick={() => setAdvancedOpen((open) => !open)}
+                    >
+                      <IconChevronRight
+                        className="advanced-options-chevron"
+                        aria-hidden="true"
+                      />
+                      <span>高级选项（目录缓存）</span>
+                      {activeCacheCount > 0 && (
+                        <Tag size="small" color="blue" type="light">
+                          已开启 {activeCacheCount} 项
+                        </Tag>
+                      )}
+                    </button>
+                    {advancedOpen && (
+                      <div className="advanced-options-body">
+                        <SettingRow
+                          label="源端缓存"
+                          variant="bordered"
+                          tip="开启后优先使用引擎缓存目录列表，减少远程请求次数，提升同步速度"
+                        >
+                          <Switch
+                            aria-label="源端缓存"
+                            checked={form.useCacheS}
+                            onChange={(value) => change("useCacheS", value)}
+                          />
+                        </SettingRow>
+                        <SettingRow
+                          label="目标缓存"
+                          variant="bordered"
+                          tip="开启后优先使用引擎缓存目录列表，减少远程请求次数，提升同步速度"
+                        >
+                          <Switch
+                            aria-label="目标缓存"
+                            checked={form.useCacheT}
+                            onChange={(value) => change("useCacheT", value)}
+                          />
+                        </SettingRow>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {panelMounted("filter") && (
+                <div className="form-section" style={panelStyle("filter")}>
+                  <div className="filter-section-block">
+                    <div className="filter-section-title">文件大小过滤</div>
+                    <div
+                      className="file-size-filters"
+                      role="group"
+                      aria-label="文件大小过滤"
+                    >
+                      {(["min", "max"] as const).map((kind) => (
+                        <FileSizeFilterRow
+                          key={kind}
+                          kind={kind}
+                          enabled={sizeEnabled[kind]}
+                          onToggle={(checked) => {
+                            const config = fileSizeFilterDefaults[kind];
+                            const valueKey = `${kind}FileSize` as const;
+                            const unitKey = `${kind}FileSizeUnit` as const;
+                            const currentVal =
+                              parseFileSizeInput(form[valueKey]) ?? 0;
+                            setSizeEnabled((prev) => ({
+                              ...prev,
+                              [kind]: checked,
+                            }));
+                            setFileSizeDrafts((prev) => {
+                              if (prev[valueKey] === undefined) return prev;
+                              const next = { ...prev };
+                              delete next[valueKey];
+                              return next;
+                            });
+                            patch({
+                              [valueKey]: checked
+                                ? currentVal > 0
+                                  ? currentVal
+                                  : config.value
+                                : 0,
+                              [unitKey]: checked
+                                ? form[unitKey] || config.unit
+                                : config.unit,
+                            });
+                          }}
+                          form={form}
+                          change={change}
+                          drafts={fileSizeDrafts}
+                          setDrafts={setFileSizeDrafts}
+                        />
+                      ))}
+                    </div>
+                    {sizeGroupError && (
+                      <div className="field-error" role="alert">
+                        {sizeGroupError}
+                      </div>
+                    )}
+                  </div>
+
+                  <Field
+                    label="文件过滤"
+                    hint="仅支持文件名和文件后缀；目录请在下方「文件夹过滤」中配置"
+                  >
+                    <FileTypeFilter
+                      value={form.exclude}
+                      onChange={(value) => change("exclude", value)}
+                    />
+                  </Field>
+
+                  <Field
+                    label="文件夹过滤"
+                    hint="仅针对源目录，勾选要忽略的子文件夹；单层目录名（如 cache/）会匹配所有源目录下的同名目录"
+                  >
+                    {/* ExcludeTree forwards id/aria-*; the group keeps the
+                        visible Field label associated with the tree region. */}
+                    <div className="field-group" role="group">
+                      <ExcludeTree
+                        engineId={form.alistId}
+                        srcPaths={form.srcPath}
+                        excludedPaths={excludedFolders}
+                        onChange={(folders) =>
+                          change(
+                            "exclude",
+                            updateExcludeFolders(form.exclude, folders),
+                          )
+                        }
+                      />
+                    </div>
+                  </Field>
+
+                  <Field
+                    label="系统目录过滤"
+                    hint="忽略操作系统和 NAS 的系统目录"
+                  >
+                    <div className="system-dir-groups" role="group">
+                      {systemDirFilterGroups.map((group) => {
+                        const selected = group.patterns.filter((p) =>
+                          isExcludePatternEnabled(form.exclude, p),
+                        );
+                        const allSelected =
+                          selected.length === group.patterns.length;
+                        return (
+                          <div className="system-dir-group" key={group.key}>
+                            <Checkbox
+                              checked={allSelected}
+                              indeterminate={
+                                selected.length > 0 && !allSelected
+                              }
+                              onChange={(event) =>
+                                change(
+                                  "exclude",
+                                  updateExcludePatterns(
+                                    form.exclude,
+                                    group.patterns,
+                                    Boolean(event.target.checked),
+                                  ),
+                                )
+                              }
+                            >
+                              {group.label}
+                            </Checkbox>
+                            <span className="system-dir-patterns">
+                              {group.patterns.join("  ")}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </Field>
+                </div>
+              )}
+            </div>
+          </fieldset>
+        </Form>
+      </Editor>
+    </RemoteDirCacheProvider>
   );
 }
 
 function FileSizeFilterRow({
   kind,
+  enabled,
+  onToggle,
   form,
   change,
-  patch,
   drafts,
   setDrafts,
 }: {
   kind: "min" | "max";
+  enabled: boolean;
+  onToggle: (checked: boolean) => void;
   form: JobForm;
   change: <K extends keyof JobForm>(key: K, value: JobForm[K]) => void;
-  patch: (values: Partial<JobForm>) => void;
   drafts: FileSizeDrafts;
   setDrafts: Dispatch<SetStateAction<FileSizeDrafts>>;
 }) {
   const config = fileSizeFilterDefaults[kind];
   const valueKey = `${kind}FileSize` as const;
   const unitKey = `${kind}FileSizeUnit` as const;
-  const parsedValue = parseFileSizeInput(form[valueKey]);
-  const currentValue = parsedValue ?? 0;
   const draft = drafts[valueKey] ?? null;
   const editing = draft !== null;
-  const enabled = editing || parsedValue === null || currentValue > 0;
   const displayValue = editing
     ? draft
     : enabled
@@ -549,6 +1350,11 @@ function FileSizeFilterRow({
 
   const commitInput = (raw: string) => {
     clearDraft();
+    // 保留空输入而不是静默回退到 0 导致勾选框被自动取消
+    if (raw.trim() === "") {
+      change(valueKey, "");
+      return;
+    }
     change(valueKey, commitFileSizeInput(raw));
   };
 
@@ -557,18 +1363,7 @@ function FileSizeFilterRow({
       <Checkbox
         aria-label={`启用${config.label}指定大小的文件`}
         checked={enabled}
-        onChange={(event) => {
-          const checked = Boolean(event.target.checked);
-          clearDraft();
-          patch({
-            [valueKey]: checked
-              ? currentValue > 0
-                ? currentValue
-                : config.value
-              : 0,
-            [unitKey]: checked ? displayUnit : config.unit,
-          });
-        }}
+        onChange={(event) => onToggle(Boolean(event.target.checked))}
       />
       <span className="file-size-filter-copy">{config.label}</span>
       <Input

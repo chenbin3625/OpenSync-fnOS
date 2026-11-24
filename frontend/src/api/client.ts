@@ -244,10 +244,12 @@ export const api = {
     request("/alist/test", { method: "POST", params: { id } }),
   jobMenu: (signal?: AbortSignal) => requestAllJobs(signal),
   saveJob: (data: unknown, signal?: AbortSignal) =>
-    request("/job", { method: "POST", data, signal }).then((result) => {
-      invalidateJobsCache();
-      return result;
-    }),
+    request<{ id?: number } | null>("/job", { method: "POST", data, signal }).then(
+      (result) => {
+        invalidateJobsCache();
+        return result;
+      },
+    ),
   jobAction: (data: unknown) =>
     request("/job", { method: "PUT", data }).then((result) => {
       invalidateJobsCache();

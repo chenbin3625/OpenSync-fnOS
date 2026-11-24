@@ -525,12 +525,22 @@ func nonNegativeFileSize(value interface{}) (int64, error) {
 
 // AddJobClient creates a new job client
 func AddJobClient(job map[string]interface{}, isInit bool) error {
+	_, err := addJobClient(job, isInit)
+	return err
+}
+
+// CreateJobClient creates a new interactive job client and returns its persisted ID.
+func CreateJobClient(job map[string]interface{}) (int64, error) {
+	return addJobClient(job, false)
+}
+
+func addJobClient(job map[string]interface{}, isInit bool) (int64, error) {
 	// A row loaded from a pre-migration database has no stored mapping yet.
 	// Freeze the layout it has been using before this run's computed mapping
 	// could change on the first edit.
 	needsPersistedDstMap := isInit && jobDstMapRaw(job["dstMap"]) == ""
 	if err := CleanJobInput(job); err != nil {
-		return err
+		return 0, err
 	}
 	if needsPersistedDstMap {
 		if err := mapper.UpdateJob(job); err != nil {
@@ -538,11 +548,11 @@ func AddJobClient(job map[string]interface{}, isInit bool) error {
 		}
 	}
 	if err := validateJobInput(job, !isInit); err != nil {
-		return err
+		return 0, err
 	}
 	if !isInit {
 		if err := validateJobDestinationConflicts(job); err != nil {
-			return err
+			return 0, err
 		}
 	}
 	if !isInit {
@@ -554,18 +564,18 @@ func AddJobClient(job map[string]interface{}, isInit bool) error {
 		defer alistRefMu.Unlock()
 		if _, err := alistDeps.GetAlistByID(util.ToInt64(job["alistId"])); err != nil {
 			if err := publicErrorIf(err, msg.T(msg.AlistNotFound)); err != nil {
-				return err
+				return 0, err
 			}
 		}
 	}
 	client, err := NewJobClient(job, isInit)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	jobClientListMu.Lock()
 	jobClientList[client.JobID] = client
 	jobClientListMu.Unlock()
-	return nil
+	return client.JobID, nil
 }
 
 // EditJobClient updates an existing job client

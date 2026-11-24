@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { TreeNodeData } from "@douyinfe/semi-ui/lib/es/tree/interface";
 import { api, combineSignals } from "../api/client";
 import { errorToast } from "../components/common";
+import { useRemoteDirCache } from "./remoteDirCache";
 import {
   collectTreeKeys,
   patchTreeNodes,
@@ -34,6 +35,7 @@ export function useAsyncTree({
   errorFallback = "目录加载失败",
   rootKeys = defaultRootKeys,
 }: UseAsyncTreeOptions) {
+  const dirCache = useRemoteDirCache();
   const rootKeysRef = useRef(rootKeys);
   rootKeysRef.current = rootKeys;
   const [treeData, setTreeData] = useState<TreeNodeData[]>([]);
@@ -56,11 +58,17 @@ export function useAsyncTree({
       path: string,
       eid?: number,
       signal?: AbortSignal,
+      options?: { force?: boolean },
     ): Promise<TreeNodeData[] | undefined> => {
       const id = eid ?? engineId;
       if (!id) return;
       try {
-        const result = await api.paths(id, path, signal);
+        const result = dirCache
+          ? await dirCache.fetchPaths(id, path, {
+              signal,
+              force: options?.force,
+            })
+          : await api.paths(id, path, signal);
         if (signal?.aborted || engineRef.current !== id) return;
         const children = toTreeChildren(path, result || []);
         setTreeData((prev) => patchTreeNodes(prev, path, children));
@@ -78,7 +86,7 @@ export function useAsyncTree({
         errorToast(err, errorFallback);
       }
     },
-    [engineId, onLoaded, onError, errorFallback],
+    [engineId, dirCache, onLoaded, onError, errorFallback],
   );
 
   const loadData = useCallback(
@@ -112,7 +120,7 @@ export function useAsyncTree({
       const kept = await refreshTreePaths(
         rootKeysRef.current,
         before,
-        (path) => loadChildren(path, engineId, signal),
+        (path) => loadChildren(path, engineId, signal, { force: true }),
         isStale,
       );
       if (!kept || isStale()) return;

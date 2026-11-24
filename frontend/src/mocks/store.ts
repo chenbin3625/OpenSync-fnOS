@@ -107,6 +107,7 @@ function normalizeJob(input: JobInput, id: number, previous?: JobItem): JobItem 
     remark: merged.remark == null ? null : stringValue(merged.remark),
     srcPath: toPathJson(merged.srcPath),
     dstPath: toPathJson(merged.dstPath),
+    dstMap: merged.dstMap == null ? null : stringValue(merged.dstMap),
     alistId: numberValue(merged.alistId, 1),
     useCacheT: merged.useCacheT === true ? 1 : numberValue(merged.useCacheT, 0),
     scanIntervalT: numberValue(merged.scanIntervalT, 0),

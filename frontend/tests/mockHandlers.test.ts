@@ -56,8 +56,30 @@ describe("mock HTTP handlers", () => {
         enable: 1,
       }),
     });
-    const created = await json<{ code: number; data: null }>(createResponse);
-    expect(created).toMatchObject({ code: 200, data: null });
+    const created = await json<{ code: number; data: { id: number } }>(
+      createResponse,
+    );
+    expect(created.code).toBe(200);
+    expect(created.data.id).toBeGreaterThan(0);
+
+    const editResponse = await fetch(`${apiUrl}/job`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: created.data.id,
+        remark: "持久化任务",
+        alistId: 1,
+        srcPath: ["/Photos"],
+        dstPath: ["/Backup"],
+        method: 0,
+        isCron: 2,
+        enable: 1,
+      }),
+    });
+    expect(await json<{ code: number; data: null }>(editResponse)).toMatchObject({
+      code: 200,
+      data: null,
+    });
 
     const listResponse = await fetch(`${apiUrl}/job?pageNum=1&pageSize=20`);
     const list = await json<{

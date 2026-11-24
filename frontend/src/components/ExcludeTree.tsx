@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
+import Tag from "@douyinfe/semi-ui/lib/es/tag";
 import Tree from "@douyinfe/semi-ui/lib/es/tree";
 import type { TreeNodeData } from "@douyinfe/semi-ui/lib/es/tree/interface";
-import { IconRefresh } from "@douyinfe/semi-icons";
+import { IconFolderStroked, IconRefresh } from "@douyinfe/semi-icons";
 import {
   applyExcludeTreeCheck,
   buildExcludeCheckedKeys,
@@ -65,18 +66,18 @@ export function ExcludeTree({
       return;
     }
 
-    const rootKeys = initialExcludeExpandedKeys(srcPaths);
-    const roots: TreeNodeData[] = rootKeys.map((p) => ({
+    const keys = initialExcludeExpandedKeys(srcPaths);
+    const roots: TreeNodeData[] = keys.map((p) => ({
       label: p,
       value: p,
       key: p,
       disabled: true,
       isLeaf: false,
     }));
-    const controller = resetTree(roots, rootKeys);
+    const controller = resetTree(roots, keys);
 
     // 自动加载每个根节点的子目录（仅一级）
-    for (const sp of rootKeys) {
+    for (const sp of keys) {
       void loadChildren(sp, engineId, controller.signal);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -101,6 +102,10 @@ export function ExcludeTree({
     [srcPaths, excludedPaths, onChange],
   );
 
+  const removeExcluded = (target: string) => {
+    onChange(excludedPaths.filter((path) => path !== target));
+  };
+
   if (!engineId || !srcPaths.length) {
     return (
       <div
@@ -110,7 +115,7 @@ export function ExcludeTree({
         aria-label={ariaLabel}
         aria-labelledby={ariaLabelledBy}
       >
-        请先选择引擎和源目录
+        请先在「基础与路径」中选择引擎和源目录
       </div>
     );
   }
@@ -123,6 +128,40 @@ export function ExcludeTree({
       aria-label={ariaLabel}
       aria-labelledby={ariaLabelledBy}
     >
+      {excludedPaths.length > 0 && (
+        <div className="exclude-selected-bar" aria-label="已排除文件夹">
+          <div className="exclude-selected-head">
+            <span className="muted">已排除 {excludedPaths.length} 个目录</span>
+            <Button
+              size="small"
+              type="tertiary"
+              theme="borderless"
+              onClick={() => onChange([])}
+            >
+              清空
+            </Button>
+          </div>
+          <div className="exclude-selected-tags" role="group" aria-label="已排除目录列表">
+            {excludedPaths.map((rel) => (
+              <Tag
+                key={rel}
+                color="blue"
+                type="light"
+                size="large"
+                prefixIcon={<IconFolderStroked size="small" aria-hidden="true" />}
+                closable
+                aria-label={`移除排除目录 ${rel}`}
+                onClose={(_tag, event) => {
+                  event.preventDefault();
+                  removeExcluded(rel);
+                }}
+              >
+                <span className="mono">{rel}</span>
+              </Tag>
+            ))}
+          </div>
+        </div>
+      )}
       <div className="exclude-tree">
         <Tree
           treeData={treeData}

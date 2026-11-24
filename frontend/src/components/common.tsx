@@ -374,13 +374,14 @@ export function ActionMenu({
   );
 }
 
-export function EmptyState() {
+export function EmptyState({ action }: { action?: ReactNode } = {}) {
   return (
     <div className="fnos-empty" role="status" aria-label="空空如也">
       <Empty
         image={<img src="/app/opensync/fnos-empty.png" alt="" />}
         description="空空如也"
       />
+      {action && <div className="empty-state-action">{action}</div>}
     </div>
   );
 }
@@ -421,12 +422,16 @@ export function Field({
   required,
   children,
   hint,
+  error,
+  fieldId,
 }: {
   label: ReactNode;
   ariaLabel?: string;
   required?: boolean;
   children: ReactNode;
   hint?: string;
+  error?: string;
+  fieldId?: string;
 }) {
   const id = useId();
   const childArray = Children.toArray(children);
@@ -447,7 +452,10 @@ export function Field({
     ? { "aria-label": ariaLabel }
     : { "aria-labelledby": `${id}-label` };
   return (
-    <div className="field">
+    <div
+      className={`field${error ? " has-error" : ""}`}
+      data-field={fieldId}
+    >
       <label id={id + "-label"} htmlFor={single ? id : undefined}>
         {label}
         {required && (
@@ -470,6 +478,11 @@ export function Field({
         </div>
       ) : (
         children
+      )}
+      {error && (
+        <div className="field-error" role="alert">
+          {error}
+        </div>
       )}
       {hint && <div className="field-hint">{hint}</div>}
     </div>

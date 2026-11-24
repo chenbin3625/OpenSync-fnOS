@@ -78,6 +78,35 @@ func TestAddJobRejectsMalformedEditID(t *testing.T) {
 	}
 }
 
+func TestAddJobReturnsCreatedID(t *testing.T) {
+	oldCreate := createJobService
+	createJobService = func(job map[string]interface{}) (int64, error) {
+		return 77, nil
+	}
+	t.Cleanup(func() { createJobService = oldCreate })
+
+	router := gin.New()
+	router.POST("/svr/job", AddJob)
+	req := httptest.NewRequest(http.MethodPost, "/svr/job", strings.NewReader(`{"remark":"测试","alistId":1,"srcPath":["/a"],"dstPath":["/b"]}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST /svr/job status = %d, want 200 (body=%s)", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Code int              `json:"code"`
+		Data map[string]int64 `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.Code != 200 || resp.Data["id"] != 77 {
+		t.Fatalf("POST /svr/job response = %+v, want code=200 data.id=77", resp)
+	}
+}
+
 func TestFlexibleIDAcceptsStringAndNumber(t *testing.T) {
 	var req struct {
 		ID *flexibleID `json:"id"`

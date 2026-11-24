@@ -39,32 +39,24 @@ test("opens task editor with step navigation", async ({ page }) => {
     page.getByRole("heading", { name: "新建任务", exact: true }),
   ).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "引擎与路径", exact: true }),
+    page.getByRole("heading", { name: "基础与路径", exact: true }),
   ).toBeVisible();
-  await expect(page.getByLabel("当前步骤")).toHaveText("步骤 1 / 4");
+  await expect(page.getByLabel("当前步骤")).toHaveText("步骤 1 / 3");
   const dialogBox = await page.locator(".editor-modal .semi-modal").boundingBox();
   const viewport = page.viewportSize();
   if ((viewport?.width || 0) >= 1000) {
-    expect(dialogBox?.width).toBeLessThanOrEqual(520);
+    expect(dialogBox?.width).toBeGreaterThanOrEqual(560);
+    expect(dialogBox?.width).toBeLessThanOrEqual(620);
   }
   await expect(
-    page.getByRole("combobox", { name: "同步方式", exact: true }),
-  ).toHaveCount(0);
+    dialog.getByRole("combobox", { name: "同步方式", exact: true }),
+  ).toBeVisible();
+  await expect(dialog.locator(".sync-method-banner")).toContainText(
+    "不会删除目标端多余文件",
+  );
   await expect(
     page.getByRole("button", { name: "下一步", exact: true }),
   ).toBeVisible();
-  await expect(
-    dialog.locator(".setting-row").filter({ hasText: "目标缓存" }),
-  ).toHaveCSS("border-radius", "8px");
-  const sourceCacheLabel = dialog
-    .locator(".setting-row")
-    .filter({ hasText: "源端缓存" })
-    .locator(".setting-row-label");
-  await expect(sourceCacheLabel).toHaveCSS("display", "flex");
-  await expect(sourceCacheLabel).toHaveCSS("gap", "6px");
-  const sourceCacheTipIcon = sourceCacheLabel.locator(".field-tip-icon");
-  await expect(sourceCacheTipIcon).toHaveCSS("width", "16px");
-  await expect(sourceCacheTipIcon).toHaveCSS("height", "16px");
   await expect(
     page.getByRole("button", { name: "下一步", exact: true }),
   ).toHaveCSS("height", "36px");

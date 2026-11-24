@@ -49,7 +49,7 @@ export function RemotePaths({
   onChange,
   // 多选只负责保留用户明确勾选的目录，不做“选父自动选子”的隐藏级联。
   multiple = false,
-  ariaLabel = "选择引擎目录",
+  ariaLabel,
   "aria-labelledby": ariaLabelledBy,
 }: {
   id?: string;
@@ -167,8 +167,8 @@ export function RemotePaths({
   return (
     <div id={id} className="remote-paths">
       <TreeSelect
-        aria-label={ariaLabel}
-        aria-labelledby={ariaLabelledBy}
+        aria-label={ariaLabel || (ariaLabelledBy ? undefined : "选择引擎目录")}
+        aria-labelledby={ariaLabel ? undefined : ariaLabelledBy}
         treeData={treeData}
         value={multiple ? value : value[0]}
         multiple={multiple}

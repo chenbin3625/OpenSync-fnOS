@@ -27,7 +27,7 @@ test("task editor keeps size filters disabled until selected", async ({
         return success([{ name: "Albums" }, { name: "Raw" }]);
       }
       if (path === "/Photos/Albums") {
-        return success([{ name: "2024" }]);
+        return success([{ name: "2024" }, { name: "2025" }]);
       }
       if (path === "/Photos/Raw") {
         return success([]);
@@ -74,7 +74,7 @@ test("task editor keeps size filters disabled until selected", async ({
   await page.locator(".semi-dropdown-menu").getByText("设置", { exact: true }).click();
   const dialog = page.getByRole("dialog");
 
-  await page.getByRole("tab", { name: "文件过滤", exact: true }).click();
+  await page.getByRole("tab", { name: "过滤规则", exact: true }).click();
   const sizeFilters = dialog.locator(".file-size-filters");
   const fileTypeFilter = dialog.locator(".file-type-filter");
   await expect(sizeFilters).toBeVisible();
@@ -109,15 +109,25 @@ test("task editor keeps size filters disabled until selected", async ({
     /semi-select-disabled/,
   );
   const minInput = minRow.getByRole("textbox", { name: "排除小于文件大小" });
+  // 清空并失焦应保持勾选态，而不是静默取消勾选并重置为 10
+  await minInput.fill("");
+  await minRow.getByText("排除小于", { exact: true }).click();
+  await expect(
+    minRow.getByRole("checkbox", { name: "启用排除小于指定大小的文件" }),
+  ).toBeChecked();
+  await expect(minInput).toHaveValue("");
+
   await minInput.fill("not-a-size");
   await minRow.getByText("排除小于", { exact: true }).click();
   await expect(minInput).toHaveValue("not-a-size");
   await dialog.getByRole("button", { name: "保存" }).click();
-  await expect(page.getByText("文件大小必须是有效的非负数")).toBeVisible();
+  await expect(
+    dialog.locator(".field-error").filter({ hasText: "文件大小必须是有效的非负数" }),
+  ).toBeVisible();
   expect(saveAttempts).toBe(0);
 
-  await page.getByRole("tab", { name: "文件夹过滤", exact: true }).click();
   const rootNode = dialog.locator('.exclude-tree [role="treeitem"][data-key="/Photos"]');
+  await rootNode.scrollIntoViewIfNeeded();
   await expect(rootNode).toHaveAttribute("aria-disabled", "true");
   await expect(
     rootNode.getByRole("checkbox", { name: "Toggle the checked state of checkbox" }),
@@ -127,10 +137,14 @@ test("task editor keeps size filters disabled until selected", async ({
   );
   await expect(albumsNode).toHaveAttribute("aria-expanded", "false");
   await albumsNode.getByRole("button").click();
-  await expect(
-    dialog.locator('.exclude-tree [role="treeitem"][data-key="/Photos/Albums/2024"]'),
-  ).toBeVisible();
+  const childNode = dialog.locator(
+    '.exclude-tree [role="treeitem"][data-key="/Photos/Albums/2024"]',
+  );
+  await expect(childNode).toBeVisible();
+  await childNode.locator(".semi-checkbox").click();
+  await expect(dialog.locator(".exclude-selected-bar")).toContainText("Albums/2024/");
   const systemDirFilter = dialog.locator(".system-dir-groups");
+  await systemDirFilter.scrollIntoViewIfNeeded();
   await expect(systemDirFilter).toBeVisible();
   await expect(systemDirFilter).toHaveCSS("border-radius", "8px");
 });
@@ -199,7 +213,7 @@ test("saves a fractional file-size threshold while the input is focused", async 
     .click();
   await page.locator(".semi-dropdown-menu").getByText("设置", { exact: true }).click();
   const dialog = page.getByRole("dialog");
-  await page.getByRole("tab", { name: "文件过滤", exact: true }).click();
+  await page.getByRole("tab", { name: "过滤规则", exact: true }).click();
 
   const minRow = dialog.locator(".file-size-filter-row").filter({ hasText: "排除小于" });
   await minRow.locator(".semi-checkbox").click();
@@ -277,17 +291,9 @@ test("task editor provides preset and custom file type filters", async ({
   await expect(dialog).toBeVisible();
 
   await expect(
-    page.getByRole("tab", { name: "文件夹过滤", exact: true }),
+    page.getByRole("tab", { name: "过滤规则", exact: true }),
   ).toBeVisible();
-  await page.getByRole("tab", { name: "文件夹过滤", exact: true }).click();
-  await expect(
-    page.getByText("仅针对源目录，勾选要忽略的子文件夹", { exact: true }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("checkbox", { name: "临时文件", exact: true }),
-  ).toHaveCount(0);
-
-  await page.getByRole("tab", { name: "文件过滤", exact: true }).click();
+  await page.getByRole("tab", { name: "过滤规则", exact: true }).click();
   await expect(
     dialog.locator(".field-hint").filter({ hasText: "0 表示不限" }),
   ).toHaveCount(0);
@@ -320,19 +326,29 @@ test("task editor provides preset and custom file type filters", async ({
     expect(firstRowPatternCount).toBeLessThanOrEqual(2);
   }
 
-  await page
-    .getByRole("textbox", { name: "自定义文件规则", exact: true })
-    .fill("*.pst");
+  // 非法自定义规则给出具体的内联错误说明
+  const customInput = page.getByRole("textbox", {
+    name: "自定义文件规则",
+    exact: true,
+  });
+  await customInput.fill("dir/a.txt");
+  await page.getByRole("button", { name: "新增文件规则", exact: true }).click();
+  await expect(dialog.locator(".file-type-add-block .field-error")).toContainText(
+    "路径分隔符",
+  );
+
+  // 新增合法自定义规则后以可关闭 Tag 展示，不再提供误导性的 Checkbox
+  await customInput.fill("*.pst");
   await page.getByRole("button", { name: "新增文件规则", exact: true }).click();
   await expect(
-    page.getByRole("button", { name: /^其他/ }),
+    page.getByRole("button", { name: /^自定义规则/ }),
   ).toBeVisible();
   const groupLabels = await dialog.locator(".file-type-group-label").allTextContents();
-  expect(groupLabels.at(-1)).toContain("其他");
-  await page.getByRole("button", { name: "展开其他", exact: true }).click();
-  await expect(
-    page.getByRole("checkbox", { name: "*.pst", exact: true }),
-  ).toBeChecked();
+  expect(groupLabels.at(-1)).toContain("自定义规则");
+  const customTag = dialog.locator(".custom-file-tag").filter({ hasText: "*.pst" });
+  await expect(customTag).toBeVisible();
+  await customTag.locator(".semi-tag-close").click();
+  await expect(customTag).toHaveCount(0);
 });
 
 test("engine form rejects invalid addresses and protects dirty cancellation", async ({
@@ -709,4 +725,343 @@ test("deep paths keep folder names readable", async ({ page }) => {
   // 深层节点名称单行显示，不被挤成多行
   const box = await label.boundingBox();
   expect(box!.height).toBeLessThanOrEqual(24);
+});
+
+test("task editor previews destination folders live across path rules and edit dstMap", async ({
+  page,
+}) => {
+  const listing: Record<string, string[]> = {
+    "/": ["drive", "media", "archive", "backup", "backup-new"],
+    "/drive": ["2", "学习"],
+    "/media": ["photos"],
+    "/archive": ["photos", "videos"],
+    "/backup": [],
+    "/backup-new": [],
+  };
+  await page.route("**/app/opensync/svr/**", async (route) => {
+    const url = new URL(route.request().url());
+    const success = (data: unknown) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ code: 200, data, msg: "" }),
+      });
+    if (url.pathname.endsWith("/session")) {
+      return success({ uid: 1, development: false, version: "test" });
+    }
+    if (url.pathname.endsWith("/alist") && url.searchParams.has("alistId")) {
+      const path = url.searchParams.get("path") || "/";
+      return success((listing[path] || []).map((name) => ({ name })));
+    }
+    if (url.pathname.endsWith("/alist")) {
+      return success([
+        { id: 1, remark: "测试引擎", url: "https://engine.test", userName: "a" },
+      ]);
+    }
+    if (url.pathname.endsWith("/job") && url.searchParams.get("current")) {
+      return success(null);
+    }
+    if (url.pathname.endsWith("/job")) {
+      return success({
+        dataList: [
+          {
+            id: 51,
+            enable: 1,
+            remark: "已保存映射任务",
+            alistId: 1,
+            srcPath: '["/drive/2","/drive/学习"]',
+            dstPath: '["/backup"]',
+            dstMap: JSON.stringify({
+              version: 1,
+              base: ["/backup/"],
+              map: {
+                "/drive/2/\u0000/backup/": "/backup/2/",
+                "/drive/学习/\u0000/backup/": "/backup/学习/",
+              },
+            }),
+            method: 0,
+            isCron: 2,
+            interval: 1440,
+            minFileSize: 0,
+            maxFileSize: 0,
+            exclude: "",
+          },
+        ],
+        count: 1,
+      });
+    }
+    return success(null);
+  });
+
+  await page.goto("/app/opensync/tasks?jobId=51");
+  await page.getByRole("button", { name: "新建任务", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  const preview = dialog.getByRole("region", { name: "同步位置预览" });
+  await expect(preview).toContainText("选择源路径和目标路径后");
+
+  const trees = dialog.locator(".remote-paths");
+  const popover = page.locator(".remote-paths-dropdown");
+  const togglePicker = async (
+    picker: import("@playwright/test").Locator,
+    shouldOpen: boolean,
+  ) => {
+    // Click the left edge of the combobox so we never hit a selected tag's
+    // close icon or the right-hand clear button, and never get blocked by an
+    // upward-opening dropdown covering the modal header.
+    await picker.locator('[role="combobox"]').click({ position: { x: 2, y: 18 } });
+    if (shouldOpen) {
+      await expect(popover).toBeVisible();
+    } else {
+      await expect(popover).toBeHidden();
+    }
+  };
+  const option = (key: string) =>
+    popover.locator(`[role="treeitem"][data-key="${key}"]`);
+  const expand = async (key: string) => {
+    await expect(option(key)).toBeVisible();
+    if ((await option(key).getAttribute("aria-expanded")) === "true") return;
+    await option(key).locator(".semi-tree-option-expand-icon").click();
+    await expect(option(key)).toHaveAttribute("aria-expanded", "true");
+  };
+
+  // Select single source /drive/2 and destination /backup-new -> direct root sync
+  await togglePicker(trees.nth(0), true);
+  await expand("/");
+  await expand("/drive");
+  await option("/drive/2").locator(".semi-tree-option-label").click();
+  await togglePicker(trees.nth(0), false);
+  await expect(preview).toContainText("请选择目标路径");
+
+  await togglePicker(trees.nth(1), true);
+  await expand("/");
+  await option("/backup-new").locator(".semi-tree-option-label").click();
+  await togglePicker(trees.nth(1), false);
+
+  await expect(preview).toContainText("单个源目录");
+  await expect(preview).toContainText("/drive/2/");
+  await expect(preview).toContainText("/backup-new/");
+  await expect(preview).toContainText("例：/drive/2/a.jpg → /backup-new/a.jpg");
+
+  // Add sibling /drive/学习 -> shared parent /drive stripped
+  await togglePicker(trees.nth(0), true);
+  await expand("/drive");
+  await option("/drive/学习").locator(".semi-tree-option-label").click();
+  await togglePicker(trees.nth(0), false);
+
+  await expect(preview).toContainText("共同父目录 /drive");
+  await expect(preview).toContainText("/backup-new/2/");
+  await expect(preview).toContainText("/backup-new/学习/");
+
+  // Add /media/photos and /archive/photos (colliding base names, no shared parent)
+  await togglePicker(trees.nth(0), true);
+  await expand("/media");
+  await option("/media/photos").locator(".semi-tree-option-label").click();
+  await expand("/archive");
+  await option("/archive/photos").locator(".semi-tree-option-label").click();
+  await togglePicker(trees.nth(0), false);
+
+  await expect(preview).toContainText("含同名目录");
+  await expect(preview).toContainText("/backup-new/media/photos/");
+  await expect(preview).toContainText("/backup-new/archive/photos/");
+
+  // Selecting /backup-new as source while /backup-new is destination surfaces inline conflict
+  await togglePicker(trees.nth(0), true);
+  await option("/backup-new").locator(".semi-tree-option-label").click();
+  await togglePicker(trees.nth(0), false);
+  await expect(preview.getByRole("alert")).toContainText("源目录与目标目录不能相同或互相包含");
+
+  expect(
+    await dialog.evaluate((el) => el.scrollWidth <= el.clientWidth),
+  ).toBe(true);
+
+  // Close new-task modal and edit existing job with stored dstMap
+  await dialog.getByRole("button", { name: "取消", exact: true }).click();
+  await page.getByRole("button", { name: "放弃", exact: true }).click();
+  await expect(dialog).not.toBeVisible();
+
+  await page
+    .locator(".overview-card")
+    .getByRole("button", { name: "更多操作", exact: true })
+    .click();
+  await page.locator(".semi-dropdown-menu").getByText("设置", { exact: true }).click();
+  const editDialog = page.getByRole("dialog");
+  const editPreview = editDialog.getByRole("region", { name: "同步位置预览" });
+  await expect(editPreview).toContainText("/backup/2/");
+  await expect(editPreview).toContainText("/backup/学习/");
+
+  // Removing /drive/学习 on edit preserves /backup/2/ from stored dstMap
+  const editSourceTree = editDialog.locator(".remote-paths").first();
+  await togglePicker(editSourceTree, true);
+  await expand("/");
+  await expand("/drive");
+  await option("/drive/学习").locator(".semi-tree-option-label").click();
+  await togglePicker(editSourceTree, false);
+
+  await expect(editPreview).toContainText("/backup/2/");
+  await expect(editPreview).toContainText("沿用原位置");
+  expect(
+    await editDialog.evaluate((el) => el.scrollWidth <= el.clientWidth),
+  ).toBe(true);
+});
+
+test("guides no-engine onboarding, detects cross-job conflicts, and deduplicates dir listing", async ({
+  page,
+}) => {
+  let engines: Array<Record<string, unknown>> = [];
+  let jobs: Array<Record<string, unknown>> = [];
+  let rootCalls = 0;
+
+  await page.route("**/app/opensync/svr/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const success = (data: unknown) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ code: 200, data, msg: "" }),
+      });
+    if (url.pathname.endsWith("/session")) {
+      return success({ uid: 1, development: false, version: "test" });
+    }
+    if (url.pathname.endsWith("/alist") && url.searchParams.has("alistId")) {
+      const path = url.searchParams.get("path") || "/";
+      if (path === "/") {
+        rootCalls++;
+        return success([
+          { name: "Photos" },
+          { name: "Backup" },
+          { name: "Backup2" },
+        ]);
+      }
+      return success([]);
+    }
+    if (url.pathname.endsWith("/alist")) {
+      return success(engines);
+    }
+    if (url.pathname.endsWith("/job") && url.searchParams.get("current")) {
+      return success(null);
+    }
+    if (url.pathname.endsWith("/job") && request.method() === "POST") {
+      return success({ id: 99 });
+    }
+    if (url.pathname.endsWith("/job")) {
+      return success({ dataList: jobs, count: jobs.length });
+    }
+    return success(null);
+  });
+
+  // 1. 无引擎时的冷启动引导
+  await page.goto("/app/opensync/tasks");
+  await expect(
+    page.getByRole("button", { name: "前往添加存储引擎", exact: true }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "新建任务", exact: true }).click();
+  const emptyDialog = page.getByRole("dialog");
+  await expect(emptyDialog.locator(".engine-empty-guide")).toContainText(
+    "还未添加存储引擎",
+  );
+  await emptyDialog
+    .getByRole("button", { name: "前往引擎管理", exact: true })
+    .click();
+  await expect(page).toHaveURL(/\/app\/opensync\/engines/);
+
+  // 2. 有引擎和已有任务时：检测跨任务冲突、目录请求去重、日程预设与提前保存
+  engines = [
+    { id: 1, remark: "主引擎", url: "https://engine.test", userName: "a" },
+    { id: 2, remark: "备引擎", url: "https://engine2.test", userName: "b" },
+  ];
+  jobs = [
+    {
+      id: 50,
+      enable: 1,
+      remark: "已有相册备份",
+      alistId: 1,
+      srcPath: '["/Photos"]',
+      dstPath: '["/Backup"]',
+      method: 0,
+      isCron: 1,
+      second: "0",
+      minute: "0",
+      hour: "2",
+      day: "*",
+      month: "*",
+      day_of_week: "*",
+      interval: 1440,
+      useCacheS: 0,
+      useCacheT: 0,
+      exclude: "",
+    },
+  ];
+
+  await page.goto("/app/opensync/tasks?jobId=50");
+  // 总览页显示所属引擎与过滤概览
+  await expect(page.locator(".overview-card")).toContainText("主引擎");
+  await page.getByRole("button", { name: "新建任务", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("textbox", { name: "任务名称", exact: true }).fill("新任务");
+
+  const trees = dialog.locator(".remote-paths");
+  const popover = page.locator(".remote-paths-dropdown");
+  await trees.nth(0).locator('[role="combobox"]').click({ position: { x: 2, y: 18 } });
+  await expect(popover.locator('[role="treeitem"][data-key="/Photos"]')).toBeVisible();
+  // 同引擎源/目标共享目录缓存：打开弹窗只请求一次根目录
+  expect(rootCalls).toBe(1);
+  await popover
+    .locator('[role="treeitem"][data-key="/Photos"] .semi-tree-option-label')
+    .click();
+  await trees.nth(0).locator('[role="combobox"]').click({ position: { x: 2, y: 18 } });
+
+  await trees.nth(1).locator('[role="combobox"]').click({ position: { x: 2, y: 18 } });
+  await popover
+    .locator('[role="treeitem"][data-key="/Backup"] .semi-tree-option-label')
+    .click();
+  await trees.nth(1).locator('[role="combobox"]').click({ position: { x: 2, y: 18 } });
+
+  // 跨任务冲突在 Step 1 实时提示，并阻止进入下一步
+  const preview = dialog.getByRole("region", { name: "同步位置预览" });
+  await expect(preview.getByRole("alert")).toContainText("已有相册备份");
+
+  // 切换引擎触发二次确认
+  await dialog.getByRole("combobox", { name: "存储引擎", exact: true }).click();
+  await page.getByRole("option").filter({ hasText: "备引擎" }).click();
+  const confirm = page.getByRole("dialog").filter({ hasText: "切换存储引擎？" });
+  await expect(confirm).toBeVisible();
+  await confirm.getByRole("button", { name: "取消", exact: true }).click();
+
+  // 改为不冲突的目标路径 /Backup2 后进入第 2 步
+  await trees.nth(1).locator('[role="combobox"]').click({ position: { x: 2, y: 18 } });
+  await popover
+    .locator('[role="treeitem"][data-key="/Backup"] .semi-tree-option-label')
+    .click();
+  await popover
+    .locator('[role="treeitem"][data-key="/Backup2"] .semi-tree-option-label')
+    .click();
+  await trees.nth(1).locator('[role="combobox"]').click({ position: { x: 2, y: 18 } });
+  await expect(preview.getByRole("alert")).toHaveCount(0);
+
+  await dialog.getByRole("button", { name: "下一步", exact: true }).click();
+  await expect(dialog.locator(".schedule-preview-card")).toContainText("预计接下来执行");
+
+  // 切换定时预设与固定间隔
+  await dialog.getByRole("button", { name: "每周", exact: true }).click();
+  await dialog.getByRole("button", { name: "周一", exact: true }).click();
+  await expect(dialog.locator(".schedule-preview-plan")).toContainText("每周");
+
+  await dialog.getByRole("combobox", { name: "调度方式", exact: true }).click();
+  await page.getByRole("option").filter({ hasText: "固定间隔" }).click();
+  await dialog.getByRole("button", { name: "每 6 小时", exact: true }).click();
+  await expect(dialog.locator(".schedule-preview-plan")).toContainText("每 6 小时（360 分钟）");
+
+  // 第 2 步直接可见「保存」与可选的「过滤规则」按钮，且窄屏下不裁切
+  const footer = dialog.locator(".editor-actions");
+  await expect(footer.getByRole("button", { name: "过滤规则", exact: true })).toBeVisible();
+  await expect(footer.getByRole("button", { name: "保存", exact: true })).toBeVisible();
+  const dialogBox = await dialog.boundingBox();
+  for (const label of ["上一步", "取消", "过滤规则", "保存"]) {
+    const btnBox = await footer
+      .getByRole("button", { name: label, exact: true })
+      .boundingBox();
+    expect(btnBox!.x).toBeGreaterThanOrEqual(dialogBox!.x - 1);
+    expect(btnBox!.x + btnBox!.width).toBeLessThanOrEqual(
+      dialogBox!.x + dialogBox!.width + 1,
+    );
+  }
 });

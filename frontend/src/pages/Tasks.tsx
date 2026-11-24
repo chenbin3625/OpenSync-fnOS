@@ -3,10 +3,11 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Modal from "@douyinfe/semi-ui/lib/es/modal";
 import Switch from "@douyinfe/semi-ui/lib/es/switch";
@@ -17,6 +18,7 @@ import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
 import {
   IconChevronRightStroked,
   IconCloudStroked,
+  IconEditStroked,
   IconPause,
   IconPlay,
   IconPlusStroked,
@@ -29,6 +31,7 @@ import {
   ActionMenu,
   EmptyState,
   Header,
+  IconButton,
   Info,
   InlineNotice,
   LoadingPanel,
@@ -41,7 +44,13 @@ import {
   type MenuAction,
 } from "../components/common";
 import { useAction, useResource } from "../lib/hooks";
-import { resolveJobSelection, resolveTaskTab } from "../lib/taskForm";
+import { buildSyncPathPreview } from "../lib/syncPathPreview";
+import {
+  resolveJobSelection,
+  resolveTaskTab,
+  summarizeJobFilters,
+} from "../lib/taskForm";
+import type { TaskEditorSavedResult } from "./TaskEditor";
 import {
   formatDuration,
   formatNextRun,
@@ -67,6 +76,7 @@ const currentTaskRealtimePollMs = 3000;
 const currentTaskFollowUpMs = 1000;
 
 export default function Tasks() {
+  const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const jobIdParam = params.get("jobId");
   const parsedJobId = jobIdParam === null ? null : Number(jobIdParam);
@@ -243,6 +253,53 @@ export default function Tasks() {
         errorToast(err);
       }
     });
+  const triggerRunJob = (jobId: number, method: number) => {
+    if (method === 2) {
+      confirmAction({
+        title: "确认启动移动同步？",
+        content:
+          "移动模式会在文件复制到目标目录并校验后删除源目录中的对应文件，是否确认立即执行？",
+        okText: "确认移动",
+        onOk: () =>
+          actions.run(async () => {
+            try {
+              await api.jobAction({ id: String(jobId) });
+              Toast.success("已提交执行");
+              await refreshJobs();
+            } catch (err) {
+              errorToast(err);
+              throw err;
+            }
+          }),
+      });
+      return;
+    }
+    action(() => api.jobAction({ id: String(jobId) }), "已提交执行");
+  };
+  const emptyAction =
+    !engines.loading && !engines.error && (engines.data?.length ?? 0) === 0 ? (
+      <div className="empty-guide">
+        <span className="muted">
+          还没有配置存储引擎，先添加引擎即可创建同步任务
+        </span>
+        <Button
+          type="primary"
+          theme="solid"
+          onClick={() => navigate("/engines")}
+        >
+          前往添加存储引擎
+        </Button>
+      </div>
+    ) : !engines.loading ? (
+      <Button
+        type="primary"
+        theme="solid"
+        icon={<IconPlusStroked aria-hidden="true" />}
+        onClick={() => setEditor({ open: true, job: null })}
+      >
+        新建同步任务
+      </Button>
+    ) : undefined;
   return (
     <div className="page task-page">
       {selected && currentTask.data?.approval && (
@@ -381,7 +438,7 @@ export default function Tasks() {
         }
       >
         {!jobs.loading && !jobs.error && !jobs.data?.count ? (
-          <EmptyState />
+          <EmptyState action={emptyAction} />
         ) : (
           <section className="task-detail-pane flex-column">
             <LoadState
@@ -399,32 +456,7 @@ export default function Tasks() {
                     busy={actions.busy}
                     running={!!currentTask.data}
                     runKey={String(currentTask.data?.taskId ?? "idle")}
-                    onRun={() => {
-                      if (selected.method === 2) {
-                        confirmAction({
-                          title: "确认启动移动同步？",
-                          content:
-                            "移动模式会在文件复制到目标目录并校验后删除源目录中的对应文件，是否确认立即执行？",
-                          okText: "确认移动",
-                          onOk: () =>
-                            actions.run(async () => {
-                              try {
-                                await api.jobAction({ id: String(selected.id) });
-                                Toast.success("已提交执行");
-                                await refreshJobs();
-                              } catch (err) {
-                                errorToast(err);
-                                throw err;
-                              }
-                            }),
-                        });
-                        return;
-                      }
-                      action(
-                        () => api.jobAction({ id: String(selected.id) }),
-                        "已提交执行",
-                      );
-                    }}
+                    onRun={() => triggerRunJob(selected.id, selected.method)}
                     onStop={() => {
                       if (!currentTask.data) return;
                       const { taskId } = currentTask.data;
@@ -529,12 +561,24 @@ export default function Tasks() {
           <JobEditor
             job={editor.job}
             engines={engines.data || []}
+            existingJobs={list}
             enginesError={engines.error}
             onRetryEngines={() => void engines.refresh()}
-            onClose={() => setEditor({ open: false, job: null })}
-            onSaved={() => {
+            onNavigateEngines={() => {
               setEditor({ open: false, job: null });
-              void refreshJobs();
+              navigate("/engines");
+            }}
+            onClose={() => setEditor({ open: false, job: null })}
+            onSaved={(result: TaskEditorSavedResult) => {
+              setEditor({ open: false, job: null });
+              if (result.createdId) {
+                update({ jobId: result.createdId, tab: "overview" });
+              }
+              void refreshJobs().then(() => {
+                if (result.runNow && result.createdId) {
+                  triggerRunJob(result.createdId, result.method);
+                }
+              });
             }}
           />
         </Suspense>
@@ -668,6 +712,24 @@ function Overview({
     : `引擎 #${job.alistId}`;
   const engineHost = engine ? engineHostOf(engine.url) : "";
   const enabled = job.enable === 1;
+  const filterSummaries = useMemo(() => summarizeJobFilters(job), [job]);
+  const cacheLabels = [
+    job.useCacheS ? "源端缓存" : "",
+    job.useCacheT ? "目标缓存" : "",
+  ].filter(Boolean);
+  const pathPreview = useMemo(
+    () =>
+      buildSyncPathPreview({
+        srcPaths: parseJobPathList(job.srcPath),
+        dstPaths: parseJobPathList(job.dstPath),
+        storedDstMap: job.dstMap,
+        method: job.method,
+      }),
+    [job.srcPath, job.dstPath, job.dstMap, job.method],
+  );
+  const showPathMapping =
+    pathPreview.items.length > 1 ||
+    pathPreview.items.some((item) => Boolean(item.appendedSuffix));
   const menu: MenuAction[] = [
     {
       label: "设置",
@@ -718,6 +780,12 @@ function Overview({
                 onClick={running ? onStop : onRun}
               />
             </Tooltip>
+            <IconButton
+              label="编辑任务"
+              icon={<IconEditStroked aria-hidden="true" />}
+              disabled={busy}
+              onClick={onEdit}
+            />
             <ActionMenu actions={menu} disabled={busy} />
           </div>
         }
@@ -750,8 +818,41 @@ function Overview({
         <div className="overview-sections">
           <section className="info-section">
             <h3>规则与调度</h3>
+            <Info label="存储引擎">
+              <span className="overview-engine">
+                <span>{engineName}</span>
+                {engineHost && <span className="muted mono">{engineHost}</span>}
+              </span>
+            </Info>
             <Info label="同步方式">{methodLabel(job.method)}</Info>
             <Info label="执行计划">{formatSchedulePlan(job)}</Info>
+            {showPathMapping && (
+              <Info label="目标映射">
+                <div className="overview-path-mapping mono">
+                  {pathPreview.items.map((item) => (
+                    <div key={item.key}>
+                      {item.srcDir} → {item.resolvedDst}
+                    </div>
+                  ))}
+                </div>
+              </Info>
+            )}
+            <Info label="过滤规则">
+              {filterSummaries.length > 0 ? (
+                <div className="overview-summary-tags">
+                  {filterSummaries.map((text) => (
+                    <Tag key={text} size="small" type="light" color="grey">
+                      {text}
+                    </Tag>
+                  ))}
+                </div>
+              ) : (
+                <span className="muted">未启用过滤</span>
+              )}
+            </Info>
+            {cacheLabels.length > 0 && (
+              <Info label="目录缓存">{cacheLabels.join("、")}</Info>
+            )}
             <Info label="最近一次执行">
               <LatestExecution
                 record={latestExecution.data?.dataList?.[0]}

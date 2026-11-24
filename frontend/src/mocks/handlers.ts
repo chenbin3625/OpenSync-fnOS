@@ -286,8 +286,10 @@ export const handlers = [
     if (!body) return fail("请求内容无效");
     const invalid = validateJobInput(body);
     if (invalid) return fail(invalid);
-    mockStore.saveJob(body);
-    return ok(null);
+    const isEdit =
+      body.id !== undefined && body.id !== null && String(body.id) !== "";
+    const saved = mockStore.saveJob(body);
+    return ok(isEdit ? null : { id: saved.id });
   }),
   http.put(`${apiBase}/job`, async ({ request }) => {
     const body = await readBody(request);
