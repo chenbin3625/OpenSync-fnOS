@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 var (
@@ -49,6 +50,7 @@ func GetClientList() ([]map[string]interface{}, error) {
 		return nil, fmt.Errorf("get alist list: %w", err)
 	}
 	for _, client := range clientList {
+		decorateNative(client)
 		delete(client, "token")
 		alistID := util.ToInt64(client["id"])
 		if _, ok := client["maxConcurrentJobs"]; !ok || client["maxConcurrentJobs"] == nil {
@@ -382,6 +384,9 @@ func UpdateClient(alist map[string]interface{}) error {
 		}
 	}
 
+	if alistOld["url"] == "rclone://native" {
+		return publicError("请通过原生存储设置修改引擎")
+	}
 	oldURL := fmt.Sprintf("%v", alistOld["url"])
 	var client *AlistClient
 	if oldURL != urlStr || hasToken {
@@ -586,6 +591,9 @@ func TestClientWithHealth(ctx context.Context, alistID int64) (*EngineHealth, er
 	health := probeEngineRow(ctx, row, false)
 	if health.Status != "online" {
 		log.Printf("alist test failed: alistID=%d: %s", alistID, health.Error)
+		if urlStr == "rclone://native" && strings.TrimSpace(health.Error) != "" {
+			return health, publicError(health.Error)
+		}
 		if health.Error == msg.T(msg.AlistUnAuth) {
 			return health, publicError(msg.T(msg.AlistUnAuth))
 		}
@@ -596,6 +604,19 @@ func TestClientWithHealth(ctx context.Context, alistID int64) (*EngineHealth, er
 
 // GetChildPath gets child directory paths for path selector
 func GetChildPath(ctx context.Context, alistID int64, path string) ([]map[string]string, error) {
+	cfg, err := loadNative(alistID)
+	if err != nil {
+		return nil, err
+	}
+	if cfg != nil {
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+		list, e := cfg.List(ctx, path)
+		if e != nil {
+			return nil, publicError(e.Error())
+		}
+		return list, nil
+	}
 	client, err := GetClientByIDContext(ctx, alistID)
 	if err != nil {
 		return nil, err

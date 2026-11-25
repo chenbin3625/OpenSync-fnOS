@@ -42,8 +42,10 @@ func ExportSystemBackup(includeSecrets bool) (*SystemBackupPayload, error) {
 			"userName":          util.StringValue(row["userName"]),
 			"maxConcurrentJobs": util.ToInt(row["maxConcurrentJobs"]),
 		}
-		if includeSecrets {
-			item["token"] = util.StringValue(row["token"])
+		rawURL := util.StringValue(row["url"])
+		tokenVal := util.StringValue(row["token"])
+		if includeSecrets || isNativeEmptyConfig(rawURL, tokenVal) {
+			item["token"] = tokenVal
 		} else {
 			item["token"] = ""
 		}
@@ -155,10 +157,13 @@ func ImportSystemBackup(payload SystemBackupPayload, conflictMode string) (map[s
 		if maxConcurrent < 0 || maxConcurrent > 50 {
 			maxConcurrent = 0
 		}
-		if err := validateAlistURL(rawURL); err != nil {
+		if err := nativeBackupKey(rawURL, userName, token); err != nil {
 			warnings = append(warnings, fmt.Sprintf("跳过无效地址的引擎 %q", rawURL))
 			enginesSkipped++
 			continue
+		}
+		if rawURL == "rclone://native" && remark == "" {
+			remark = "原生备份"
 		}
 		key := engineBackupKey(rawURL, userName)
 		if existing, exists := engineByKey[key]; exists {

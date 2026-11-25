@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"opensync/internal/mapper"
 	"opensync/internal/msg"
+	"opensync/internal/native"
 	"opensync/pkg/util"
 	"sort"
 	"strings"
@@ -14,10 +15,10 @@ import (
 )
 
 const (
-	dryRunItemLimit     = 500
-	dryRunRunTimeout    = 15 * time.Minute
-	dryRunMaxTracked    = 64
-	dryRunScanWorkers   = 8
+	dryRunItemLimit   = 500
+	dryRunRunTimeout  = 15 * time.Minute
+	dryRunMaxTracked  = 64
+	dryRunScanWorkers = 8
 )
 
 // DryRunItem represents a single planned action in a read-only dry-run preview.
@@ -135,7 +136,14 @@ func StartDryRun(jobID int64) (*DryRunResult, error) {
 		return nil, err
 	}
 	alistID := util.ToInt64(job["alistId"])
-	client, err := GetClientByIDContext(context.Background(), alistID)
+	cfg, err := loadNative(alistID)
+	if err != nil {
+		return nil, err
+	}
+	var client *AlistClient
+	if cfg == nil {
+		client, err = GetClientByIDContext(context.Background(), alistID)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -179,7 +187,45 @@ func StartDryRun(jobID int64) (*DryRunResult, error) {
 	dryRunSessions[jobID] = sess
 	dryRunMu.Unlock()
 
-	go runDryRunSession(ctx, sess, job, client)
+	if cfg != nil {
+		go func() {
+			defer cancel()
+			var prevDirs, pairDirs int64
+			var lastPair string
+			outcome := runNativePairs(ctx, cfg, job, true, nil, func(src, dst string, v native.Event) {
+				pairKey := src + "\x00" + dst
+				if pairKey != lastPair {
+					prevDirs += pairDirs
+					pairDirs = 0
+					lastPair = pairKey
+				}
+				if v.ScanDirs > 0 {
+					if v.ScanDirs > pairDirs {
+						pairDirs = v.ScanDirs
+					}
+					sess.scannedDirs.Store(prevDirs + pairDirs)
+				}
+				if v.File != "" {
+					action := "copy"
+					if v.Updated {
+						action = "update"
+					}
+					sess.addItem(DryRunItem{Action: action, SrcPath: src, DstPath: dst, FileName: v.File, FileSize: v.Size})
+				}
+			})
+			if outcome.err != nil {
+				if ctx.Err() != nil {
+					sess.finish("cancelled", "")
+				} else {
+					sess.finish("failed", outcome.err.Error())
+				}
+			} else {
+				sess.finish("completed", "")
+			}
+		}()
+	} else {
+		go runDryRunSession(ctx, sess, job, client)
+	}
 	return sess.snapshot(), nil
 }
 

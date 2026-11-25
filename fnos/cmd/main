@@ -35,6 +35,7 @@ LOG_ROTATOR_PID_FILE="${TRIM_PKGVAR}/log-rotator.pid"
 START_TIMEOUT=60
 # 本脚本的规范路径，用于确认启动锁的持有者仍是本应用的 `main start|stop`。
 SELF="$(readlink -f "$0" 2>/dev/null || true)"
+SELF="${SELF:-$0}"
 # start / stop 共用的生命周期锁。有 flock 时用它做内核级互斥（进程退出即释放，
 # 不存在“建锁到写 PID 之间”的空窗）；start.lock 目录 + pid 仍在 flock 保护下维护，
 # 兼容旧版脚本并作为缺少 flock 时的回退。
@@ -440,6 +441,7 @@ start_app() {
     acquire_lifecycle_lock 0 '应用正在启动，请稍后重试'
     if status_app; then start_log_rotator "$PID"; start_succeeded; return 0; fi
     [ -x "$BIN" ] || fail_start '应用服务文件缺失，请重新安装对应架构的安装包'
+    "$(dirname "$SELF")/config_callback" || fail_start '无法加载本地目录授权'
     rotate_log
     if [ -L "$LOG_FILE" ]; then
         fail_start '日志文件是符号链接，已拒绝启动以避免写入数据目录之外'

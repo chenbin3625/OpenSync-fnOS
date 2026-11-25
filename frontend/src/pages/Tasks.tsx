@@ -731,7 +731,11 @@ function Overview({
   const engineName = engine
     ? engine.remark || engine.userName
     : `引擎 #${job.alistId}`;
-  const engineHost = engine ? engineHostOf(engine.url) : "";
+  const engineHost = engine
+    ? engine.kind === "rclone" || engine.url === "rclone://native"
+      ? "rclone"
+      : engineHostOf(engine.url)
+    : "";
   const enabled = job.enable === 1;
   const filterSummaries = useMemo(() => summarizeJobFilters(job), [job]);
   const cacheLabels = [

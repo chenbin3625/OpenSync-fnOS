@@ -1,5 +1,14 @@
 #!/bin/bash
+set -eu
+umask 077
 
-### This script is called after the user change environment variables in application setting page.
-
-exit 0
+# fnOS supplies a fresh directory grant list to this callback. Publish it
+# atomically so the running service also sees revocations.
+dir=${TRIM_PKGTMP:?}
+[[ "$dir" = /* && "$dir" != / ]] || exit 1
+mkdir -p "$dir"
+tmp=$(mktemp "$dir/.native-roots.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+printf '%s' "${TRIM_DATA_ACCESSIBLE_PATHS:-}" > "$tmp"
+chmod 0644 "$tmp"
+mv -f "$tmp" "$dir/native-roots"

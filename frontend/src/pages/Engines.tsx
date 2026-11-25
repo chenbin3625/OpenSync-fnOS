@@ -13,6 +13,7 @@ import {
   IconRefresh,
 } from "@douyinfe/semi-icons";
 import { api } from "../api/client";
+import { NativeStorageEditor } from "../components/NativeStorageEditor";
 import {
   Editor,
   Field,
@@ -38,6 +39,8 @@ export default function Engines() {
   const action = useAction();
   const [editing, setEditing] = useState<AlistItem | null | undefined>();
   const [testingId, setTestingId] = useState<number | null>(null);
+  const [nativeOpen, setNativeOpen] = useState(false);
+  const nativeEngine = engines.data?.find((engine) => engine.kind === "rclone");
   const [checkingAll, setCheckingAll] = useState(false);
   const [expandedStorages, setExpandedStorages] = useState<
     Record<number, boolean>
@@ -49,11 +52,20 @@ export default function Engines() {
       .testEngine(id)
       .then((health) => {
         const latency = health?.latencyMs ? `（${health.latencyMs}ms）` : "";
-        const storages =
-          health?.storagesKnown && health.storages
-            ? `，已读取 ${health.storages.length} 个挂载点`
-            : "";
-        Toast.success(`引擎连接正常${latency}${storages}`);
+        const storageList = health?.storagesKnown ? health.storages || [] : [];
+        const unhealthy = storageList.filter((st) => !isStorageHealthy(st)).length;
+        if (unhealthy > 0) {
+          Toast.warning(
+            `引擎在线${latency}，但有 ${unhealthy} 个存储挂载异常`,
+          );
+          setExpandedStorages((prev) => ({ ...prev, [id]: true }));
+        } else {
+          const storages =
+            health?.storagesKnown && storageList.length > 0
+              ? `，已读取 ${storageList.length} 个挂载点`
+              : "";
+          Toast.success(`引擎连接正常${latency}${storages}`);
+        }
         void engines.refresh(true);
       })
       .catch((err) => {
@@ -92,6 +104,12 @@ export default function Engines() {
                 刷新健康状态
               </Button>
             )}
+            <Button
+              disabled={engines.loading && !engines.data}
+              onClick={() => setNativeOpen(true)}
+            >
+              {nativeEngine ? "配置原生存储" : "添加原生存储"}
+            </Button>
             <Button
               theme="solid"
               icon={<IconPlusStroked aria-hidden="true" />}
@@ -162,11 +180,24 @@ export default function Engines() {
                     )}
                   </span>
                 }
-                subtitle={engine.url}
+                subtitle={
+                  engine.kind === "rclone"
+                    ? (() => {
+                        const names = Object.keys(engine.remotes || {}).sort((a, b) =>
+                          a.localeCompare(b),
+                        );
+                        return names.length > 0
+                          ? ["本地授权目录", ...names].join(" · ")
+                          : "本地授权目录（未配置远端存储）";
+                      })()
+                    : engine.url
+                }
                 meta={
                   <div className="engine-meta-stack">
                     <div className="item-meta">
-                      账号 {engine.userName || "—"}
+                      {engine.kind === "rclone"
+                        ? "内置 rclone 引擎"
+                        : `账号 ${engine.userName || "—"}`}
                       {health?.lastCheckedAt
                         ? ` · 最近检测 ${formatTimestamp(health.lastCheckedAt, true)}`
                         : ""}
@@ -248,7 +279,7 @@ export default function Engines() {
                     <IconButton
                       label="编辑引擎"
                       icon={<IconEditStroked aria-hidden="true" />}
-                      onClick={() => setEditing(engine)}
+                      onClick={() => engine.kind==="rclone"?setNativeOpen(true):setEditing(engine)}
                     />
                     <IconButton
                       label="删除引擎"
@@ -275,6 +306,17 @@ export default function Engines() {
           })}
         </div>
       </LoadState>
+      {nativeOpen && (
+        <NativeStorageEditor
+          engine={nativeEngine}
+          onClose={() => setNativeOpen(false)}
+          onChanged={() => void engines.refresh(true)}
+          onSaved={() => {
+            setNativeOpen(false);
+            void engines.refresh(true);
+          }}
+        />
+      )}
       {editing !== undefined && (
         <EngineEditor
           engine={editing}

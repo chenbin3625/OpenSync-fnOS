@@ -171,8 +171,14 @@ export const Realtime = memo(function Realtime({
         )}
         {!task.scanFinish && task.scan && (
           <div className="scan-status">
-            已扫描 {task.scan.scannedDirs} 个目录 · 待扫描{" "}
-            {task.scan.remainingDirs} 个目录
+            已扫描 {task.scan.scannedDirs} 个目录
+            {task.scan.totalFiles
+              ? ` · 共 ${task.scan.totalFiles} 个文件${
+                  task.scan.checkedFiles
+                    ? `（已核对 ${task.scan.checkedFiles}）`
+                    : ""
+                }`
+              : ` · 待扫描 ${task.scan.remainingDirs} 个目录`}
           </div>
         )}
         <Tabs

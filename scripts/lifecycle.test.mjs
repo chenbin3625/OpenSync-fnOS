@@ -40,7 +40,7 @@ const setupLifecycleFixture = ({ appdestSymlink = false } = {}) => {
   mkdirSync(join(realTarget, "server"), { recursive: true });
   copyFileSync(binary, join(realTarget, "server/opensync"));
   if (appdestSymlink) symlinkSync(realTarget, join(fixture, "target"));
-  for (const name of ["main", "upgrade_init", "uninstall_init"]) {
+  for (const name of ["main", "upgrade_init", "uninstall_init", "config_callback"]) {
     copyFileSync(join(root, "fnos/cmd", name), join(fixture, "cmd", name));
     chmodSync(join(fixture, "cmd", name), 0o755);
   }

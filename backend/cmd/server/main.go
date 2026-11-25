@@ -41,6 +41,7 @@ var appVersion = "dev"
 
 const prefix = "/app/opensync"
 const maxRequestBodyBytes = 1 << 20
+
 // maxBackupImportBodyBytes matches the 10 MiB backup file limit in Settings UI
 // plus JSON envelope overhead ({conflictMode, payload}).
 const maxBackupImportBodyBytes = 12 << 20
@@ -100,6 +101,14 @@ func newRouterWithVersionChecker(development bool, allowedOrigins []string, chec
 	api.POST("/system/import", handler.ImportSystemConfig)
 	api.GET("/system/logs", handler.GetSystemLogs)
 	api.GET("/system/logs/download", handler.DownloadSystemLogs)
+	api.GET("/native/storage", handler.GetNativeStorage)
+	api.PUT("/native/engine", handler.SaveNativeEngine)
+	api.POST("/native/storage", handler.SaveNativeStorage)
+	api.PUT("/native/storage", handler.UpdateNativeStorage)
+	api.DELETE("/native/storage", handler.DeleteNativeStorage)
+	api.POST("/native/storage/test", handler.TestNativeStorage)
+	api.POST("/native/storage/import/preview", handler.PreviewNativeImport)
+	api.POST("/native/storage/import", handler.ImportNativeStorage)
 	api.GET("/alist", handler.GetAlist)
 	api.GET("/alist/health", handler.GetAlistHealth)
 	api.POST("/alist", handler.AddAlist)

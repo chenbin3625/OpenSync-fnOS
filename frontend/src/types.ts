@@ -46,7 +46,73 @@ export interface EngineHealth {
   storagesKnown?: boolean;
 }
 
+export interface NativeRemoteDetail {
+  type: string;
+  summary?: string;
+}
+
+export interface NativeLocalRoot {
+  path: string;
+  id: string;
+}
+
+export interface NativeRemoteItem {
+  name: string;
+  type: string;
+  summary: string;
+  options: Record<string, string>;
+  configuredSecrets: string[];
+  usedByJobs: string[];
+  usedByCrypts: string[];
+}
+
+export interface NativeStorageState {
+  engineId: number;
+  enabled: boolean;
+  remark: string;
+  maxConcurrentJobs: number;
+  rcloneAvailable: boolean;
+  rcloneError?: string;
+  localRoots: NativeLocalRoot[];
+  remotes: NativeRemoteItem[];
+}
+
+export interface NativeImportCandidate {
+  name: string;
+  type: string;
+  status: "ready" | "conflict" | "incompatible" | "invalid";
+  existingName?: string;
+  existingType?: string;
+  canReplace: boolean;
+  summary?: string;
+  options: Record<string, string>;
+  configuredSecrets: string[];
+  warnings?: string[];
+  error?: string;
+}
+
+export interface NativeImportPreview {
+  encrypted: boolean;
+  items: NativeImportCandidate[];
+}
+
+export interface NativeImportResult {
+  imported: string[];
+  replaced: string[];
+}
+
+export interface NativeStorageTestResult {
+  ok: boolean;
+  latencyMs: number;
+  message: string;
+  warning?: string;
+  dirsCount?: number;
+}
+
 export interface AlistItem {
+  kind?: "rclone";
+  remotes?: Record<string, string>;
+  remoteDetails?: Record<string, NativeRemoteDetail>;
   id: number;
   remark?: string | null;
   url: string;
@@ -155,6 +221,8 @@ export interface ScanProgress {
   scannedDirs: number;
   remainingDirs: number;
   totalDirs: number;
+  checkedFiles?: number;
+  totalFiles?: number;
 }
 
 export interface FullSyncApprovalPath {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"opensync/internal/config"
+	"opensync/internal/native"
 	"opensync/pkg/util"
 	"runtime"
 	"sync"
@@ -15,11 +16,13 @@ import (
 
 // JobTask represents a running task with sync engine
 type JobTask struct {
-	TaskID      int64
-	JobClient   *JobClient
-	Job         map[string]interface{}
-	AlistClient *AlistClient
-	CreateTime  float64
+	TaskID       int64
+	JobClient    *JobClient
+	Job          map[string]interface{}
+	AlistClient  *AlistClient
+	nativeConfig native.Config
+	nativeStats  atomic.Pointer[nativeProgressSnapshot]
+	CreateTime   float64
 
 	FinishMu       sync.Mutex
 	FinishedCounts map[taskStatus]int
@@ -65,32 +68,34 @@ type JobTask struct {
 	fullSyncDeleteGuardSkipped atomic.Bool
 	// drained records that the executor exited because every queued item
 	// finished — not because the task was stopped or its deadline hit.
-	drained       atomic.Bool
-	ScanTotalDirs atomic.Int64
-	ScanDoneDirs  atomic.Int64
+	drained          atomic.Bool
+	ScanTotalDirs    atomic.Int64
+	ScanDoneDirs     atomic.Int64
+	ScanTotalFiles   atomic.Int64
+	ScanCheckedFiles atomic.Int64
 
 	// CurrentMu guards the transfer meter below (speed bookkeeping).
 	CurrentMu sync.RWMutex
 
-	RetrySourceTaskID         int64
-	RetryStatuses             []taskStatus
-	RetryItemIDs              []int64
-	releaseEngineSlot         func()
-	trashDirMu                sync.Mutex
-	trashDirReady             map[string]struct{}
-	trashDirBusy              map[string]*trashDirState
-	trashRunBucket            string
-	trashItemCounts           map[string]int
-	moveSrcDirMu              sync.Mutex
-	moveSrcSubdirs            map[string]string
-	FatalMu                   sync.Mutex
-	FatalErr                  *string
-	PersistMu                 sync.Mutex
-	PersistErr                error
-	persistBufMu              sync.Mutex
-	persistBuffer             []JobTaskItem
-	persistFlushMu            sync.Mutex
-	persistFlushScheduled     bool
+	RetrySourceTaskID     int64
+	RetryStatuses         []taskStatus
+	RetryItemIDs          []int64
+	releaseEngineSlot     func()
+	trashDirMu            sync.Mutex
+	trashDirReady         map[string]struct{}
+	trashDirBusy          map[string]*trashDirState
+	trashRunBucket        string
+	trashItemCounts       map[string]int
+	moveSrcDirMu          sync.Mutex
+	moveSrcSubdirs        map[string]string
+	FatalMu               sync.Mutex
+	FatalErr              *string
+	PersistMu             sync.Mutex
+	PersistErr            error
+	persistBufMu          sync.Mutex
+	persistBuffer         []JobTaskItem
+	persistFlushMu        sync.Mutex
+	persistFlushScheduled bool
 	// persistFlushTimer is the pending debounced flush. It is retained so the
 	// task can cancel it on completion: an AfterFunc that outlives the task
 	// would still write task items (and reach GetDB) after the run finished,
@@ -126,7 +131,17 @@ func newJobTask(taskID int64, jc *JobClient) (*JobTask, error) {
 		cachedLimits:   &limits,
 	}
 	jt.ctx, jt.cancel = newTaskContext(config.GetConfig().Server.Timeout)
-	client, err := GetClientByIDContext(jt.ctx, util.ToInt64(job["alistId"]))
+	id := util.ToInt64(job["alistId"])
+	cfg, err := loadNative(id)
+	if err != nil {
+		jt.cancel()
+		return nil, err
+	}
+	if cfg != nil {
+		jt.nativeConfig = cfg
+		return jt, nil
+	}
+	client, err := GetClientByIDContext(jt.ctx, id)
 	if err != nil {
 		jt.cancel()
 		return nil, err
@@ -152,6 +167,10 @@ func newTaskContext(timeoutHours int) (context.Context, context.CancelFunc) {
 }
 
 func (jt *JobTask) Start() {
+	if jt.nativeConfig != nil {
+		go jt.runNative()
+		return
+	}
 	scanDone := make(chan struct{})
 	jt.runtimeMu.Lock()
 	jt.scanDone = scanDone

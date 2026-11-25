@@ -19,6 +19,7 @@ import {
 } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { envWithNode, root, run } from "./toolchain.mjs";
+import { bundleRclone } from "./rclone.mjs";
 import { parseManifestVersion, SEMVER_PATTERN } from "./version.mjs";
 
 /** 两个架构的 Go 交叉编译目标；飞牛 manifest 里 x86/arm 分别声明。 */
@@ -211,7 +212,7 @@ export const readVersion = () =>
   parseManifestVersion(readFileSync(join(root, "fnos", "manifest"), "utf8"));
 
 /** 组装单个架构的 fpk，返回产物路径。 */
-export const buildPackage = (arch, { nodeDir } = {}) => {
+export const buildPackage = (arch, { nodeDir, distDir = join(root, "dist") } = {}) => {
   if (!ARCHES.includes(arch)) throw new Error("架构必须是 amd64 或 arm64");
   // The version is injected into the binary. Building without it used to ship
   // appVersion="undefined" from a manifest typo, and a release that reports the
@@ -221,7 +222,6 @@ export const buildPackage = (arch, { nodeDir } = {}) => {
     throw new Error(
       `fnos/manifest 缺少有效的 version=（当前：${version || "空"}），无法注入应用版本`,
     );
-  const distDir = join(root, "dist");
   mkdirSync(distDir, { recursive: true });
   const stage = mkdtempSync(join(distDir, `.stage-${arch}-`));
   const pack = join(stage, `opensync-${arch}`);
@@ -260,6 +260,7 @@ export const buildPackage = (arch, { nodeDir } = {}) => {
       },
     );
 
+    bundleRclone(arch, join(pack, "app", "server"));
     run(resolveFnpack(), ["build", "--directory", pack], {
       cwd: stage,
     });

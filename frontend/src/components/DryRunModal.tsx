@@ -208,7 +208,7 @@ export function DryRunModal({
     >
       <div className="dry-run-body">
         <div className="dry-run-note">
-          只读扫描对比源目录与目标目录，不会对任何文件执行复制、移动、重命名或删除操作。
+          只读扫描对比源目录与目标目录，不会对任何文件执行复制、移动、重命名或删除操作。（使用内容比对或普通 WebDAV 目标时，预演需读取目标内容进行校验）
         </div>
 
         {error && (

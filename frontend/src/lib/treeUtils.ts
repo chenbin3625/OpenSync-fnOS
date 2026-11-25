@@ -8,7 +8,7 @@ export function toTreeChildren(
   return (items || []).map((n) => {
     const name = n.name || n.path || "";
     const full =
-      parentPath === "/" ? "/" + name : parentPath + "/" + name;
+      n.path?.startsWith("/") && n.name ? n.path : parentPath === "/" ? "/" + name : parentPath + "/" + name;
     return { label: name, value: full, key: full, isLeaf: false };
   });
 }

@@ -170,6 +170,99 @@ export const handlers = [
     });
   }),
 
+  http.get(`${apiBase}/native/storage`, () =>
+    ok(mockStore.getNativeStorageState()),
+  ),
+  http.put(`${apiBase}/native/engine`, async ({ request }) => {
+    const body = await readBody(request);
+    if (!body) return fail("请求内容无效");
+    const remark =
+      typeof body.remark === "string" ? body.remark : undefined;
+    const maxConcurrentJobs =
+      body.maxConcurrentJobs === undefined
+        ? undefined
+        : Number(body.maxConcurrentJobs);
+    if (remark !== undefined && !remark.trim()) return fail("请输入引擎名称");
+    if (
+      maxConcurrentJobs !== undefined &&
+      (!Number.isInteger(maxConcurrentJobs) ||
+        maxConcurrentJobs < 0 ||
+        maxConcurrentJobs > 50)
+    ) {
+      return fail("最大并发任务数必须在 0–50 之间");
+    }
+    return ok(mockStore.saveNativeEngine({ remark, maxConcurrentJobs }));
+  }),
+  http.post(`${apiBase}/native/storage`, async ({ request }) => {
+    const body = await readBody(request);
+    if (!body) return fail("请求内容无效");
+    if (typeof body.config === "string" && body.config.trim()) {
+      const res = mockStore.importNativeRemotes({
+        config: body.config,
+        replace: Boolean(body.replace),
+      });
+      return typeof res === "string" ? fail(res) : ok(null);
+    }
+    const err = mockStore.saveNativeRemote({
+      name: typeof body.name === "string" ? body.name : undefined,
+      options: recordBody(body.options) as Record<string, string> | undefined,
+      replace: Boolean(body.replace),
+      maxConcurrentJobs:
+        body.maxConcurrentJobs === undefined
+          ? undefined
+          : Number(body.maxConcurrentJobs),
+    });
+    return err ? fail(err) : ok(null);
+  }),
+  http.put(`${apiBase}/native/storage`, async ({ request }) => {
+    const body = await readBody(request);
+    if (!body || typeof body.name !== "string" || !recordBody(body.options)) {
+      return fail("缺少必要参数");
+    }
+    const err = mockStore.updateNativeRemote({
+      name: body.name,
+      options: recordBody(body.options) as Record<string, string>,
+      clearSecrets: Array.isArray(body.clearSecrets)
+        ? body.clearSecrets.map(String)
+        : undefined,
+    });
+    return err ? fail(err) : ok(null);
+  }),
+  http.delete(`${apiBase}/native/storage`, ({ request }) => {
+    const name = new URL(request.url).searchParams.get("name") || "";
+    if (!name.trim()) return fail("缺少必要参数");
+    const err = mockStore.deleteNativeRemote(name);
+    return err ? fail(err) : ok(null);
+  }),
+  http.post(`${apiBase}/native/storage/test`, async ({ request }) => {
+    const body = await readBody(request);
+    if (!body) return fail("请求内容无效");
+    return ok(
+      mockStore.testNativeRemote({
+        name: typeof body.name === "string" ? body.name : undefined,
+        options: recordBody(body.options) as Record<string, string> | undefined,
+      }),
+    );
+  }),
+  http.post(`${apiBase}/native/storage/import/preview`, async ({ request }) => {
+    const body = await readBody(request);
+    if (!body || typeof body.config !== "string") return fail("请求内容无效");
+    const res = mockStore.previewNativeImport(body.config);
+    return typeof res === "string" ? fail(res) : ok(res);
+  }),
+  http.post(`${apiBase}/native/storage/import`, async ({ request }) => {
+    const body = await readBody(request);
+    if (!body || typeof body.config !== "string") return fail("请求内容无效");
+    const res = mockStore.importNativeRemotes({
+      config: body.config,
+      selected: Array.isArray(body.selected)
+        ? body.selected.map(String)
+        : undefined,
+      replace: Boolean(body.replace),
+    });
+    return typeof res === "string" ? fail(res) : ok(res);
+  }),
+
   http.get(`${apiBase}/alist`, ({ request }) => {
     const query = new URL(request.url).searchParams;
     const engineId = numberParam(query, "alistId");

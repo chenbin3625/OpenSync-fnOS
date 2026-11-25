@@ -29,3 +29,6 @@ frontend/.tmp-*
 /CODE_REVIEW.md
 /FIXES.md
 /review/
+
+# 本地 Agent 运行时技能目录
+/skills/

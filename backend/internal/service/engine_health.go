@@ -176,6 +176,11 @@ func buildEngineAlertContent(name, engineURL, detail, kind string) string {
 }
 
 func probeEngineRow(ctx context.Context, alist map[string]interface{}, sendAlert bool) *EngineHealth {
+	if alist["url"] == "rclone://native" {
+		probe, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		return nativeHealth(probe, alist, sendAlert)
+	}
 	alistID := util.ToInt64(alist["id"])
 	remark := util.StringValue(alist["remark"])
 	urlStr := util.StringValue(alist["url"])

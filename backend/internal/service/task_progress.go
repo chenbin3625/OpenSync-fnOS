@@ -5,6 +5,7 @@ import (
 	"math"
 	"opensync/internal/mapper"
 	"opensync/pkg/util"
+	"path"
 	"sort"
 	"time"
 )
@@ -23,7 +24,12 @@ func (jt *JobTask) scanProgressPayload() scanProgressPayload {
 	if remaining < 0 {
 		remaining = 0
 	}
-	return scanProgressPayload{ScannedDirs: scanned, RemainingDirs: remaining, TotalDirs: total}
+	payload := scanProgressPayload{ScannedDirs: scanned, RemainingDirs: remaining, TotalDirs: total}
+	if totalFiles := jt.ScanTotalFiles.Load(); totalFiles > 0 {
+		payload.TotalFiles = totalFiles
+		payload.CheckedFiles = jt.ScanCheckedFiles.Load()
+	}
+	return payload
 }
 
 func (jt *JobTask) touchWatching() {
@@ -47,6 +53,8 @@ type scanProgressPayload struct {
 	ScannedDirs   int64 `json:"scannedDirs"`
 	RemainingDirs int64 `json:"remainingDirs"`
 	TotalDirs     int64 `json:"totalDirs"`
+	CheckedFiles  int64 `json:"checkedFiles,omitempty"`
+	TotalFiles    int64 `json:"totalFiles,omitempty"`
 }
 
 type taskNumStats struct {
@@ -159,6 +167,34 @@ func (jt *JobTask) getCurrentPayload() jobCurrentPayload {
 	}
 	doneSize := successSize + doingSize
 
+	var nativeSpeed float64
+	if snap := jt.nativeStats.Load(); snap != nil && snap.stats != nil {
+		stats := snap.stats
+		nativeSpeed = stats.Speed
+		remainSize = max(0, stats.TotalBytes-stats.Bytes)
+		doneSize = max(doneSize, stats.Bytes)
+		waitCount = max(0, int(stats.TotalTransfers-stats.Transfers))
+		if len(stats.Transferring) > 0 {
+			doing = make([]streamDoingItem, 0, len(stats.Transferring))
+			runningSize = 0
+			for _, item := range stats.Transferring {
+				rel := path.Clean(item.Name)
+				runningSize += item.Size
+				doing = append(doing, streamDoingItem{
+					FileName:   path.Base(rel),
+					SrcPath:    path.Join(snap.src, path.Dir(rel)),
+					DstPath:    path.Join(snap.dst, path.Dir(rel)),
+					FileSize:   item.Size,
+					Type:       taskItemTypeCopy.Int(),
+					Status:     taskStatusRunning.Int(),
+					Progress:   item.Percentage,
+					CreateTime: now,
+				})
+			}
+			waitCount = max(0, waitCount-len(doing))
+		}
+	}
+
 	payload := jobCurrentPayload{
 		TaskID:     jt.TaskID,
 		ScanFinish: jt.ScanFinish.Load(),
@@ -195,10 +231,18 @@ func (jt *JobTask) getCurrentPayload() jobCurrentPayload {
 		}
 	}
 
-	payload.Speed = jt.sampleSpeed(duration, doneSize)
+	if jt.nativeConfig != nil {
+		payload.Speed = nativeSpeed
+	} else {
+		payload.Speed = jt.sampleSpeed(duration, doneSize)
+	}
 
-	if payload.SpeedAvg > 0 && remainSize > 0 {
-		payload.RemainTime = int(math.Ceil(float64(remainSize) / payload.SpeedAvg))
+	rateForETA := payload.SpeedAvg
+	if rateForETA <= 0 && payload.Speed > 0 {
+		rateForETA = payload.Speed
+	}
+	if rateForETA > 0 && remainSize > 0 {
+		payload.RemainTime = int(math.Ceil(float64(remainSize) / rateForETA))
 	}
 	return payload
 }
@@ -240,7 +284,16 @@ func (jt *JobTask) GetCurrent() map[string]interface{} {
 		"speed": payload.Speed, "speedAvg": payload.SpeedAvg, "remainTime": payload.RemainTime,
 	}
 	if payload.Scan != nil {
-		result["scan"] = map[string]int64{"scannedDirs": payload.Scan.ScannedDirs, "remainingDirs": payload.Scan.RemainingDirs, "totalDirs": payload.Scan.TotalDirs}
+		scanMap := map[string]int64{
+			"scannedDirs":   payload.Scan.ScannedDirs,
+			"remainingDirs": payload.Scan.RemainingDirs,
+			"totalDirs":     payload.Scan.TotalDirs,
+		}
+		if payload.Scan.TotalFiles > 0 {
+			scanMap["checkedFiles"] = payload.Scan.CheckedFiles
+			scanMap["totalFiles"] = payload.Scan.TotalFiles
+		}
+		result["scan"] = scanMap
 	}
 	if payload.FirstSync != nil {
 		result["firstSync"] = *payload.FirstSync
@@ -409,6 +462,25 @@ func (jt *JobTask) doingStreamItems() []streamDoingItem {
 }
 
 func (jt *JobTask) doingTaskMaps() []map[string]interface{} {
+	if snap := jt.nativeStats.Load(); snap != nil && snap.stats != nil && len(snap.stats.Transferring) > 0 {
+		now := time.Now().Unix()
+		dos := make([]map[string]interface{}, 0, len(snap.stats.Transferring))
+		for _, item := range snap.stats.Transferring {
+			rel := path.Clean(item.Name)
+			dos = append(dos, map[string]interface{}{
+				"taskId":     jt.TaskID,
+				"srcPath":    path.Join(snap.src, path.Dir(rel)),
+				"dstPath":    path.Join(snap.dst, path.Dir(rel)),
+				"fileName":   path.Base(rel),
+				"fileSize":   item.Size,
+				"type":       taskItemTypeCopy.Int(),
+				"status":     taskStatusRunning.Int(),
+				"progress":   item.Percentage,
+				"createTime": now,
+			})
+		}
+		return dos
+	}
 	jt.DoingMu.RLock()
 	defer jt.DoingMu.RUnlock()
 

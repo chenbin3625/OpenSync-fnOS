@@ -192,6 +192,8 @@ export default function TaskEditor({
   );
   const { form, dirty, change, patch, setForm, setDirty } =
     useEditorForm<JobForm>(() => seedForm);
+  const nativeEngine = engines.find((engine) => engine.id === form.alistId)?.kind === "rclone";
+  const [nativeTarget, setNativeTarget] = useState("");
   const notifications = useResource((signal) => api.notifications(signal));
   const [fileSizeDrafts, setFileSizeDrafts] = useState<FileSizeDrafts>({});
   const [sizeEnabled, setSizeEnabled] = useState<{ min: boolean; max: boolean }>(
@@ -396,6 +398,9 @@ export default function TaskEditor({
       setForm((current) => ({
         ...current,
         alistId: nextEngineId,
+        ...(engines.find((engine) => engine.id === nextEngineId)?.kind === "rclone"
+          ? { method: 0, trashEnable: false, conflictPolicy: 0, useCacheS: false, useCacheT: false, scanIntervalS: 0, scanIntervalT: 0 }
+          : {}),
         srcPath: [],
         dstPath: [],
         // 文件夹过滤记录的是旧引擎源目录下的相对路径，换引擎后不再对应
@@ -671,7 +676,7 @@ export default function TaskEditor({
                         }
                         disabled={!engines.length}
                         optionList={engines.map((engine) => ({
-                          label: `${engine.remark || engine.userName} · ${engine.url}`,
+                          label: engine.kind==="rclone" ? `${engine.remark || "原生备份"} · rclone` : `${engine.remark || engine.userName} · ${engine.url}`,
                           value: engine.id,
                         }))}
                         onChange={handleEngineChange}
@@ -719,7 +724,7 @@ export default function TaskEditor({
                       <Select
                         aria-labelledby={methodLabelId}
                         value={form.method}
-                        optionList={methodOptions.map((method, value) => ({
+                        optionList={(nativeEngine ? methodOptions.slice(0,1) : methodOptions).map((method, value) => ({
                           value,
                           label: method.name,
                         }))}
@@ -774,6 +779,27 @@ export default function TaskEditor({
                     </Field>
                   </div>
 
+                  {nativeEngine && (
+                    <Field label="输入目标路径" hint="仅有存储桶权限或目标文件夹尚不存在时，可直接添加路径。源目录请从本地授权目录中选择。">
+                      <div className="field-group">
+                        <Input value={nativeTarget} onChange={setNativeTarget} placeholder="/存储名称/存储桶/备份目录" />
+                        <Button
+                          disabled={(() => {
+                            const t = nativeTarget.trim();
+                            return !t.startsWith("/") || t === "/" || t.split("/").filter(Boolean).length === 0;
+                          })()}
+                          onClick={() => {
+                            const cleaned = nativeTarget.trim().replace(/\/+$/, "");
+                            if (!cleaned || cleaned === "/") return;
+                            change("dstPath", Array.from(new Set([...form.dstPath, cleaned])));
+                            setNativeTarget("");
+                          }}
+                        >
+                          添加路径
+                        </Button>
+                      </div>
+                    </Field>
+                  )}
                   <SyncPathPreview
                     srcPaths={form.srcPath}
                     dstPaths={form.dstPath}
@@ -822,7 +848,7 @@ export default function TaskEditor({
                         <Field label="同名冲突处理">
                           <Select
                             value={form.conflictPolicy}
-                            optionList={conflictPolicyOptions.map((o) => ({
+                            optionList={(nativeEngine ? conflictPolicyOptions.slice(0,2) : conflictPolicyOptions).map((o) => ({
                               label: o.label,
                               value: o.value,
                             }))}
@@ -838,6 +864,7 @@ export default function TaskEditor({
                         >
                           <Switch
                             aria-label="启用目标端回收站"
+                            disabled={nativeEngine}
                             checked={form.trashEnable}
                             onChange={(v) => change("trashEnable", v)}
                           />
@@ -1434,6 +1461,7 @@ export default function TaskEditor({
                         >
                           <Switch
                             aria-label="源端缓存"
+                            disabled={nativeEngine}
                             checked={form.useCacheS}
                             onChange={(value) => change("useCacheS", value)}
                           />
@@ -1445,6 +1473,7 @@ export default function TaskEditor({
                         >
                           <Switch
                             aria-label="目标缓存"
+                            disabled={nativeEngine}
                             checked={form.useCacheT}
                             onChange={(value) => change("useCacheT", value)}
                           />
@@ -1456,6 +1485,7 @@ export default function TaskEditor({
                           >
                             <Input
                               inputMode="numeric"
+                              disabled={nativeEngine}
                               value={String(form.scanIntervalS)}
                               onChange={(v) =>
                                 change(
@@ -1471,6 +1501,7 @@ export default function TaskEditor({
                           >
                             <Input
                               inputMode="numeric"
+                              disabled={nativeEngine}
                               value={String(form.scanIntervalT)}
                               onChange={(v) =>
                                 change(

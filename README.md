@@ -12,17 +12,17 @@
 [![适用平台](https://img.shields.io/badge/%E5%B9%B3%E5%8F%B0-fnOS%20x86%20%7C%20arm64-1677ff)](https://github.com/chenbin3625/OpenSync-fnOS/releases)
 [![许可证](https://img.shields.io/github/license/chenbin3625/OpenSync-fnOS?label=%E8%AE%B8%E5%8F%AF%E8%AF%81)](LICENSE)
 
-当前版本：**v0.0.44**
+当前版本：**v0.0.46**
 
 [下载安装](https://github.com/chenbin3625/OpenSync-fnOS/releases/latest) · [快速上手](#快速上手) · [常见问题](#常见问题)
 
 </div>
 
-OpenSync 是一款运行在飞牛 fnOS 上的文件同步与备份应用。它借助 **OpenList（兼容 AList）** 连接你的本地磁盘、网盘和 WebDAV 等存储，再按你设定的时间，自动把文件从源目录复制、镜像或移动到目标目录。
+OpenSync 是运行在飞牛 fnOS 上的文件同步与备份应用。内置 rclone 可直接备份 NAS 文件，也可通过 OpenList（兼容 AList）同步已有网盘挂载。
 
-所有同步配置都在图形界面完成，不需要写脚本：在 OpenList 里添加好存储，在 OpenSync 里填上地址和 Token，再建一个任务，第一次备份就可以跑起来了。
+两种引擎都可以在任务向导中设置执行时间、过滤规则和通知。
 
-> **一句话理解**：OpenSync 决定「什么时候、把哪些文件、从哪同步到哪」，真正的读写由 OpenList 完成。
+原生任务由随包的 rclone 执行。已有 OpenList 任务使用原来的挂载和访问权限。
 
 ## 目录
 
@@ -70,8 +70,8 @@ OpenSync 是一款运行在飞牛 fnOS 上的文件同步与备份应用。它�
 ### 安装前准备
 
 - 飞牛 fnOS **1.2.0401 或更高版本**；
-- 已安装并运行 **OpenList**（或 AList），并在其中至少添加了一个存储；
-- OpenSync 所在设备能够访问 OpenList 的地址。
+- 原生备份需要向 OpenSync 授予本地源目录的读取权限。
+- 使用 OpenList 引擎时，需要可访问的 OpenList 或 AList 服务，并在其中至少添加一个存储。
 
 > 如果还没有 OpenList，可以先参考 [OpenList 项目](https://github.com/OpenListTeam/OpenList) 完成安装。OpenList 支持的本地磁盘、S3、WebDAV、阿里云盘、百度网盘、OneDrive 等存储，都可以直接在 OpenSync 中使用。
 
@@ -88,11 +88,24 @@ OpenSync 是一款运行在飞牛 fnOS 上的文件同步与备份应用。它�
 
 1. 在飞牛中打开「应用中心」，选择「手动安装」，上传下载好的 `.fpk` 文件。
 2. 等待安装完成，在应用列表中找到 **OpenSync** 并打开。
-3. 首次使用可在应用设置中按需配置访问目录；如果使用本地目录作为存储，还需要在 OpenList 中添加并授权该目录，确保 OpenList 进程有读写权限。飞牛应用设置中的授权目录不会自动同步为 OpenList 存储。
+3. 原生任务在飞牛应用设置中授权目录。OpenList 任务需要在 OpenList 中单独挂载和授权目录。
 
 安装包同时提供 `SHA256SUMS` 校验文件，熟悉命令行的用户可以自行校验完整性。
 
 ## 快速上手
+
+### 使用原生备份
+
+1. 在飞牛应用设置中给 **OpenSync** 授权源文件夹。如果目标是本机其他磁盘，同时授权目标文件夹。
+2. 进入「引擎管理 → 添加原生存储」。本地盘直接选择「本地授权目录」。远端可通过表单添加，也可导入 `rclone.conf`。加密配置文件需要输入配置密码。一次导入支持多个命名存储和相互引用的 Crypt 配置。
+3. S3 表单支持阿里云 OSS、腾讯云 COS、Cloudflare R2、MinIO 和 Backblaze B2 的 S3 兼容接口。填写服务商给出的 endpoint、区域和密钥。WebDAV、SFTP 和 SMB 各有独立表单。SFTP 可录入可信的 known_hosts 公钥；留空时，OpenSync 会记录首次连接得到的公钥，后续连接验证该公钥。
+4. 使用 Crypt 时先添加底层存储，再填写类似 `archive:bucket/private` 的目标路径，或选择授权范围内的本机绝对路径。保存密码和加密盐以便恢复。导入支持所列后端的常用连接字段，并会指出不支持的字段；外部命令和指向私钥文件的字段请改为受支持的内嵌配置。
+5. 在任务中选择「原生备份」，从「本地」选择源，选择目标和计划。目标尚不存在或凭据只能访问指定存储桶时，可直接输入 `/存储名称/桶名/目录`。预演后可立即执行或等待调度。
+
+原生备份保留源端已删除文件的目标副本，默认更新同名文件。普通 WebDAV 默认读回目标内容后比对，仅上传缺失或变化的文件，会消耗下载流量。备份范围是普通文件，符号链接和空目录会跳过。目标盘身份发生变化时任务会停止，请重新确认授权目录。默认配置导出隐藏存储凭据，勾选「包含密钥」会同时导出 Crypt 配置。
+
+### 使用 OpenList 同步
+
 
 下面以「把 NAS 上的照片备份到网盘」为例，第一次配置大约需要 5 分钟。
 
@@ -322,7 +335,7 @@ OpenSync 是一款运行在飞牛 fnOS 上的文件同步与备份应用。它�
 
 ### 必须安装 OpenList 吗？能不能直接连网盘？
 
-需要安装。OpenSync 依赖 OpenList / AList 作为存储引擎，本身不直接对接网盘。好处是只要 OpenList 支持的存储——本地磁盘、S3、WebDAV、阿里云盘、百度网盘、OneDrive 等——都能直接在 OpenSync 里使用，具体支持范围以你使用的 OpenList 版本为准。
+原生备份只需安装 OpenSync。使用 OpenList 引擎的任务需要可访问的 OpenList 或 AList 服务。
 
 ### 在 OpenList 里添加的目录，为什么 OpenSync 里看不到文件？
 

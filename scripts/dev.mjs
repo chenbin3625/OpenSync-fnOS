@@ -2,7 +2,7 @@
 // 一键启动本地预览：Go 后端（--dev，按显式配置监听可信局域网）+ Vite 前端开发服务。
 // 用法：node scripts/dev.mjs  或  npm run dev
 import { spawn } from "node:child_process";
-import { createWriteStream, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -299,13 +299,18 @@ const runCli = async () => {
   process.on("SIGINT", () => void supervisor.shutdown(0, "\n收到 Ctrl-C。"));
   process.on("SIGTERM", () => void supervisor.shutdown(0, "\n收到终止信号。"));
 
+  const bundledDevRclone = join(root, ".tools", "rclone", "bin", "rclone");
+  const backendEnv = { OPENSYNC_DEV_HOST: "0.0.0.0" };
+  if (!process.env.OPENSYNC_RCLONE_BIN && existsSync(bundledDevRclone)) {
+    backendEnv.OPENSYNC_RCLONE_BIN = bundledDevRclone;
+  }
   const backend = supervisor.start(
     "backend",
     "go",
     ["run", "./cmd/server", "--dev", "--port", String(BACKEND_PORT)],
     {
       cwd: join(root, "backend"),
-      env: { OPENSYNC_DEV_HOST: "0.0.0.0" },
+      env: backendEnv,
       color: "36",
     },
   );

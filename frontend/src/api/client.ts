@@ -10,6 +10,10 @@ import type {
   FilterTestResult,
   FullSyncApproval,
   JobItem,
+  NativeImportPreview,
+  NativeImportResult,
+  NativeStorageState,
+  NativeStorageTestResult,
   NotifyItem,
   PageData,
   SystemBackupPayload,
@@ -257,6 +261,47 @@ export const api = {
     request<{ name?: string; path?: string }[]>("/alist", {
       params: { alistId, path },
       signal,
+    }),
+  nativeStorageState: (signal?: AbortSignal) =>
+    request<NativeStorageState>("/native/storage", {
+      signal,
+      cache: "no-store",
+    }),
+  saveNativeEngine: (data: { remark?: string; maxConcurrentJobs?: number }) =>
+    request<NativeStorageState>("/native/engine", { method: "PUT", data }),
+  saveNativeStorage: (data: unknown) =>
+    request("/native/storage", { method: "POST", data }),
+  updateNativeStorage: (data: {
+    name: string;
+    options: Record<string, string>;
+    clearSecrets?: string[];
+  }) => request("/native/storage", { method: "PUT", data }),
+  deleteNativeStorage: (name: string) =>
+    request("/native/storage", { method: "DELETE", params: { name } }),
+  testNativeStorage: (data: {
+    name?: string;
+    options?: Record<string, string>;
+    editing?: boolean;
+    clearSecrets?: string[];
+  }) =>
+    request<NativeStorageTestResult>("/native/storage/test", {
+      method: "POST",
+      data,
+    }),
+  previewNativeImport: (data: { config: string; configPassword?: string }) =>
+    request<NativeImportPreview>("/native/storage/import/preview", {
+      method: "POST",
+      data,
+    }),
+  importNativeStorage: (data: {
+    config: string;
+    configPassword?: string;
+    selected?: string[];
+    replace?: boolean;
+  }) =>
+    request<NativeImportResult>("/native/storage/import", {
+      method: "POST",
+      data,
     }),
   saveEngine: (data: unknown, edit: boolean) =>
     request("/alist", { method: edit ? "PUT" : "POST", data }),

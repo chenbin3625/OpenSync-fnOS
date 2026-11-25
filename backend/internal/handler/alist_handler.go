@@ -29,6 +29,78 @@ func GetAlist(c *gin.Context) {
 	})
 }
 
+func GetNativeStorage(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	handleService(c, func() (interface{}, error) {
+		return service.GetNativeStorageState(c.Request.Context())
+	})
+}
+
+func SaveNativeEngine(c *gin.Context) {
+	var in service.NativeEngineInput
+	if !bindJSONStrict(c, &in) {
+		return
+	}
+	handleService(c, func() (interface{}, error) {
+		return service.SaveNativeEngine(c.Request.Context(), in)
+	})
+}
+
+func SaveNativeStorage(c *gin.Context) {
+	var in service.NativeStorageInput
+	if !bindJSONStrict(c, &in) {
+		return
+	}
+	handleServiceVoid(c, func() error { return service.SaveNativeStorage(c.Request.Context(), in) })
+}
+
+func UpdateNativeStorage(c *gin.Context) {
+	var in service.NativeRemoteEditInput
+	if !bindJSONStrict(c, &in) {
+		return
+	}
+	handleServiceVoid(c, func() error { return service.UpdateNativeStorage(c.Request.Context(), in) })
+}
+
+func PreviewNativeImport(c *gin.Context) {
+	var in service.NativeImportInput
+	if !bindJSONStrict(c, &in) {
+		return
+	}
+	handleService(c, func() (interface{}, error) {
+		return service.PreviewNativeImport(c.Request.Context(), in)
+	})
+}
+
+func ImportNativeStorage(c *gin.Context) {
+	var in service.NativeImportInput
+	if !bindJSONStrict(c, &in) {
+		return
+	}
+	handleService(c, func() (interface{}, error) {
+		return service.ImportNativeStorage(c.Request.Context(), in)
+	})
+}
+
+func TestNativeStorage(c *gin.Context) {
+	var in service.NativeStorageTestInput
+	if !bindJSONStrict(c, &in) {
+		return
+	}
+	handleService(c, func() (interface{}, error) {
+		return service.TestNativeStorage(c.Request.Context(), in)
+	})
+}
+
+func DeleteNativeStorage(c *gin.Context) {
+	name := c.Query("name")
+	if name == "" {
+		respondError(c, msg.T(msg.LostPart))
+		return
+	}
+	handleServiceVoid(c, func() error { return service.DeleteNativeStorage(name) })
+}
+
 // AddAlist handles POST /svr/alist
 func AddAlist(c *gin.Context) {
 	var req map[string]interface{}

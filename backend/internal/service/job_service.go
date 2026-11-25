@@ -834,7 +834,13 @@ func addJobClient(job map[string]interface{}, isInit bool) (int64, error) {
 		if err := validateJobDestinationConflicts(job); err != nil {
 			return 0, err
 		}
-		if _, err := alistDeps.GetAlistByID(util.ToInt64(job["alistId"])); err != nil {
+		row, err := alistDeps.GetAlistByID(util.ToInt64(job["alistId"]))
+		if err == nil {
+			if err := validateNativeJob(job, row); err != nil {
+				return 0, err
+			}
+		}
+		if err != nil {
 			if err := publicErrorIf(err, msg.T(msg.AlistNotFound)); err != nil {
 				return 0, err
 			}
@@ -896,8 +902,12 @@ func EditJobClient(job map[string]interface{}) error {
 	var alistErr error
 	var updateErr error
 	if conflictErr == nil {
-		_, alistErr = alistDeps.GetAlistByID(util.ToInt64(job["alistId"]))
+		var row map[string]interface{}
+		row, alistErr = alistDeps.GetAlistByID(util.ToInt64(job["alistId"]))
 		if alistErr == nil {
+			conflictErr = validateNativeJob(job, row)
+		}
+		if alistErr == nil && conflictErr == nil {
 			updateErr = mapper.UpdateJob(job)
 		}
 	}

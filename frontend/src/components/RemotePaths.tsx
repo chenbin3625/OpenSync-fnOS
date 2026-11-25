@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Highlight from "@douyinfe/semi-ui/lib/es/highlight";
 import Tag from "@douyinfe/semi-ui/lib/es/tag";
@@ -40,6 +40,27 @@ function SelectedPath({ path }: { path: string }) {
       <span className="remote-paths-selected-name">{name}</span>
     </span>
   );
+}
+
+function mergeMissingNodes(
+  base: TreeNodeData[],
+  extra: TreeNodeData[],
+): TreeNodeData[] {
+  const result = base.map((node) => ({ ...node }));
+  for (const item of extra) {
+    const idx = result.findIndex((n) => n.key === item.key);
+    if (idx === -1) {
+      result.push(item);
+    } else if (item.children?.length) {
+      const existing = result[idx];
+      result[idx] = {
+        ...existing,
+        isLeaf: false,
+        children: mergeMissingNodes(existing.children || [], item.children),
+      };
+    }
+  }
+  return result;
 }
 
 export function RemotePaths({
@@ -97,6 +118,13 @@ export function RemotePaths({
     resetTree(seed(value), []);
     if (engineId) void loadData();
   }, [engineId, resetTree, loadData]);
+
+  // Keep manually added paths (e.g. non-existent native target subdirectories)
+  // present in treeData so TreeSelect renders and removes their tags reliably.
+  const displayTreeData = useMemo(
+    () => (value.length ? mergeMissingNodes(treeData, seed(value)) : treeData),
+    [treeData, value],
+  );
 
   // 节点名不换行，过长时可横向滚动；悬停显示完整路径
   const renderLabel = useCallback(
@@ -169,7 +197,7 @@ export function RemotePaths({
       <TreeSelect
         aria-label={ariaLabel || (ariaLabelledBy ? undefined : "选择引擎目录")}
         aria-labelledby={ariaLabel ? undefined : ariaLabelledBy}
-        treeData={treeData}
+        treeData={displayTreeData}
         value={multiple ? value : value[0]}
         multiple={multiple}
         treeNodeLabelProp="value"
