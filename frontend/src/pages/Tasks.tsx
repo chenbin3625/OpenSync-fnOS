@@ -9,7 +9,6 @@ import {
 } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import Button from "@douyinfe/semi-ui/lib/es/button";
-import Modal from "@douyinfe/semi-ui/lib/es/modal";
 import Switch from "@douyinfe/semi-ui/lib/es/switch";
 import Tabs from "@douyinfe/semi-ui/lib/es/tabs";
 import Tag from "@douyinfe/semi-ui/lib/es/tag";
@@ -46,6 +45,10 @@ import {
   type MenuAction,
 } from "../components/common";
 import { DryRunModal } from "../components/DryRunModal";
+import {
+  FullSyncApprovalModal,
+  PendingApprovalBanner,
+} from "../components/FullSyncApprovalModal";
 import { useAction, useResource } from "../lib/hooks";
 import { buildSyncPathPreview } from "../lib/syncPathPreview";
 import {
@@ -68,7 +71,7 @@ import {
   parseJobPathList,
 } from "./Home/homeUtils";
 import { formatTimestamp } from "../utils/date";
-import type { AlistItem, FullSyncApproval, JobItem, TaskRecord } from "../types";
+import type { AlistItem, JobItem, TaskRecord } from "../types";
 
 const Realtime = lazy(() =>
   import("./TaskExecution").then((module) => ({ default: module.Realtime })),
@@ -108,6 +111,8 @@ export default function Tasks() {
     job: null,
   });
   const [dryRunOpen, setDryRunOpen] = useState(false);
+  const [approvalModalOpen, setApprovalModalOpen] = useState(false);
+  const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
   const [pendingCreatedId, setPendingCreatedId] = useState<number | null>(null);
   const mobileJobButtons = useRef<Array<HTMLButtonElement | null>>([]);
   const actions = useAction();
@@ -148,14 +153,66 @@ export default function Tasks() {
     },
     [selectedJobId],
   );
+  const pendingApproval = useResource(
+    async (signal) => {
+      if (!selectedJobId || deletedJobIdsRef.current.has(selectedJobId)) {
+        return null;
+      }
+      return api.pendingApproval(selectedJobId, signal);
+    },
+    [selectedJobId],
+  );
   const hasCurrentTask = !!currentTask.data;
-  const approvalVisible = !!currentTask.data?.approval;
-  const hadApproval = useRef(false);
-  useEffect(() => {
-    if (approvalVisible && !hadApproval.current) Toast.destroyAll();
-    hadApproval.current = approvalVisible;
-  }, [approvalVisible]);
+  const activeApproval = pendingApproval.data ?? null;
+  const approvalExecuting = activeApproval?.status === "executing";
   const refreshCurrentTask = currentTask.refresh;
+  const refreshPendingApproval = pendingApproval.refresh;
+  const requestedApprovalOpen = params.get("approval") === "1";
+
+  // Reset modal open state when switching jobs.
+  useEffect(() => {
+    setApprovalModalOpen(false);
+  }, [selectedJobId]);
+
+  // Honor ?approval=1 (from the global banner) once when approval data arrives,
+  // then clean the query flag so closing the modal does not re-open it.
+  useEffect(() => {
+    if (!requestedApprovalOpen || !activeApproval) return;
+    setApprovalModalOpen(true);
+    const next = new URLSearchParams(params);
+    next.delete("approval");
+    setParams(next, { replace: true });
+  }, [requestedApprovalOpen, activeApproval, params, setParams]);
+
+  // Refresh pending approval whenever a running task finishes, and refresh
+  // jobs/history whenever background deletion completes.
+  const prevTaskIdRef = useRef<number | null>(null);
+  useEffect(() => {
+    const curId = currentTask.data?.taskId ?? null;
+    if (prevTaskIdRef.current !== null && curId === null) {
+      void refreshPendingApproval(true);
+      void jobs.refresh(true);
+      window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
+    }
+    prevTaskIdRef.current = curId;
+  }, [currentTask.data?.taskId, refreshPendingApproval, jobs.refresh]);
+
+  const prevExecutingRef = useRef(false);
+  useEffect(() => {
+    if (prevExecutingRef.current && !approvalExecuting) {
+      setHistoryRefreshKey((k) => k + 1);
+      void jobs.refresh(true);
+      window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
+    }
+    prevExecutingRef.current = approvalExecuting;
+  }, [approvalExecuting, jobs.refresh]);
+
+  useEffect(() => {
+    if (!activeApproval && approvalModalOpen) {
+      setApprovalModalOpen(false);
+    }
+  }, [activeApproval, approvalModalOpen]);
+
   const realtimeTab = requestedTab === "realtime";
   const prevRealtimeTab = useRef(realtimeTab);
   useEffect(() => {
@@ -181,14 +238,25 @@ export default function Tasks() {
           !deletedJobIdsRef.current.has(selectedJobId)
         ) {
           void refreshCurrentTask(true);
+          void refreshPendingApproval(true);
         }
       },
-      realtimeTab ? currentTaskRealtimePollMs : currentTaskPollMs,
+      approvalExecuting
+        ? 1500
+        : realtimeTab
+          ? currentTaskRealtimePollMs
+          : currentTaskPollMs,
     );
     return () => {
       clearInterval(interval);
     };
-  }, [selectedJobId, realtimeTab, refreshCurrentTask]);
+  }, [
+    selectedJobId,
+    realtimeTab,
+    approvalExecuting,
+    refreshCurrentTask,
+    refreshPendingApproval,
+  ]);
   const currentTaskSettled =
     !!selectedJobId &&
     snapshotState?.jobId === selectedJobId &&
@@ -216,19 +284,14 @@ export default function Tasks() {
     },
     [params, setParams],
   );
-  const handleRealtimeEnded = useCallback(
-    () => update({ tab: "overview" }),
-    [update],
-  );
+  const handleRealtimeEnded = useCallback(() => {
+    void refreshPendingApproval(true);
+    update({ tab: "overview" });
+  }, [update, refreshPendingApproval]);
   const handleOpenRealtime = useCallback(
     () => update({ tab: "realtime" }),
     [update],
   );
-  const handleApprovalDetected = useCallback(() => {
-    if (selectedJobId && !deletedJobIdsRef.current.has(selectedJobId)) {
-      void refreshCurrentTask(true);
-    }
-  }, [selectedJobId, refreshCurrentTask]);
   const refreshJobs = async (options?: { skipCurrentTask?: boolean }) => {
     await jobs.refresh(true);
     window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
@@ -236,12 +299,15 @@ export default function Tasks() {
       clearTimeout(followUp.current);
       return;
     }
-    await currentTask.refresh(true);
+    await Promise.all([
+      currentTask.refresh(true),
+      pendingApproval.refresh(true),
+    ]);
     clearTimeout(followUp.current);
-    followUp.current = setTimeout(
-      () => void refreshCurrentTask(true),
-      currentTaskFollowUpMs,
-    );
+    followUp.current = setTimeout(() => {
+      void refreshCurrentTask(true);
+      void refreshPendingApproval(true);
+    }, currentTaskFollowUpMs);
   };
   const action = (operation: () => Promise<unknown>, message: string) =>
     void actions.run(async () => {
@@ -300,35 +366,40 @@ export default function Tasks() {
         新建同步任务
       </Button>
     ) : undefined;
+  const approvePendingDelete = () =>
+    actions.run(async () => {
+      if (!activeApproval?.taskId) return;
+      try {
+        await api.taskAction(activeApproval.taskId, "approve");
+        setApprovalModalOpen(false);
+        Toast.success("已提交后台校验并执行删除");
+        await refreshJobs();
+      } catch (err) {
+        errorToast(err);
+      }
+    });
+  const rejectPendingDelete = () =>
+    actions.run(async () => {
+      if (!activeApproval?.taskId) return;
+      try {
+        await api.taskAction(activeApproval.taskId, "reject");
+        setApprovalModalOpen(false);
+        Toast.success("已跳过本次删除，目标端文件已保留");
+        await refreshJobs();
+      } catch (err) {
+        errorToast(err);
+      }
+    });
   return (
     <div className="page task-page">
-      {selected && currentTask.data?.approval && (
+      {selected && activeApproval && approvalModalOpen && (
         <FullSyncApprovalModal
-          approval={currentTask.data.approval}
-          taskId={currentTask.data.taskId}
+          approval={activeApproval}
+          jobName={getJobName(selected)}
           busy={actions.busy}
-          onApprove={() =>
-            actions.run(async () => {
-              try {
-                await api.taskAction(currentTask.data!.taskId, "approve");
-                Toast.success("已确认执行");
-                await refreshJobs();
-              } catch (err) {
-                errorToast(err);
-              }
-            })
-          }
-          onReject={() =>
-            actions.run(async () => {
-              try {
-                await api.taskAction(currentTask.data!.taskId, "reject");
-                Toast.success("已取消执行");
-                await refreshJobs();
-              } catch (err) {
-                errorToast(err);
-              }
-            })
-          }
+          onClose={() => setApprovalModalOpen(false)}
+          onApprove={approvePendingDelete}
+          onReject={rejectPendingDelete}
         />
       )}
       <Header
@@ -444,6 +515,14 @@ export default function Tasks() {
             />
             {selected && !jobs.error ? (
               <div className="task-tab-content">
+                {activeApproval && (
+                  <PendingApprovalBanner
+                    approval={activeApproval}
+                    busy={actions.busy}
+                    onInspect={() => setApprovalModalOpen(true)}
+                    onReject={() => void rejectPendingDelete()}
+                  />
+                )}
                 {tab === "overview" && (
                   <Overview
                     job={selected}
@@ -528,7 +607,6 @@ export default function Tasks() {
                       key={selected.id}
                       jobId={selected.id}
                       onTaskEnded={handleRealtimeEnded}
-                      onApprovalDetected={handleApprovalDetected}
                     />
                   </Suspense>
                 )}
@@ -538,6 +616,7 @@ export default function Tasks() {
                       key={selected.id}
                       jobId={selected.id}
                       currentTaskId={currentTask.data?.taskId}
+                      refreshKey={historyRefreshKey}
                       onOpenRealtime={handleOpenRealtime}
                     />
                   </Suspense>
@@ -607,94 +686,6 @@ export default function Tasks() {
         </Suspense>
       )}
     </div>
-  );
-}
-
-function FullSyncApprovalModal({
-  approval,
-  taskId,
-  busy,
-  onApprove,
-  onReject,
-}: {
-  approval: FullSyncApproval;
-  taskId: number;
-  busy: boolean;
-  onApprove: () => Promise<unknown>;
-  onReject: () => Promise<unknown>;
-}) {
-  const visiblePaths = approval.paths || [];
-  const remaining = Math.max(0, approval.pathCount - visiblePaths.length);
-  return (
-    <Modal
-      visible
-      width={520}
-      className="fnos-confirm full-sync-approval-modal"
-      centered
-      closable={false}
-      closeOnEsc={false}
-      maskClosable={false}
-      title="确认全量同步"
-      footer={
-        <div className="editor-actions">
-          <Button type="tertiary" onClick={onReject} disabled={busy}>
-            拒绝并取消同步
-          </Button>
-          <Button
-            type="danger"
-            theme="solid"
-            loading={busy}
-            onClick={onApprove}
-          >
-            确认并继续
-          </Button>
-        </div>
-      }
-    >
-      <div className="full-sync-approval">
-        <p className="full-sync-approval-lead">
-          {approval.deleteCount > 0
-            ? `本次同步预计会删除目标端 ${approval.deleteCount} 个文件或目录${
-                approval.deleteSize > 0
-                  ? `（${formatSize(approval.deleteSize)}）`
-                  : ""
-              }。`
-            : "本次同步会调整目标端文件位置，文件内容会保留。"}
-        </p>
-        <p className="field-hint">
-          下面列出部分目标端路径；移动项会保留文件内容，只清理目标端旧位置。
-        </p>
-        <div className="full-sync-approval-list" role="list">
-          {visiblePaths.map((item) => (
-            <div
-              className="full-sync-approval-item"
-              role="listitem"
-              key={`${item.action}:${item.path}`}
-            >
-              <Tag
-                size="small"
-                type="light"
-                color={item.action === "删除" ? "red" : "blue"}
-              >
-                {item.action}
-              </Tag>
-              <span className="full-sync-approval-path">{item.path}</span>
-              <span className="muted">
-                {item.isPath
-                  ? `${item.count} 项${item.size > 0 ? ` · ${formatSize(item.size)}` : ""}`
-                  : formatSize(item.size)}
-              </span>
-            </div>
-          ))}
-        </div>
-        {remaining > 0 && (
-          <div className="field-hint">还有 {remaining} 个路径未展开。</div>
-        )}
-        <div className="field-hint">
-          任务 #{taskId} 已暂停，确认后才会开始写入和删除。
-        </div>
-      </div>
-    </Modal>
   );
 }
 

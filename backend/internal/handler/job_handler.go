@@ -519,3 +519,24 @@ func TestJobFilter(c *gin.Context) {
 		return service.TestJobFilter(req)
 	})
 }
+
+// GetPendingApproval handles GET /svr/job/approval.
+// With jobId it returns that job's pending deletion approval (or null);
+// without jobId it returns all pending deletion approvals.
+func GetPendingApproval(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	if rawJobID := c.Query("jobId"); rawJobID != "" {
+		jobID, err := parseRequiredID(rawJobID)
+		if err != nil {
+			respondError(c, err.Error())
+			return
+		}
+		handleService(c, func() (interface{}, error) {
+			return service.GetPendingApproval(jobID), nil
+		})
+		return
+	}
+	handleService(c, func() (interface{}, error) {
+		return service.ListPendingApprovals(), nil
+	})
+}

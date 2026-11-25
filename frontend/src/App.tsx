@@ -380,17 +380,19 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
               <span>
                 有 {pendingApprovalJobs.length} 个全量同步任务（
                 {getJobName(pendingApprovalJobs[0])}
-                {pendingApprovalJobs.length > 1 ? " 等" : ""}）正在等待删除确认
+                {pendingApprovalJobs.length > 1 ? " 等" : ""}）存在待确认删除项（不影响同步运行）
               </span>
               <Button
                 size="small"
                 type="danger"
                 theme="solid"
                 onClick={() =>
-                  navigate(`/tasks?jobId=${pendingApprovalJobs[0].id}&tab=overview`)
+                  navigate(
+                    `/tasks?jobId=${pendingApprovalJobs[0].id}&tab=overview&approval=1`,
+                  )
                 }
               >
-                立即审批
+                查看并审批
               </Button>
             </div>
           )}

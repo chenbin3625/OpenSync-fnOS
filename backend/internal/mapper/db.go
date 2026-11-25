@@ -47,6 +47,19 @@ var (
 // a deterministic seam.
 var initDBPauseForTest func()
 
+// dbIfInitialized returns the active database handle only when one has already
+// been opened and shutdown has not started. Callers that want best-effort
+// persistence (without lazily creating a file database during in-memory unit
+// tests) use this instead of GetDB.
+func dbIfInitialized() *sql.DB {
+	dbMu.RLock()
+	defer dbMu.RUnlock()
+	if shutdown {
+		return nil
+	}
+	return db
+}
+
 // currentOnce reads the once guard under dbMu. CloseDB replaces it, so reading
 // the package variable unsynchronized would race with shutdown.
 func currentOnce() *sync.Once {

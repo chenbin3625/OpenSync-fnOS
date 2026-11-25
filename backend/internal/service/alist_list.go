@@ -315,7 +315,7 @@ func (c *AlistClient) fetchFileListPage(ctx context.Context, req alistListReques
 	if err := c.checkWaitContext(ctx, req.Path, scanInterval); err != nil {
 		return fileListPage{}, err
 	}
-	resp, err := c.startRequest(ctx, http.MethodPost, "/api/fs/list", req, nil)
+	resp, err := c.startRequest(withAlistSlowMetaOperation(ctx), http.MethodPost, "/api/fs/list", req, nil)
 	if err != nil {
 		return fileListPage{}, err
 	}

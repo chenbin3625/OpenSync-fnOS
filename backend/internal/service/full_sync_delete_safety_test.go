@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -27,6 +28,8 @@ func (rec *removeRecorder) server(t *testing.T) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
+		case "/api/me":
+			_, _ = w.Write([]byte(`{"code":200,"data":{"username":"admin"}}`))
 		case "/api/fs/list":
 			var req alistListRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -703,6 +706,8 @@ func TestFullSyncIncompleteScanCopiesWithoutDeleting(t *testing.T) {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		switch r.URL.Path {
+		case "/api/me":
+			_, _ = w.Write([]byte(`{"code":200,"data":{"username":"admin"}}`))
 		case "/api/fs/list":
 			switch body.Path {
 			case "/src/":
@@ -837,5 +842,75 @@ func TestFullSyncRootDestinationGuardsDeletesOnEmptySource(t *testing.T) {
 	jt.runFullSyncDeletes()
 	if calls := rec.calls(); len(calls) != 0 {
 		t.Fatalf(`remove calls = %#v, want none when root "/" source listed empty`, calls)
+	}
+}
+
+func TestFullSyncIncompleteScanGuardDistinguishesSrcAndDstFailure(t *testing.T) {
+	cases := []struct {
+		name           string
+		srcFailed      bool
+		dstFailed      bool
+		wantSubstring  string
+		forbidSubstr   string
+	}{
+		{
+			name:          "destination scan failed only",
+			dstFailed:     true,
+			wantSubstring: "full-sync destination scan was incomplete",
+			forbidSubstr:  "请确认来源目录可正常列举后重试",
+		},
+		{
+			name:          "source scan failed only",
+			srcFailed:     true,
+			wantSubstring: "full-sync source scan was incomplete",
+			forbidSubstr:  "请确认来源目录可正常列举后重试",
+		},
+		{
+			name:          "both scans failed",
+			srcFailed:     true,
+			dstFailed:     true,
+			wantSubstring: "full-sync source and destination scans were incomplete",
+			forbidSubstr:  "请确认来源目录可正常列举后重试",
+		},
+		{
+			name:          "generic scanIncomplete fallback",
+			wantSubstring: "full-sync scan was incomplete",
+			forbidSubstr:  "请确认来源目录可正常列举后重试",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var persisted []map[string]interface{}
+			restorePersist := stubPersistJobTaskItems(t, &persisted, nil)
+			defer restorePersist()
+
+			rec := &removeRecorder{}
+			server := rec.server(t)
+			defer server.Close()
+
+			src := &fullSyncSnapshot{root: "/src/", dirs: map[string]FileListResult{"": {"a.txt": {Size: 1}}}}
+			dst := &fullSyncSnapshot{root: "/dst/", dirs: map[string]FileListResult{"": {"a.txt": {Size: 1}}}}
+			plan := newFullSyncPlan(src, dst, nil)
+			plan.scanIncomplete = true
+			plan.srcScanFailed = tc.srcFailed
+			plan.dstScanFailed = tc.dstFailed
+
+			jt := deleteSafetyTask(t, server.URL, server.Client())
+			jt.executeFullSyncPlan(plan)
+			if err := jt.flushPersistBuffer(); err != nil {
+				t.Fatalf("flushPersistBuffer() error: %v", err)
+			}
+			if len(persisted) != 1 {
+				t.Fatalf("persisted = %#v, want 1 guard record", persisted)
+			}
+			gotMsg := taskItemErrMsg(persisted[0]["errMsg"])
+			if !strings.Contains(gotMsg, tc.wantSubstring) {
+				t.Fatalf("guard errMsg = %q, want substring %q", gotMsg, tc.wantSubstring)
+			}
+			if strings.Contains(gotMsg, tc.forbidSubstr) {
+				t.Fatalf("guard errMsg = %q, must not contain misleading text %q", gotMsg, tc.forbidSubstr)
+			}
+		})
 	}
 }

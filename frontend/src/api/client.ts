@@ -8,6 +8,7 @@ import type {
   DryRunResult,
   EngineHealth,
   FilterTestResult,
+  FullSyncApproval,
   JobItem,
   NotifyItem,
   PageData,
@@ -299,6 +300,17 @@ export const api = {
     ),
   current: (id: number, signal?: AbortSignal) =>
     requestCurrentTask<CurrentTaskData | null>({ id }, signal),
+  pendingApproval: (jobId: number, signal?: AbortSignal) =>
+    request<FullSyncApproval | null>("/job/approval", {
+      params: { jobId },
+      signal,
+      cache: "no-store",
+    }),
+  pendingApprovals: (signal?: AbortSignal) =>
+    request<FullSyncApproval[]>("/job/approval", {
+      signal,
+      cache: "no-store",
+    }),
   history: (
     id: number,
     params: Record<string, unknown>,
@@ -334,6 +346,11 @@ export const api = {
         action,
         ...(itemIds && itemIds.length > 0 ? { itemIds } : {}),
       },
+    }).then((result) => {
+      if (action === "approve" || action === "reject") {
+        invalidateJobsCache();
+      }
+      return result;
     }),
   deleteTask: (taskId: number) =>
     request("/job", { method: "DELETE", params: { taskId } }),

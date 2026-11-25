@@ -73,11 +73,9 @@ const fileTableWidths = {
 export const Realtime = memo(function Realtime({
   jobId,
   onTaskEnded,
-  onApprovalDetected,
 }: {
   jobId: number;
   onTaskEnded?: () => void;
-  onApprovalDetected?: () => void;
 }) {
   const {
     currentTask,
@@ -103,14 +101,6 @@ export const Realtime = memo(function Realtime({
     hadTask.current = false;
     onTaskEnded?.();
   }, [currentTask, taskLoading, taskError, onTaskEnded]);
-  const hasApproval = Boolean(currentTask?.approval);
-  const prevApproval = useRef(false);
-  useEffect(() => {
-    if (hasApproval && !prevApproval.current) {
-      onApprovalDetected?.();
-    }
-    prevApproval.current = hasApproval;
-  }, [hasApproval, onApprovalDetected]);
   if (!currentTask) {
     if (taskError)
       return (
@@ -234,10 +224,12 @@ export const Realtime = memo(function Realtime({
 export const History = memo(function History({
   jobId,
   currentTaskId,
+  refreshKey = 0,
   onOpenRealtime,
 }: {
   jobId: number;
   currentTaskId?: number;
+  refreshKey?: number;
   onOpenRealtime: () => void;
 }) {
   const [page, setPage] = useState(1);
@@ -271,6 +263,12 @@ export const History = memo(function History({
     prevCurrentTaskId.current = currentTaskId;
     void refreshHistory(true);
   }, [currentTaskId, refreshHistory]);
+  const prevRefreshKey = useRef(refreshKey);
+  useEffect(() => {
+    if (prevRefreshKey.current === refreshKey) return;
+    prevRefreshKey.current = refreshKey;
+    void refreshHistory(true);
+  }, [refreshKey, refreshHistory]);
   const action = useAction();
   const rows = resource.data?.dataList || [];
   const totalCount = resource.data?.count || 0;

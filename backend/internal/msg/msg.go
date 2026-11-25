@@ -40,9 +40,10 @@ const (
 	CannotResumeLostJob     = "CannotResumeLostJob"
 	DisabledJobCannotRun    = "DisabledJobCannotRun"
 	CannotDisableManualJob  = "CannotDisableManualJob"
-	TaskNotRunningStop      = "TaskNotRunningStop"
-	FullSyncPending         = "FullSyncPending"
-	NoFailedTaskItems       = "NoFailedTaskItems"
+	TaskNotRunningStop        = "TaskNotRunningStop"
+	FullSyncPending           = "FullSyncPending"
+	FullSyncApprovalExecuting = "FullSyncApprovalExecuting"
+	NoFailedTaskItems         = "NoFailedTaskItems"
 	NotifyTestMsg           = "NotifyTestMsg"
 	NotifyURLInvalid        = "NotifyURLInvalid"
 	NotifyMethodInvalid     = "NotifyMethodInvalid"
@@ -168,9 +169,10 @@ var translations = map[string]map[string]string{
 		CannotResumeLostJob:     "作业不存在无法恢复，请删除后重新创建",
 		DisabledJobCannotRun:    "禁用的作业不能运行",
 		CannotDisableManualJob:  "不可禁用仅手动任务",
-		TaskNotRunningStop:      "任务未在运行中，无法停止",
-		FullSyncPending:         "全量同步当前不在待确认状态",
-		NoFailedTaskItems:       "没有可重试的未完成项",
+		TaskNotRunningStop:        "任务未在运行中，无法停止",
+		FullSyncPending:           "当前没有待确认的删除项",
+		FullSyncApprovalExecuting: "待确认删除正在后台执行中，请勿重复操作",
+		NoFailedTaskItems:         "没有可重试的未完成项",
 		NotifyTestMsg:           "这是一条由您自己发送的OpenSync测试消息，当你看到这条消息，说明你的配置是正确可用的。",
 		NotifyURLInvalid:        "Webhook URL必须是有效的 HTTP 或 HTTPS URL",
 		NotifyMethodInvalid:     "通知方式不支持",
@@ -224,8 +226,8 @@ var translations = map[string]map[string]string{
 		TaskRunningCannotDelete:  "正在运行中的任务记录不能删除",
 		NoRetryItemSelected:      "未选中可重试的失败项",
 
-		NotifyApprovalTitle:         "全量同步待确认",
-		NotifyApprovalContent:       "任务「%s」检测到目标端存在 %d 个待删除项（%d 个文件，%d 个目录），已暂停等待确认。请在 OpenSync 中查看清单并确认或跳过删除。",
+		NotifyApprovalTitle:         "待确认删除",
+		NotifyApprovalContent:       "任务「%s」已完成同步，检测到目标端存在 %d 个待删除项（%d 个文件，%d 个目录），不影响后续同步任务。请在 OpenSync 中查看清单并确认或跳过删除。",
 		NotifyEngineOfflineTitle:    "存储引擎连接异常",
 		NotifyEngineOnlineTitle:     "存储引擎已恢复在线",
 		NotifyEngineStorageErrTitle: "存储引擎挂载状态异常",
@@ -242,7 +244,7 @@ var translations = map[string]map[string]string{
 
 		FmtExcludeRulesUnsupported: "以下过滤规则不受支持，已拒绝保存：%s。仅支持三种写法：文件名（可含 * 通配）、*.后缀、相对目录/",
 		FmtIncludeRulesUnsupported: "以下白名单规则不受支持，已拒绝保存：%s。仅支持文件名（可含 * 通配）或 *.后缀",
-		FmtMirrorDeleteGuard:       "为防止误删，已跳过本次全量同步的删除阶段：%s。请确认来源目录可正常列举后重试",
+		FmtMirrorDeleteGuard:       "为防止误删，已跳过本次全量同步的删除阶段：%s。请确认来源和目标目录可正常访问后重试",
 		FmtUnsafeDeleteTarget:      "已拒绝删除 %q（位于 %q）：名称不是单个文件或目录",
 		FmtScanError:               "%s目录扫描失败，原因为: %s",
 		FmtJobDstConflict:          "目标目录 %s 已被其他同步任务使用，两个任务会互相覆盖或删除对方写入的文件，请调整目标目录",
@@ -283,9 +285,10 @@ var translations = map[string]map[string]string{
 		CannotResumeLostJob:     "Job does not exist and cannot be resumed, please delete and recreate",
 		DisabledJobCannotRun:    "Disabled jobs cannot be run",
 		CannotDisableManualJob:  "Cannot disable manual-only jobs",
-		TaskNotRunningStop:      "Task is not running and cannot be stopped",
-		FullSyncPending:         "The full sync is not waiting for approval",
-		NoFailedTaskItems:       "No failed items available to retry",
+		TaskNotRunningStop:        "Task is not running and cannot be stopped",
+		FullSyncPending:           "No pending deletions awaiting approval",
+		FullSyncApprovalExecuting: "Pending deletions are already executing",
+		NoFailedTaskItems:         "No failed items available to retry",
 		NotifyTestMsg:           "This is a test message sent by OpenSync. If you see this, your configuration is working correctly.",
 		NotifyURLInvalid:        "Webhook URL must be a valid HTTP or HTTPS URL",
 		NotifyMethodInvalid:     "Notification method not supported",
@@ -339,8 +342,8 @@ var translations = map[string]map[string]string{
 		TaskRunningCannotDelete:   "Cannot delete a task while it is running",
 		NoRetryItemSelected:       "No retryable failed items selected",
 
-		NotifyApprovalTitle:         "Full Sync Awaiting Approval",
-		NotifyApprovalContent:       "Job \"%s\" detected %d destination items to delete (%d files, %d folders) and paused awaiting approval. Open OpenSync to review and confirm or skip deletion.",
+		NotifyApprovalTitle:         "Deletions Awaiting Approval",
+		NotifyApprovalContent:       "Job \"%s\" finished syncing with %d destination items pending deletion (%d files, %d folders). Syncing is not blocked; open OpenSync to review and confirm or skip deletion.",
 		NotifyEngineOfflineTitle:    "Storage Engine Offline",
 		NotifyEngineOnlineTitle:     "Storage Engine Recovered",
 		NotifyEngineStorageErrTitle: "Storage Mount Alert",
@@ -357,7 +360,7 @@ var translations = map[string]map[string]string{
 
 		FmtExcludeRulesUnsupported: "The following filter rules are not supported and were rejected: %s. Only three formats are supported: filename (with * wildcard), *.extension, relative/directory/",
 		FmtIncludeRulesUnsupported: "The following whitelist rules are not supported and were rejected: %s. Only filename (with * wildcard) or *.extension are supported",
-		FmtMirrorDeleteGuard:       "To prevent accidental deletion, the delete phase of this full sync was skipped: %s. Please verify the source directory can be listed correctly and try again",
+		FmtMirrorDeleteGuard:       "To prevent accidental deletion, the delete phase of this full sync was skipped: %s. Please verify both source and destination directories are accessible and try again",
 		FmtUnsafeDeleteTarget:      "Refused to delete %q in %q: the name is not a single file or directory",
 		FmtScanError:               "%s directory scan failed: %s",
 		FmtJobDstConflict:          "Destination directory %s is already used by another sync job; the two jobs would overwrite or delete each other's files, please adjust the destination",

@@ -1151,6 +1151,116 @@ body[theme-mode="dark"] .fnos-empty img {
   word-break: break-word;
 }
 
+.full-sync-approval-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 12px;
+}
+
+.approval-modal-notice {
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  font-size: var(--font-size-small);
+  line-height: 1.5;
+}
+
+.approval-modal-notice.is-warning {
+  border: 1px solid var(--warning-border);
+  background: var(--warning-surface);
+  color: var(--warning-text);
+}
+
+.approval-modal-notice.is-error {
+  border: 1px solid var(--danger-border, rgba(245, 63, 63, 0.35));
+  background: var(--danger-surface, rgba(245, 63, 63, 0.08));
+  color: var(--semi-color-danger);
+}
+
+.task-approval-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 12px 16px;
+  margin-bottom: 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--warning-border);
+  border-left: 3px solid var(--semi-color-warning);
+  background: var(--warning-surface);
+  color: var(--warning-text);
+}
+
+.task-approval-banner.is-executing {
+  border-color: var(--semi-color-border);
+  border-left-color: var(--semi-color-primary);
+  background: var(--surface-soft);
+  color: var(--semi-color-text-0);
+}
+
+.task-approval-banner-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+.task-approval-banner-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  border: 1px solid var(--warning-border);
+  color: var(--semi-color-warning);
+}
+
+.task-approval-banner.is-executing .task-approval-banner-icon {
+  border-color: var(--semi-color-border);
+  color: var(--semi-color-primary);
+}
+
+.task-approval-banner-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.task-approval-banner-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: var(--font-size-body);
+}
+
+.task-approval-banner-sub {
+  font-size: var(--font-size-small);
+  opacity: 0.9;
+}
+
+.task-approval-banner-warn {
+  font-size: var(--font-size-small);
+  font-weight: 500;
+}
+
+.task-approval-banner-error {
+  font-size: var(--font-size-small);
+  color: var(--semi-color-danger);
+}
+
+.task-approval-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
 .editor-form {
   display: grid;
   gap: 24px;

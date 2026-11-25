@@ -725,10 +725,13 @@ func (c *AlistClient) FileStatContext(ctx context.Context, dir, name string) (Fi
 }
 
 func (c *AlistClient) MkdirContext(ctx context.Context, path string, scanInterval int) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := c.CheckWaitContext(ctx, path, scanInterval); err != nil {
 		return err
 	}
-	_, err := c.PostContext(ctx, "/api/fs/mkdir", alistPathRequest{Path: path}, nil)
+	_, err := c.PostContext(withAlistSlowMetaOperation(ctx), "/api/fs/mkdir", alistPathRequest{Path: path}, nil)
 	return err
 }
 

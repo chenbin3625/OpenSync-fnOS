@@ -59,6 +59,7 @@ func InitJobs() {
 			logger.Printf("Error adding job: %v", err)
 		}
 	}
+	pendingDeleteApprovals.LoadFromDB()
 }
 
 func ShutdownJobs(ctx context.Context) {
@@ -98,6 +99,7 @@ func ShutdownJobs(ctx context.Context) {
 	case <-done:
 	case <-ctx.Done():
 	}
+	pendingDeleteApprovals.Shutdown(ctx)
 	// Pending debounced progress publishes read the database; the caller closes
 	// it right after ShutdownJobs returns, so their timers must be cancelled
 	// here (same reason as the persist flush timers).
@@ -160,6 +162,9 @@ func activeProtectedHistoryTaskIDs() []int64 {
 			add(cur.TaskID)
 		}
 		add(client.retrySource())
+	}
+	for _, approval := range pendingDeleteApprovals.ListAll() {
+		add(approval.TaskID)
 	}
 	return ids
 }
@@ -909,12 +914,36 @@ func EditJobClient(job map[string]interface{}) error {
 		nextScheduler.Stop()
 		return fmt.Errorf("update job: %w", updateErr)
 	}
+	prevConfig := client.jobSnapshot()
 	nextScheduler.Start()
 	oldScheduler := client.replaceJobConfig(job, nextScheduler)
 	if oldScheduler != nil {
 		oldScheduler.Stop()
 	}
+	if jobConfigInvalidatesPendingDeletes(prevConfig, job) {
+		pendingDeleteApprovals.ClearForJob(jobID)
+	}
 	return nil
+}
+
+func jobConfigInvalidatesPendingDeletes(prev, next map[string]interface{}) bool {
+	if util.ToInt(next["method"]) != 1 {
+		return true
+	}
+	if prev == nil {
+		return false
+	}
+	for _, key := range []string{
+		"alistId", "method", "srcPath", "dstPath", "dstMap",
+		"exclude", "include", "filterMode",
+		"minFileSize", "maxFileSize", "minFileAgeMinutes", "olderThanDays", "newerThanDays",
+		"compareMode", "conflictPolicy",
+	} {
+		if fmt.Sprint(prev[key]) != fmt.Sprint(next[key]) {
+			return true
+		}
+	}
+	return false
 }
 
 // DoAllJobManual executes all enabled jobs manually
@@ -974,6 +1003,7 @@ func RemoveJobClient(jobID int64) error {
 		if err := removeJobRow(jobID); err != nil {
 			return fmt.Errorf("delete job: %w", err)
 		}
+		pendingDeleteApprovals.ClearForJob(jobID)
 		return nil
 	}
 	// Release loadMu before pausing and waiting for idle: holding loadMu across
@@ -1034,6 +1064,7 @@ func RemoveJobClient(jobID int64) error {
 		}
 		jobClientListMu.Unlock()
 		loadMu.Unlock()
+		pendingDeleteApprovals.ClearForJob(jobID)
 		return nil
 	}
 	// Row still exists: roll back to the previous state and allow a retry.
@@ -1103,43 +1134,19 @@ func StopTask(taskID int64) error {
 }
 
 func ApproveFullSyncTask(taskID int64) error {
-	job, err := mapper.GetJobByTaskID(taskID)
-	if err != nil {
-		if err := publicErrorIf(err, msg.T(msg.JobNotFound)); err != nil {
-			return err
-		}
-	}
-	client, err := GetJobClientByID(util.ToInt64(job["id"]))
-	if err != nil {
-		return err
-	}
-	task := client.currentTask()
-	if task == nil || task.TaskID != taskID {
-		return publicError(msg.T(msg.FullSyncPending))
-	}
-	return task.approveFullSync()
+	return pendingDeleteApprovals.ApproveByTaskID(taskID)
 }
 
 func RejectFullSyncTask(taskID int64) error {
-	job, err := mapper.GetJobByTaskID(taskID)
-	if err != nil {
-		if err := publicErrorIf(err, msg.T(msg.JobNotFound)); err != nil {
-			return err
-		}
-	}
-	client, err := GetJobClientByID(util.ToInt64(job["id"]))
-	if err != nil {
-		return err
-	}
-	task := client.currentTask()
-	if task == nil || task.TaskID != taskID {
-		return publicError(msg.T(msg.FullSyncPending))
-	}
-	if task.fullSyncApprovalSnapshot() == nil {
-		return publicError(msg.T(msg.FullSyncPending))
-	}
-	task.requestBreak()
-	return nil
+	return pendingDeleteApprovals.RejectByTaskID(taskID)
+}
+
+func GetPendingApproval(jobID int64) *FullSyncApproval {
+	return pendingDeleteApprovals.GetByJobID(jobID)
+}
+
+func ListPendingApprovals() []*FullSyncApproval {
+	return pendingDeleteApprovals.ListAll()
 }
 
 // RetryFailedTask replays all non-success items of a historical task.
@@ -1204,20 +1211,18 @@ func addJobNextRunTimes(result map[string]interface{}) {
 		jobID := util.ToInt64(row["id"])
 		next := int64(0)
 		running := false
-		pendingApproval := false
 		if client := clients[jobID]; client != nil {
 			if nextTime, scheduled := client.nextRunTime(); scheduled {
 				next = nextTime.Unix()
 			}
 			if task := client.currentTask(); task != nil {
 				running = true
-				pendingApproval = task.fullSyncApprovalSnapshot() != nil
 			}
 		}
 		row["nextRunTime"] = next
 		row["running"] = running
 		row["queued"] = queuedSet[jobID]
-		row["pendingApproval"] = pendingApproval
+		row["pendingApproval"] = pendingDeleteApprovals.Has(jobID)
 		if latest, ok := latestTasks[jobID]; ok {
 			row["lastStatus"] = util.ToInt(latest["status"])
 		}

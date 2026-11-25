@@ -37,6 +37,7 @@ import {
   errorToast,
 } from "../components/common";
 import { DryRunModal } from "../components/DryRunModal";
+import { FullSyncApprovalModal } from "../components/FullSyncApprovalModal";
 import { useAction, useResource } from "../lib/hooks";
 import { cloneJobToForm, findBatchMoveJobs } from "../lib/taskForm";
 import {
@@ -46,7 +47,7 @@ import {
   taskRecordStatusNames,
 } from "./Home/homeUtils";
 import { formatTimestamp } from "../utils/date";
-import type { DashboardJobItem, JobItem } from "../types";
+import type { DashboardJobItem, FullSyncApproval, JobItem } from "../types";
 import type { TaskEditorSavedResult } from "./TaskEditor";
 
 const JobEditor = lazy(() => import("./TaskEditor"));
@@ -115,6 +116,12 @@ export default function Dashboard() {
   const [dryRunJob, setDryRunJob] = useState<{ id: number; name: string } | null>(
     null,
   );
+  const [approvalModal, setApprovalModal] = useState<{
+    jobId: number;
+    jobName: string;
+    approval: FullSyncApproval;
+    loading?: boolean;
+  } | null>(null);
   const [editorState, setEditorState] = useState<{
     open: boolean;
     job: JobItem | null;
@@ -235,8 +242,38 @@ export default function Dashboard() {
   };
 
   const openJobDetail = (job: DashboardJobItem) => {
-    const tab = job.running && !job.pendingApproval ? "realtime" : "overview";
+    const tab = job.running ? "realtime" : "overview";
     navigate(`/tasks?jobId=${job.id}&tab=${tab}`);
+  };
+
+  const openApprovalModal = (
+    jobId: number,
+    jobName: string,
+    seed: FullSyncApproval,
+  ) => {
+    const needsFetch = !seed.paths || seed.paths.length === 0;
+    setApprovalModal({
+      jobId,
+      jobName,
+      approval: seed,
+      loading: needsFetch,
+    });
+    if (needsFetch) {
+      void api
+        .pendingApproval(jobId)
+        .then((fresh) => {
+          setApprovalModal((prev) => {
+            if (!prev || prev.jobId !== jobId) return prev;
+            if (!fresh) return null;
+            return { ...prev, approval: fresh, loading: false };
+          });
+        })
+        .catch(() => {
+          setApprovalModal((prev) =>
+            prev && prev.jobId === jobId ? { ...prev, loading: false } : prev,
+          );
+        });
+    }
   };
 
   const runBatch = (
@@ -406,9 +443,7 @@ export default function Dashboard() {
     kpi && kpi.totalJobs > 0
       ? Math.round((kpi.enabledJobs / kpi.totalJobs) * 100)
       : 0;
-  const activeRunningCount = kpi
-    ? Math.max(0, kpi.runningJobs - kpi.pendingApprovals)
-    : 0;
+  const activeRunningCount = kpi ? kpi.runningJobs : 0;
   const liveRunPct =
     kpi && kpi.totalJobs > 0
       ? Math.min(100, (activeRunningCount / kpi.totalJobs) * 100)
@@ -546,43 +581,79 @@ export default function Dashboard() {
                   </span>
                   <div className="approval-alert-copy">
                     <strong>
-                      有 {data.pendingApprovals.length} 个全量同步任务正在等待删除审批
+                      有 {data.pendingApprovals.length} 个全量同步任务存在待确认删除项
                     </strong>
                     <span className="approval-alert-sub">
-                      审批通过前相关任务保持暂停，确认影响范围后才会执行目标端删除。
+                      文件同步已完成且不受阻塞，目标端多余文件将保留至您确认后再执行清理。
                     </span>
                   </div>
                 </div>
                 <div className="approval-alert-list">
-                  {data.pendingApprovals.map((item) => (
-                    <div
-                      key={`${item.jobId}-${item.taskId}`}
-                      className="approval-alert-row"
-                    >
-                      <div className="approval-alert-item-main">
-                        <strong>{item.jobName}</strong>
-                        <Tag size="small" type="light" color="grey">
-                          任务 #{item.taskId}
-                        </Tag>
-                        <span className="approval-alert-impact">
-                          预计删除 <strong>{item.deleteCount} 项</strong>
-                          {item.deleteSize > 0
-                            ? ` · ${formatSize(item.deleteSize)}`
-                            : ""}
-                        </span>
-                      </div>
-                      <Button
-                        size="small"
-                        type="danger"
-                        theme="solid"
-                        onClick={() =>
-                          navigate(`/tasks?jobId=${item.jobId}&tab=overview`)
+                  {data.pendingApprovals.map((item) => {
+                    const matchedJob = allJobs.find((j) => j.id === item.jobId);
+                    const executing = item.status === "executing";
+                    const seedApproval: FullSyncApproval = matchedJob?.pendingApproval
+                      ? {
+                          ...matchedJob.pendingApproval,
+                          jobId: item.jobId,
+                          jobName: item.jobName,
+                          taskId: matchedJob.pendingApproval.taskId || item.taskId,
                         }
+                      : {
+                          jobId: item.jobId,
+                          jobName: item.jobName,
+                          taskId: item.taskId,
+                          deleteCount: item.deleteCount,
+                          deleteSize: item.deleteSize,
+                          pathCount: item.pathCount,
+                          paths: [],
+                          status: item.status,
+                          createdAt: item.createdAt,
+                          expiresAt: item.expiresAt,
+                          planChanged: item.planChanged,
+                          lastError: item.lastError,
+                        };
+                    return (
+                      <div
+                        key={`${item.jobId}-${item.taskId}`}
+                        className="approval-alert-row"
                       >
-                        立即前往审批
-                      </Button>
-                    </div>
-                  ))}
+                        <div className="approval-alert-item-main">
+                          <strong>{item.jobName}</strong>
+                          <Tag size="small" type="light" color="grey">
+                            任务 #{item.taskId}
+                          </Tag>
+                          <span className="approval-alert-impact">
+                            {executing ? (
+                              "正在后台校验并执行删除…"
+                            ) : (
+                              <>
+                                待确认删除 <strong>{item.deleteCount} 项</strong>
+                                {item.deleteSize > 0
+                                  ? ` · ${formatSize(item.deleteSize)}`
+                                  : ""}
+                              </>
+                            )}
+                          </span>
+                        </div>
+                        <Button
+                          size="small"
+                          type="danger"
+                          theme="solid"
+                          disabled={executing}
+                          onClick={() =>
+                            openApprovalModal(
+                              item.jobId,
+                              item.jobName,
+                              seedApproval,
+                            )
+                          }
+                        >
+                          {executing ? "正在删除…" : "查看并审批"}
+                        </Button>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             )}
@@ -1142,7 +1213,9 @@ export default function Dashboard() {
                             </Tag>
                             {job.pendingApproval && (
                               <Tag size="small" type="solid" color="orange">
-                                待审批删除
+                                {job.pendingApproval.status === "executing"
+                                  ? "正在删除"
+                                  : "待确认删除"}
                               </Tag>
                             )}
                             {job.queued && (
@@ -1191,25 +1264,17 @@ export default function Dashboard() {
 
                         <div
                           className="dashboard-job-status-col"
-                          onClick={() => openJobDetail(job)}
+                          onClick={() =>
+                            !job.running && job.pendingApproval
+                              ? openApprovalModal(
+                                  job.id,
+                                  jobName,
+                                  job.pendingApproval,
+                                )
+                              : openJobDetail(job)
+                          }
                         >
-                          {job.pendingApproval ? (
-                            <div className="dashboard-job-approval-note">
-                              <span className="dashboard-job-approval-title">
-                                <IconAlertTriangle
-                                  size="small"
-                                  aria-hidden="true"
-                                />
-                                预计删除 {job.pendingApproval.deleteCount} 项
-                                {job.pendingApproval.deleteSize > 0
-                                  ? ` · ${formatSize(job.pendingApproval.deleteSize)}`
-                                  : ""}
-                              </span>
-                              <span className="dashboard-job-approval-action">
-                                点击查看删除清单并审批
-                              </span>
-                            </div>
-                          ) : job.running ? (
+                          {job.running ? (
                             <div className="dashboard-job-progress">
                               <div className="dashboard-job-progress-head">
                                 <span className="dashboard-job-progress-label">
@@ -1241,6 +1306,27 @@ export default function Dashboard() {
                                   <span>正在扫描文件列表…</span>
                                 )}
                               </div>
+                            </div>
+                          ) : job.pendingApproval ? (
+                            <div className="dashboard-job-approval-note">
+                              <span className="dashboard-job-approval-title">
+                                <IconAlertTriangle
+                                  size="small"
+                                  aria-hidden="true"
+                                />
+                                {job.pendingApproval.status === "executing"
+                                  ? "正在后台执行删除…"
+                                  : `待确认删除 ${job.pendingApproval.deleteCount} 项${
+                                      job.pendingApproval.deleteSize > 0
+                                        ? ` · ${formatSize(job.pendingApproval.deleteSize)}`
+                                        : ""
+                                    }`}
+                              </span>
+                              <span className="dashboard-job-approval-action">
+                                {job.pendingApproval.status === "executing"
+                                  ? "不影响后续同步任务"
+                                  : "同步已完成 · 点击查看清单并审批"}
+                              </span>
                             </div>
                           ) : (
                             <>
@@ -1358,6 +1444,44 @@ export default function Dashboard() {
           </div>
         )}
       </LoadState>
+
+      {approvalModal && (
+        <FullSyncApprovalModal
+          approval={approvalModal.approval}
+          jobName={approvalModal.jobName}
+          loading={Boolean(approvalModal.loading)}
+          busy={action.busy}
+          onClose={() => setApprovalModal(null)}
+          onApprove={() =>
+            action.run(async () => {
+              const taskId = approvalModal.approval.taskId;
+              if (!taskId) return;
+              try {
+                await api.taskAction(taskId, "approve");
+                setApprovalModal(null);
+                Toast.success("已提交后台校验并执行删除");
+                await refreshAll(true);
+              } catch (err) {
+                errorToast(err);
+              }
+            })
+          }
+          onReject={() =>
+            action.run(async () => {
+              const taskId = approvalModal.approval.taskId;
+              if (!taskId) return;
+              try {
+                await api.taskAction(taskId, "reject");
+                setApprovalModal(null);
+                Toast.success("已跳过本次删除，目标端文件已保留");
+                await refreshAll(true);
+              } catch (err) {
+                errorToast(err);
+              }
+            })
+          }
+        />
+      )}
 
       {dryRunJob && (
         <DryRunModal

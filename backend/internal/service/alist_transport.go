@@ -24,6 +24,12 @@ import (
 const (
 	alistHTTP3HandshakeTimeout = 2 * time.Second
 	alistResponseHeaderTimeout = 30 * time.Second
+	// alistSlowMetaResponseHeaderTimeout covers /api/fs/list and /api/fs/mkdir.
+	// Cloud storage drivers paginate upstream listings before sending the first
+	// response header, and mkdir checks parent directories the same way. A 30s
+	// timeout aborted in-flight listings prematurely and piled retry requests
+	// onto the upstream API.
+	alistSlowMetaResponseHeaderTimeout = 2 * time.Minute
 	// alistLongOpResponseHeaderTimeout covers /api/fs/copy and /api/fs/move.
 	// Same-storage copy/move and synchronous drivers finish the whole transfer
 	// before answering. With the regular 30s header timeout the client gave up
@@ -41,7 +47,20 @@ const (
 
 var errRequestBodyNotReplayable = errors.New("alist: request body cannot be retried")
 
+type alistSlowMetaOpKey struct{}
 type alistLongOpKey struct{}
+
+// withAlistSlowMetaOperation marks ctx so protocolTripper routes the request
+// through the HTTP/1.1-2 transport with the relaxed response-header timeout
+// used by /api/fs/list and /api/fs/mkdir.
+func withAlistSlowMetaOperation(ctx context.Context) context.Context {
+	return context.WithValue(ctx, alistSlowMetaOpKey{}, true)
+}
+
+func isAlistSlowMetaOperation(ctx context.Context) bool {
+	v, _ := ctx.Value(alistSlowMetaOpKey{}).(bool)
+	return v
+}
 
 // withAlistLongOperation marks ctx so protocolTripper routes the request
 // through the HTTP/1.1-2 transport that has the long response-header timeout.
@@ -221,6 +240,7 @@ func isBlockedAlistRedirectIP(ip net.IP) bool {
 
 func newAlistRoundTripper() http.RoundTripper {
 	t := newProtocolTripper(newAlistHTTPTransport(alistResponseHeaderTimeout), newAlistHTTP3Transport())
+	t.h12SlowMeta = newAlistHTTPTransport(alistSlowMetaResponseHeaderTimeout)
 	t.h12Long = newAlistHTTPTransport(alistLongOpResponseHeaderTimeout)
 	return t
 }
@@ -274,6 +294,9 @@ func newProtocolTripper(h12 http.RoundTripper, h3 http.RoundTripper) *protocolTr
 // remembered so UDP-blocked NAS paths do not retry a 2s handshake forever.
 type protocolTripper struct {
 	h12 http.RoundTripper
+	// h12SlowMeta is used for requests marked withAlistSlowMetaOperation
+	// (/api/fs/list, /api/fs/mkdir). nil falls back to h12 (tests, custom trippers).
+	h12SlowMeta http.RoundTripper
 	// h12Long is used for requests marked withAlistLongOperation. nil falls
 	// back to h12 (tests, custom trippers).
 	h12Long http.RoundTripper
@@ -327,8 +350,11 @@ func (t *protocolTripper) usesProxy(req *http.Request) bool {
 
 func (t *protocolTripper) roundTrip(req *http.Request) (*http.Response, error) {
 	h12 := t.h12
-	if t.h12Long != nil && isAlistLongOperation(req.Context()) {
+	switch {
+	case t.h12Long != nil && isAlistLongOperation(req.Context()):
 		h12 = t.h12Long
+	case t.h12SlowMeta != nil && isAlistSlowMetaOperation(req.Context()):
+		h12 = t.h12SlowMeta
 	}
 	proxied := t.usesProxy(req)
 	if !proxied && req.URL.Scheme == "https" && t.preferHTTP3(req.URL.Host) {
@@ -572,7 +598,7 @@ func (t *protocolTripper) markHTTP3Failed(host string) {
 }
 
 func (t *protocolTripper) CloseIdleConnections() {
-	for _, rt := range []http.RoundTripper{t.h12, t.h12Long, t.h3} {
+	for _, rt := range []http.RoundTripper{t.h12, t.h12SlowMeta, t.h12Long, t.h3} {
 		if closer, ok := rt.(interface{ CloseIdleConnections() }); ok {
 			closer.CloseIdleConnections()
 		}

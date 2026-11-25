@@ -447,8 +447,10 @@ describe("mocks store & handlers alignment", () => {
       jobs: [{ id: 10, remark: "镜像", method: 1, enable: 1 }],
     });
     const task = store.runJob(10);
-    expect(task.approval).toBeDefined();
-    expect(task.approval?.pathCount).toBe(2);
-    expect(task.approval?.paths).toHaveLength(2);
+    expect(task.approval).toBeUndefined();
+    const approval = store.getPendingApproval(10);
+    expect(approval).not.toBeNull();
+    expect(approval?.pathCount).toBe(2);
+    expect(approval?.paths).toHaveLength(2);
   });
 });

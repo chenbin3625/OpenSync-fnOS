@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const currentVersion = 261122
+const currentVersion = 261123
 
 // InitSQL initializes the database schema and runs migrations
 func InitSQL() {
@@ -127,6 +127,14 @@ func InitSQL() {
 				lastSendTime integer DEFAULT 0,
 				lastSendError text DEFAULT NULL,
 				createTime integer DEFAULT (strftime('%s', 'now'))
+			)`,
+
+			`CREATE TABLE pending_delete_approval(
+				jobId integer primary key,
+				taskId integer NOT NULL,
+				payload text NOT NULL,
+				createdAt integer NOT NULL,
+				expiresAt integer DEFAULT 0
 			)`,
 		)
 
@@ -422,6 +430,15 @@ func migrationStatements(fromVersion int64) []string {
 			"ALTER TABLE job ADD COLUMN notifyMode integer DEFAULT 0",
 			"ALTER TABLE job ADD COLUMN notifyIds text DEFAULT NULL",
 		)
+	}
+	if fromVersion < 261123 {
+		stmts = append(stmts, `CREATE TABLE IF NOT EXISTS pending_delete_approval(
+			jobId integer primary key,
+			taskId integer NOT NULL,
+			payload text NOT NULL,
+			createdAt integer NOT NULL,
+			expiresAt integer DEFAULT 0
+		)`)
 	}
 	stmts = append(stmts, fmt.Sprintf("UPDATE schema_version SET version=%d", currentVersion))
 	return stmts

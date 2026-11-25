@@ -55,12 +55,14 @@ type fullSyncDir struct {
 }
 
 type fullSyncDelete struct {
+	srcDir     string
 	dir        string
 	name       string
 	metadata   FileMetadata
 	object     string
 	blocksPath string
 	protected  bool
+	isBlocker  bool
 	// subtree is the destination snapshot key of a directory entry, so the
 	// safety valve can weigh a recursive delete by everything it removes.
 	subtree string
@@ -72,15 +74,23 @@ type fullSyncRelocation struct {
 	item   *CopyItem
 }
 
-// FullSyncApproval describes the destructive part of a full-sync plan.
-// DeleteCount includes entries below a recursive directory delete; Paths is a
-// bounded preview so a large mirror does not put an unbounded payload in the
-// realtime progress stream.
+// FullSyncApproval describes the deferred destructive deletions of a full-sync
+// run. DeleteCount includes entries below a recursive directory delete; Paths
+// is a bounded preview so a large mirror does not put an unbounded payload in
+// API responses.
 type FullSyncApproval struct {
+	JobID       int64                  `json:"jobId,omitempty"`
+	JobName     string                 `json:"jobName,omitempty"`
+	TaskID      int64                  `json:"taskId,omitempty"`
 	DeleteCount int                    `json:"deleteCount"`
 	DeleteSize  int64                  `json:"deleteSize"`
 	PathCount   int                    `json:"pathCount"`
 	Paths       []FullSyncApprovalPath `json:"paths"`
+	Status      string                 `json:"status,omitempty"`
+	CreatedAt   int64                  `json:"createdAt,omitempty"`
+	ExpiresAt   int64                  `json:"expiresAt,omitempty"`
+	PlanChanged bool                   `json:"planChanged,omitempty"`
+	LastError   string                 `json:"lastError,omitempty"`
 	signature   string
 }
 
@@ -120,9 +130,8 @@ type fullSyncPlan struct {
 	// relocations and type-conflict removals could all be based on entries the
 	// failed listing never showed, so they are left to a complete run.
 	scanIncomplete bool
-	// approvalTimedOut is set on the copy-only plan executed after the operator
-	// did not answer the destructive-action confirmation.
-	approvalTimedOut bool
+	srcScanFailed  bool
+	dstScanFailed  bool
 	// planErr is the first panic captured from a concurrent compareDir branch.
 	// A partially built plan is never executed: it could not have weighed its
 	// own deletions and may treat unmatched entries as extra.
@@ -156,30 +165,6 @@ func (jt *JobTask) syncFull(work scanWork, spec *excludeMatcher) {
 	plan := jt.buildFullSyncPlan(work, spec)
 	if plan == nil {
 		return
-	}
-	if jt.RequireFullSyncApproval {
-		plans, result := jt.confirmFullSyncPlans([]*fullSyncPlan{plan}, func() []*fullSyncPlan {
-			fresh := jt.buildFullSyncPlan(work, spec)
-			if fresh == nil {
-				return nil
-			}
-			return []*fullSyncPlan{fresh}
-		})
-		switch result {
-		case fullSyncApprovalGranted:
-			if len(plans) == 0 {
-				return
-			}
-			plan = plans[0]
-		case fullSyncApprovalTimedOut:
-			// The operator did not answer. Copying is safe and still makes
-			// progress; deletions, relocations and type-conflict removals are
-			// dropped and recorded.
-			jt.executeFullSyncPlan(plan.withoutDestructive())
-			return
-		default:
-			return
-		}
 	}
 	jt.executeFullSyncPlan(plan)
 }
@@ -233,7 +218,9 @@ func (jt *JobTask) buildFullSyncPlan(work scanWork, spec *excludeMatcher) *fullS
 	}
 
 	plan := newFullSyncPlan(srcSnapshot, dstSnapshot, jt.scanBranchSem)
-	plan.scanIncomplete = srcErr != nil || dstErr != nil
+	plan.srcScanFailed = srcErr != nil
+	plan.dstScanFailed = dstErr != nil
+	plan.scanIncomplete = plan.srcScanFailed || plan.dstScanFailed
 	func() {
 		// A panic in the inline recursion path must abort the plan, not just the
 		// goroutine that happened to run it.
@@ -254,47 +241,6 @@ func (jt *JobTask) buildFullSyncPlan(work scanWork, spec *excludeMatcher) *fullS
 		return nil
 	}
 	return plan
-}
-
-func (jt *JobTask) confirmFullSyncPlans(
-	plans []*fullSyncPlan,
-	rescan func() []*fullSyncPlan,
-) ([]*fullSyncPlan, fullSyncApprovalResult) {
-	for {
-		approval := combineFullSyncApprovals(plans)
-		if approval == nil {
-			return plans, fullSyncApprovalGranted
-		}
-		jt.setFullSyncApproval(approval)
-		switch jt.waitForFullSyncApproval() {
-		case fullSyncApprovalTimedOut:
-			return nil, fullSyncApprovalTimedOut
-		case fullSyncApprovalRejected:
-			return nil, fullSyncApprovalRejected
-		}
-		fresh := rescan()
-		if jt.isBreak() || len(fresh) == 0 {
-			return nil, fullSyncApprovalRejected
-		}
-		freshApproval := combineFullSyncApprovals(fresh)
-		if sameFullSyncApproval(approval, freshApproval) {
-			return fresh, fullSyncApprovalGranted
-		}
-		plans = fresh
-	}
-}
-
-// withoutDestructive returns the copy-only part of a plan. It is used when the
-// destructive phase may not run (approval timeout) but the writes proven by
-// the scan are still safe to perform.
-func (plan *fullSyncPlan) withoutDestructive() *fullSyncPlan {
-	safe := newFullSyncPlan(plan.src, plan.dst, nil)
-	safe.scanIncomplete = plan.scanIncomplete
-	safe.approvalTimedOut = true
-	safe.newDirs = plan.newDirs
-	safe.newFiles = plan.newFiles
-	safe.changed = plan.changed
-	return safe
 }
 
 func combineFullSyncApprovals(plans []*fullSyncPlan) *FullSyncApproval {
@@ -595,7 +541,7 @@ func (plan *fullSyncPlan) compareDir(job map[string]interface{}, srcRelDir, dstR
 				if nameExcluded || typeConflict {
 					matchedDst[dstName] = struct{}{}
 					if typeConflict && !plan.scanIncomplete && (isDir || jobAllowsFileMeta(job, metadata, now)) {
-						plan.addBlocker(dstDir, dstName, dstItems[dstName], dstDir+name, dstRelPath)
+						plan.addBlocker(srcDir, dstDir, dstName, dstItems[dstName], dstDir+name, dstRelPath)
 					}
 					continue
 				}
@@ -624,7 +570,7 @@ func (plan *fullSyncPlan) compareDir(job map[string]interface{}, srcRelDir, dstR
 			if conflictName, conflictMeta, ok := dstIndex.find(name+"/", srcIndex); ok {
 				matchedDst[conflictName] = struct{}{}
 				if !plan.scanIncomplete {
-					plan.addBlocker(dstDir, conflictName, conflictMeta, fullSyncObjectPath(dstDir, name), dstRelDir+conflictName)
+					plan.addBlocker(srcDir, dstDir, conflictName, conflictMeta, fullSyncObjectPath(dstDir, name), dstRelDir+conflictName)
 				}
 			}
 			dstName, dstMetadata, exists := dstIndex.find(name, srcIndex)
@@ -654,7 +600,7 @@ func (plan *fullSyncPlan) compareDir(job map[string]interface{}, srcRelDir, dstR
 		if conflictName, conflictMeta, ok := dstIndex.find(fileName, srcIndex); ok {
 			matchedDst[conflictName] = struct{}{}
 			if !plan.scanIncomplete {
-				plan.addBlocker(dstDir, conflictName, conflictMeta, fullSyncObjectPath(dstDir, fileName)+"/", dstRelDir+conflictName)
+				plan.addBlocker(srcDir, dstDir, conflictName, conflictMeta, fullSyncObjectPath(dstDir, fileName)+"/", dstRelDir+conflictName)
 			}
 		}
 		dstName, _, exists := dstIndex.find(name, srcIndex)
@@ -676,7 +622,7 @@ func (plan *fullSyncPlan) compareDir(job map[string]interface{}, srcRelDir, dstR
 			if _, matched := matchedDst[name]; matched {
 				continue
 			}
-			plan.collectDestinationOnly(dstRelDir, name, dstItems[name])
+			plan.collectDestinationOnly(srcRelDir, dstRelDir, name, dstItems[name])
 		}
 	}
 
@@ -768,7 +714,7 @@ func (plan *fullSyncPlan) collectDestinationFiles(dstRelDir, deleteRoot string) 
 	}
 }
 
-func (plan *fullSyncPlan) collectDestinationOnly(dstRelDir, name string, metadata FileMetadata) {
+func (plan *fullSyncPlan) collectDestinationOnly(srcRelDir, dstRelDir, name string, metadata FileMetadata) {
 	relPath := dstRelDir + name
 	if _, excluded := plan.dst.excluded[relPath]; excluded {
 		return
@@ -776,12 +722,13 @@ func (plan *fullSyncPlan) collectDestinationOnly(dstRelDir, name string, metadat
 	if _, protected := plan.dst.protectedDirs[relPath]; protected {
 		items := plan.dst.dirs[relPath]
 		for _, child := range sortedFileListKeys(items) {
-			plan.collectDestinationOnly(relPath, child, items[child])
+			plan.collectDestinationOnly(srcRelDir+name, relPath, child, items[child])
 		}
 		return
 	}
+	srcDir := plan.src.root + srcRelDir
 	dstDir := plan.dst.root + dstRelDir
-	deleteRoot := plan.addExtraDelete(dstDir, name, metadata, relPath)
+	deleteRoot := plan.addExtraDelete(srcDir, dstDir, name, metadata, relPath)
 	if strings.HasSuffix(name, "/") {
 		plan.collectDestinationFiles(relPath, deleteRoot)
 	} else {
@@ -817,10 +764,11 @@ func subtreeKey(name, relPath string) string {
 	return ""
 }
 
-func (plan *fullSyncPlan) addExtraDelete(dir, name string, metadata FileMetadata, relPath string) string {
+func (plan *fullSyncPlan) addExtraDelete(srcDir, dir, name string, metadata FileMetadata, relPath string) string {
 	object := fullSyncObjectPath(dir, name)
 	plan.mu.Lock()
 	plan.extraDeletes[object] = fullSyncDelete{
+		srcDir:   srcDir,
 		dir:      dir,
 		name:     name,
 		metadata: metadata,
@@ -831,18 +779,20 @@ func (plan *fullSyncPlan) addExtraDelete(dir, name string, metadata FileMetadata
 	return object
 }
 
-func (plan *fullSyncPlan) addBlocker(dir, name string, metadata FileMetadata, blocksPath, relPath string) {
+func (plan *fullSyncPlan) addBlocker(srcDir, dir, name string, metadata FileMetadata, blocksPath, relPath string) {
 	object := fullSyncObjectPath(dir, name)
 	_, excluded := plan.dst.excluded[relPath]
 	_, protected := plan.dst.protectedDirs[relPath]
 	plan.mu.Lock()
 	plan.blockers[object] = fullSyncDelete{
+		srcDir:     srcDir,
 		dir:        dir,
 		name:       name,
 		metadata:   metadata,
 		object:     object,
 		blocksPath: blocksPath,
 		protected:  excluded || protected,
+		isBlocker:  true,
 		subtree:    subtreeKey(name, relPath),
 	}
 	plan.mu.Unlock()
@@ -870,12 +820,23 @@ func newFullSyncFile(srcDir, dstDir, name string, metadata FileMetadata) *fullSy
 	}
 }
 
+func (plan *fullSyncPlan) incompleteScanReason() string {
+	switch {
+	case plan.srcScanFailed && plan.dstScanFailed:
+		return "full-sync source and destination scans were incomplete; only copies from the scanned entries ran and deletions, relocations and type-conflict removals were skipped"
+	case plan.srcScanFailed:
+		return "full-sync source scan was incomplete; only copies from the scanned entries ran and deletions, relocations and type-conflict removals were skipped"
+	case plan.dstScanFailed:
+		return "full-sync destination scan was incomplete; only copies from the scanned entries ran and deletions, relocations and type-conflict removals were skipped"
+	default:
+		return "full-sync scan was incomplete; only copies from the scanned entries ran and deletions, relocations and type-conflict removals were skipped"
+	}
+}
+
 func (jt *JobTask) executeFullSyncPlan(plan *fullSyncPlan) {
-	if plan.approvalTimedOut {
-		errMsg := msg.FullSyncApprovalTimeout()
-		jt.CopyHook("", plan.dst.root, "", nil, "", taskStatusFailed, &errMsg, taskItemPath, taskItemTypeDelete, time.Now().Unix())
-	} else if plan.scanIncomplete {
-		errMsg := msg.MirrorDeleteGuard("full-sync scan was incomplete; only copies from the scanned entries ran and deletions, relocations and type-conflict removals were skipped")
+	if plan.scanIncomplete {
+		jt.fullSyncDeleteGuardSkipped.Store(true)
+		errMsg := msg.MirrorDeleteGuard(plan.incompleteScanReason())
 		// Empty file name: this record can never be replayed as a delete.
 		jt.CopyHook("", plan.dst.root, "", nil, "", taskStatusFailed, &errMsg, taskItemPath, taskItemTypeDelete, time.Now().Unix())
 	}
@@ -884,6 +845,7 @@ func (jt *JobTask) executeFullSyncPlan(plan *fullSyncPlan) {
 	// so they pass the same collision check, safety valve and failure cap as
 	// the delete phase instead of running ahead of all three.
 	repairOnly := jt.hasRetrySource()
+	deferDeletes := jt.RequireFullSyncApproval && !repairOnly
 	var relocations []fullSyncRelocation
 	var writes fullSyncWriteIndex
 	var guardReason string
@@ -896,6 +858,12 @@ func (jt *JobTask) executeFullSyncPlan(plan *fullSyncPlan) {
 	deletes := &fullSyncDeleteRun{jt: jt, root: plan.dst.root}
 
 	blocked := make(map[string]struct{})
+	// writeBlocked tracks paths blocked by real failures (protected conflicts,
+	// failed deletions, failed directory creation). Approval-deferred blockers
+	// populate blocked so writes under them do not fail on this pass, without
+	// poisoning writesFailed against unrelated deletes.
+	writeBlocked := make(map[string]struct{})
+	var deferredBlockers []fullSyncDelete
 	// Remove type conflicts first so missing destination directories can be
 	// created before target-side relocations begin. A conflict left in place
 	// blocks its replacement: writing over the other type would only fail.
@@ -909,8 +877,21 @@ func (jt *JobTask) executeFullSyncPlan(plan *fullSyncPlan) {
 			errMsg := msg.MirrorDeleteGuard(reason)
 			jt.DelHook(item.dir, item.name, nil, taskStatusFailed, &errMsg, boolToTaskItemObject(item.subtree != ""), time.Now().Unix())
 		}
-		if item.protected || repairOnly || deletesUnsafe || jt.skipCollidingDelete(writes, item) || !deletes.run(item) {
+		if item.protected || repairOnly || deletesUnsafe || jt.skipCollidingDelete(writes, item) {
+			p := normalizeBlockedPath(item.blocksPath)
+			blocked[p] = struct{}{}
+			writeBlocked[p] = struct{}{}
+			continue
+		}
+		if deferDeletes {
 			blocked[normalizeBlockedPath(item.blocksPath)] = struct{}{}
+			deferredBlockers = append(deferredBlockers, item)
+			continue
+		}
+		if !deletes.run(item) {
+			p := normalizeBlockedPath(item.blocksPath)
+			blocked[p] = struct{}{}
+			writeBlocked[p] = struct{}{}
 		}
 	}
 
@@ -920,7 +901,9 @@ func (jt *JobTask) executeFullSyncPlan(plan *fullSyncPlan) {
 			continue
 		}
 		if jt.createFullSyncDir(item) != taskStatusSuccess {
-			blocked[normalizeBlockedPath(item.dstDir)] = struct{}{}
+			p := normalizeBlockedPath(item.dstDir)
+			blocked[p] = struct{}{}
+			writeBlocked[p] = struct{}{}
 		}
 	}
 
@@ -946,9 +929,11 @@ func (jt *JobTask) executeFullSyncPlan(plan *fullSyncPlan) {
 
 	movedTargets := make(map[string]struct{})
 	consumedFileDeletes := make(map[string]struct{})
+	relocatedOut := make(map[string]struct{})
 	for _, relocation := range active {
 		if relocation.item.status() == taskStatusSuccess {
 			movedTargets[relocation.target.target] = struct{}{}
+			relocatedOut[relocation.source.object] = struct{}{}
 			if relocation.source.deleteRoot == relocation.source.object {
 				consumedFileDeletes[relocation.source.deleteRoot] = struct{}{}
 			}
@@ -958,7 +943,7 @@ func (jt *JobTask) executeFullSyncPlan(plan *fullSyncPlan) {
 	}
 
 	writesFailed := &fullSyncWriteFailures{}
-	for dir := range blocked {
+	for dir := range writeBlocked {
 		writesFailed.protectDir(dir)
 	}
 	for _, relocation := range active {
@@ -992,6 +977,7 @@ func (jt *JobTask) executeFullSyncPlan(plan *fullSyncPlan) {
 	}
 	if !deletesUnsafe {
 		for _, dir := range sortedBlockedKeys(suspicious) {
+			jt.fullSyncDeleteGuardSkipped.Store(true)
 			reason := fmt.Sprintf("source directory for %s listed empty while the destination holds %d entries below it; deletes under it were skipped",
 				dir, suspiciousCounts[dir])
 			log.Printf("Task %d %s", jt.TaskID, reason)
@@ -1008,6 +994,7 @@ func (jt *JobTask) executeFullSyncPlan(plan *fullSyncPlan) {
 	// but the amplifier itself is what turns one of them into data loss, so an
 	// implausible deletion volume stops every delete instead of executing it.
 	if deletesUnsafe {
+		jt.fullSyncDeleteGuardSkipped.Store(true)
 		log.Printf("Task %d skipped the full-sync delete phase: %s", jt.TaskID, guardReason)
 		errMsg := msg.MirrorDeleteGuard(guardReason)
 		// The record exists to show the user why nothing was deleted. It names
@@ -1020,7 +1007,8 @@ func (jt *JobTask) executeFullSyncPlan(plan *fullSyncPlan) {
 	if jt.isBreak() || deletes.aborted {
 		return
 	}
-	var items []fullSyncDelete
+	items := make([]fullSyncDelete, 0, len(deferredBlockers)+len(plan.extraDeletes))
+	items = append(items, deferredBlockers...)
 	for _, key := range sortedDeleteKeys(plan.extraDeletes, true) {
 		if _, protected := protectedDeletes[key]; protected {
 			continue
@@ -1039,7 +1027,14 @@ func (jt *JobTask) executeFullSyncPlan(plan *fullSyncPlan) {
 	if len(items) > 0 {
 		jt.fullSyncDeleteMu.Lock()
 		jt.fullSyncDeletes = append(jt.fullSyncDeletes, fullSyncDeleteBatch{
-			root: plan.dst.root, items: items, writesFailed: writesFailed, run: *deletes,
+			srcRoot:         plan.src.root,
+			srcRootNonEmpty: plan.src.entryCount() > 0,
+			root:            plan.dst.root,
+			dstSnapshot:     plan.dst,
+			relocatedOut:    relocatedOut,
+			items:           items,
+			writesFailed:    writesFailed,
+			run:             *deletes,
 		})
 		jt.fullSyncDeleteMu.Unlock()
 	}
@@ -1120,13 +1115,6 @@ func (plan *fullSyncPlan) approvalPreview() *FullSyncApproval {
 			continue
 		}
 		add(plan.extraDeletes[key], "删除")
-	}
-	for _, relocation := range relocations {
-		add(fullSyncDelete{
-			dir:      relocation.source.dir,
-			name:     relocation.source.name,
-			metadata: relocation.source.metadata,
-		}, "移动")
 	}
 	if preview.PathCount == 0 {
 		return nil
@@ -1219,10 +1207,14 @@ func (failures *fullSyncWriteFailures) blocks(item fullSyncDelete) bool {
 }
 
 type fullSyncDeleteBatch struct {
-	root         string
-	items        []fullSyncDelete
-	writesFailed *fullSyncWriteFailures
-	run          fullSyncDeleteRun
+	srcRoot         string
+	srcRootNonEmpty bool
+	root            string
+	dstSnapshot     *fullSyncSnapshot
+	relocatedOut    map[string]struct{}
+	items           []fullSyncDelete
+	writesFailed    *fullSyncWriteFailures
+	run             fullSyncDeleteRun
 }
 
 func (jt *JobTask) runFullSyncDeletes() {
@@ -1230,10 +1222,20 @@ func (jt *JobTask) runFullSyncDeletes() {
 	batches := jt.fullSyncDeletes
 	jt.fullSyncDeletes = nil
 	jt.fullSyncDeleteMu.Unlock()
+	if jt.RequireFullSyncApproval {
+		jt.stageDeferredFullSyncDeletes(batches)
+		return
+	}
 	if len(batches) == 0 {
+		if !jt.fullSyncDeleteGuardSkipped.Load() && !jt.isBreak() && jt.context().Err() == nil && util.ToInt(jt.Job["method"]) == 1 && !jt.hasRetrySource() {
+			if jobID := jt.approvalJobID(); jobID > 0 {
+				pendingDeleteApprovals.ClearIfPending(jobID)
+			}
+		}
 		return
 	}
 	wasDrained := jt.drained.Swap(false)
+	anySkippedOrAborted := false
 	for _, batch := range batches {
 		if jt.isBreak() || jt.context().Err() != nil {
 			return
@@ -1249,14 +1251,93 @@ func (jt *JobTask) runFullSyncDeletes() {
 			}
 			batch.run.run(item)
 		}
+		if batch.run.aborted {
+			anySkippedOrAborted = true
+		}
 		if skipped > 0 {
+			anySkippedOrAborted = true
 			reason := fmt.Sprintf("destination writes did not all succeed; %d extra entries that may be the previous copy of a failed write were kept until a clean run", skipped)
 			errMsg := msg.MirrorDeleteGuard(reason)
 			jt.DelHook(batch.root, "", nil, taskStatusFailed, &errMsg, taskItemPath, time.Now().Unix())
 		}
 	}
+	if !anySkippedOrAborted && !jt.fullSyncDeleteGuardSkipped.Load() && !jt.isBreak() && jt.context().Err() == nil && util.ToInt(jt.Job["method"]) == 1 && !jt.hasRetrySource() {
+		if jobID := jt.approvalJobID(); jobID > 0 {
+			pendingDeleteApprovals.ClearIfPending(jobID)
+		}
+	}
 	if wasDrained && !jt.isBreak() && jt.context().Err() == nil {
 		jt.drained.Store(true)
+	}
+}
+
+// stageDeferredFullSyncDeletes turns the surviving delete candidates from a
+// completed copy phase into a post-positioned pending deletion approval without
+// blocking the sync task.
+func (jt *JobTask) stageDeferredFullSyncDeletes(batches []fullSyncDeleteBatch) {
+	if jt.isBreak() || jt.context().Err() != nil {
+		return
+	}
+	var targets []pendingDeleteTarget
+	hadGuardedSkip := jt.fullSyncDeleteGuardSkipped.Load()
+	for _, batch := range batches {
+		skipped := 0
+		for _, item := range batch.items {
+			if !item.isBlocker && batch.writesFailed.blocks(item) {
+				skipped++
+				continue
+			}
+			if !isSafeDeleteTargetName(item.name) {
+				continue
+			}
+			isDir := strings.HasSuffix(item.name, "/")
+			count := 1
+			size := item.metadata.Size
+			if size < 0 {
+				size = 0
+			}
+			var digest string
+			if isDir && batch.dstSnapshot != nil && item.subtree != "" {
+				count, size, digest = batch.dstSnapshot.subtreeSummary(item.subtree, batch.relocatedOut)
+			} else if isDir {
+				size = 0
+				count, size, digest = summarizeSubtreeEntries(nil)
+			}
+			srcDir := item.srcDir
+			if srcDir == "" {
+				relDir := strings.TrimPrefix(normalizeDirPath(item.dir), normalizeDirPath(batch.root))
+				srcDir = normalizeDirPath(batch.srcRoot) + relDir
+			}
+			targets = append(targets, pendingDeleteTarget{
+				SrcRoot:         normalizeDirPath(batch.srcRoot),
+				DstRoot:         normalizeDirPath(batch.root),
+				SrcDir:          normalizeDirPath(srcDir),
+				DstDir:          normalizeDirPath(item.dir),
+				Name:            item.name,
+				IsDir:           isDir,
+				IsBlocker:       item.isBlocker,
+				Size:            size,
+				Count:           count,
+				Modified:        item.metadata.Modified,
+				SubtreeDigest:   digest,
+				SrcRootNonEmpty: batch.srcRootNonEmpty,
+			})
+		}
+		if skipped > 0 {
+			hadGuardedSkip = true
+			reason := fmt.Sprintf("destination writes did not all succeed; %d extra entries that may be the previous copy of a failed write were kept until a clean run", skipped)
+			errMsg := msg.MirrorDeleteGuard(reason)
+			jt.DelHook(batch.root, "", nil, taskStatusFailed, &errMsg, taskItemPath, time.Now().Unix())
+		}
+	}
+	if len(targets) > 0 {
+		pendingDeleteApprovals.Stage(jt, targets)
+		return
+	}
+	if !hadGuardedSkip && util.ToInt(jt.Job["method"]) == 1 && !jt.hasRetrySource() {
+		if jobID := jt.approvalJobID(); jobID > 0 {
+			pendingDeleteApprovals.ClearIfPending(jobID)
+		}
 	}
 }
 
@@ -1534,6 +1615,38 @@ func (snapshot *fullSyncSnapshot) deleteSize(item fullSyncDelete) int64 {
 		}
 	}
 	return total
+}
+
+// subtreeSummary computes the exact remaining entry count, total file bytes,
+// and content digest of a directory subtree after subtracting excluded entries
+// and files already relocated out of the directory during the sync phase.
+func (snapshot *fullSyncSnapshot) subtreeSummary(subtree string, relocatedOut map[string]struct{}) (count int, size int64, digest string) {
+	snapshot.mu.Lock()
+	defer snapshot.mu.Unlock()
+	var entries []subtreeDigestEntry
+	for dir, items := range snapshot.dirs {
+		if dir != subtree && !strings.HasPrefix(dir, subtree) {
+			continue
+		}
+		subRelDir := strings.TrimPrefix(dir, subtree)
+		for name, meta := range items {
+			if _, excluded := snapshot.excluded[dir+name]; excluded {
+				continue
+			}
+			if len(relocatedOut) > 0 {
+				if _, moved := relocatedOut[fullSyncObjectPath(snapshot.root+dir, name)]; moved {
+					continue
+				}
+			}
+			entries = append(entries, subtreeDigestEntry{
+				relPath:  subRelDir + name,
+				isDir:    strings.HasSuffix(name, "/"),
+				size:     meta.Size,
+				modified: meta.Modified,
+			})
+		}
+	}
+	return summarizeSubtreeEntries(entries)
 }
 
 // subtreeEntryCount totals the entries recorded in relDir and all directories

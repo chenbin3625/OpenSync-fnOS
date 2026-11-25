@@ -7,6 +7,7 @@ import type {
   DryRunResult,
   EngineHealth,
   FilterTestResult,
+  FullSyncApproval,
   JobItem,
   NotifyItem,
   PageData,
@@ -452,6 +453,7 @@ export class MockStore {
   private settings: SystemSettings;
   private histories = new Map<number, TaskRecord[]>();
   private currentTasks = new Map<number, CurrentTaskData>();
+  private pendingApprovals = new Map<number, FullSyncApproval>();
   private currentItems = new Map<number, TaskItem[]>();
   private taskItems = new Map<number, TaskItem[]>();
   private nextEngineId: number;
@@ -606,7 +608,7 @@ export class MockStore {
           ...job,
           running: Boolean(current),
           queued: false,
-          pendingApproval: Boolean(current?.approval),
+          pendingApproval: this.pendingApprovals.has(job.id),
           lastStatus: latest?.status ?? 0,
         };
       }),
@@ -632,6 +634,7 @@ export class MockStore {
   deleteJob(id: number): void {
     this.jobs = this.jobs.filter((job) => job.id !== id);
     this.currentTasks.delete(id);
+    this.pendingApprovals.delete(id);
     this.currentItems.delete(id);
     this.histories.delete(id);
   }
@@ -656,38 +659,59 @@ export class MockStore {
     const base = createDemoTaskView(now(), items);
     const taskId = this.nextTaskId++;
     const job = this.jobs.find((item) => item.id === jobId);
-    const task = {
+    const task: CurrentTaskData = {
       ...base,
       taskId,
-      approval:
-        job?.method === 1
-          ? {
-              deleteCount: 3,
-              deleteSize: 48 * 1024 * 1024,
-              pathCount: 2,
-              paths: [
-                {
-                  path: "/Backup/Nightly/old-camera",
-                  isPath: true,
-                  count: 2,
-                  size: 48 * 1024 * 1024,
-                  action: "删除",
-                },
-                {
-                  path: "/Backup/Nightly/obsolete.mov",
-                  isPath: false,
-                  count: 1,
-                  size: 0,
-                  action: "删除",
-                },
-              ],
-            }
-          : undefined,
     };
     this.currentTasks.set(jobId, task);
     this.currentItems.set(jobId, items);
     this.taskItems.set(taskId, items);
+    if (job?.method === 1) {
+      const createdAt = now();
+      const timeoutMin = this.settings.fullSyncApprovalTimeout ?? 30;
+      this.pendingApprovals.set(jobId, {
+        jobId,
+        jobName: job.remark || `任务 #${jobId}`,
+        taskId,
+        status: "pending",
+        createdAt,
+        expiresAt: timeoutMin > 0 ? createdAt + timeoutMin * 60 : 0,
+        deleteCount: 3,
+        deleteSize: 48 * 1024 * 1024,
+        pathCount: 2,
+        paths: [
+          {
+            path: "/Backup/Nightly/old-camera",
+            isPath: true,
+            count: 2,
+            size: 48 * 1024 * 1024,
+            action: "删除",
+          },
+          {
+            path: "/Backup/Nightly/obsolete.mov",
+            isPath: false,
+            count: 1,
+            size: 0,
+            action: "删除",
+          },
+        ],
+      });
+    }
     return { ...task };
+  }
+
+  getPendingApproval(jobId: number): FullSyncApproval | null {
+    const approval = this.pendingApprovals.get(jobId);
+    return approval
+      ? { ...approval, paths: approval.paths.map((p) => ({ ...p })) }
+      : null;
+  }
+
+  listPendingApprovals(): FullSyncApproval[] {
+    return [...this.pendingApprovals.values()].map((approval) => ({
+      ...approval,
+      paths: approval.paths.map((p) => ({ ...p })),
+    }));
   }
 
   getCurrentTask(jobId: number): CurrentTaskData | null {
@@ -763,12 +787,14 @@ export class MockStore {
     if (input.taskId !== undefined) {
       const taskId = numberValue(input.taskId, 0);
       if (input.action === "approve" || input.action === "reject") {
-        for (const [jobId, task] of this.currentTasks) {
-          if (task.taskId !== taskId) continue;
-          if (input.action === "reject") this.finishCurrentTask(jobId, 4, taskId);
-          else task.approval = undefined;
+        // Post-positioned deletion approval is decoupled from the running sync
+        // task: neither approve nor reject aborts or blocks currentTasks.
+        for (const [jobId, approval] of this.pendingApprovals) {
+          if (approval.taskId !== taskId) continue;
+          this.pendingApprovals.delete(jobId);
           return;
         }
+        return;
       }
       if (input.action === "stop") this.stopTask(taskId);
       if (input.action === "retry") this.retryTask(taskId);
@@ -999,14 +1025,20 @@ export class MockStore {
       if (job.enable === 1) enabledJobs += 1;
       const current = this.currentTasks.get(job.id);
       if (current) runningJobs += 1;
-      if (current?.approval) {
+      const approval = this.getPendingApproval(job.id);
+      if (approval) {
         pendingApprovals.push({
           jobId: job.id,
           jobName: job.remark || `任务 #${job.id}`,
-          taskId: current.taskId,
-          deleteCount: current.approval.deleteCount,
-          deleteSize: current.approval.deleteSize,
-          pathCount: current.approval.pathCount,
+          taskId: approval.taskId ?? 0,
+          deleteCount: approval.deleteCount,
+          deleteSize: approval.deleteSize,
+          pathCount: approval.pathCount,
+          status: approval.status,
+          createdAt: approval.createdAt,
+          expiresAt: approval.expiresAt,
+          planChanged: approval.planChanged,
+          lastError: approval.lastError,
         });
       }
       const engine = this.engines.find((e) => e.id === job.alistId);
@@ -1027,7 +1059,7 @@ export class MockStore {
         running: Boolean(current),
         queued: false,
         currentTaskId: current?.taskId ?? 0,
-        pendingApproval: current?.approval ?? null,
+        pendingApproval: approval,
         liveNum: current?.num ?? null,
         liveProgress: total > 0 ? (done * 100) / total : 0,
         nextRunTime: job.nextRunTime ?? 0,

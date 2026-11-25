@@ -525,9 +525,14 @@ func TestRemoveJobClientWithPendingFullSyncApprovalDoesNotDeadlockSSE(t *testing
 	}
 	defer client.Scheduler.Stop()
 
-	task := &JobTask{TaskID: 550, JobClient: client}
+	task := &JobTask{TaskID: 550, JobClient: client, Job: client.Job}
 	task.initRuntime()
-	task.setFullSyncApproval(&FullSyncApproval{DeleteCount: 1})
+	pendingDeleteApprovals.ResetForTest()
+	defer pendingDeleteApprovals.ResetForTest()
+	pendingDeleteApprovals.Stage(task, []pendingDeleteTarget{{
+		SrcRoot: "/src/", DstRoot: "/dst/", SrcDir: "/src/", DstDir: "/dst/",
+		Name: "old.txt", Size: 12, Count: 1,
+	}})
 	client.setCurrentTask(task)
 	if !client.tryMarkDoing() {
 		t.Fatalf("tryMarkDoing() = false, want true")
@@ -598,6 +603,9 @@ func TestRemoveJobClientWithPendingFullSyncApprovalDoesNotDeadlockSSE(t *testing
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("RemoveJobClient(55) deadlocked")
+	}
+	if pendingDeleteApprovals.Has(55) {
+		t.Fatal("RemoveJobClient(55) did not clear pending delete approval")
 	}
 }
 

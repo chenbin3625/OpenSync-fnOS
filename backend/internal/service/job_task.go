@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"opensync/internal/config"
-	"opensync/internal/msg"
 	"opensync/pkg/util"
 	"runtime"
 	"sync"
@@ -59,14 +58,11 @@ type JobTask struct {
 	// The executor waits for it before the final flush: a scan goroutine still
 	// running would append task items and re-arm the flush timer after the
 	// task was finished. Nil for tasks not started through Start (tests).
-	scanDone                chan struct{}
-	RequireFullSyncApproval bool
-	fullSyncApprovalMu      sync.Mutex
-	fullSyncApproval        *FullSyncApproval
-	fullSyncApprovalCh      chan struct{}
-	fullSyncApproved        bool
-	fullSyncDeleteMu        sync.Mutex
-	fullSyncDeletes         []fullSyncDeleteBatch
+	scanDone                   chan struct{}
+	RequireFullSyncApproval    bool
+	fullSyncDeleteMu           sync.Mutex
+	fullSyncDeletes            []fullSyncDeleteBatch
+	fullSyncDeleteGuardSkipped atomic.Bool
 	// drained records that the executor exited because every queued item
 	// finished — not because the task was stopped or its deadline hit.
 	drained       atomic.Bool
@@ -350,62 +346,23 @@ func (jt *JobTask) requestBreak() {
 		if cancel != nil {
 			cancel()
 		}
-		jt.clearFullSyncApproval()
 	}
 }
 
-func (jt *JobTask) setFullSyncApproval(approval *FullSyncApproval) {
-	jt.fullSyncApprovalMu.Lock()
-	jt.fullSyncApproval = approval
-	jt.fullSyncApproved = false
-	jt.fullSyncApprovalCh = make(chan struct{})
-	jt.fullSyncApprovalMu.Unlock()
-	jt.notifyProgressNow()
-	if approval != nil && jt.TaskID > 0 {
-		QueueApprovalNotification(jt.TaskID, jt.jobIDSnapshot(), jt.Job, approval)
+func (jt *JobTask) approvalJobID() int64 {
+	if id := jt.jobIDSnapshot(); id > 0 {
+		return id
 	}
-}
-
-func (jt *JobTask) fullSyncApprovalSnapshot() *FullSyncApproval {
-	jt.fullSyncApprovalMu.Lock()
-	defer jt.fullSyncApprovalMu.Unlock()
-	if jt.fullSyncApproval == nil {
-		return nil
+	if jt != nil && jt.Job != nil {
+		return util.ToInt64(jt.Job["id"])
 	}
-	copy := *jt.fullSyncApproval
-	copy.Paths = append([]FullSyncApprovalPath(nil), jt.fullSyncApproval.Paths...)
-	return &copy
-}
-
-func (jt *JobTask) approveFullSync() error {
-	jt.fullSyncApprovalMu.Lock()
-	if jt.fullSyncApproval == nil || jt.fullSyncApprovalCh == nil {
-		jt.fullSyncApprovalMu.Unlock()
-		return publicError(msg.T(msg.FullSyncPending))
-	}
-	jt.fullSyncApproved = true
-	jt.fullSyncApproval = nil
-	close(jt.fullSyncApprovalCh)
-	jt.fullSyncApprovalCh = nil
-	jt.fullSyncApprovalMu.Unlock()
-	jt.notifyProgressNow()
-	return nil
-}
-
-func (jt *JobTask) clearFullSyncApproval() {
-	jt.fullSyncApprovalMu.Lock()
-	hadApproval := jt.fullSyncApproval != nil
-	jt.fullSyncApproval = nil
-	jt.fullSyncApprovalCh = nil
-	jt.fullSyncApprovalMu.Unlock()
-	if hadApproval {
-		jt.notifyProgressChange()
-	}
+	return 0
 }
 
 const defaultFullSyncApprovalWait = 30 * time.Minute
 
-// fullSyncApprovalWait bounds how long a run waits for operator confirmation.
+// fullSyncApprovalWait bounds how long a pending deletion approval stays valid
+// before expiring automatically without deleting destination files.
 // Tests may override it directly; in production it follows SystemSettings.FullSyncApprovalTimeout.
 var fullSyncApprovalWait = defaultFullSyncApprovalWait
 
@@ -418,63 +375,6 @@ func effectiveFullSyncApprovalWait() time.Duration {
 		return 0
 	}
 	return time.Duration(minutes) * time.Minute
-}
-
-type fullSyncApprovalResult int
-
-const (
-	fullSyncApprovalGranted fullSyncApprovalResult = iota
-	fullSyncApprovalRejected
-	fullSyncApprovalTimedOut
-)
-
-func (jt *JobTask) waitForFullSyncApproval() fullSyncApprovalResult {
-	jt.fullSyncApprovalMu.Lock()
-	ch := jt.fullSyncApprovalCh
-	jt.fullSyncApprovalMu.Unlock()
-	if ch == nil {
-		return fullSyncApprovalGranted
-	}
-	waitDur := effectiveFullSyncApprovalWait()
-	var timer *time.Timer
-	var timerC <-chan time.Time
-	if waitDur > 0 {
-		timer = time.NewTimer(waitDur)
-		defer timer.Stop()
-		timerC = timer.C
-	}
-	select {
-	case <-ch:
-		jt.fullSyncApprovalMu.Lock()
-		approved := jt.fullSyncApproved
-		jt.fullSyncApproval = nil
-		jt.fullSyncApprovalMu.Unlock()
-		if approved {
-			return fullSyncApprovalGranted
-		}
-		return fullSyncApprovalRejected
-	case <-timerC:
-		jt.fullSyncApprovalMu.Lock()
-		pending := jt.fullSyncApprovalCh == ch
-		if pending {
-			jt.fullSyncApproval = nil
-			jt.fullSyncApprovalCh = nil
-		}
-		jt.fullSyncApprovalMu.Unlock()
-		if !pending {
-			// A decision landed between the timer and the lock.
-			return fullSyncApprovalGranted
-		}
-		log.Printf("Task %d full-sync approval timed out after %s; continuing with copies only", jt.TaskID, waitDur)
-		jt.notifyProgressNow()
-		return fullSyncApprovalTimedOut
-	case <-jt.context().Done():
-		jt.fullSyncApprovalMu.Lock()
-		jt.fullSyncApproval = nil
-		jt.fullSyncApprovalCh = nil
-		jt.fullSyncApprovalMu.Unlock()
-		return fullSyncApprovalRejected
-	}
 }
 
 func (jt *JobTask) waitForBreak(d time.Duration) bool {

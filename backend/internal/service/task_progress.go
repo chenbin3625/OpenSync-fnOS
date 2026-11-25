@@ -162,7 +162,6 @@ func (jt *JobTask) getCurrentPayload() jobCurrentPayload {
 	payload := jobCurrentPayload{
 		TaskID:     jt.TaskID,
 		ScanFinish: jt.ScanFinish.Load(),
-		Approval:   jt.fullSyncApprovalSnapshot(),
 		DoingTask:  doing,
 		CreateTime: int(jt.CreateTime),
 		Duration:   duration,

@@ -32,12 +32,12 @@ type ServerConfig struct {
 	CopyConcurrency int
 	ScanConcurrency int
 	MaxRetries      int
-	// ScheduledFullSyncConfirm pauses a scheduled full sync before it deletes
-	// destination entries and waits for an operator to confirm the plan.
+	// ScheduledFullSyncConfirm defers destination deletions of a scheduled full
+	// sync into a post-sync pending approval queue without blocking the sync.
 	ScheduledFullSyncConfirm int
-	// FullSyncApprovalTimeout is how many minutes a full sync waits for deletion
-	// approval before continuing with copy-only (0 = wait indefinitely until
-	// task timeout or cancellation).
+	// FullSyncApprovalTimeout is how many minutes a pending deletion approval
+	// stays valid before expiring automatically without deleting destination
+	// files (0 = never expires until manually approved or skipped).
 	FullSyncApprovalTimeout int
 	// EngineHealthCheckInterval is the periodic storage engine health probe
 	// interval in minutes (0 = disabled).

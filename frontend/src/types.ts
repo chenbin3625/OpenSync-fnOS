@@ -166,10 +166,18 @@ export interface FullSyncApprovalPath {
 }
 
 export interface FullSyncApproval {
+  jobId?: number;
+  jobName?: string;
+  taskId?: number;
   deleteCount: number;
   deleteSize: number;
   pathCount: number;
   paths: FullSyncApprovalPath[];
+  status?: "pending" | "executing" | string;
+  createdAt?: number;
+  expiresAt?: number;
+  planChanged?: boolean;
+  lastError?: string;
 }
 
 export interface CurrentTaskData {
@@ -239,6 +247,11 @@ export interface DashboardPendingApproval {
   deleteCount: number;
   deleteSize: number;
   pathCount: number;
+  status?: "pending" | "executing" | string;
+  createdAt?: number;
+  expiresAt?: number;
+  planChanged?: boolean;
+  lastError?: string;
 }
 
 export interface DashboardJobItem {

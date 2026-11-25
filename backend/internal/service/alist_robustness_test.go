@@ -270,6 +270,56 @@ func TestProtocolTripperRoutesLongOperationsToLongTransport(t *testing.T) {
 	if got := newAlistRoundTripper().(*protocolTripper).h12Long.(*http.Transport).ResponseHeaderTimeout; got != alistLongOpResponseHeaderTimeout {
 		t.Fatalf("long transport ResponseHeaderTimeout = %v, want %v", got, alistLongOpResponseHeaderTimeout)
 	}
+	if got := newAlistRoundTripper().(*protocolTripper).h12SlowMeta.(*http.Transport).ResponseHeaderTimeout; got != alistSlowMetaResponseHeaderTimeout {
+		t.Fatalf("slow-meta transport ResponseHeaderTimeout = %v, want %v", got, alistSlowMetaResponseHeaderTimeout)
+	}
+}
+
+func TestProtocolTripperRoutesSlowMetaOperationsToSlowMetaTransport(t *testing.T) {
+	var shortHits, slowMetaHits, longHits atomic.Int32
+	tripper := newProtocolTripper(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		shortHits.Add(1)
+		return jsonResponse(r, `{"code":200,"message":"success","data":{"total":0,"content":[]}}`), nil
+	}), nil)
+	tripper.h12SlowMeta = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		slowMetaHits.Add(1)
+		if r.URL.Path == "/api/fs/list" {
+			return jsonResponse(r, `{"code":200,"message":"success","data":{"total":0,"content":[]}}`), nil
+		}
+		return jsonResponse(r, `{"code":200,"message":"success","data":{}}`), nil
+	})
+	tripper.h12Long = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		longHits.Add(1)
+		return jsonResponse(r, `{"code":200,"message":"success","data":{"tasks":[]}}`), nil
+	})
+
+	// Explicit long operation takes precedence over slow-meta if both are present.
+	bothCtx := withAlistLongOperation(withAlistSlowMetaOperation(context.Background()))
+	req, _ := http.NewRequestWithContext(bothCtx, http.MethodPost, "http://alist.test/api/fs/copy", nil)
+	resp, err := tripper.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip(both) error: %v", err)
+	}
+	closeBody(resp.Body)
+
+	client := &AlistClient{
+		URL:        "http://alist.test",
+		client:     &http.Client{Transport: tripper},
+		longClient: &http.Client{Transport: tripper},
+	}
+	if _, err := client.FileListApiContext(context.Background(), "/quark/photos", 0, 0); err != nil {
+		t.Fatalf("FileListApiContext() error: %v", err)
+	}
+	if err := client.MkdirContext(context.Background(), "/quark/photos/2026", 0); err != nil {
+		t.Fatalf("MkdirContext() error: %v", err)
+	}
+	if _, err := client.FileStatContext(context.Background(), "/quark/photos", "a.jpg"); err != nil {
+		t.Fatalf("FileStatContext() error: %v", err)
+	}
+
+	if longHits.Load() != 1 || slowMetaHits.Load() != 2 || shortHits.Load() != 1 {
+		t.Fatalf("long/slowMeta/short hits = %d/%d/%d, want 1/2/1", longHits.Load(), slowMetaHits.Load(), shortHits.Load())
+	}
 }
 func TestParseAltSvcHTTP3(t *testing.T) {
 	u443, _ := url.Parse("https://nas.example:443/api")

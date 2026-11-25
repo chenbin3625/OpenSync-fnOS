@@ -275,6 +275,11 @@ func DeleteJob(jobID int64) error {
 		if _, err := tx.Exec("DELETE FROM job_task WHERE jobId=?", jobID); err != nil {
 			return err
 		}
+		if hasApprovalTable, err := txTableExists(tx, "pending_delete_approval"); err == nil && hasApprovalTable {
+			if _, err := tx.Exec("DELETE FROM pending_delete_approval WHERE jobId=?", jobID); err != nil {
+				return err
+			}
+		}
 		if _, err := tx.Exec("DELETE FROM job WHERE id=?", jobID); err != nil {
 			return err
 		}
@@ -972,6 +977,13 @@ func UpdateJobTaskStatusAndNum(taskID int64, status int, errMsg *string, taskNum
 	return ExecuteUpdate("UPDATE job_task SET status=?, errMsg=?, taskNum=?, runTime=strftime('%s','now') WHERE id=?", status, errMsg, taskNum, taskID)
 }
 
+// UpdateJobTaskStatusAndNumPreserveRunTime refreshes task status and counters
+// after deferred deletion approval executes without altering the sync task's
+// original runTime.
+func UpdateJobTaskStatusAndNumPreserveRunTime(taskID int64, status int, errMsg *string, taskNum string) error {
+	return ExecuteUpdate("UPDATE job_task SET status=?, errMsg=?, taskNum=? WHERE id=?", status, errMsg, taskNum, taskID)
+}
+
 // UpdateJobTaskStatusClearNum records a final status without counters. taskNum
 // is left NULL so the task list recomputes it on the next read instead of
 // caching counters that could not be read.
@@ -1378,4 +1390,56 @@ func escapeLike(s string) string {
 	s = strings.ReplaceAll(s, `%`, `\%`)
 	s = strings.ReplaceAll(s, `_`, `\_`)
 	return s
+}
+
+// --- Pending Delete Approval ---
+
+// UpsertPendingDeleteApproval persists a deferred deletion approval for jobID.
+// It is a no-op when the database is not initialized or does not contain the
+// pending_delete_approval table (e.g. isolated in-memory unit tests).
+func UpsertPendingDeleteApproval(jobID, taskID int64, payload string, createdAt, expiresAt int64) error {
+	handle := dbIfInitialized()
+	if handle == nil {
+		return nil
+	}
+	exists, err := dbTableExists(handle, "pending_delete_approval")
+	if err != nil || !exists {
+		return err
+	}
+	return ExecuteUpdate(
+		`INSERT INTO pending_delete_approval (jobId, taskId, payload, createdAt, expiresAt)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(jobId) DO UPDATE SET
+		   taskId=excluded.taskId,
+		   payload=excluded.payload,
+		   createdAt=excluded.createdAt,
+		   expiresAt=excluded.expiresAt`,
+		jobID, taskID, payload, createdAt, expiresAt,
+	)
+}
+
+// DeletePendingDeleteApproval removes a persisted deferred deletion approval.
+func DeletePendingDeleteApproval(jobID int64) error {
+	handle := dbIfInitialized()
+	if handle == nil {
+		return nil
+	}
+	exists, err := dbTableExists(handle, "pending_delete_approval")
+	if err != nil || !exists {
+		return err
+	}
+	return ExecuteUpdate("DELETE FROM pending_delete_approval WHERE jobId=?", jobID)
+}
+
+// ListPendingDeleteApprovals returns all persisted deferred deletion approvals.
+func ListPendingDeleteApprovals() ([]map[string]interface{}, error) {
+	handle := dbIfInitialized()
+	if handle == nil {
+		return nil, nil
+	}
+	exists, err := dbTableExists(handle, "pending_delete_approval")
+	if err != nil || !exists {
+		return nil, err
+	}
+	return FetchAllToTable("SELECT jobId, taskId, payload, createdAt, expiresAt FROM pending_delete_approval ORDER BY createdAt DESC, jobId ASC")
 }

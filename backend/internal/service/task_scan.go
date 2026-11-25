@@ -166,28 +166,6 @@ func (jt *JobTask) runFullSyncPhases(firstDstWorks, laterWorks []scanWork, spec 
 	if jt.isBreak() || len(plans) == 0 {
 		return
 	}
-	if jt.RequireFullSyncApproval {
-		planned := plans
-		var result fullSyncApprovalResult
-		plans, result = jt.confirmFullSyncPlans(plans, func() []*fullSyncPlan {
-			fresh := jt.buildFullSyncPlans(firstDstWorks, spec)
-			if !jt.isBreak() {
-				fresh = append(fresh, jt.buildFullSyncPlans(laterWorks, spec)...)
-			}
-			return fresh
-		})
-		switch result {
-		case fullSyncApprovalGranted:
-			// plans is the freshly rescanned set.
-		case fullSyncApprovalTimedOut:
-			for _, plan := range planned {
-				jt.executeFullSyncPlan(plan.withoutDestructive())
-			}
-			return
-		default:
-			return
-		}
-	}
 	jt.executeFullSyncPlans(plans)
 }
 

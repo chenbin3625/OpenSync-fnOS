@@ -277,6 +277,18 @@ export const handlers = [
     if (!body) return fail("请求内容无效");
     return ok(mockStore.testJobFilter(body));
   }),
+  http.get(`${apiBase}/job/approval`, ({ request }) => {
+    const query = new URL(request.url).searchParams;
+    const rawJobId = query.get("jobId");
+    if (rawJobId !== null && rawJobId !== "") {
+      const jobId = numberParam(query, "jobId");
+      if (jobId === undefined || !Number.isInteger(jobId) || jobId <= 0) {
+        return fail("缺少必要参数");
+      }
+      return ok(mockStore.getPendingApproval(jobId));
+    }
+    return ok(mockStore.listPendingApprovals());
+  }),
   http.get(`${apiBase}/job/stream`, ({ request }) => {
     const query = new URL(request.url).searchParams;
     const jobId = numberParam(query, "id");

@@ -81,7 +81,7 @@ describe("mock store", () => {
     });
   });
 
-  it("offers a deletion preview for full sync and resolves it by action", () => {
+  it("stages post-sync deletion approval without blocking or aborting the sync task", () => {
     const store = createMockStore({
       jobs: [
         {
@@ -92,19 +92,33 @@ describe("mock store", () => {
           srcPath: ["/Photos"],
           dstPath: ["/Backup"],
         },
+        {
+          id: 18,
+          remark: "全量任务二",
+          method: 1,
+          enable: 1,
+          srcPath: ["/Docs"],
+          dstPath: ["/BackupDocs"],
+        },
       ],
     });
     const running = store.runJob(8);
-    expect(running.approval?.deleteCount).toBeGreaterThan(0);
+    expect(running.approval).toBeUndefined();
+    expect(store.getPendingApproval(8)?.deleteCount).toBeGreaterThan(0);
 
     store.updateJobAction({ taskId: running.taskId, action: "approve" });
-    expect(store.getCurrentTask(8)?.approval).toBeUndefined();
+    expect(store.getPendingApproval(8)).toBeNull();
+    expect(store.getCurrentTask(8)?.taskId).toBe(running.taskId);
 
-    store.updateJobAction({ taskId: running.taskId, action: "reject" });
-    expect(store.getCurrentTask(8)).toBeNull();
-    expect(store.listHistory(8).dataList[0]).toMatchObject({
-      id: running.taskId,
-      status: 4,
+    const running2 = store.runJob(18);
+    expect(store.getPendingApproval(18)?.deleteCount).toBeGreaterThan(0);
+    store.updateJobAction({ taskId: running2.taskId, action: "reject" });
+    expect(store.getPendingApproval(18)).toBeNull();
+    // Rejecting deferred deletions skips deletes without aborting the sync task.
+    expect(store.getCurrentTask(18)?.taskId).toBe(running2.taskId);
+    expect(store.listHistory(18).dataList[0]).toMatchObject({
+      id: running2.taskId,
+      status: 1,
     });
   });
 

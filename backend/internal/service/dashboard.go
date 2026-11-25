@@ -96,7 +96,7 @@ func GetDashboardOverview() (map[string]interface{}, error) {
 		nextRunTime := int64(0)
 		running := false
 		currentTaskID := int64(0)
-		var approval *FullSyncApproval
+		approval := pendingDeleteApprovals.GetByJobID(jobID)
 		var liveNum *taskNumStats
 		liveProgress := 0.0
 
@@ -108,7 +108,6 @@ func GetDashboardOverview() (map[string]interface{}, error) {
 				running = true
 				runningJobs++
 				currentTaskID = task.TaskID
-				approval = task.fullSyncApprovalSnapshot()
 				payload := task.getCurrentPayload()
 				numCopy := payload.Num
 				liveNum = &numCopy
@@ -116,21 +115,26 @@ func GetDashboardOverview() (map[string]interface{}, error) {
 				if total > 0 {
 					liveProgress = float64(payload.DoneSize) * 100.0 / float64(total)
 				}
-				if approval != nil {
-					jobName := strings.TrimSpace(util.StringValue(job["remark"]))
-					if jobName == "" {
-						jobName = fmt.Sprintf("任务 #%d", jobID)
-					}
-					pendingApprovals = append(pendingApprovals, map[string]interface{}{
-						"jobId":       jobID,
-						"jobName":     jobName,
-						"taskId":      task.TaskID,
-						"deleteCount": approval.DeleteCount,
-						"deleteSize":  approval.DeleteSize,
-						"pathCount":   approval.PathCount,
-					})
-				}
 			}
+		}
+		if approval != nil {
+			jobName := strings.TrimSpace(util.StringValue(job["remark"]))
+			if jobName == "" {
+				jobName = fmt.Sprintf("任务 #%d", jobID)
+			}
+			pendingApprovals = append(pendingApprovals, map[string]interface{}{
+				"jobId":       jobID,
+				"jobName":     jobName,
+				"taskId":      approval.TaskID,
+				"deleteCount": approval.DeleteCount,
+				"deleteSize":  approval.DeleteSize,
+				"pathCount":   approval.PathCount,
+				"status":      approval.Status,
+				"createdAt":   approval.CreatedAt,
+				"expiresAt":   approval.ExpiresAt,
+				"planChanged": approval.PlanChanged,
+				"lastError":   approval.LastError,
+			})
 		}
 
 		var lastTaskSummary map[string]interface{}
