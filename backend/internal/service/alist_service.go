@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"opensync/internal/mapper"
 	"opensync/internal/msg"
+	"opensync/internal/native"
 	"opensync/pkg/util"
 	"strconv"
 	"strings"
@@ -611,7 +612,7 @@ func GetChildPath(ctx context.Context, alistID int64, path string) ([]map[string
 	if cfg != nil {
 		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
-		list, e := cfg.List(ctx, path)
+		list, e := cfg.ListWithOptions(ctx, path, native.SessionOptions{ProxyURL: globalNativeProxyURL()})
 		if e != nil {
 			return nil, publicError(e.Error())
 		}

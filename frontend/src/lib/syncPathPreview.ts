@@ -146,8 +146,90 @@ export function syncPathContains(parent: string, candidate: string): boolean {
   return normalizedCandidate.startsWith(`${normalizedParent}/`);
 }
 
-// Mirrors commonSrcSelectionParent in backend/internal/service/task_scan.go.
-export function commonSrcSelectionParent(srcPaths: readonly string[]): string {
+// Mirrors native.StripLocalRootID in backend/internal/native/paths.go.
+export function stripNativeLocalRootID(segment: string): {
+  base: string;
+  stripped: boolean;
+} {
+  const idx = segment.lastIndexOf("~");
+  if (idx <= 0 || segment.length - idx - 1 !== 12) {
+    return { base: segment, stripped: false };
+  }
+  const base = segment.slice(0, idx);
+  if (base === "." || base === "..") {
+    return { base: segment, stripped: false };
+  }
+  const suffix = segment.slice(idx + 1);
+  if (!/^[0-9a-f]{12}$/.test(suffix)) {
+    return { base: segment, stripped: false };
+  }
+  return { base, stripped: true };
+}
+
+// Mirrors splitLocalRootSegment in backend/internal/service/task_scan.go.
+function splitLocalRootSegment(cleanPath: string): {
+  storage: string;
+  rootSeg: string;
+  rest: string;
+} | null {
+  if (!cleanPath.startsWith("/")) return null;
+  const trimmed = cleanPath.slice(1);
+  const firstSlash = trimmed.indexOf("/");
+  if (firstSlash <= 0) return null;
+  const storage = trimmed.slice(0, firstSlash);
+  const afterStorage = trimmed.slice(firstSlash + 1);
+  if (!afterStorage) return null;
+  const secondSlash = afterStorage.indexOf("/");
+  const rootSeg =
+    secondSlash >= 0 ? afterStorage.slice(0, secondSlash) : afterStorage;
+  if (!rootSeg) return null;
+  const rest = secondSlash >= 0 ? afterStorage.slice(secondSlash + 1) : "";
+  return { storage, rootSeg, rest };
+}
+
+// Mirrors sanitizeSrcPathsForDstDerivation in backend/internal/service/task_scan.go.
+function sanitizeSrcPathsForDstDerivation(srcPaths: readonly string[]): {
+  sanitized: string[];
+  sanitizeOne: (cleanPath: string) => string;
+} {
+  const cleanedInputs = srcPaths.map((raw) => cleanPosixPath(raw.trim()));
+  const rawByBase = new Map<string, Set<string>>();
+  for (const clean of cleanedInputs) {
+    const parts = splitLocalRootSegment(clean);
+    if (!parts) continue;
+    const { base } = stripNativeLocalRootID(parts.rootSeg);
+    const baseKey = base.toLowerCase();
+    const rawKey = parts.rootSeg.toLowerCase();
+    let set = rawByBase.get(baseKey);
+    if (!set) {
+      set = new Set<string>();
+      rawByBase.set(baseKey, set);
+    }
+    set.add(rawKey);
+  }
+
+  const sanitizeOne = (clean: string): string => {
+    const parts = splitLocalRootSegment(clean);
+    if (!parts) return clean;
+    const { base, stripped } = stripNativeLocalRootID(parts.rootSeg);
+    if (!stripped) return clean;
+    const set = rawByBase.get(base.toLowerCase());
+    if (set && set.size > 1) return clean;
+    if (set && set.size === 1 && !set.has(parts.rootSeg.toLowerCase())) {
+      return clean;
+    }
+    return parts.rest
+      ? `/${parts.storage}/${base}/${parts.rest}`
+      : `/${parts.storage}/${base}`;
+  };
+
+  return {
+    sanitized: cleanedInputs.map(sanitizeOne),
+    sanitizeOne,
+  };
+}
+
+function commonSrcSelectionParentRaw(srcPaths: readonly string[]): string {
   if (srcPaths.length < 2) return "";
   let common = cleanPosixPath(srcPaths[0].trim());
   for (let i = 1; i < srcPaths.length; i++) {
@@ -164,16 +246,22 @@ export function commonSrcSelectionParent(srcPaths: readonly string[]): string {
   return common;
 }
 
+// Mirrors commonSrcSelectionParent in backend/internal/service/task_scan.go.
+export function commonSrcSelectionParent(srcPaths: readonly string[]): string {
+  const { sanitized } = sanitizeSrcPathsForDstDerivation(srcPaths);
+  return commonSrcSelectionParentRaw(sanitized);
+}
+
 // Mirrors srcSelectionBaseNameIsAmbiguous in backend/internal/service/task_scan.go.
 export function srcSelectionBaseNameIsAmbiguous(
   cleanSrc: string,
   srcPaths: readonly string[],
 ): boolean {
-  const base = posixBase(cleanSrc);
+  const base = posixBase(cleanSrc).toLowerCase();
   for (const other of srcPaths) {
     const cleanOther = cleanPosixPath(other.trim());
     if (cleanOther === cleanSrc) continue;
-    if (posixBase(cleanOther) === base) return true;
+    if (posixBase(cleanOther).toLowerCase() === base) return true;
   }
   return false;
 }
@@ -183,10 +271,11 @@ export function srcSelectionSuffix(
   srcPath: string,
   srcPaths: readonly string[],
 ): string {
-  const cleanSrc = cleanPosixPath(srcPath.trim());
-  const commonParent = commonSrcSelectionParent(srcPaths);
+  const { sanitized, sanitizeOne } = sanitizeSrcPathsForDstDerivation(srcPaths);
+  const cleanSrc = sanitizeOne(cleanPosixPath(srcPath.trim()));
+  const commonParent = commonSrcSelectionParentRaw(sanitized);
   if (commonParent === "" || commonParent === "." || commonParent === "/") {
-    if (srcSelectionBaseNameIsAmbiguous(cleanSrc, srcPaths)) {
+    if (srcSelectionBaseNameIsAmbiguous(cleanSrc, sanitized)) {
       return cleanSrc.startsWith("/") ? cleanSrc.slice(1) : cleanSrc;
     }
     return posixBase(cleanSrc);
@@ -398,16 +487,20 @@ export function buildSyncPathPreview({
   const stored = parseStoredJobDstMap(storedDstMap);
   const reuse = stored && jobDstBaseEquals(stored.base, base) ? stored.map : null;
 
-  const commonParent = commonSrcSelectionParent(cleanSrc);
+  const { sanitized: sanitizedSrc } =
+    sanitizeSrcPathsForDstDerivation(cleanSrc);
+  const commonParent = commonSrcSelectionParentRaw(sanitizedSrc);
   const hasSharedParent =
-    cleanSrc.length > 1 &&
+    sanitizedSrc.length > 1 &&
     commonParent !== "" &&
     commonParent !== "." &&
     commonParent !== "/";
   const hasAmbiguousBase =
-    cleanSrc.length > 1 &&
+    sanitizedSrc.length > 1 &&
     !hasSharedParent &&
-    cleanSrc.some((src) => srcSelectionBaseNameIsAmbiguous(src, cleanSrc));
+    sanitizedSrc.some((src) =>
+      srcSelectionBaseNameIsAmbiguous(src, sanitizedSrc),
+    );
 
   const rule: SyncPathMappingRule =
     cleanSrc.length <= 1
@@ -462,6 +555,9 @@ export function buildSyncPathPreview({
 
   if (method === 2 && cleanDst.length > 1) {
     conflicts.push("移动模式只允许一个目标目录");
+  }
+  if (method === 3 && (cleanSrc.length > 1 || cleanDst.length > 1)) {
+    conflicts.push("双向同步模式只允许一个源目录和一个目标目录");
   }
 
   const overlap = findOverlappingPair(cleanSrc, cleanDst);

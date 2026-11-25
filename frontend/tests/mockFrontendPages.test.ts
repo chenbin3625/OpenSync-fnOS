@@ -145,7 +145,7 @@ describe("mock job action contract", () => {
 describe("mock settings contract", () => {
   it("defaults match the backend", async () => {
     resetMockStore();
-    const result = await call<Record<string, number>>("/system/config");
+    const result = await call<Record<string, unknown>>("/system/config");
     expect(result.body.data).toEqual({
       taskTimeout: 48,
       taskSave: 30,
@@ -155,6 +155,8 @@ describe("mock settings contract", () => {
       scheduledFullSyncConfirm: 0,
       fullSyncApprovalTimeout: 30,
       engineHealthCheckInterval: 15,
+      defaultBwLimit: "",
+      proxyUrl: "",
     });
   });
 

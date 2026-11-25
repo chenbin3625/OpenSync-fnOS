@@ -162,5 +162,103 @@ describe("native storage mock API lifecycle", () => {
       await fetch(`${apiUrl}/native/storage`),
     );
     expect(finalState.data.remotes.map((r) => r.name)).toEqual(["Archive"]);
+    expect(finalState.data.rcloneVersion).toBeTruthy();
+    expect(finalState.data.supportedTypes).toContain("union");
+    expect(finalState.data.supportedTypes).toContain("b2");
+
+    // 9. Rename, export, about, browse, restore, and job consistency check
+    const renamed = await json<{ oldName: string; newName: string; updatedJobs: number }>(
+      await fetch(`${apiUrl}/native/storage/rename`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ oldName: "Archive", newName: "ArchiveV2" }),
+      }),
+    );
+    expect(renamed.code).toBe(200);
+    expect(renamed.data.newName).toBe("ArchiveV2");
+
+    const exported = await json<{ content: string; encrypted: boolean; filename: string }>(
+      await fetch(`${apiUrl}/native/storage/export`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ names: ["ArchiveV2"], password: "" }),
+      }),
+    );
+    expect(exported.code).toBe(200);
+    expect(exported.data.content).toContain("[ArchiveV2]");
+    expect(exported.data.encrypted).toBe(false);
+
+    const about = await json<{ supported: boolean; total?: number }>(
+      await fetch(`${apiUrl}/native/storage/about`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "ArchiveV2" }),
+      }),
+    );
+    expect(about.code).toBe(200);
+    expect(about.data.supported).toBe(true);
+    expect(about.data.total).toBeGreaterThan(0);
+
+    const browse = await json<{ path: string; entries: Array<{ name: string; path: string; isDir: boolean }> }>(
+      await fetch(`${apiUrl}/native/storage/browse`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: "/ArchiveV2" }),
+      }),
+    );
+    expect(browse.code).toBe(200);
+    expect(browse.data.entries.length).toBeGreaterThan(0);
+
+    const restored = await json<null>(
+      await fetch(`${apiUrl}/native/storage/restore`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          srcPath: "/ArchiveV2/backup-report.txt",
+          dstLocalDir: "/vol1/1000/Photos",
+          isDir: false,
+          overwrite: false,
+        }),
+      }),
+    );
+    expect(restored.code).toBe(200);
+
+    // 10. Create a bisync job with rclone tuning options and run consistency check
+    const createdJob = await json<{ id: number }>(
+      await fetch(`${apiUrl}/job`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          remark: "双向同步测试",
+          alistId: enabled.data.engineId,
+          method: 3,
+          isCron: 2,
+          srcPath: ["/本地/Photos"],
+          dstPath: ["/ArchiveV2/Photos"],
+          bwLimit: "10M",
+          tpsLimit: 12,
+          modifyWindow: "2s",
+          fastList: 1,
+          multiThreadStreams: 8,
+          createEmptySrcDirs: 1,
+          followSymlinks: 1,
+          extraFlags: JSON.stringify({ checkFirst: true, s3NoHead: true }),
+        }),
+      }),
+    );
+    expect(createdJob.code).toBe(200);
+    expect(createdJob.data.id).toBeGreaterThan(0);
+
+    const checkRes = await json<{ status: string; matchedCount: number; download: boolean }>(
+      await fetch(`${apiUrl}/job/check`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: createdJob.data.id, download: true }),
+      }),
+    );
+    expect(checkRes.code).toBe(200);
+    expect(checkRes.data.status).toBe("completed");
+    expect(checkRes.data.download).toBe(true);
+    expect(checkRes.data.matchedCount).toBeGreaterThan(0);
   });
 });

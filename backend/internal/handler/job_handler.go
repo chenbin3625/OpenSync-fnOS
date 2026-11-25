@@ -112,7 +112,7 @@ func validateJobFields(req map[string]interface{}) error {
 	}
 	if v, ok := req["method"]; ok && v != nil && v != "" {
 		method, isInt := strictInt64(v)
-		if !isInt || method < 0 || method > 2 {
+		if !isInt || method < 0 || method > 3 {
 			return errors.New(msg.T(msg.LostPart))
 		}
 	}
@@ -502,6 +502,54 @@ func CancelDryRun(c *gin.Context) {
 	}
 	handleServiceVoid(c, func() error {
 		return service.CancelDryRun(id)
+	})
+}
+
+// StartJobCheck handles POST /svr/job/check
+func StartJobCheck(c *gin.Context) {
+	var req struct {
+		ID       *flexibleID `json:"id"`
+		Download bool        `json:"download"`
+	}
+	if !bindJSONStrict(c, &req) {
+		return
+	}
+	if req.ID == nil {
+		respondError(c, msg.T(msg.LostPart))
+		return
+	}
+	jobID, err := req.ID.parse()
+	if err != nil {
+		respondError(c, err.Error())
+		return
+	}
+	handleService(c, func() (interface{}, error) {
+		return service.StartJobCheck(jobID, req.Download)
+	})
+}
+
+// GetJobCheck handles GET /svr/job/check
+func GetJobCheck(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	id, err := parseRequiredID(c.Query("id"))
+	if err != nil {
+		respondError(c, err.Error())
+		return
+	}
+	handleService(c, func() (interface{}, error) {
+		return service.GetJobCheck(id)
+	})
+}
+
+// CancelJobCheck handles DELETE /svr/job/check
+func CancelJobCheck(c *gin.Context) {
+	id, err := parseRequiredID(c.Query("id"))
+	if err != nil {
+		respondError(c, err.Error())
+		return
+	}
+	handleServiceVoid(c, func() error {
+		return service.CancelJobCheck(id)
 	})
 }
 

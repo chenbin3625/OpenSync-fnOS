@@ -129,6 +129,41 @@ func (q *copyQueue) len() int {
 	return len(q.items) - q.head
 }
 
+// removeMatching removes the first queued item matching (srcDir, dstDir, fileName).
+func (q *copyQueue) removeMatching(srcDir, dstDir, fileName string) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for i := q.head; i < len(q.items); i++ {
+		item := q.items[i]
+		if item == nil {
+			continue
+		}
+		if item.SrcPath == srcDir && item.DstPath == dstDir && item.FileName == fileName {
+			q.subWaitStatsLocked(item)
+			copy(q.items[i:], q.items[i+1:])
+			q.items[len(q.items)-1] = nil
+			q.items = q.items[:len(q.items)-1]
+			q.signalSpace()
+			return true
+		}
+	}
+	return false
+}
+
+// reset clears all queued waiting items without permanently closing the queue.
+func (q *copyQueue) reset() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for i := q.head; i < len(q.items); i++ {
+		q.items[i] = nil
+	}
+	q.items = q.items[:0]
+	q.head = 0
+	q.waitCount = 0
+	q.waitSize = 0
+	q.signalSpace()
+}
+
 func (q *copyQueue) snapshot() []*CopyItem {
 	q.mu.Lock()
 	defer q.mu.Unlock()

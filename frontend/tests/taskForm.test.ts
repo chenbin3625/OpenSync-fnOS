@@ -24,13 +24,16 @@ import {
 import * as taskFormModule from "../src/lib/taskForm";
 
 describe("existing synchronization contracts", () => {
-  it("keeps copy modes and exposes verified single-target moves", () => {
-    expect(methodNames).toEqual(["增量同步", "全量同步", "移动"]);
+  it("keeps copy modes and exposes verified single-target moves and bisync", () => {
+    expect(methodNames).toEqual(["增量同步", "全量同步", "移动", "双向同步"]);
     expect(methodOptions.map((method) => method.description).join("\n")).toContain(
       "不会删除目标端多余文件",
     );
     expect(methodOptions.map((method) => method.description).join("\n")).toContain(
       "会删除目标端多余文件",
+    );
+    expect(methodOptions.map((method) => method.description).join("\n")).toContain(
+      "rclone bisync",
     );
 
     for (const method of [0, 1]) {
@@ -521,5 +524,88 @@ describe("existing synchronization contracts", () => {
         "排除目录 1 个",
       ]),
     );
+  });
+
+  it("validates bisync single source/destination and round-trips rclone tuning fields", () => {
+    const multiSrcBisync = {
+      ...defaultJobForm(7),
+      remark: "双向",
+      method: 3,
+      srcPath: ["/A", "/B"],
+      dstPath: ["/C"],
+    };
+    expect(validateJobForm(multiSrcBisync)).toContain("一个源目录");
+
+    const multiDstBisync = {
+      ...defaultJobForm(7),
+      remark: "双向",
+      method: 3,
+      srcPath: ["/A"],
+      dstPath: ["/C", "/D"],
+    };
+    expect(validateJobForm(multiDstBisync)).toContain("一个目标目录");
+
+    const stored = {
+      id: 9,
+      enable: 1,
+      remark: "原生调优任务",
+      alistId: 7,
+      method: 3,
+      isCron: 2,
+      interval: 0,
+      srcPath: '["/本地/Photos"]',
+      dstPath: '["/Archive/Photos"]',
+      useCacheS: 0,
+      useCacheT: 0,
+      bwLimit: "08:00,5M 23:00,off",
+      tpsLimit: 12.5,
+      tpsLimitBurst: 25,
+      modifyWindow: "2s",
+      fastList: 1,
+      multiThreadStreams: 8,
+      createEmptySrcDirs: 1,
+      followSymlinks: 1,
+      extraFlags: JSON.stringify({
+        noUpdateModtime: true,
+        inplace: false,
+        checkFirst: true,
+        s3NoHead: true,
+      }),
+    };
+    const form = jobToForm(stored);
+    expect(validateJobForm(form)).toBe("");
+    expect(form.method).toBe(3);
+    expect(form.bwLimit).toBe("08:00,5M 23:00,off");
+    expect(form.tpsLimit).toBe(12.5);
+    expect(form.tpsLimitBurst).toBe(25);
+    expect(form.modifyWindow).toBe("2s");
+    expect(form.fastList).toBe(true);
+    expect(form.multiThreadStreams).toBe(8);
+    expect(form.createEmptySrcDirs).toBe(true);
+    expect(form.followSymlinks).toBe(true);
+    expect(form.extraFlags).toEqual({
+      noUpdateModtime: true,
+      inplace: false,
+      checkFirst: true,
+      s3NoHead: true,
+    });
+
+    const payload = buildJobPayload(form);
+    expect(payload).toMatchObject({
+      method: 3,
+      bwLimit: "08:00,5M 23:00,off",
+      tpsLimit: 12.5,
+      tpsLimitBurst: 25,
+      modifyWindow: "2s",
+      fastList: 1,
+      multiThreadStreams: 8,
+      createEmptySrcDirs: 1,
+      followSymlinks: 1,
+    });
+    expect(JSON.parse(payload.extraFlags)).toEqual({
+      noUpdateModtime: true,
+      checkFirst: true,
+      s3NoHead: true,
+    });
   });
 });

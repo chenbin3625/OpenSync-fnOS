@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"opensync/internal/mapper"
 	"opensync/internal/msg"
-	"opensync/internal/native"
 	"opensync/pkg/util"
 	"sort"
 	"strings"
@@ -190,38 +189,12 @@ func StartDryRun(jobID int64) (*DryRunResult, error) {
 	if cfg != nil {
 		go func() {
 			defer cancel()
-			var prevDirs, pairDirs int64
-			var lastPair string
-			outcome := runNativePairs(ctx, cfg, job, true, nil, func(src, dst string, v native.Event) {
-				pairKey := src + "\x00" + dst
-				if pairKey != lastPair {
-					prevDirs += pairDirs
-					pairDirs = 0
-					lastPair = pairKey
+			defer func() {
+				if r := recover(); r != nil {
+					sess.finish("failed", fmt.Sprintf("dry-run panic: %v", r))
 				}
-				if v.ScanDirs > 0 {
-					if v.ScanDirs > pairDirs {
-						pairDirs = v.ScanDirs
-					}
-					sess.scannedDirs.Store(prevDirs + pairDirs)
-				}
-				if v.File != "" {
-					action := "copy"
-					if v.Updated {
-						action = "update"
-					}
-					sess.addItem(DryRunItem{Action: action, SrcPath: src, DstPath: dst, FileName: v.File, FileSize: v.Size})
-				}
-			})
-			if outcome.err != nil {
-				if ctx.Err() != nil {
-					sess.finish("cancelled", "")
-				} else {
-					sess.finish("failed", outcome.err.Error())
-				}
-			} else {
-				sess.finish("completed", "")
-			}
+			}()
+			runNativeDryRunSession(ctx, sess, cfg, job)
 		}()
 	} else {
 		go runDryRunSession(ctx, sess, job, client)

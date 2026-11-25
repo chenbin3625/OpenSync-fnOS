@@ -27,6 +27,8 @@ export interface SystemSettings {
   scheduledFullSyncConfirm: number;
   fullSyncApprovalTimeout: number;
   engineHealthCheckInterval: number;
+  defaultBwLimit?: string;
+  proxyUrl?: string;
 }
 
 export interface EngineStorageStatus {
@@ -72,9 +74,75 @@ export interface NativeStorageState {
   remark: string;
   maxConcurrentJobs: number;
   rcloneAvailable: boolean;
+  rcloneVersion?: string;
   rcloneError?: string;
+  supportedTypes?: string[];
   localRoots: NativeLocalRoot[];
   remotes: NativeRemoteItem[];
+}
+
+export interface NativeRenameResult {
+  oldName: string;
+  newName: string;
+  updatedJobs: number;
+}
+
+export interface NativeExportResult {
+  content: string;
+  encrypted: boolean;
+  filename: string;
+}
+
+export interface NativeAboutInfo {
+  supported: boolean;
+  total?: number;
+  used?: number;
+  free?: number;
+  trashed?: number;
+  other?: number;
+  message?: string;
+}
+
+export interface NativeDirEntry {
+  name: string;
+  path: string;
+  isDir: boolean;
+  size: number;
+  modTime: number;
+  md5?: string;
+}
+
+export interface NativeBrowseResult {
+  path: string;
+  entries: NativeDirEntry[];
+}
+
+export interface NativeExtraFlags {
+  noUpdateModtime?: boolean;
+  inplace?: boolean;
+  checkFirst?: boolean;
+  s3NoHead?: boolean;
+}
+
+export interface JobCheckResult {
+  jobId: number;
+  status: "running" | "completed" | "failed" | "cancelled" | string;
+  download: boolean;
+  startedAt: number;
+  finishedAt: number;
+  checkedFiles: number;
+  totalFiles: number;
+  matchedCount: number;
+  differCount: number;
+  missingOnSrcCount: number;
+  missingOnDstCount: number;
+  errorCount: number;
+  differ: string[];
+  missingOnSrc: string[];
+  missingOnDst: string[];
+  errors: string[];
+  truncated: boolean;
+  error?: string;
 }
 
 export interface NativeImportCandidate {
@@ -169,6 +237,16 @@ export interface JobItem {
   windowStopOutside?: number | boolean;
   notifyMode?: number;
   notifyIds?: string | number[] | null;
+  // Native rclone tuning fields
+  bwLimit?: string | null;
+  tpsLimit?: number;
+  tpsLimitBurst?: number;
+  modifyWindow?: string | null;
+  fastList?: number | boolean;
+  multiThreadStreams?: number;
+  createEmptySrcDirs?: number | boolean;
+  followSymlinks?: number | boolean;
+  extraFlags?: string | NativeExtraFlags | null;
   // Runtime decorations returned by GET /svr/job
   running?: boolean;
   queued?: boolean;

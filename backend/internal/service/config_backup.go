@@ -6,6 +6,7 @@ import (
 	"opensync/internal/config"
 	"opensync/internal/mapper"
 	"opensync/internal/msg"
+	"opensync/internal/native"
 	"opensync/pkg/util"
 	"strings"
 	"time"
@@ -46,6 +47,12 @@ func ExportSystemBackup(includeSecrets bool) (*SystemBackupPayload, error) {
 		tokenVal := util.StringValue(row["token"])
 		if includeSecrets || isNativeEmptyConfig(rawURL, tokenVal) {
 			item["token"] = tokenVal
+		} else if rawURL == native.EngineURL {
+			if redacted, _, err := native.RedactConfigForBackup(tokenVal); err == nil {
+				item["token"] = redacted
+			} else {
+				item["token"] = ""
+			}
 		} else {
 			item["token"] = ""
 		}
@@ -165,6 +172,7 @@ func ImportSystemBackup(payload SystemBackupPayload, conflictMode string) (map[s
 		if rawURL == "rclone://native" && remark == "" {
 			remark = "原生备份"
 		}
+		hasRedactedNative := rawURL == native.EngineURL && native.ConfigContainsRedactedSecrets(token)
 		key := engineBackupKey(rawURL, userName)
 		if existing, exists := engineByKey[key]; exists {
 			existingID := util.ToInt64(existing["id"])
@@ -173,9 +181,11 @@ func ImportSystemBackup(payload SystemBackupPayload, conflictMode string) (map[s
 			}
 			if conflictMode == "overwrite" {
 				var tokenPtr *string
-				if token != "" && !isMaskedSecretValue(token) {
+				if token != "" && !isMaskedSecretValue(token) && !hasRedactedNative {
 					t := token
 					tokenPtr = &t
+				} else if hasRedactedNative {
+					warnings = append(warnings, fmt.Sprintf("原生引擎 %q 的导出配置已脱敏，已保留当前已保存的远端凭据", remark))
 				}
 				mc := maxConcurrent
 				if err := mapper.UpdateAlistWithConcurrency(existingID, remark, rawURL, tokenPtr, &mc); err != nil {
@@ -191,8 +201,8 @@ func ImportSystemBackup(payload SystemBackupPayload, conflictMode string) (map[s
 			}
 			continue
 		}
-		if token == "" || isMaskedSecretValue(token) {
-			warnings = append(warnings, fmt.Sprintf("引擎 %q (%s) 不包含有效令牌，已跳过导入（请导出时勾选包含凭据或手动添加）", remark, rawURL))
+		if token == "" || isMaskedSecretValue(token) || hasRedactedNative {
+			warnings = append(warnings, fmt.Sprintf("引擎 %q (%s) 不包含有效令牌或远端凭据已脱敏，已跳过导入（请导出时勾选包含凭据或手动添加）", remark, rawURL))
 			enginesSkipped++
 			continue
 		}

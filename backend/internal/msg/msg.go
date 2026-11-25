@@ -61,6 +61,8 @@ const (
 	SettingsSchedConfirm        = "SettingsSchedConfirm"
 	SettingsApprovalTimeout     = "SettingsApprovalTimeout"
 	SettingsHealthCheckInterval = "SettingsHealthCheckInterval"
+	SettingsDefaultBwLimit      = "SettingsDefaultBwLimit"
+	SettingsProxyURL            = "SettingsProxyURL"
 	InternalError               = "InternalError"
 	RequestTooLarge             = "RequestTooLarge"
 	SSEConnLimit                = "SSEConnLimit"
@@ -96,8 +98,17 @@ const (
 	BackupConflictModeInvalid = "BackupConflictModeInvalid"
 	DryRunAlreadyRunning     = "DryRunAlreadyRunning"
 	DryRunNotFound           = "DryRunNotFound"
+	CheckAlreadyRunning      = "CheckAlreadyRunning"
+	CheckNotFound            = "CheckNotFound"
 	TaskRunningCannotDelete  = "TaskRunningCannotDelete"
 	NoRetryItemSelected      = "NoRetryItemSelected"
+	BwLimitInvalid           = "BwLimitInvalid"
+	ProxyURLInvalid          = "ProxyURLInvalid"
+	TPSLimitInvalid          = "TPSLimitInvalid"
+	TPSLimitBurstInvalid     = "TPSLimitBurstInvalid"
+	ModifyWindowInvalid      = "ModifyWindowInvalid"
+	MultiThreadStreamsInvalid = "MultiThreadStreamsInvalid"
+	ExtraFlagsInvalid        = "ExtraFlagsInvalid"
 
 	// Localized notification labels
 	NotifyApprovalTitle         = "NotifyApprovalTitle"
@@ -115,6 +126,7 @@ const (
 	NotifyMethodIncremental     = "NotifyMethodIncremental"
 	NotifyMethodFull            = "NotifyMethodFull"
 	NotifyMethodMove            = "NotifyMethodMove"
+	NotifyMethodBisync          = "NotifyMethodBisync"
 )
 
 // Format-string keys
@@ -190,6 +202,8 @@ var translations = map[string]map[string]string{
 		SettingsSchedConfirm:        "定时全量同步删除确认",
 		SettingsApprovalTimeout:     "全量同步审批超时",
 		SettingsHealthCheckInterval: "引擎健康检查间隔",
+		SettingsDefaultBwLimit:      "默认传输限速",
+		SettingsProxyURL:            "全局代理地址",
 		InternalError:               "操作失败，请检查引擎连接或查看服务日志",
 		RequestTooLarge:             "请求内容过大",
 		SSEConnLimit:                "连接数已达上限，请关闭其他页面后重试",
@@ -223,8 +237,17 @@ var translations = map[string]map[string]string{
 		BackupConflictModeInvalid: "导入冲突处理模式仅支持 skip 或 overwrite",
 		DryRunAlreadyRunning:     "该任务已有模拟运行正在进行中",
 		DryRunNotFound:           "未找到该任务的模拟运行记录",
+		CheckAlreadyRunning:      "该任务已有校验任务正在进行中",
+		CheckNotFound:            "未找到该任务的校验记录",
 		TaskRunningCannotDelete:  "正在运行中的任务记录不能删除",
 		NoRetryItemSelected:      "未选中可重试的失败项",
+		BwLimitInvalid:           "限速格式无效，支持如 10M、500K、10M:2M 或分时段规则 08:00,5M 23:00,off",
+		ProxyURLInvalid:          "代理地址无效，仅支持 http://、https://、socks5:// 或 socks5h:// URL",
+		TPSLimitInvalid:          "每秒请求限流（TPS）必须是 0 到 1000 之间的数值",
+		TPSLimitBurstInvalid:     "突发请求配额必须是 0 到 1000 之间的整数",
+		ModifyWindowInvalid:      "时间精度容差格式无效，请使用如 1s、2s、100ms、1m（最大 24h）",
+		MultiThreadStreamsInvalid: "单文件多线程流数必须是 0 到 64 之间的整数",
+		ExtraFlagsInvalid:        "扩展传输参数格式无效或包含不受支持的选项",
 
 		NotifyApprovalTitle:         "待确认删除",
 		NotifyApprovalContent:       "任务「%s」已完成同步，检测到目标端存在 %d 个待删除项（%d 个文件，%d 个目录），不影响后续同步任务。请在 OpenSync 中查看清单并确认或跳过删除。",
@@ -241,6 +264,7 @@ var translations = map[string]map[string]string{
 		NotifyMethodIncremental:     "增量同步",
 		NotifyMethodFull:            "全量同步",
 		NotifyMethodMove:            "移动同步",
+		NotifyMethodBisync:          "双向同步",
 
 		FmtExcludeRulesUnsupported: "以下过滤规则不受支持，已拒绝保存：%s。仅支持三种写法：文件名（可含 * 通配）、*.后缀、相对目录/",
 		FmtIncludeRulesUnsupported: "以下白名单规则不受支持，已拒绝保存：%s。仅支持文件名（可含 * 通配）或 *.后缀",
@@ -306,6 +330,8 @@ var translations = map[string]map[string]string{
 		SettingsSchedConfirm:        "Scheduled full-sync deletion confirmation",
 		SettingsApprovalTimeout:     "Full-sync approval timeout",
 		SettingsHealthCheckInterval: "Engine health check interval",
+		SettingsDefaultBwLimit:      "Default bandwidth limit",
+		SettingsProxyURL:            "Global proxy URL",
 		InternalError:               "Operation failed, please check engine connection or view service logs",
 		RequestTooLarge:             "Request body too large",
 		SSEConnLimit:                "Connection limit reached, please close other pages and try again",
@@ -339,8 +365,17 @@ var translations = map[string]map[string]string{
 		BackupConflictModeInvalid: "Backup conflict mode must be skip or overwrite",
 		DryRunAlreadyRunning:      "A dry-run preview is already running for this job",
 		DryRunNotFound:            "No dry-run preview found for this job",
+		CheckAlreadyRunning:       "A verification check is already running for this job",
+		CheckNotFound:             "No verification check found for this job",
 		TaskRunningCannotDelete:   "Cannot delete a task while it is running",
 		NoRetryItemSelected:       "No retryable failed items selected",
+		BwLimitInvalid:            "Invalid bandwidth limit format (e.g. 10M, 500K, 10M:2M, or schedule 08:00,5M 23:00,off)",
+		ProxyURLInvalid:           "Invalid proxy URL; only http://, https://, socks5://, or socks5h:// URLs are supported",
+		TPSLimitInvalid:           "TPS limit must be a number between 0 and 1000",
+		TPSLimitBurstInvalid:      "TPS burst must be an integer between 0 and 1000",
+		ModifyWindowInvalid:       "Invalid modify window duration (e.g. 1s, 2s, 100ms, 1m; max 24h)",
+		MultiThreadStreamsInvalid: "Multi-thread streams must be an integer between 0 and 64",
+		ExtraFlagsInvalid:         "Invalid or unsupported extra transfer options",
 
 		NotifyApprovalTitle:         "Deletions Awaiting Approval",
 		NotifyApprovalContent:       "Job \"%s\" finished syncing with %d destination items pending deletion (%d files, %d folders). Syncing is not blocked; open OpenSync to review and confirm or skip deletion.",
@@ -357,6 +392,7 @@ var translations = map[string]map[string]string{
 		NotifyMethodIncremental:     "Incremental Sync",
 		NotifyMethodFull:            "Full Sync",
 		NotifyMethodMove:            "Move Sync",
+		NotifyMethodBisync:          "Bidirectional Sync",
 
 		FmtExcludeRulesUnsupported: "The following filter rules are not supported and were rejected: %s. Only three formats are supported: filename (with * wildcard), *.extension, relative/directory/",
 		FmtIncludeRulesUnsupported: "The following whitelist rules are not supported and were rejected: %s. Only filename (with * wildcard) or *.extension are supported",

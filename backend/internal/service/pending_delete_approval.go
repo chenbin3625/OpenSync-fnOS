@@ -9,6 +9,7 @@ import (
 	"log"
 	"opensync/internal/mapper"
 	"opensync/internal/msg"
+	"opensync/internal/native"
 	"opensync/pkg/util"
 	"path"
 	"sort"
@@ -672,6 +673,22 @@ func (m *pendingDeleteManager) executeRecord(ctx context.Context, rec *pendingDe
 	}()
 
 	jobCfg := m.liveJobConfig(rec)
+	if alistID := util.ToInt64(jobCfg["alistId"]); alistID > 0 && rec.client == nil {
+		nativeCfg, nativeErr := loadNative(alistID)
+		if nativeErr != nil {
+			if ctx.Err() != nil {
+				m.restorePendingAfterCancel(rec)
+				return
+			}
+			m.returnToPending(rec, rec.Targets, false, nativeErr.Error())
+			return
+		}
+		if nativeCfg != nil {
+			m.executeNativeRecord(ctx, rec, jobCfg, nativeCfg)
+			return
+		}
+	}
+
 	client, err := m.resolveClient(ctx, rec, jobCfg)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -781,6 +798,76 @@ func (m *pendingDeleteManager) liveJobConfig(rec *pendingDeleteRecord) map[strin
 		}
 	}
 	return cfg
+}
+
+func (m *pendingDeleteManager) executeNativeRecord(ctx context.Context, rec *pendingDeleteRecord, jobCfg map[string]interface{}, nativeCfg native.Config) {
+	listNative := func(dir string) (FileListResult, bool, error) {
+		return nativeDirListToFileList(ctx, nativeCfg, dir)
+	}
+	toDelete, refreshedTargets, changed, verifyErr := verifyPendingDeleteTargetsWithLister(ctx, listNative, listNative, jobCfg, rec.Targets)
+	if ctx.Err() != nil {
+		m.restorePendingAfterCancel(rec)
+		return
+	}
+	if verifyErr != nil {
+		log.Printf("Job %d (task %d) native pending delete verification aborted: %v", rec.JobID, rec.TaskID, verifyErr)
+		m.returnToPending(rec, rec.Targets, false, verifyErr.Error())
+		return
+	}
+	if changed {
+		if len(refreshedTargets) == 0 {
+			m.completeRecord(rec)
+			return
+		}
+		log.Printf("Job %d (task %d) native pending delete target(s) changed since scan; re-prompting with %d updated path(s)", rec.JobID, rec.TaskID, len(refreshedTargets))
+		m.returnToPending(rec, refreshedTargets, true, "")
+		return
+	}
+	if len(toDelete) == 0 {
+		m.completeRecord(rec)
+		return
+	}
+
+	delCtx, delCancel := context.WithCancel(ctx)
+	delRunner := &JobTask{
+		TaskID:       rec.TaskID,
+		Job:          jobCfg,
+		nativeConfig: nativeCfg,
+		ctx:          delCtx,
+		cancel:       delCancel,
+	}
+	delRunner.initRuntime()
+	defer delRunner.cancelTaskRuntime()
+
+	consecutiveFails := 0
+	for _, target := range toDelete {
+		if delCtx.Err() != nil {
+			break
+		}
+		if consecutiveFails >= 5 {
+			errMsg := "连续删除失败达到上限，已中止剩余删除操作"
+			delRunner.DelHook(target.DstDir, target.Name, nil, taskStatusFailed, &errMsg, boolToTaskItemObject(target.IsDir), time.Now().Unix())
+			continue
+		}
+		err := nativeDeleteOrTrash(delCtx, nativeCfg, delRunner, jobCfg, target.DstRoot, target.DstDir, target.Name, target.IsDir)
+		if err != nil {
+			consecutiveFails++
+			s := err.Error()
+			delRunner.DelHook(target.DstDir, target.Name, nil, taskStatusFailed, &s, boolToTaskItemObject(target.IsDir), time.Now().Unix())
+		} else {
+			consecutiveFails = 0
+			delRunner.DelHook(target.DstDir, target.Name, target.Size, taskStatusSuccess, nil, boolToTaskItemObject(target.IsDir), time.Now().Unix())
+		}
+	}
+
+	if delCtx.Err() != nil {
+		_ = delRunner.persistRemainingTaskItems()
+		m.restorePendingAfterCancel(rec)
+		return
+	}
+
+	m.persistDeleteOutcome(rec, delRunner)
+	m.completeRecord(rec)
 }
 
 func (m *pendingDeleteManager) resolveClient(ctx context.Context, rec *pendingDeleteRecord, jobCfg map[string]interface{}) (*AlistClient, error) {
@@ -928,6 +1015,8 @@ func (m *pendingDeleteManager) completeRecord(rec *pendingDeleteRecord) {
 //   - changed: true if any still-extra target changed on destination since scan
 //   - err: non-nil if source/destination could not be verified safely (network
 //     error, empty source root guard, etc.); callers must delete nothing.
+type pendingDeleteDirLister func(dir string) (FileListResult, bool, error)
+
 func verifyPendingDeleteTargets(
 	ctx context.Context,
 	client *AlistClient,
@@ -936,6 +1025,36 @@ func verifyPendingDeleteTargets(
 ) (toDelete []pendingDeleteTarget, refreshed []pendingDeleteTarget, changed bool, err error) {
 	scanIntervalS := util.ToInt(jobCfg["scanIntervalS"])
 	scanIntervalT := util.ToInt(jobCfg["scanIntervalT"])
+	listSrcRaw := func(dir string) (FileListResult, bool, error) {
+		items, listErr := client.FileListApiContext(ctx, dir, 0, scanIntervalS)
+		if listErr != nil {
+			if isAlistObjectNotFound(listErr) {
+				return nil, true, nil
+			}
+			return nil, false, listErr
+		}
+		return items, false, nil
+	}
+	listDstRaw := func(dir string) (FileListResult, bool, error) {
+		items, listErr := client.FileListApiContext(ctx, dir, 0, scanIntervalT)
+		if listErr != nil {
+			if isAlistObjectNotFound(listErr) {
+				return nil, true, nil
+			}
+			return nil, false, listErr
+		}
+		return items, false, nil
+	}
+	return verifyPendingDeleteTargetsWithLister(ctx, listSrcRaw, listDstRaw, jobCfg, targets)
+}
+
+func verifyPendingDeleteTargetsWithLister(
+	ctx context.Context,
+	listSrcRaw pendingDeleteDirLister,
+	listDstRaw pendingDeleteDirLister,
+	jobCfg map[string]interface{},
+	targets []pendingDeleteTarget,
+) (toDelete []pendingDeleteTarget, refreshed []pendingDeleteTarget, changed bool, err error) {
 	spec := buildJobExcludeMatcher(jobCfg)
 	includeM := buildJobIncludeMatcher(jobCfg)
 	protectConflicts := util.ToInt(jobCfg["conflictPolicy"]) == 2
@@ -953,16 +1072,12 @@ func verifyPendingDeleteTargets(
 		if c, ok := srcCache[dir]; ok {
 			return c.items, c.notFound, nil
 		}
-		items, listErr := client.FileListApiContext(ctx, dir, 0, scanIntervalS)
+		items, notFound, listErr := listSrcRaw(dir)
 		if listErr != nil {
-			if isAlistObjectNotFound(listErr) {
-				srcCache[dir] = cachedList{notFound: true}
-				return nil, true, nil
-			}
 			return nil, false, listErr
 		}
-		srcCache[dir] = cachedList{items: items}
-		return items, false, nil
+		srcCache[dir] = cachedList{items: items, notFound: notFound}
+		return items, notFound, nil
 	}
 
 	listDst := func(dir string) (FileListResult, bool, error) {
@@ -970,16 +1085,12 @@ func verifyPendingDeleteTargets(
 		if c, ok := dstCache[dir]; ok {
 			return c.items, c.notFound, nil
 		}
-		items, listErr := client.FileListApiContext(ctx, dir, 0, scanIntervalT)
+		items, notFound, listErr := listDstRaw(dir)
 		if listErr != nil {
-			if isAlistObjectNotFound(listErr) {
-				dstCache[dir] = cachedList{notFound: true}
-				return nil, true, nil
-			}
 			return nil, false, listErr
 		}
-		dstCache[dir] = cachedList{items: items}
-		return items, false, nil
+		dstCache[dir] = cachedList{items: items, notFound: notFound}
+		return items, notFound, nil
 	}
 
 	// Step 1: Verify every referenced source root is reachable and did not

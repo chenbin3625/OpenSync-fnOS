@@ -26,6 +26,7 @@ import {
   IconPlusStroked,
   IconServerStroked,
   IconSettingStroked,
+  IconTickCircle,
 } from "@douyinfe/semi-icons";
 import { api } from "../api/client";
 import {
@@ -44,6 +45,7 @@ import {
   errorToast,
   type MenuAction,
 } from "../components/common";
+import { CheckModal } from "../components/CheckModal";
 import { DryRunModal } from "../components/DryRunModal";
 import {
   FullSyncApprovalModal,
@@ -111,6 +113,7 @@ export default function Tasks() {
     job: null,
   });
   const [dryRunOpen, setDryRunOpen] = useState(false);
+  const [checkOpen, setCheckOpen] = useState(false);
   const [approvalModalOpen, setApprovalModalOpen] = useState(false);
   const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
   const [pendingCreatedId, setPendingCreatedId] = useState<number | null>(null);
@@ -532,6 +535,7 @@ export default function Tasks() {
                     runKey={String(currentTask.data?.taskId ?? "idle")}
                     onRun={() => triggerRunJob(selected.id, selected.method)}
                     onDryRun={() => setDryRunOpen(true)}
+                    onCheck={() => setCheckOpen(true)}
                     onClone={() =>
                       setEditor({
                         open: true,
@@ -638,6 +642,13 @@ export default function Tasks() {
           onRunReal={() => triggerRunJob(selected.id, selected.method)}
         />
       )}
+      {checkOpen && selected && (
+        <CheckModal
+          jobId={selected.id}
+          jobName={getJobName(selected)}
+          onClose={() => setCheckOpen(false)}
+        />
+      )}
       {editor.open && (
         <Suspense fallback={<LoadingPanel />}>
           <JobEditor
@@ -697,6 +708,7 @@ function Overview({
   runKey,
   onRun,
   onDryRun,
+  onCheck,
   onClone,
   onStop,
   onToggle,
@@ -710,6 +722,7 @@ function Overview({
   runKey: string;
   onRun: () => void;
   onDryRun: () => void;
+  onCheck: () => void;
   onClone: () => void;
   onStop: () => void;
   onToggle: () => void;
@@ -731,8 +744,10 @@ function Overview({
   const engineName = engine
     ? engine.remark || engine.userName
     : `引擎 #${job.alistId}`;
+  const isNativeEngine =
+    engine?.kind === "rclone" || engine?.url === "rclone://native";
   const engineHost = engine
-    ? engine.kind === "rclone" || engine.url === "rclone://native"
+    ? isNativeEngine
       ? "rclone"
       : engineHostOf(engine.url)
     : "";
@@ -742,6 +757,27 @@ function Overview({
     job.useCacheS ? "源端缓存" : "",
     job.useCacheT ? "目标缓存" : "",
   ].filter(Boolean);
+  const extraFlagLabels = useMemo(() => {
+    const raw = job.extraFlags;
+    if (!raw) return [] as string[];
+    let obj: Record<string, unknown> | null = null;
+    if (typeof raw === "string") {
+      try {
+        obj = JSON.parse(raw) as Record<string, unknown>;
+      } catch {
+        obj = null;
+      }
+    } else if (typeof raw === "object") {
+      obj = raw as Record<string, unknown>;
+    }
+    if (!obj) return [] as string[];
+    const list: string[] = [];
+    if (obj.noUpdateModtime) list.push("跳过仅时间更新");
+    if (obj.inplace) list.push("原地写入");
+    if (obj.checkFirst) list.push("先比对后传输");
+    if (obj.s3NoHead) list.push("跳过 S3 HEAD");
+    return list;
+  }, [job.extraFlags]);
   const throttleLabels = [
     Number(job.scanIntervalS || 0) > 0 ? `源扫描间隔 ${job.scanIntervalS}s` : "",
     Number(job.scanIntervalT || 0) > 0 ? `目标扫描间隔 ${job.scanIntervalT}s` : "",
@@ -750,6 +786,17 @@ function Overview({
     job.maxRetries !== undefined && Number(job.maxRetries) >= 0
       ? `重试 ${job.maxRetries} 次`
       : "",
+    job.bwLimit?.trim() ? `限速 ${job.bwLimit.trim()}` : "",
+    Number(job.tpsLimit || 0) > 0 ? `TPS ${job.tpsLimit}/s` : "",
+    Number(job.tpsLimitBurst || 0) > 0 ? `突发 ${job.tpsLimitBurst}` : "",
+    job.modifyWindow?.trim() ? `时间容差 ${job.modifyWindow.trim()}` : "",
+    Number(job.multiThreadStreams || 0) > 0
+      ? `${job.multiThreadStreams} 线程/文件`
+      : "",
+    Boolean(job.fastList) ? "fast-list" : "",
+    Boolean(job.createEmptySrcDirs) ? "同步空目录" : "",
+    Boolean(job.followSymlinks) ? "跟随符号链接" : "",
+    ...extraFlagLabels,
   ].filter(Boolean);
   const pathPreview = useMemo(
     () =>
@@ -770,6 +817,15 @@ function Overview({
       icon: <IconEyeOpenedStroked aria-hidden="true" />,
       onClick: onDryRun,
     },
+    ...(isNativeEngine
+      ? [
+          {
+            label: "数据一致性校验",
+            icon: <IconTickCircle aria-hidden="true" />,
+            onClick: onCheck,
+          },
+        ]
+      : []),
     {
       label: "复制任务",
       icon: <IconCopy aria-hidden="true" />,
@@ -843,6 +899,14 @@ function Overview({
               disabled={busy}
               onClick={onDryRun}
             />
+            {isNativeEngine && (
+              <IconButton
+                label="数据一致性校验（rclone check）"
+                icon={<IconTickCircle aria-hidden="true" />}
+                disabled={busy}
+                onClick={onCheck}
+              />
+            )}
             <Tooltip content={runActionLabel} position="top">
               <Button
                 aria-label={runActionLabel}

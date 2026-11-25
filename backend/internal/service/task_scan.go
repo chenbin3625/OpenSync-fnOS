@@ -534,20 +534,124 @@ func dstPathForSrcSelection(dstPath, srcPath string, srcPaths []string) string {
 	return normalizeDirPath(dstPath + suffix)
 }
 
+// stripNativeLocalRootID strips the "~<12-lowercase-hex>" fingerprint suffix
+// appended by native.rootID / legacyRootID to an authorized local root segment.
+// Returns (base, true) only when segment matches "<base>~<12 lowercase hex>"
+// with a safe non-empty base name (not "." or "..").
+func stripNativeLocalRootID(segment string) (string, bool) {
+	idx := strings.LastIndexByte(segment, '~')
+	if idx <= 0 || len(segment)-idx-1 != 12 {
+		return segment, false
+	}
+	base := segment[:idx]
+	if base == "." || base == ".." {
+		return segment, false
+	}
+	suffix := segment[idx+1:]
+	for i := 0; i < len(suffix); i++ {
+		c := suffix[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return segment, false
+		}
+	}
+	return base, true
+}
+
+// splitLocalRootSegment extracts the top-level storage segment, second-level
+// directory segment (where native local root IDs live), and remaining tail of
+// a cleaned absolute POSIX path. Returns ok=false for paths shallower than two
+// segments.
+func splitLocalRootSegment(cleanPath string) (storage, rootSeg, rest string, ok bool) {
+	if !strings.HasPrefix(cleanPath, "/") {
+		return "", "", "", false
+	}
+	trimmed := strings.TrimPrefix(cleanPath, "/")
+	storage, afterStorage, hasRoot := strings.Cut(trimmed, "/")
+	if !hasRoot || storage == "" || afterStorage == "" {
+		return "", "", "", false
+	}
+	rootSeg, rest, _ = strings.Cut(afterStorage, "/")
+	if rootSeg == "" {
+		return "", "", "", false
+	}
+	return storage, rootSeg, rest, true
+}
+
+// sanitizeSrcPathsForDstDerivation strips the "~<12-hex>" fingerprint suffix
+// from native local authorized root segments (/<storage>/<base>~<12hex>[/...])
+// when deriving destination subdirectories for multi-source jobs.
+//
+// If two distinct root segments in the same selection collapse to the same
+// base name (compared case-insensitively, matching syncPathContains), both
+// keep their fingerprint suffixes so same-named folders from distinct volumes
+// never collide or nest at the destination.
+func sanitizeSrcPathsForDstDerivation(srcPaths []string) ([]string, func(string) string) {
+	cleanedInputs := make([]string, len(srcPaths))
+	rawByBase := make(map[string]map[string]struct{}, len(srcPaths))
+	for i, raw := range srcPaths {
+		clean := path.Clean(strings.TrimSpace(raw))
+		cleanedInputs[i] = clean
+		_, rootSeg, _, ok := splitLocalRootSegment(clean)
+		if !ok {
+			continue
+		}
+		base, _ := stripNativeLocalRootID(rootSeg)
+		baseKey := strings.ToLower(base)
+		rawKey := strings.ToLower(rootSeg)
+		set := rawByBase[baseKey]
+		if set == nil {
+			set = make(map[string]struct{}, 1)
+			rawByBase[baseKey] = set
+		}
+		set[rawKey] = struct{}{}
+	}
+
+	sanitizeOne := func(clean string) string {
+		storage, rootSeg, rest, ok := splitLocalRootSegment(clean)
+		if !ok {
+			return clean
+		}
+		base, stripped := stripNativeLocalRootID(rootSeg)
+		if !stripped {
+			return clean
+		}
+		set := rawByBase[strings.ToLower(base)]
+		if len(set) > 1 {
+			return clean
+		}
+		if len(set) == 1 {
+			if _, same := set[strings.ToLower(rootSeg)]; !same {
+				return clean
+			}
+		}
+		if rest == "" {
+			return "/" + storage + "/" + base
+		}
+		return "/" + storage + "/" + base + "/" + rest
+	}
+
+	sanitized := make([]string, len(cleanedInputs))
+	for i, clean := range cleanedInputs {
+		sanitized[i] = sanitizeOne(clean)
+	}
+	return sanitized, sanitizeOne
+}
+
 func srcSelectionSuffix(srcPath string, srcPaths []string) string {
-	cleanSrc := path.Clean(strings.TrimSpace(srcPath))
+	sanitizedPaths, sanitizeOne := sanitizeSrcPathsForDstDerivation(srcPaths)
+	cleanSrc := sanitizeOne(path.Clean(strings.TrimSpace(srcPath)))
 	// A partially checked tree branch arrives as sibling paths rather than its
 	// parent, so the shared parent is the highest segment the selection already
 	// accounts for: everything above it is stripped, everything below it is kept
 	// so nested branches still reach the destination with their hierarchy.
-	commonParent := commonSrcSelectionParent(srcPaths)
+	commonParent := commonSrcSelectionParentRaw(sanitizedPaths)
 	if commonParent == "" || commonParent == "." || commonParent == "/" {
 		// Sources with no shared parent keep the historical base-name layout,
 		// but only while the base names stay unique. Two selections that share
 		// one (/a/docs and /b/docs) would otherwise collapse into the same
 		// destination directory and, in mirror mode, delete each other's files
 		// on every run. Those fall back to the full path instead.
-		if srcSelectionBaseNameIsAmbiguous(cleanSrc, srcPaths) {
+		if srcSelectionBaseNameIsAmbiguous(cleanSrc, sanitizedPaths) {
 			return strings.TrimPrefix(cleanSrc, "/")
 		}
 		return path.Base(cleanSrc)
@@ -564,7 +668,8 @@ func srcSelectionSuffix(srcPath string, srcPaths []string) string {
 }
 
 // srcSelectionBaseNameIsAmbiguous reports whether another selected source path
-// resolves to the same base name as cleanSrc.
+// resolves to the same base name (case-insensitively, matching syncPathContains)
+// as cleanSrc.
 func srcSelectionBaseNameIsAmbiguous(cleanSrc string, srcPaths []string) bool {
 	base := path.Base(cleanSrc)
 	for _, other := range srcPaths {
@@ -572,7 +677,7 @@ func srcSelectionBaseNameIsAmbiguous(cleanSrc string, srcPaths []string) bool {
 		if cleanOther == cleanSrc {
 			continue
 		}
-		if path.Base(cleanOther) == base {
+		if strings.EqualFold(path.Base(cleanOther), base) {
 			return true
 		}
 	}
@@ -580,10 +685,16 @@ func srcSelectionBaseNameIsAmbiguous(cleanSrc string, srcPaths []string) bool {
 }
 
 // commonSrcSelectionParent returns the deepest directory that contains every
-// selected source path. Callers subtract exactly this prefix, so the value has
-// to be the common parent of the paths themselves — not of their parent
-// directories, which would leave one extra level in the destination path.
+// selected source path (after stripping unambiguous native local root IDs).
+// Callers subtract exactly this prefix, so the value has to be the common
+// parent of the paths themselves — not of their parent directories, which
+// would leave one extra level in the destination path.
 func commonSrcSelectionParent(srcPaths []string) string {
+	sanitized, _ := sanitizeSrcPathsForDstDerivation(srcPaths)
+	return commonSrcSelectionParentRaw(sanitized)
+}
+
+func commonSrcSelectionParentRaw(srcPaths []string) string {
 	if len(srcPaths) < 2 {
 		return ""
 	}

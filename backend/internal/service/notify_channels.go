@@ -239,6 +239,8 @@ func localizedMethodLabel(method int) string {
 		return msg.T(msg.NotifyMethodFull)
 	case 2:
 		return msg.T(msg.NotifyMethodMove)
+	case 3:
+		return msg.T(msg.NotifyMethodBisync)
 	default:
 		return msg.T(msg.NotifyMethodIncremental)
 	}

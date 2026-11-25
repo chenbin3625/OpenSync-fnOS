@@ -30,12 +30,31 @@ const (
 	backupFilePerm os.FileMode = 0644
 )
 
+// diskAccessMode controls which WebDAV mutations are allowed on the loopback
+// disk endpoint for a given operation.
+type diskAccessMode int
+
+const (
+	diskReadOnly    diskAccessMode = iota // PROPFIND, OPTIONS, GET, HEAD
+	diskAppendWrite                       // + MKCOL, PUT
+	diskFullWrite                         // + DELETE, MOVE (bounded inside os.Root)
+)
+
 // A task-scoped loopback DAV endpoint confines every file operation (including
 // symlink resolution during a transfer) to the open fnOS-authorized root.
 type diskFS struct {
-	root     *os.Root
-	base     string
-	checksum bool
+	root           *os.Root
+	base           string
+	checksum       bool
+	followSymlinks bool
+	openRead       func(string) (*os.File, error)
+}
+
+func (d diskFS) openReadOnly(rel string) (*os.File, error) {
+	if d.openRead != nil {
+		return d.openRead(rel)
+	}
+	return d.root.Open(rel)
 }
 
 func (d diskFS) name(p string) string {
@@ -52,7 +71,11 @@ func (d diskFS) Rename(context.Context, string, string) error          { return 
 func (d diskFS) Stat(_ context.Context, p string) (os.FileInfo, error) { return d.root.Stat(d.name(p)) }
 
 func md5FileInRoot(root *os.Root, rel string) (string, error) {
-	in, err := root.Open(rel)
+	return md5FileInDisk(diskFS{root: root}, rel)
+}
+
+func md5FileInDisk(d diskFS, rel string) (string, error) {
+	in, err := d.openReadOnly(rel)
 	if err != nil {
 		return "", err
 	}
@@ -72,7 +95,70 @@ func sameDevice(info os.FileInfo, rootDev uint64, hasRootDev bool) bool {
 	return !ok || uint64(sys.Dev) == rootDev
 }
 
-func writePropfindResponse(buf *bytes.Buffer, root *os.Root, hrefPath string, st os.FileInfo, rel string, wantChecksum bool) error {
+// removeInRootSafe removes a file or directory subtree inside root without ever
+// crossing symlinks, mount points, or removing root/base itself.
+func removeInRootSafe(root *os.Root, rel, base string, rootDev uint64, hasRootDev bool) error {
+	rel = path.Clean(rel)
+	base = path.Clean(base)
+	if rel == "." || rel == "" || rel == "/" || rel == base {
+		return os.ErrPermission
+	}
+	st, err := root.Lstat(rel)
+	if err != nil {
+		return err
+	}
+	if st.Mode()&os.ModeSymlink != 0 || !sameDevice(st, rootDev, hasRootDev) {
+		return os.ErrPermission
+	}
+	if !st.IsDir() {
+		return root.Remove(rel)
+	}
+	f, err := root.Open(rel)
+	if err != nil {
+		return err
+	}
+	entries, readErr := f.ReadDir(-1)
+	_ = f.Close()
+	if readErr != nil {
+		return readErr
+	}
+	for _, entry := range entries {
+		childRel := path.Join(rel, entry.Name())
+		if entry.Type()&os.ModeSymlink != 0 {
+			// Refuse deleting symlinks across boundaries; remove only plain entries.
+			if err := root.Remove(childRel); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := removeInRootSafe(root, childRel, base, rootDev, hasRootDev); err != nil {
+			return err
+		}
+	}
+	return root.Remove(rel)
+}
+
+func writeDiskReadError(w http.ResponseWriter, err error) {
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+		http.Error(w, "Not Found", http.StatusNotFound)
+		return
+	}
+	if errors.Is(err, os.ErrPermission) {
+		http.Error(w, "Permission denied", http.StatusForbidden)
+		return
+	}
+	http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+}
+
+func writeDiskWriteError(w http.ResponseWriter, err error) {
+	if errors.Is(err, os.ErrPermission) {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	w.WriteHeader(http.StatusConflict)
+}
+
+func writePropfindResponse(buf *bytes.Buffer, d diskFS, hrefPath string, st os.FileInfo, rel string, wantChecksum, ignoreChecksumPermErr bool) error {
 	escaped := (&url.URL{Path: hrefPath}).EscapedPath()
 	buf.WriteString("<D:response><D:href>")
 	_ = xml.EscapeText(buf, []byte(escaped))
@@ -89,16 +175,77 @@ func writePropfindResponse(buf *bytes.Buffer, root *os.Root, hrefPath string, st
 	buf.WriteString(st.ModTime().UTC().Format(http.TimeFormat))
 	buf.WriteString("</D:getlastmodified>")
 	if wantChecksum && !st.IsDir() && st.Mode().IsRegular() {
-		sum, err := md5FileInRoot(root, rel)
+		sum, err := md5FileInDisk(d, rel)
 		if err != nil {
-			return err
+			if !(ignoreChecksumPermErr && errors.Is(err, os.ErrPermission)) {
+				return err
+			}
+		} else {
+			buf.WriteString(`<oc:checksums><oc:checksum>MD5:`)
+			buf.WriteString(sum)
+			buf.WriteString(`</oc:checksum></oc:checksums>`)
 		}
-		buf.WriteString(`<oc:checksums><oc:checksum>MD5:`)
-		buf.WriteString(sum)
-		buf.WriteString(`</oc:checksum></oc:checksums>`)
 	}
 	buf.WriteString("</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>")
 	return nil
+}
+
+// serveGetHead serves GET and HEAD directly against os.Root instead of
+// delegating to golang.org/x/net/webdav, whose handleGetHeadPost maps every
+// OpenFile error (including EACCES / ACL denial) to HTTP 404 Not Found.
+func serveGetHead(w http.ResponseWriter, r *http.Request, d diskFS, prefix string, rootDev uint64, hasRootDev bool) {
+	subPath := strings.TrimPrefix(r.URL.Path, prefix)
+	rel := d.name(subPath)
+	if rel == "." {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var (
+		st  os.FileInfo
+		err error
+	)
+	if d.followSymlinks {
+		st, err = d.root.Stat(rel)
+	} else {
+		st, err = d.root.Lstat(rel)
+	}
+	if err != nil {
+		writeDiskReadError(w, err)
+		return
+	}
+	if (!d.followSymlinks && st.Mode()&os.ModeSymlink != 0) || !sameDevice(st, rootDev, hasRootDev) {
+		http.Error(w, "Not Found", http.StatusNotFound)
+		return
+	}
+	if st.IsDir() {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if !st.Mode().IsRegular() {
+		http.Error(w, "Not Found", http.StatusNotFound)
+		return
+	}
+	f, err := d.openReadOnly(rel)
+	if err != nil {
+		writeDiskReadError(w, err)
+		return
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		writeDiskReadError(w, err)
+		return
+	}
+	if fi.IsDir() {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if !fi.Mode().IsRegular() || !sameDevice(fi, rootDev, hasRootDev) {
+		http.Error(w, "Not Found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("ETag", fmt.Sprintf(`"%x%x"`, fi.ModTime().UnixNano(), fi.Size()))
+	http.ServeContent(w, r, path.Base(rel), fi.ModTime(), f)
 }
 
 // servePropfind handles WebDAV PROPFIND directly against os.Root without
@@ -129,6 +276,9 @@ func servePropfind(w http.ResponseWriter, r *http.Request, d diskFS, prefix stri
 	)
 	if rel == "." {
 		st, err = d.root.Stat(".")
+	} else if d.followSymlinks {
+		// os.Root.Stat strictly confines symlink resolution inside the authorized root.
+		st, err = d.root.Stat(rel)
 	} else {
 		st, err = d.root.Lstat(rel)
 	}
@@ -137,10 +287,14 @@ func servePropfind(w http.ResponseWriter, r *http.Request, d diskFS, prefix stri
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
+		if errors.Is(err, os.ErrPermission) {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	if rel != "." && (st.Mode()&os.ModeSymlink != 0 || !sameDevice(st, rootDev, hasRootDev)) {
+	if rel != "." && ((!d.followSymlinks && st.Mode()&os.ModeSymlink != 0) || !sameDevice(st, rootDev, hasRootDev)) {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
@@ -164,9 +318,13 @@ func servePropfind(w http.ResponseWriter, r *http.Request, d diskFS, prefix stri
 	if st.IsDir() {
 		targetHref += "/"
 	}
-	if err := writePropfindResponse(&buf, d.root, targetHref, st, rel, wantChecksum); err != nil {
+	if err := writePropfindResponse(&buf, d, targetHref, st, rel, wantChecksum, false); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if errors.Is(err, os.ErrPermission) {
+			w.WriteHeader(http.StatusForbidden)
 			return
 		}
 		w.WriteHeader(http.StatusInternalServerError)
@@ -180,36 +338,58 @@ func servePropfind(w http.ResponseWriter, r *http.Request, d diskFS, prefix stri
 				w.WriteHeader(http.StatusNotFound)
 				return
 			}
+			if errors.Is(err, os.ErrPermission) {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 		entries, readErr := dirFile.ReadDir(-1)
 		_ = dirFile.Close()
 		if readErr != nil {
+			if errors.Is(readErr, os.ErrPermission) {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 		for _, entry := range entries {
+			name := entry.Name()
+			childRel := path.Join(rel, name)
+			var (
+				childSt os.FileInfo
+				infoErr error
+			)
 			if entry.Type()&os.ModeSymlink != 0 {
-				continue
+				if !d.followSymlinks {
+					continue
+				}
+				childSt, infoErr = d.root.Stat(childRel)
+				if infoErr != nil {
+					continue
+				}
+			} else {
+				childSt, infoErr = entry.Info()
+				if infoErr != nil {
+					continue
+				}
+				if childSt.Mode()&os.ModeSymlink != 0 {
+					continue
+				}
 			}
-			childSt, infoErr := entry.Info()
-			if infoErr != nil {
-				continue
-			}
-			if childSt.Mode()&os.ModeSymlink != 0 || !sameDevice(childSt, rootDev, hasRootDev) {
+			if !sameDevice(childSt, rootDev, hasRootDev) {
 				continue
 			}
 			if !childSt.IsDir() && !childSt.Mode().IsRegular() {
 				continue
 			}
-			name := entry.Name()
-			childRel := path.Join(rel, name)
 			childHref := baseHref + "/" + name
 			if childSt.IsDir() {
 				childHref += "/"
 			}
-			if err := writePropfindResponse(&buf, d.root, childHref, childSt, childRel, wantChecksum); err != nil {
+			if err := writePropfindResponse(&buf, d, childHref, childSt, childRel, wantChecksum, true); err != nil {
 				if errors.Is(err, os.ErrNotExist) {
 					continue
 				}
@@ -287,12 +467,10 @@ func openDisk(sub string) (*os.Root, string, error) {
 	return root, rel, nil
 }
 
-func randomName() string { var b [16]byte; rand.Read(b[:]); return hex.EncodeToString(b[:]) }
-
-func (s *Session) disk(sub string, write, checksum bool) (string, error) {
-	root, rel, e := openDisk(sub)
-	if e != nil {
-		return "", e
+func openDiskWithDev(sub string) (*os.Root, string, uint64, bool, error) {
+	root, rel, err := openDisk(sub)
+	if err != nil {
+		return nil, "", 0, false, err
 	}
 	var rootDev uint64
 	var hasRootDev bool
@@ -302,6 +480,28 @@ func (s *Session) disk(sub string, write, checksum bool) (string, error) {
 			hasRootDev = true
 		}
 	}
+	return root, rel, rootDev, hasRootDev, nil
+}
+
+func randomName() string { var b [16]byte; rand.Read(b[:]); return hex.EncodeToString(b[:]) }
+
+func (s *Session) disk(sub string, write, checksum bool) (string, error) {
+	mode := diskReadOnly
+	if write {
+		mode = diskAppendWrite
+	}
+	return s.diskWithMode(sub, mode, checksum)
+}
+
+func (s *Session) diskWithMode(sub string, mode diskAccessMode, checksum bool) (string, error) {
+	return s.diskWithOptions(sub, mode, checksum, false)
+}
+
+func (s *Session) diskWithOptions(sub string, mode diskAccessMode, checksum, followSymlinks bool) (string, error) {
+	root, rel, rootDev, hasRootDev, e := openDiskWithDev(sub)
+	if e != nil {
+		return "", e
+	}
 	// Serve the authorized volume from a private root handle. The unguessable
 	// prefix is only in the private config, never logged or passed on argv.
 	ln, e := net.Listen("tcp4", "127.0.0.1:0")
@@ -309,7 +509,7 @@ func (s *Session) disk(sub string, write, checksum bool) (string, error) {
 		root.Close()
 		return "", e
 	}
-	fs := diskFS{root: root, base: rel, checksum: checksum}
+	fs := diskFS{root: root, base: rel, checksum: checksum, followSymlinks: followSymlinks}
 	id, _, _ := strings.Cut(sub, "/")
 	prefix := "/" + randomName()
 	dav := &webdav.Handler{Prefix: prefix, FileSystem: fs, LockSystem: webdav.NewMemLS()}
@@ -338,6 +538,9 @@ func (s *Session) disk(sub string, write, checksum bool) (string, error) {
 		return true
 	}
 
+	allowWrite := mode >= diskAppendWrite
+	allowDeleteMove := mode >= diskFullWrite
+
 	srv := &http.Server{ReadHeaderTimeout: 10 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, prefix+"/") && r.URL.Path != prefix {
 			http.NotFound(w, r)
@@ -350,26 +553,28 @@ func (s *Session) disk(sub string, write, checksum bool) (string, error) {
 		switch r.Method {
 		case "PROPFIND":
 			servePropfind(w, r, fs, prefix, rootDev, hasRootDev)
-		case "OPTIONS", "GET", "HEAD":
+		case "OPTIONS":
 			dav.ServeHTTP(w, r)
+		case "GET", "HEAD":
+			serveGetHead(w, r, fs, prefix, rootDev, hasRootDev)
 		case "MKCOL":
-			if !write {
-				w.WriteHeader(403)
+			if !allowWrite {
+				w.WriteHeader(http.StatusForbidden)
 				return
 			}
 			if err := mkdirAllPerm(root, fs.name(strings.TrimPrefix(r.URL.Path, prefix)), backupDirPerm); err != nil {
-				w.WriteHeader(409)
+				writeDiskWriteError(w, err)
 				return
 			}
-			w.WriteHeader(201)
+			w.WriteHeader(http.StatusCreated)
 		case "PUT":
-			if !write {
-				w.WriteHeader(403)
+			if !allowWrite {
+				w.WriteHeader(http.StatusForbidden)
 				return
 			}
 			target := fs.name(strings.TrimPrefix(r.URL.Path, prefix))
 			if target == "." {
-				w.WriteHeader(409)
+				w.WriteHeader(http.StatusConflict)
 				return
 			}
 			parent := path.Dir(target)
@@ -377,13 +582,13 @@ func (s *Session) disk(sub string, write, checksum bool) (string, error) {
 			// uploading top-level files into a newly specified or derived local
 			// subdirectory; ensure the parent directory exists before writing.
 			if err := mkdirAllPerm(root, parent, backupDirPerm); err != nil {
-				w.WriteHeader(409)
+				writeDiskWriteError(w, err)
 				return
 			}
 			tmp := path.Join(parent, ".opensync-"+randomName()+".partial")
 			file, e := root.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, backupFilePerm)
 			if e != nil {
-				w.WriteHeader(409)
+				writeDiskWriteError(w, e)
 				return
 			}
 			defer root.Remove(tmp)
@@ -397,24 +602,119 @@ func (s *Session) disk(sub string, write, checksum bool) (string, error) {
 				e = closeErr
 			}
 			if e != nil || r.Context().Err() != nil || r.ContentLength >= 0 && count != r.ContentLength {
-				w.WriteHeader(500)
+				w.WriteHeader(http.StatusInternalServerError)
 				return
 			}
 			if sec, e := strconv.ParseInt(r.Header.Get("X-OC-Mtime"), 10, 64); e == nil {
 				t := time.Unix(sec, 0)
 				if root.Chtimes(tmp, t, t) != nil {
-					w.WriteHeader(500)
+					w.WriteHeader(http.StatusInternalServerError)
 					return
 				}
 				w.Header().Set("X-OC-Mtime", "accepted")
 			}
 			if e = root.Rename(tmp, target); e != nil {
-				w.WriteHeader(409)
+				writeDiskWriteError(w, e)
 				return
 			}
-			w.WriteHeader(201)
+			w.WriteHeader(http.StatusCreated)
+		case "DELETE":
+			if !allowDeleteMove {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			target := fs.name(strings.TrimPrefix(r.URL.Path, prefix))
+			err := removeInRootSafe(root, target, fs.base, rootDev, hasRootDev)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				if errors.Is(err, os.ErrPermission) {
+					w.WriteHeader(http.StatusForbidden)
+					return
+				}
+				w.WriteHeader(http.StatusConflict)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case "MOVE":
+			if !allowDeleteMove {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			destHeader := strings.TrimSpace(r.Header.Get("Destination"))
+			if destHeader == "" {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			destURL, err := url.Parse(destHeader)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			destPath := destURL.Path
+			if !strings.HasPrefix(destPath, prefix+"/") && destPath != prefix {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			srcRel := fs.name(strings.TrimPrefix(r.URL.Path, prefix))
+			dstRel := fs.name(strings.TrimPrefix(destPath, prefix))
+			baseClean := path.Clean(fs.base)
+			if srcRel == "." || dstRel == "." || srcRel == baseClean || dstRel == baseClean {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			srcSt, err := root.Lstat(srcRel)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				if errors.Is(err, os.ErrPermission) {
+					w.WriteHeader(http.StatusForbidden)
+					return
+				}
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			if srcSt.Mode()&os.ModeSymlink != 0 || !sameDevice(srcSt, rootDev, hasRootDev) {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			existed := false
+			if dstSt, statErr := root.Lstat(dstRel); statErr == nil {
+				existed = true
+				if strings.EqualFold(strings.TrimSpace(r.Header.Get("Overwrite")), "F") {
+					w.WriteHeader(http.StatusPreconditionFailed)
+					return
+				}
+				if dstSt.Mode()&os.ModeSymlink != 0 || !sameDevice(dstSt, rootDev, hasRootDev) {
+					w.WriteHeader(http.StatusForbidden)
+					return
+				}
+				if dstSt.IsDir() {
+					if err := removeInRootSafe(root, dstRel, fs.base, rootDev, hasRootDev); err != nil {
+						writeDiskWriteError(w, err)
+						return
+					}
+				}
+			}
+			if err := mkdirAllPerm(root, path.Dir(dstRel), backupDirPerm); err != nil {
+				writeDiskWriteError(w, err)
+				return
+			}
+			if err := root.Rename(srcRel, dstRel); err != nil {
+				writeDiskWriteError(w, err)
+				return
+			}
+			if existed {
+				w.WriteHeader(http.StatusNoContent)
+			} else {
+				w.WriteHeader(http.StatusCreated)
+			}
 		default:
-			w.WriteHeader(405)
+			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
 	})}
 	done := make(chan struct{})

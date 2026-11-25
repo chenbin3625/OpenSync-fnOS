@@ -121,6 +121,7 @@ describe("sync method labels", () => {
     expect(methodLabel(0)).toBe("增量同步");
     expect(methodLabel(1)).toBe("全量同步");
     expect(methodLabel(2)).toBe("移动");
+    expect(methodLabel(3)).toBe("双向同步");
     expect(methodLabel(9)).toBe("—");
   });
 });

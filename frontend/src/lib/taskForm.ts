@@ -1,4 +1,4 @@
-import type { JobItem } from "../types";
+import type { JobItem, NativeExtraFlags } from "../types";
 import {
   defaultCronFields,
   defaultExclude,
@@ -50,6 +50,48 @@ function parseNotifyIdList(value: unknown): number[] {
   return [];
 }
 
+function parseNativeExtraFlags(value: unknown): Required<NativeExtraFlags> {
+  const empty: Required<NativeExtraFlags> = {
+    noUpdateModtime: false,
+    inplace: false,
+    checkFirst: false,
+    s3NoHead: false,
+  };
+  if (!value) return empty;
+  let obj: Record<string, unknown> | null = null;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return empty;
+    try {
+      const parsed: unknown = JSON.parse(trimmed);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        obj = parsed as Record<string, unknown>;
+      }
+    } catch {
+      return empty;
+    }
+  } else if (typeof value === "object" && !Array.isArray(value)) {
+    obj = value as Record<string, unknown>;
+  }
+  if (!obj) return empty;
+  return {
+    noUpdateModtime: Boolean(obj.noUpdateModtime),
+    inplace: Boolean(obj.inplace),
+    checkFirst: Boolean(obj.checkFirst),
+    s3NoHead: Boolean(obj.s3NoHead),
+  };
+}
+
+function serializeNativeExtraFlags(flags: NativeExtraFlags | undefined): string {
+  if (!flags) return "";
+  const out: NativeExtraFlags = {};
+  if (flags.noUpdateModtime) out.noUpdateModtime = true;
+  if (flags.inplace) out.inplace = true;
+  if (flags.checkFirst) out.checkFirst = true;
+  if (flags.s3NoHead) out.s3NoHead = true;
+  return Object.keys(out).length > 0 ? JSON.stringify(out) : "";
+}
+
 export function defaultJobForm(alistId?: number) {
   return {
     id: undefined as number | undefined,
@@ -90,12 +132,26 @@ export function defaultJobForm(alistId?: number) {
     windowStopOutside: false,
     notifyMode: 0,
     notifyIds: [] as number[],
+    bwLimit: "",
+    tpsLimit: 0,
+    tpsLimitBurst: 0,
+    modifyWindow: "",
+    fastList: false,
+    multiThreadStreams: 0,
+    createEmptySrcDirs: false,
+    followSymlinks: false,
+    extraFlags: {
+      noUpdateModtime: false,
+      inplace: false,
+      checkFirst: false,
+      s3NoHead: false,
+    } as Required<NativeExtraFlags>,
     ...defaultCronFields,
   };
 }
 export type JobForm = ReturnType<typeof defaultJobForm>;
 // Preserve all supported modes when editing stored jobs.
-const supportedJobMethods = new Set([0, 1, 2]);
+const supportedJobMethods = new Set([0, 1, 2, 3]);
 
 export function normalizeJobMethod(method: unknown) {
   const parsed = Number(method);
@@ -214,6 +270,15 @@ export function jobToForm(job: JobItem): JobForm {
     windowStopOutside: Boolean(job.windowStopOutside),
     notifyMode: Number(job.notifyMode ?? 0),
     notifyIds: parseNotifyIdList(job.notifyIds),
+    bwLimit: (job.bwLimit || "").trim(),
+    tpsLimit: Number(job.tpsLimit ?? 0),
+    tpsLimitBurst: Number(job.tpsLimitBurst ?? 0),
+    modifyWindow: (job.modifyWindow || "").trim(),
+    fastList: Boolean(job.fastList),
+    multiThreadStreams: Number(job.multiThreadStreams ?? 0),
+    createEmptySrcDirs: Boolean(job.createEmptySrcDirs),
+    followSymlinks: Boolean(job.followSymlinks),
+    extraFlags: parseNativeExtraFlags(job.extraFlags),
     second: job.second || "0",
     minute: job.minute || "0",
     hour: job.hour || "2",
@@ -280,6 +345,15 @@ export function buildJobPayload(form: JobForm) {
     windowStopOutside: Number(Boolean(form.windowStopOutside)),
     notifyMode: Number(form.notifyMode) || 0,
     notifyIds: form.notifyMode === 1 ? form.notifyIds : [],
+    bwLimit: form.bwLimit.trim(),
+    tpsLimit: Math.max(0, Math.min(10000, Number(form.tpsLimit) || 0)),
+    tpsLimitBurst: Math.max(0, Math.min(10000, Math.trunc(Number(form.tpsLimitBurst) || 0))),
+    modifyWindow: form.modifyWindow.trim(),
+    fastList: Number(Boolean(form.fastList)),
+    multiThreadStreams: Math.max(0, Math.min(64, Math.trunc(Number(form.multiThreadStreams) || 0))),
+    createEmptySrcDirs: Number(Boolean(form.createEmptySrcDirs)),
+    followSymlinks: Number(Boolean(form.followSymlinks)),
+    extraFlags: serializeNativeExtraFlags(form.extraFlags),
   };
 }
 export interface JobValidationOptions {
@@ -369,6 +443,14 @@ export function validateJobFormFields(
   }
   if (form.method === 2 && form.dstPath.length > 1) {
     fields.dstPath = "移动模式只允许一个目标目录";
+    step0Errors.push(fields.dstPath);
+  }
+  if (form.method === 3 && form.srcPath.length > 1) {
+    fields.srcPath = "双向同步模式只允许一个源目录";
+    step0Errors.push(fields.srcPath);
+  }
+  if (form.method === 3 && form.dstPath.length > 1) {
+    fields.dstPath = "双向同步模式只允许一个目标目录";
     step0Errors.push(fields.dstPath);
   }
   if (form.srcPath.length > 0 && form.dstPath.length > 0) {

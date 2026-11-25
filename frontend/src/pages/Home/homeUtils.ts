@@ -60,6 +60,11 @@ export const methodOptions = [
     description:
       "复制文件并校验目标大小、源文件未变后删除源文件；仅支持一个目标目录，保留空源目录。需刷新、复制和删除权限，请勿使用指向同一数据的别名目录或同时修改文件。",
   },
+  {
+    name: "双向同步",
+    description:
+      "基于 rclone bisync 在一对源目录和目标目录之间双向同步新增、修改与删除（仅原生 rclone 引擎支持）；首次运行自动执行基线初始化（--resync），后续按变更增量同步。",
+  },
 ];
 export const methodNames = methodOptions.map((method) => method.name);
 

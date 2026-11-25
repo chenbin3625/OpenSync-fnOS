@@ -8,14 +8,17 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net/url"
 	"opensync/internal/msg"
 	"opensync/pkg/crypto"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 )
 
 // ServerConfig holds server configuration
@@ -42,7 +45,11 @@ type ServerConfig struct {
 	// EngineHealthCheckInterval is the periodic storage engine health probe
 	// interval in minutes (0 = disabled).
 	EngineHealthCheckInterval int
-	PasswdStr                 string
+	// DefaultBwLimit is the global default rclone bandwidth limit (empty = unlimited).
+	DefaultBwLimit string
+	// ProxyURL is the optional global outbound proxy URL for native rclone transfers.
+	ProxyURL  string
+	PasswdStr string
 	// AllowedOrigins lists the origins allowed to perform mutations. Entries are
 	// full origins ("http://nas.example:5666") or bare hosts ("nas.example");
 	// full origins match scheme and effective port exactly, while bare hosts
@@ -104,14 +111,86 @@ const (
 
 // SystemSettings is the subset of backend settings exposed for runtime editing.
 type SystemSettings struct {
-	TaskTimeout               int `json:"taskTimeout"`
-	TaskSave                  int `json:"taskSave"`
-	CopyConcurrency           int `json:"copyConcurrency"`
-	ScanConcurrency           int `json:"scanConcurrency"`
-	MaxRetries                int `json:"maxRetries"`
-	ScheduledFullSyncConfirm  int `json:"scheduledFullSyncConfirm"`
-	FullSyncApprovalTimeout   int `json:"fullSyncApprovalTimeout"`
-	EngineHealthCheckInterval int `json:"engineHealthCheckInterval"`
+	TaskTimeout               int    `json:"taskTimeout"`
+	TaskSave                  int    `json:"taskSave"`
+	CopyConcurrency           int    `json:"copyConcurrency"`
+	ScanConcurrency           int    `json:"scanConcurrency"`
+	MaxRetries                int    `json:"maxRetries"`
+	ScheduledFullSyncConfirm  int    `json:"scheduledFullSyncConfirm"`
+	FullSyncApprovalTimeout   int    `json:"fullSyncApprovalTimeout"`
+	EngineHealthCheckInterval int    `json:"engineHealthCheckInterval"`
+	DefaultBwLimit            string `json:"defaultBwLimit"`
+	ProxyURL                  string `json:"proxyUrl"`
+}
+
+var (
+	bwRatePartPattern      = regexp.MustCompile(`^(?i:off|0|[0-9]+(?:\.[0-9]+)?(?:[bkmgtp]i?b?)?)$`)
+	bwScheduleTokenPattern = regexp.MustCompile(`^(?:(?i:mon|tue|wed|thu|fri|sat|sun)-)?(?:[01]?[0-9]|2[0-3]):[0-5][0-9],(.+)$`)
+)
+
+func validBwRateSpec(spec string) bool {
+	if spec == "" {
+		return false
+	}
+	if up, down, hasColon := strings.Cut(spec, ":"); hasColon {
+		if strings.Contains(down, ":") {
+			return false
+		}
+		return bwRatePartPattern.MatchString(up) && bwRatePartPattern.MatchString(down)
+	}
+	return bwRatePartPattern.MatchString(spec)
+}
+
+// ValidateBwLimit checks whether value is empty or a valid rclone --bwlimit specification.
+func ValidateBwLimit(value string) error {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil
+	}
+	if len(trimmed) > 256 || strings.HasPrefix(trimmed, "-") || strings.IndexFunc(trimmed, unicode.IsControl) >= 0 {
+		return errors.New(msg.T(msg.BwLimitInvalid))
+	}
+	tokens := strings.Fields(trimmed)
+	if len(tokens) == 1 && !strings.Contains(tokens[0], ",") {
+		if !validBwRateSpec(tokens[0]) {
+			return errors.New(msg.T(msg.BwLimitInvalid))
+		}
+		return nil
+	}
+	for _, tok := range tokens {
+		m := bwScheduleTokenPattern.FindStringSubmatch(tok)
+		if m == nil || !validBwRateSpec(m[1]) {
+			return errors.New(msg.T(msg.BwLimitInvalid))
+		}
+	}
+	return nil
+}
+
+// ValidateProxyURL checks whether value is empty or a valid http/https/socks5/socks5h proxy URL.
+func ValidateProxyURL(value string) error {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil
+	}
+	if len(trimmed) > 512 || strings.IndexFunc(trimmed, unicode.IsSpace) >= 0 || strings.IndexFunc(trimmed, unicode.IsControl) >= 0 {
+		return errors.New(msg.T(msg.ProxyURLInvalid))
+	}
+	u, err := url.Parse(trimmed)
+	if err != nil || u.Hostname() == "" {
+		return errors.New(msg.T(msg.ProxyURLInvalid))
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https", "socks5", "socks5h":
+	default:
+		return errors.New(msg.T(msg.ProxyURLInvalid))
+	}
+	if port := u.Port(); port != "" {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return errors.New(msg.T(msg.ProxyURLInvalid))
+		}
+	}
+	return nil
 }
 
 // GetPasswordStr gets or generates the encryption secret key. Persistence is
@@ -289,6 +368,7 @@ var knownConfigKeys = map[string]struct{}{
 	"task_save": {}, "task_timeout": {}, "copy_concurrency": {},
 	"scan_concurrency": {}, "max_retries": {}, "scheduled_full_sync_confirm": {},
 	"full_sync_approval_timeout": {}, "engine_health_check_interval": {},
+	"default_bw_limit": {}, "proxy_url": {},
 	"allowed_origins": {}, "locale": {},
 }
 
@@ -345,6 +425,8 @@ func loadServerConfig(passwdStr string) (ServerConfig, error) {
 	sCfg.ScheduledFullSyncConfirm = envIntConfigValue("OPENSYNC_SCHEDULED_FULL_SYNC_CONFIRM", sCfg.ScheduledFullSyncConfirm)
 	sCfg.FullSyncApprovalTimeout = envIntConfigValue("OPENSYNC_FULL_SYNC_APPROVAL_TIMEOUT", sCfg.FullSyncApprovalTimeout)
 	sCfg.EngineHealthCheckInterval = envIntConfigValue("OPENSYNC_ENGINE_HEALTH_CHECK_INTERVAL", sCfg.EngineHealthCheckInterval)
+	sCfg.DefaultBwLimit = envStringConfigValue("OPENSYNC_DEFAULT_BW_LIMIT", sCfg.DefaultBwLimit)
+	sCfg.ProxyURL = envStringConfigValue("OPENSYNC_PROXY_URL", sCfg.ProxyURL)
 	sCfg.AllowedOrigins = splitList(os.Getenv("OPENSYNC_ALLOWED_ORIGINS"))
 	sCfg.Locale = envStringConfigValue("OPENSYNC_LOCALE", sCfg.Locale)
 	for _, name := range deprecatedConfigEnv {
@@ -395,6 +477,12 @@ func loadServerConfig(passwdStr string) (ServerConfig, error) {
 		if v, ok := opensync["engine_health_check_interval"]; ok {
 			sCfg.EngineHealthCheckInterval = intConfigValue(v, sCfg.EngineHealthCheckInterval, "engine_health_check_interval")
 		}
+		if v, ok := opensync["default_bw_limit"]; ok {
+			sCfg.DefaultBwLimit = strings.TrimSpace(v)
+		}
+		if v, ok := opensync["proxy_url"]; ok {
+			sCfg.ProxyURL = strings.TrimSpace(v)
+		}
 		if v, ok := opensync["allowed_origins"]; ok {
 			sCfg.AllowedOrigins = splitList(v)
 		}
@@ -426,6 +514,26 @@ func clampServerConfig(sCfg *ServerConfig) {
 	sCfg.ScheduledFullSyncConfirm = clampManagedInt("scheduled_full_sync_confirm", sCfg.ScheduledFullSyncConfirm)
 	sCfg.FullSyncApprovalTimeout = clampManagedInt("full_sync_approval_timeout", sCfg.FullSyncApprovalTimeout)
 	sCfg.EngineHealthCheckInterval = clampManagedInt("engine_health_check_interval", sCfg.EngineHealthCheckInterval)
+	sCfg.DefaultBwLimit = clampManagedString("default_bw_limit", sCfg.DefaultBwLimit)
+	sCfg.ProxyURL = clampManagedString("proxy_url", sCfg.ProxyURL)
+}
+
+func clampManagedString(key, value string) string {
+	trimmed := strings.TrimSpace(value)
+	switch key {
+	case "default_bw_limit":
+		if ValidateBwLimit(trimmed) != nil {
+			return ""
+		}
+		return trimmed
+	case "proxy_url":
+		if ValidateProxyURL(trimmed) != nil {
+			return ""
+		}
+		return trimmed
+	default:
+		return trimmed
+	}
 }
 
 // clampManagedInt applies the same startup range clamping to a single managed
@@ -494,6 +602,8 @@ func settingsFromServer(s ServerConfig) SystemSettings {
 		ScheduledFullSyncConfirm:  s.ScheduledFullSyncConfirm,
 		FullSyncApprovalTimeout:   s.FullSyncApprovalTimeout,
 		EngineHealthCheckInterval: s.EngineHealthCheckInterval,
+		DefaultBwLimit:            s.DefaultBwLimit,
+		ProxyURL:                  s.ProxyURL,
 	}
 }
 
@@ -542,6 +652,8 @@ func UpdateSystemSettingsWith(update func(current SystemSettings) SystemSettings
 	nextServer.ScheduledFullSyncConfirm = settings.ScheduledFullSyncConfirm
 	nextServer.FullSyncApprovalTimeout = settings.FullSyncApprovalTimeout
 	nextServer.EngineHealthCheckInterval = settings.EngineHealthCheckInterval
+	nextServer.DefaultBwLimit = strings.TrimSpace(settings.DefaultBwLimit)
+	nextServer.ProxyURL = strings.TrimSpace(settings.ProxyURL)
 
 	if err := writeConfigFile(nextServer, cfg.Server); err != nil {
 		var conflict *configConflictError
@@ -578,6 +690,12 @@ func validateSystemSettings(settings SystemSettings) error {
 			return fmt.Errorf("%s", msg.SettingsRangeError(item.name, item.min, item.max))
 		}
 	}
+	if err := ValidateBwLimit(settings.DefaultBwLimit); err != nil {
+		return err
+	}
+	if err := ValidateProxyURL(settings.ProxyURL); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -601,6 +719,7 @@ func envStringConfigValue(envName string, fallback string) string {
 var configManagedKeys = []string{
 	"task_save", "task_timeout", "copy_concurrency", "scan_concurrency", "max_retries",
 	"scheduled_full_sync_confirm", "full_sync_approval_timeout", "engine_health_check_interval",
+	"default_bw_limit", "proxy_url",
 }
 
 func configManagedValues(sCfg ServerConfig) map[string]string {
@@ -613,6 +732,8 @@ func configManagedValues(sCfg ServerConfig) map[string]string {
 		"scheduled_full_sync_confirm":  strconv.Itoa(sCfg.ScheduledFullSyncConfirm),
 		"full_sync_approval_timeout":   strconv.Itoa(sCfg.FullSyncApprovalTimeout),
 		"engine_health_check_interval": strconv.Itoa(sCfg.EngineHealthCheckInterval),
+		"default_bw_limit":             strings.TrimSpace(sCfg.DefaultBwLimit),
+		"proxy_url":                    strings.TrimSpace(sCfg.ProxyURL),
 	}
 }
 
@@ -798,6 +919,16 @@ func managedIntValue(key string, sCfg ServerConfig) (int, bool) {
 	return 0, false
 }
 
+func managedStringValue(key string, sCfg ServerConfig) (string, bool) {
+	switch key {
+	case "default_bw_limit":
+		return strings.TrimSpace(sCfg.DefaultBwLimit), true
+	case "proxy_url":
+		return strings.TrimSpace(sCfg.ProxyURL), true
+	}
+	return "", false
+}
+
 // checkManagedValuesConflict refuses to overwrite managed keys that were
 // edited by hand while the app was running. The last occurrence of a key wins,
 // matching readINI; non-integer on-disk values are ignored because startup
@@ -827,7 +958,17 @@ func checkManagedValuesConflict(content string, before ServerConfig) error {
 	}
 	for _, key := range configManagedKeys {
 		diskValue, ok := diskValues[key]
-		if !ok || diskValue == "" {
+		if !ok {
+			continue
+		}
+		if currentStr, isStr := managedStringValue(key, before); isStr {
+			effectiveStr := clampManagedString(key, diskValue)
+			if effectiveStr != currentStr {
+				return &configConflictError{detail: fmt.Sprintf("%s（内存=%q，config.ini=%q）", key, currentStr, diskValue)}
+			}
+			continue
+		}
+		if diskValue == "" {
 			continue
 		}
 		rawDiskInt, err := strconv.Atoi(diskValue)

@@ -8,12 +8,17 @@ import type {
   EngineHealth,
   FilterTestResult,
   FullSyncApproval,
+  JobCheckResult,
   JobItem,
+  NativeAboutInfo,
+  NativeBrowseResult,
+  NativeExportResult,
   NativeImportCandidate,
   NativeImportPreview,
   NativeImportResult,
   NativeLocalRoot,
   NativeRemoteItem,
+  NativeRenameResult,
   NativeStorageState,
   NativeStorageTestResult,
   NotifyItem,
@@ -55,6 +60,8 @@ const defaultSettings: SystemSettings = {
   scheduledFullSyncConfirm: 0,
   fullSyncApprovalTimeout: 30,
   engineHealthCheckInterval: 15,
+  defaultBwLimit: "",
+  proxyUrl: "",
 };
 
 const defaultPaths: Record<string, { name: string }[]> = {
@@ -240,6 +247,19 @@ function normalizeJob(input: JobInput, id: number, previous?: JobItem): JobItem 
       merged.windowStopOutside === true ? 1 : numberValue(merged.windowStopOutside, 0),
     notifyMode: numberValue(merged.notifyMode, 0),
     notifyIds,
+    bwLimit: merged.bwLimit == null ? "" : stringValue(merged.bwLimit),
+    tpsLimit: numberValue(merged.tpsLimit, 0),
+    tpsLimitBurst: numberValue(merged.tpsLimitBurst, 0),
+    modifyWindow: merged.modifyWindow == null ? "" : stringValue(merged.modifyWindow),
+    fastList: merged.fastList === true ? 1 : numberValue(merged.fastList, 0),
+    multiThreadStreams: numberValue(merged.multiThreadStreams, 0),
+    createEmptySrcDirs:
+      merged.createEmptySrcDirs === true
+        ? 1
+        : numberValue(merged.createEmptySrcDirs, 0),
+    followSymlinks:
+      merged.followSymlinks === true ? 1 : numberValue(merged.followSymlinks, 0),
+    extraFlags: merged.extraFlags == null ? "" : typeof merged.extraFlags === "string" ? merged.extraFlags : JSON.stringify(merged.extraFlags),
     createTime: numberValue(merged.createTime, now()),
   };
 }
@@ -533,11 +553,12 @@ export class MockStore {
   private nextNotifyId: number;
   private nextTaskId = 7000;
   private dryRuns = new Map<number, DryRunResult>();
+  private jobChecks = new Map<number, JobCheckResult>();
   private engineHealthMap = new Map<number, EngineHealth>();
   private nativeRemotes = new Map<string, Record<string, string>>();
   private nativeLocalRoots: NativeLocalRoot[] = [
-    { path: "/vol1/1000/Photos", id: "Photos~mock01" },
-    { path: "/vol2/1000/Backup", id: "Backup~mock02" },
+    { path: "/vol1/1000/Photos", id: "Photos~a1b2c3d4e5f6" },
+    { path: "/vol2/1000/Backup", id: "Backup~1234567890ab" },
   ];
 
   constructor(seed: MockStoreSeed = {}) {
@@ -755,19 +776,49 @@ export class MockStore {
 
   getNativeStorageState(): NativeStorageState {
     const engine = this.syncNativeEngineMetadata();
+    const secretKeys = new Set([
+      "secret_access_key",
+      "session_token",
+      "pass",
+      "bearer_token",
+      "key_pem",
+      "key_file_pass",
+      "password",
+      "password2",
+      "key",
+      "token",
+      "client_secret",
+      "service_account_credentials",
+      "sas_url",
+      "application_credential_secret",
+    ]);
+    const supportedTypes = [
+      "local",
+      "s3",
+      "webdav",
+      "sftp",
+      "smb",
+      "ftp",
+      "http",
+      "b2",
+      "onedrive",
+      "drive",
+      "dropbox",
+      "box",
+      "pcloud",
+      "mega",
+      "azureblob",
+      "googlecloudstorage",
+      "swift",
+      "crypt",
+      "chunker",
+      "compress",
+      "hasher",
+      "union",
+    ];
     const remotes: NativeRemoteItem[] = [...this.nativeRemotes.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([name, params]) => {
-        const secretKeys = new Set([
-          "secret_access_key",
-          "session_token",
-          "pass",
-          "bearer_token",
-          "key_pem",
-          "key_file_pass",
-          "password",
-          "password2",
-        ]);
         const pub: Record<string, string> = {};
         const configuredSecrets: string[] = [];
         for (const [k, v] of Object.entries(params)) {
@@ -777,10 +828,22 @@ export class MockStore {
         }
         const usedByCrypts: string[] = [];
         for (const [otherName, otherParams] of this.nativeRemotes.entries()) {
-          if (otherName === name || otherParams.type !== "crypt") continue;
-          const ref = (otherParams.remote || "").split(":")[0];
-          if (ref.toLowerCase() === name.toLowerCase()) {
-            usedByCrypts.push(otherName);
+          if (otherName === name) continue;
+          const ot = otherParams.type;
+          if (ot === "crypt" || ot === "chunker" || ot === "compress" || ot === "hasher") {
+            const ref = (otherParams.remote || "").split(":")[0];
+            if (ref.toLowerCase() === name.toLowerCase()) {
+              usedByCrypts.push(otherName);
+            }
+          } else if (ot === "union") {
+            const upstreams = (otherParams.upstreams || "").split(/\s+/).filter(Boolean);
+            if (
+              upstreams.some(
+                (u) => u.replace(/:(?:ro|nc|ep)$/i, "").split(":")[0]?.toLowerCase() === name.toLowerCase(),
+              )
+            ) {
+              usedByCrypts.push(otherName);
+            }
           }
         }
         const usedByJobs: string[] = [];
@@ -818,6 +881,8 @@ export class MockStore {
       remark: engine?.remark || "原生备份",
       maxConcurrentJobs: engine?.maxConcurrentJobs ?? 1,
       rcloneAvailable: true,
+      rcloneVersion: "v1.76.0",
+      supportedTypes,
       localRoots: [...this.nativeLocalRoots],
       remotes,
     };
@@ -896,6 +961,12 @@ export class MockStore {
       "key_file_pass",
       "password",
       "password2",
+      "key",
+      "token",
+      "client_secret",
+      "service_account_credentials",
+      "sas_url",
+      "application_credential_secret",
     ]) {
       if (!next[secretKey] && !clearSet.has(secretKey) && oldParams[secretKey]) {
         next[secretKey] = oldParams[secretKey];
@@ -930,7 +1001,31 @@ export class MockStore {
     if (!cleaned) return "请先选择非空的 rclone.conf 文件";
     const parsed = parseMockINI(cleaned);
     if (typeof parsed === "string") return parsed;
-    const supported = new Set(["local", "s3", "webdav", "sftp", "smb", "crypt"]);
+    const supported = new Set([
+      "local",
+      "s3",
+      "webdav",
+      "sftp",
+      "smb",
+      "ftp",
+      "http",
+      "b2",
+      "onedrive",
+      "drive",
+      "dropbox",
+      "box",
+      "pcloud",
+      "mega",
+      "azureblob",
+      "googlecloudstorage",
+      "swift",
+      "crypt",
+      "chunker",
+      "compress",
+      "hasher",
+      "union",
+    ]);
+    const oauthTypes = new Set(["onedrive", "drive", "dropbox", "box", "pcloud"]);
     const items: NativeImportCandidate[] = Object.entries(parsed)
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([name, params]) => {
@@ -949,6 +1044,29 @@ export class MockStore {
             configuredSecrets: [],
             error: `存储 "${name}" 的后端类型不受支持`,
           };
+        }
+        if (oauthTypes.has(typ)) {
+          let validToken = false;
+          if (params.token) {
+            try {
+              const obj = JSON.parse(params.token) as Record<string, unknown>;
+              validToken = Boolean(obj && (obj.access_token || obj.refresh_token));
+            } catch {
+              validToken = false;
+            }
+          }
+          if (!validToken) {
+            return {
+              name,
+              type: typ,
+              status: "invalid",
+              canReplace: false,
+              summary: mockNativeSummary(params),
+              options: {},
+              configuredSecrets: [],
+              error: `存储 "${name}" 缺少有效的 OAuth Token JSON`,
+            };
+          }
         }
         if (existingKey) {
           const oldType = this.nativeRemotes.get(existingKey)?.type || "";
@@ -1050,6 +1168,213 @@ export class MockStore {
       message: "连接正常，可读取 3 个目录/存储桶",
       dirsCount: 3,
     };
+  }
+
+  renameNativeRemote(
+    oldName: string,
+    newName: string,
+  ): NativeRenameResult | string {
+    const oldTrim = oldName.trim();
+    const newTrim = newName.trim();
+    if (!oldTrim || !newTrim) return "请提供原存储名称和新存储名称";
+    const actualOld = [...this.nativeRemotes.keys()].find(
+      (k) => k.toLowerCase() === oldTrim.toLowerCase(),
+    );
+    if (!actualOld) return `存储 "${oldTrim}" 不存在`;
+    const conflict = [...this.nativeRemotes.keys()].find(
+      (k) => k !== actualOld && k.toLowerCase() === newTrim.toLowerCase(),
+    );
+    if (conflict) return `存储 "${conflict}" 已存在`;
+    const params = this.nativeRemotes.get(actualOld)!;
+    this.nativeRemotes.delete(actualOld);
+    this.nativeRemotes.set(newTrim, params);
+    for (const [k, other] of this.nativeRemotes.entries()) {
+      if (other.remote) {
+        const colon = other.remote.indexOf(":");
+        if (
+          colon > 0 &&
+          other.remote.slice(0, colon).toLowerCase() === actualOld.toLowerCase()
+        ) {
+          other.remote = `${newTrim}${other.remote.slice(colon)}`;
+          this.nativeRemotes.set(k, other);
+        }
+      }
+    }
+    let updatedJobs = 0;
+    const engine = this.syncNativeEngineMetadata();
+    if (engine) {
+      const rewrite = (p: string) => {
+        const trimmed = p.replace(/^\/+/, "");
+        const idx = trimmed.indexOf("/");
+        const seg = idx >= 0 ? trimmed.slice(0, idx) : trimmed;
+        const rest = idx >= 0 ? trimmed.slice(idx + 1) : "";
+        if (seg.toLowerCase() !== actualOld.toLowerCase()) return p;
+        return rest ? `/${newTrim}/${rest}` : `/${newTrim}`;
+      };
+      for (const job of this.jobs) {
+        if (job.alistId !== engine.id) continue;
+        const src = parsePathList(job.srcPath);
+        const dst = parsePathList(job.dstPath);
+        const nextSrc = src.map(rewrite);
+        const nextDst = dst.map(rewrite);
+        if (
+          JSON.stringify(src) !== JSON.stringify(nextSrc) ||
+          JSON.stringify(dst) !== JSON.stringify(nextDst)
+        ) {
+          job.srcPath = JSON.stringify(nextSrc);
+          job.dstPath = JSON.stringify(nextDst);
+          updatedJobs += 1;
+        }
+      }
+      this.engineHealthMap.delete(engine.id);
+    }
+    return { oldName: actualOld, newName: newTrim, updatedJobs };
+  }
+
+  exportNativeConfig(
+    names?: string[],
+    password?: string,
+  ): NativeExportResult | string {
+    const selected =
+      names && names.length > 0
+        ? names
+        : [...this.nativeRemotes.keys()].sort((a, b) => a.localeCompare(b));
+    const blocks: string[] = [];
+    for (const name of selected) {
+      const actual = [...this.nativeRemotes.keys()].find(
+        (k) => k.toLowerCase() === name.toLowerCase(),
+      );
+      if (!actual) continue;
+      const params = this.nativeRemotes.get(actual)!;
+      const lines = [`[${actual}]`];
+      for (const [k, v] of Object.entries(params)) {
+        lines.push(`${k} = ${v}`);
+      }
+      blocks.push(lines.join("\n"));
+    }
+    if (blocks.length === 0) return "没有可导出的远端存储配置";
+    return {
+      content: password
+        ? `# Encrypted rclone configuration\n# RCLONE_ENCRYPT_V0:\n${btoa(blocks.join("\n\n"))}\n`
+        : `${blocks.join("\n\n")}\n`,
+      encrypted: Boolean(password),
+      filename: "rclone-export.conf",
+    };
+  }
+
+  aboutNativeStorage(name: string): NativeAboutInfo | string {
+    const trimmed = name.trim();
+    if (!trimmed) return "请提供存储名称";
+    if (trimmed === "本地") {
+      return {
+        supported: true,
+        total: 4 * 1024 * 1024 * 1024 * 1024,
+        used: 1.2 * 1024 * 1024 * 1024 * 1024,
+        free: 2.8 * 1024 * 1024 * 1024 * 1024,
+      };
+    }
+    const actual = [...this.nativeRemotes.keys()].find(
+      (k) => k.toLowerCase() === trimmed.toLowerCase(),
+    );
+    if (!actual) return `存储 "${trimmed}" 不存在`;
+    return {
+      supported: true,
+      total: 1024 * 1024 * 1024 * 1024,
+      used: 256 * 1024 * 1024 * 1024,
+      free: 768 * 1024 * 1024 * 1024,
+    };
+  }
+
+  browseNativeStorage(path: string): NativeBrowseResult | string {
+    const trimmed = (path || "/").trim() || "/";
+    if (trimmed === "/") {
+      const entries = [
+        {
+          name: "本地",
+          path: "/本地",
+          isDir: true,
+          size: 0,
+          modTime: now(),
+        },
+        ...[...this.nativeRemotes.keys()]
+          .sort((a, b) => a.localeCompare(b))
+          .map((name) => ({
+            name,
+            path: `/${name}`,
+            isDir: true,
+            size: 0,
+            modTime: now(),
+          })),
+      ];
+      return { path: "/", entries };
+    }
+    const clean = trimmed.replace(/\/+$/, "");
+    return {
+      path: clean,
+      entries: [
+        {
+          name: "2026",
+          path: `${clean}/2026`,
+          isDir: true,
+          size: 0,
+          modTime: now() - 3600,
+        },
+        {
+          name: "backup-report.txt",
+          path: `${clean}/backup-report.txt`,
+          isDir: false,
+          size: 4096,
+          modTime: now() - 1800,
+        },
+      ],
+    };
+  }
+
+  restoreNativeFile(input: {
+    srcPath: string;
+    dstLocalDir: string;
+  }): string | null {
+    if (!input.srcPath?.trim() || !input.dstLocalDir?.trim()) {
+      return "请提供要恢复的远端路径和本地目标目录";
+    }
+    return null;
+  }
+
+  startJobCheck(jobId: number, download: boolean): JobCheckResult | null {
+    const job = this.jobs.find((j) => j.id === jobId);
+    if (!job) return null;
+    const result: JobCheckResult = {
+      jobId,
+      status: "completed",
+      download,
+      startedAt: now() - 1,
+      finishedAt: now(),
+      checkedFiles: 24,
+      totalFiles: 24,
+      matchedCount: 24,
+      differCount: 0,
+      missingOnSrcCount: 0,
+      missingOnDstCount: 0,
+      errorCount: 0,
+      differ: [],
+      missingOnSrc: [],
+      missingOnDst: [],
+      errors: [],
+      truncated: false,
+    };
+    this.jobChecks.set(jobId, result);
+    return result;
+  }
+
+  getJobCheck(jobId: number): JobCheckResult | null {
+    return this.jobChecks.get(jobId) ?? null;
+  }
+
+  cancelJobCheck(jobId: number): void {
+    const existing = this.jobChecks.get(jobId);
+    if (existing) {
+      this.jobChecks.set(jobId, { ...existing, status: "cancelled" });
+    }
   }
 
   listJobs(pageNum = 1, pageSize = 500): PageData<JobItem> {

@@ -52,7 +52,7 @@ func TestValidateJobFieldsRejectsNonIntegerNumbers(t *testing.T) {
 		{"interval": -1},
 		{"method": "abc"},
 		{"method": 1.9},
-		{"method": 3},
+		{"method": 4},
 	} {
 		if err := validateJobFields(req); err == nil {
 			t.Errorf("validateJobFields(%v) = nil, want rejection", req)
@@ -60,6 +60,7 @@ func TestValidateJobFieldsRejectsNonIntegerNumbers(t *testing.T) {
 	}
 	for _, req := range []map[string]interface{}{
 		{"interval": float64(1440), "method": float64(2)},
+		{"interval": float64(60), "method": float64(3)},
 		{"interval": "60", "method": "0"},
 		{"interval": nil, "method": ""},
 	} {

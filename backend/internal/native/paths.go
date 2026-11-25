@@ -197,16 +197,24 @@ func virtualLocal(p string) (string, error) {
 
 // The identity embedded in a stored path detects a disappeared or replaced mount.
 func resolveLocal(sub string) (string, error) {
+	return resolveLocalEntry(sub, false)
+}
+
+func resolveLocalEntry(sub string, allowFile bool) (string, error) {
 	id, rel, _ := strings.Cut(sub, "/")
 	for _, r := range authorizedRoots() {
 		if r.ID != id && r.LegacyID != id {
 			continue
 		}
 		p := r.Path
+		var segs []string
 		for _, name := range strings.Split(rel, "/") {
-			if name == "" {
-				continue
+			if name != "" {
+				segs = append(segs, name)
 			}
+		}
+		for i, name := range segs {
+			isLast := i == len(segs)-1
 			p = filepath.Join(p, name)
 			st, e := os.Lstat(p)
 			if os.IsNotExist(e) {
@@ -215,7 +223,10 @@ func resolveLocal(sub string) (string, error) {
 			if e == nil && uint64(st.Sys().(*syscall.Stat_t).Dev) != r.Device {
 				return "", errors.New("此路径跨越其他挂载卷，请在飞牛中直接授权该卷上的目录")
 			}
-			if e != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+			if e != nil || st.Mode()&os.ModeSymlink != 0 {
+				return "", errors.New("本地路径含链接或不可访问的目录")
+			}
+			if !st.IsDir() && !(allowFile && isLast && st.Mode().IsRegular()) {
 				return "", errors.New("本地路径含链接或不可访问的目录")
 			}
 		}
@@ -225,22 +236,27 @@ func resolveLocal(sub string) (string, error) {
 }
 
 type Endpoint struct {
-	Path            string
-	Backend         string
-	Vendor          string
-	LocalPath       string
-	Identity        string
-	BackingIdentity string
-	CryptScope      string
-	Sub             string
-	IsCrypt         bool
+	Path             string
+	RemoteName       string
+	Backend          string
+	Vendor           string
+	LocalPath        string
+	Identity         string
+	BackingIdentity  string
+	UnionBackingIDs  []string
+	CryptScope       string
+	Sub              string
+	IsCrypt          bool
+	IsLocal          bool
+	ReadOnly         bool
+	AllowHashCheck   bool
 }
 
-func cryptChainFingerprint(c Config, start string) string {
+func wrapperChainFingerprint(c Config, start string) string {
 	h := sha256.New()
-	for ref := start; c[ref]["type"] == "crypt"; {
+	for ref := start; IsWrapperType(c[ref]["type"]); {
 		p := c[ref]
-		fmt.Fprintf(h, "crypt\x00")
+		fmt.Fprintf(h, "%s\x00", p["type"])
 		for _, k := range slices.Sorted(maps.Keys(p)) {
 			fmt.Fprintf(h, "%s=%s\x00", k, p[k])
 		}
@@ -249,67 +265,101 @@ func cryptChainFingerprint(c Config, start string) string {
 	return hex.EncodeToString(h.Sum(nil)[:12])
 }
 
-// Resolve maps only trusted names to rclone arguments. It never accepts an
-// inline connection string or lets a configured local remote expose the host root.
+func backendRequiresContainer(backend string) bool {
+	switch backend {
+	case "s3", "smb", "b2", "azureblob", "googlecloudstorage", "swift":
+		return true
+	default:
+		return false
+	}
+}
+
+// Resolve maps only trusted names to rclone arguments for directory endpoints.
+// It never accepts an inline connection string or lets a configured local remote expose the host root.
 func (c Config) Resolve(v string) (Endpoint, error) {
+	return c.resolveEndpoint(v, false)
+}
+
+// ResolveEntry resolves a virtual path that may refer to either a directory or a regular file.
+func (c Config) ResolveEntry(v string) (Endpoint, error) {
+	return c.resolveEndpoint(v, true)
+}
+
+func (c Config) resolveEndpoint(v string, allowFile bool) (Endpoint, error) {
 	v = strings.TrimSuffix(v, "/")
 	name, sub, _ := strings.Cut(strings.TrimPrefix(v, "/"), "/")
 	if !strings.HasPrefix(v, "/") || !cleanRelative(sub) {
 		return Endpoint{}, errors.New("无效的备份路径")
 	}
 	if name == Local || c[name]["type"] == "local" {
-		p, e := resolveLocal(sub)
+		p, e := resolveLocalEntry(sub, allowFile)
 		id := "/local" + p
-		return Endpoint{Path: p, Backend: "local", LocalPath: p, Identity: id, BackingIdentity: id, Sub: sub}, e
+		return Endpoint{
+			Path:            p,
+			RemoteName:      name,
+			Backend:         "local",
+			LocalPath:       p,
+			Identity:        id,
+			BackingIdentity: id,
+			Sub:             sub,
+			IsLocal:         true,
+		}, e
 	}
 	if c[name] == nil {
 		return Endpoint{}, errors.New("备份存储不存在")
 	}
-	isCrypt := c[name]["type"] == "crypt"
+
+	isCrypt := false
+	hasWrapper := false
 	ref := name
 	var backing string
 	rest := sub
-	for c[ref]["type"] == "crypt" {
+	for IsWrapperType(c[ref]["type"]) {
+		hasWrapper = true
+		if c[ref]["type"] == "crypt" {
+			isCrypt = true
+		}
 		var prefix string
 		ref, prefix, _ = strings.Cut(c[ref]["remote"], ":")
 		backing = prefix
 		rest = strings.TrimSuffix(strings.Trim(prefix+"/"+rest, "/"), "/")
 	}
+
 	options := c[ref]
-	result := Endpoint{
-		Path:    name + ":" + sub,
-		Backend: options["type"],
-		Vendor:  strings.ToLower(strings.TrimSpace(options["vendor"])),
-		Sub:     sub,
-		IsCrypt: isCrypt,
+	if ref != Local && options == nil {
+		return Endpoint{}, errors.New("备份存储底层配置不存在")
 	}
+	backend := "local"
+	vendor := ""
+	allowHashCheck := false
+	if options != nil {
+		backend = options["type"]
+		vendor = strings.ToLower(strings.TrimSpace(options["vendor"]))
+		allowHashCheck = options["allow_hashcheck"] == "true"
+	}
+
+	result := Endpoint{
+		Path:           name + ":" + sub,
+		RemoteName:     name,
+		Backend:        backend,
+		Vendor:         vendor,
+		Sub:            sub,
+		IsCrypt:        isCrypt,
+		ReadOnly:       backend == "http",
+		AllowHashCheck: allowHashCheck,
+	}
+
 	// Never include credentials or access keys in a path identity. Aliases of
 	// the same server protect the same backup tree even with different keys.
-	host := strings.ToLower(strings.Trim(options["host"], "[]"))
-	port := options["port"]
-	if port == "" && result.Backend == "sftp" {
-		port = "22"
-	}
-	if port == "" && result.Backend == "smb" {
-		port = "445"
-	}
-	location := host + ":" + port
-	switch result.Backend {
-	case "s3":
-		location = normalizeS3Location(options)
-	case "webdav":
-		location = strings.TrimRight(options["url"], "/")
-	case "sftp":
-		location = options["user"] + "@" + location
-	}
+	location := resolveBackendLocation(backend, ref, options)
 	backingScope := rest
 	if isCrypt {
 		backingScope = backing
 	}
-	result.BackingIdentity = path.Join("/", result.Backend, location, backingScope)
+	result.BackingIdentity = path.Join("/", backend, location, backingScope)
 	result.Identity = result.BackingIdentity
-	if ref == Local || c[ref]["type"] == "local" {
-		// Crypt encodes the child names. Its physical scope is the backing directory.
+
+	if ref == Local || (options != nil && options["type"] == "local") {
 		p, e := resolveLocal(backing)
 		if e != nil {
 			return Endpoint{}, e
@@ -318,16 +368,103 @@ func (c Config) Resolve(v string) (Endpoint, error) {
 		result.BackingIdentity = "/local" + p
 		result.Identity = result.BackingIdentity
 		result.Backend = "local"
+		if !hasWrapper {
+			result.IsLocal = true
+		}
 	}
+
+	if backend == "union" {
+		ups, err := ParseUnionUpstreams(options["upstreams"])
+		if err != nil {
+			return Endpoint{}, err
+		}
+		var backingIDs []string
+		for _, up := range ups {
+			uRef, uSub, _ := strings.Cut(up.Target, ":")
+			targetPath := "/" + uRef
+			combinedSub := strings.TrimSuffix(strings.Trim(uSub+"/"+rest, "/"), "/")
+			if combinedSub != "" {
+				targetPath += "/" + combinedSub
+			}
+			if ep, err := c.Resolve(targetPath); err == nil {
+				backingIDs = append(backingIDs, ep.BackingIdentity)
+			}
+		}
+		result.UnionBackingIDs = backingIDs
+	}
+
 	if isCrypt {
-		fp := cryptChainFingerprint(c, name)
+		fp := wrapperChainFingerprint(c, name)
 		result.CryptScope = path.Join(result.BackingIdentity, fp)
 		result.Identity = path.Join("/crypt", result.CryptScope, sub)
 	}
-	if (result.Backend == "s3" || result.Backend == "smb") && rest == "" {
-		return Endpoint{}, errors.New("请选择存储桶或共享目录")
+	if backendRequiresContainer(result.Backend) && rest == "" {
+		return Endpoint{}, errors.New("请选择存储桶、容器或共享目录")
 	}
 	return result, nil
+}
+
+func resolveBackendLocation(backend, remoteName string, options map[string]string) string {
+	if options == nil {
+		return strings.ToLower(remoteName)
+	}
+	host := strings.ToLower(strings.Trim(options["host"], "[]"))
+	port := options["port"]
+	switch backend {
+	case "s3":
+		return normalizeS3Location(options)
+	case "webdav", "http":
+		return strings.TrimRight(options["url"], "/")
+	case "sftp":
+		if port == "" {
+			port = "22"
+		}
+		return options["user"] + "@" + host + ":" + port
+	case "smb":
+		if port == "" {
+			port = "445"
+		}
+		return host + ":" + port
+	case "ftp":
+		if port == "" {
+			port = "21"
+		}
+		return options["user"] + "@" + host + ":" + port
+	case "b2":
+		return strings.ToLower(strings.TrimSpace(options["account"]))
+	case "azureblob":
+		if acct := strings.TrimSpace(options["account"]); acct != "" {
+			return strings.ToLower(acct)
+		}
+		return strings.ToLower(remoteName)
+	case "googlecloudstorage":
+		if p := strings.TrimSpace(options["project_number"]); p != "" {
+			return p
+		}
+		return strings.ToLower(remoteName)
+	case "onedrive":
+		if id := strings.TrimSpace(options["drive_id"]); id != "" {
+			return id
+		}
+		return strings.ToLower(remoteName)
+	case "drive":
+		if td := strings.TrimSpace(options["team_drive"]); td != "" {
+			return "team/" + td
+		}
+		if rf := strings.TrimSpace(options["root_folder_id"]); rf != "" {
+			return "root/" + rf
+		}
+		return strings.ToLower(remoteName)
+	case "mega":
+		return strings.ToLower(strings.TrimSpace(options["user"]))
+	case "pcloud":
+		if u := strings.TrimSpace(options["username"]); u != "" {
+			return strings.ToLower(u)
+		}
+		return strings.ToLower(remoteName)
+	default:
+		return strings.ToLower(remoteName)
+	}
 }
 
 func normalizeS3Location(options map[string]string) string {
@@ -361,11 +498,33 @@ func EndpointsConflict(a, b Endpoint) bool {
 	if a.CryptScope != "" && a.CryptScope == b.CryptScope {
 		return endpointPathContains(a.Sub, b.Sub) || endpointPathContains(b.Sub, a.Sub)
 	}
-	return endpointPathContains(a.BackingIdentity, b.BackingIdentity) ||
-		endpointPathContains(b.BackingIdentity, a.BackingIdentity)
+	if endpointPathContains(a.BackingIdentity, b.BackingIdentity) ||
+		endpointPathContains(b.BackingIdentity, a.BackingIdentity) {
+		return true
+	}
+	for _, ua := range a.UnionBackingIDs {
+		if endpointPathContains(ua, b.BackingIdentity) || endpointPathContains(b.BackingIdentity, ua) {
+			return true
+		}
+		for _, ub := range b.UnionBackingIDs {
+			if endpointPathContains(ua, ub) || endpointPathContains(ub, ua) {
+				return true
+			}
+		}
+	}
+	for _, ub := range b.UnionBackingIDs {
+		if endpointPathContains(ub, a.BackingIdentity) || endpointPathContains(a.BackingIdentity, ub) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c Config) List(ctx context.Context, v string) ([]map[string]string, error) {
+	return c.ListWithOptions(ctx, v, SessionOptions{})
+}
+
+func (c Config) ListWithOptions(ctx context.Context, v string, opts SessionOptions) ([]map[string]string, error) {
 	result := []map[string]string{}
 	push := func(label, child string) { result = append(result, map[string]string{"name": label, "path": child}) }
 	if v == "/" {
@@ -415,7 +574,7 @@ func (c Config) List(ctx context.Context, v string) ([]map[string]string, error)
 		if c[n] == nil || !cleanRelative(sub) {
 			return nil, errors.New("远端路径无效")
 		}
-		session, e := c.Session(n, false, false)
+		session, e := c.SessionFor([]SessionSpec{{Name: n, Mode: diskReadOnly}}, opts)
 		if e != nil {
 			return nil, e
 		}

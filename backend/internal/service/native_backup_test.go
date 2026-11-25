@@ -239,9 +239,16 @@ func TestNativeMultiPairContinuesAfterPartialFileFailure(t *testing.T) {
 	for _, r := range roots {
 		byBase[filepath.Base(r["name"])] = r["path"]
 	}
-	// Block dst1/<src1-derived-dir>/blocked with a regular file so pair 1 gets a file-level failure.
-	derived1 := path.Base(byBase["src1"])
-	derived2 := path.Base(byBase["src2"])
+	// Block dst1/src1/blocked with a regular file so pair 1 gets a file-level failure.
+	// Multi-source native backup strips the local rootID "~<12hex>" fingerprint
+	// from derived destination subdirectories when basenames are unambiguous.
+	rawRootID1 := path.Base(byBase["src1"])
+	rawRootID2 := path.Base(byBase["src2"])
+	if !strings.Contains(rawRootID1, "~") || !strings.Contains(rawRootID2, "~") {
+		t.Fatalf("expected fingerprinted local root IDs, got %q and %q", rawRootID1, rawRootID2)
+	}
+	derived1 := "src1"
+	derived2 := "src2"
 	if err := os.MkdirAll(filepath.Join(dst1, derived1), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +285,10 @@ func TestNativeMultiPairContinuesAfterPartialFileFailure(t *testing.T) {
 	}
 	data, err := os.ReadFile(filepath.Join(dst1, derived2, "ok.txt"))
 	if err != nil || string(data) != "successdata" {
-		t.Fatalf("pair 2 output missing: %q (%v)", string(data), err)
+		t.Fatalf("pair 2 output missing at clean dir %q: %q (%v)", derived2, string(data), err)
+	}
+	if _, err := os.Stat(filepath.Join(dst1, rawRootID2)); !os.IsNotExist(err) {
+		t.Fatalf("expected hashed dir %q not to be created, stat err=%v", rawRootID2, err)
 	}
 }
 

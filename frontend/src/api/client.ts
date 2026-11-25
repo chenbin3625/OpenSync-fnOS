@@ -9,9 +9,14 @@ import type {
   EngineHealth,
   FilterTestResult,
   FullSyncApproval,
+  JobCheckResult,
   JobItem,
+  NativeAboutInfo,
+  NativeBrowseResult,
+  NativeExportResult,
   NativeImportPreview,
   NativeImportResult,
+  NativeRenameResult,
   NativeStorageState,
   NativeStorageTestResult,
   NotifyItem,
@@ -288,6 +293,38 @@ export const api = {
       method: "POST",
       data,
     }),
+  renameNativeStorage: (data: { oldName: string; newName: string }) =>
+    request<NativeRenameResult>("/native/storage/rename", {
+      method: "POST",
+      data,
+    }),
+  exportNativeConfig: (data: { names?: string[]; password?: string }) =>
+    request<NativeExportResult>("/native/storage/export", {
+      method: "POST",
+      data,
+    }),
+  aboutNativeStorage: (name: string) =>
+    request<NativeAboutInfo>("/native/storage/about", {
+      method: "POST",
+      data: { name },
+    }),
+  browseNativeStorage: (path: string, signal?: AbortSignal) =>
+    request<NativeBrowseResult>("/native/storage/browse", {
+      method: "POST",
+      data: { path },
+      signal,
+    }),
+  restoreNativeFile: (data: {
+    srcPath: string;
+    dstLocalDir: string;
+    isDir: boolean;
+    overwrite: boolean;
+  }) =>
+    request("/native/storage/restore", {
+      method: "POST",
+      data,
+      timeoutMs: 30 * 60 * 1000,
+    }),
   previewNativeImport: (data: { config: string; configPassword?: string }) =>
     request<NativeImportPreview>("/native/storage/import/preview", {
       method: "POST",
@@ -419,6 +456,19 @@ export const api = {
     }),
   cancelDryRun: (id: number) =>
     request("/job/dry-run", { method: "DELETE", params: { id } }),
+  startJobCheck: (id: number, download = false) =>
+    request<JobCheckResult>("/job/check", {
+      method: "POST",
+      data: { id, download },
+    }),
+  getJobCheck: (id: number, signal?: AbortSignal) =>
+    request<JobCheckResult | null>("/job/check", {
+      params: { id },
+      signal,
+      cache: "no-store",
+    }),
+  cancelJobCheck: (id: number) =>
+    request("/job/check", { method: "DELETE", params: { id } }),
   testJobFilter: (data: Record<string, unknown>) =>
     request<FilterTestResult>("/job/filter/test", { method: "POST", data }),
   notifications: (signal?: AbortSignal) =>

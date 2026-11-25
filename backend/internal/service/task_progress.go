@@ -173,17 +173,25 @@ func (jt *JobTask) getCurrentPayload() jobCurrentPayload {
 		nativeSpeed = stats.Speed
 		remainSize = max(0, stats.TotalBytes-stats.Bytes)
 		doneSize = max(doneSize, stats.Bytes)
-		waitCount = max(0, int(stats.TotalTransfers-stats.Transfers))
+		if stats.TotalTransfers > 0 {
+			waitCount = max(0, int(stats.TotalTransfers-stats.Transfers))
+		}
+		runningRemain := int64(0)
 		if len(stats.Transferring) > 0 {
 			doing = make([]streamDoingItem, 0, len(stats.Transferring))
 			runningSize = 0
 			for _, item := range stats.Transferring {
 				rel := path.Clean(item.Name)
 				runningSize += item.Size
+				if rem := item.Size - item.Bytes; rem > 0 {
+					runningRemain += rem
+				}
+				srcBase := snap.src
+				dstBase := snap.dst
 				doing = append(doing, streamDoingItem{
 					FileName:   path.Base(rel),
-					SrcPath:    path.Join(snap.src, path.Dir(rel)),
-					DstPath:    path.Join(snap.dst, path.Dir(rel)),
+					SrcPath:    path.Join(srcBase, path.Dir(rel)),
+					DstPath:    path.Join(dstBase, path.Dir(rel)),
 					FileSize:   item.Size,
 					Type:       taskItemTypeCopy.Int(),
 					Status:     taskStatusRunning.Int(),
@@ -192,6 +200,9 @@ func (jt *JobTask) getCurrentPayload() jobCurrentPayload {
 				})
 			}
 			waitCount = max(0, waitCount-len(doing))
+		}
+		if stats.TotalBytes > 0 {
+			waitSize = max(0, remainSize-runningRemain)
 		}
 	}
 

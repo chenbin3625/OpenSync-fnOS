@@ -27,14 +27,16 @@ func GetSystemConfig(c *gin.Context) {
 // timeout and retention to "unlimited"/"off" and failed range checks for the
 // concurrency fields.
 type systemSettingsPatch struct {
-	TaskTimeout               *int `json:"taskTimeout"`
-	TaskSave                  *int `json:"taskSave"`
-	CopyConcurrency           *int `json:"copyConcurrency"`
-	ScanConcurrency           *int `json:"scanConcurrency"`
-	MaxRetries                *int `json:"maxRetries"`
-	ScheduledFullSyncConfirm  *int `json:"scheduledFullSyncConfirm"`
-	FullSyncApprovalTimeout   *int `json:"fullSyncApprovalTimeout"`
-	EngineHealthCheckInterval *int `json:"engineHealthCheckInterval"`
+	TaskTimeout               *int    `json:"taskTimeout"`
+	TaskSave                  *int    `json:"taskSave"`
+	CopyConcurrency           *int    `json:"copyConcurrency"`
+	ScanConcurrency           *int    `json:"scanConcurrency"`
+	MaxRetries                *int    `json:"maxRetries"`
+	ScheduledFullSyncConfirm  *int    `json:"scheduledFullSyncConfirm"`
+	FullSyncApprovalTimeout   *int    `json:"fullSyncApprovalTimeout"`
+	EngineHealthCheckInterval *int    `json:"engineHealthCheckInterval"`
+	DefaultBwLimit            *string `json:"defaultBwLimit"`
+	ProxyURL                  *string `json:"proxyUrl"`
 }
 
 // applyTo overlays the provided fields on the current settings.
@@ -56,6 +58,12 @@ func (p systemSettingsPatch) applyTo(current config.SystemSettings) config.Syste
 		if field.src != nil {
 			*field.dst = *field.src
 		}
+	}
+	if p.DefaultBwLimit != nil {
+		next.DefaultBwLimit = *p.DefaultBwLimit
+	}
+	if p.ProxyURL != nil {
+		next.ProxyURL = *p.ProxyURL
 	}
 	return next
 }

@@ -9,29 +9,90 @@ import (
 	"fmt"
 	"maps"
 	"net/url"
+	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 )
 
 const EngineURL = "rclone://native"
 const Local = "本地"
 
+// RedactedSecretPlaceholder is written when exporting a non-secret system backup.
+const RedactedSecretPlaceholder = "***REDACTED***"
+
 type Config map[string]map[string]string
 
 var namePattern = regexp.MustCompile("^[\\p{L}\\p{N}_][\\p{L}\\p{N}_. -]{0,63}$")
 var regexpKey = regexp.MustCompile("^[a-z][a-z0-9_]*$")
 
+var (
+	bwRatePartPattern      = regexp.MustCompile(`^(?i:off|0|[0-9]+(?:\.[0-9]+)?(?:[bkmgtp]i?b?)?)$`)
+	bwScheduleTokenPattern = regexp.MustCompile(`^(?:(?i:mon|tue|wed|thu|fri|sat|sun)-)?(?:[01]?[0-9]|2[0-3]):[0-5][0-9],(.+)$`)
+)
+
+// supportedRemoteOrder defines the canonical ordering of remote backend types
+// exposed to clients.
+var supportedRemoteOrder = []string{
+	"s3",
+	"webdav",
+	"sftp",
+	"smb",
+	"ftp",
+	"http",
+	"b2",
+	"onedrive",
+	"drive",
+	"dropbox",
+	"box",
+	"pcloud",
+	"mega",
+	"azureblob",
+	"googlecloudstorage",
+	"swift",
+	"crypt",
+	"chunker",
+	"compress",
+	"hasher",
+	"union",
+}
+
+// openSyncMetaFields are OpenSync-owned per-remote options stripped before
+// emitting standard rclone INI sections or exporting rclone.conf.
+var openSyncMetaFields = map[string]bool{
+	"insecure_skip_verify": true,
+	"proxy_url":            true,
+	"allow_hashcheck":      true,
+}
+
 var fields = map[string]string{
 	"local":  "description",
-	"s3":     "provider env_auth access_key_id secret_access_key session_token region endpoint location_constraint acl storage_class force_path_style no_check_bucket v2_auth list_version chunk_size upload_cutoff upload_concurrency disable_http2 server_side_encryption sse_kms_key_id directory_markers leave_parts_on_error description",
-	"webdav": "url vendor user pass bearer_token pacer_min_sleep nextcloud_chunk_size description",
-	"sftp":   "host user port pass key_pem key_file_pass shell_type disable_hashcheck known_hosts description",
-	"smb":    "host user port pass domain hide_special_share case_insensitive idle_timeout description",
-	"crypt":  "remote password password2 filename_encryption directory_name_encryption filename_encoding suffix no_data_encryption description",
+	"s3":     "provider env_auth access_key_id secret_access_key session_token region endpoint location_constraint acl storage_class force_path_style no_check_bucket v2_auth list_version chunk_size upload_cutoff upload_concurrency disable_http2 server_side_encryption sse_kms_key_id directory_markers leave_parts_on_error upload_checksum_algorithm no_head no_head_object insecure_skip_verify proxy_url description",
+	"webdav": "url vendor user pass bearer_token pacer_min_sleep nextcloud_chunk_size headers encoding insecure_skip_verify proxy_url description",
+	"sftp":   "host user port pass key_pem key_file_pass shell_type disable_hashcheck allow_hashcheck known_hosts idle_timeout concurrency chunk_size use_insecure_cipher set_modtime description",
+	"smb":    "host user port pass domain spn hide_special_share case_insensitive idle_timeout description",
+	"ftp":    "host user port pass tls explicit_tls disable_tls13 concurrency idle_timeout no_check_certificate shut_timeout writing_mdtm force_list_hidden insecure_skip_verify description",
+	"http":   "url headers no_head no_slash insecure_skip_verify proxy_url description",
+	"b2":     "account key endpoint hard_delete chunk_size upload_cutoff copy_cutoff download_url memory_pool_flush_time insecure_skip_verify proxy_url description",
+	"onedrive": "token drive_id drive_type client_id client_secret region auth_url token_url chunk_size expose_onenote_files server_side_across_configs insecure_skip_verify proxy_url description",
+	"drive":    "token client_id client_secret scope root_folder_id team_drive service_account_credentials shared_with_me trashed_only chunk_size upload_cutoff ack_abuse server_side_across_configs insecure_skip_verify proxy_url description",
+	"dropbox":  "token client_id client_secret chunk_size shared_files shared_folders impersonate insecure_skip_verify proxy_url description",
+	"box":      "token client_id client_secret root_folder_id box_sub_type owned_by insecure_skip_verify proxy_url description",
+	"pcloud":   "token client_id client_secret hostname username password root_folder_id insecure_skip_verify proxy_url description",
+	"mega":     "user pass debug hard_delete use_https insecure_skip_verify proxy_url description",
+	"azureblob": "account key sas_url endpoint tenant client_id client_secret access_tier archive_tier chunk_size upload_cutoff no_check_container insecure_skip_verify proxy_url description",
+	"googlecloudstorage": "project_number service_account_credentials token client_id client_secret location storage_class bucket_policy_only object_acl bucket_acl anonymous endpoint insecure_skip_verify proxy_url description",
+	"swift":    "user key auth domain tenant tenant_id tenant_domain region storage_url auth_token application_credential_id application_credential_name application_credential_secret auth_version chunk_size no_chunk insecure_skip_verify proxy_url description",
+	"crypt":    "remote password password2 filename_encryption directory_name_encryption filename_encoding suffix no_data_encryption description",
+	"chunker":  "remote chunk_size name_format start_from meta_format hash_type fail_hard transactions description",
+	"compress": "remote mode level ram_cache_limit description",
+	"hasher":   "remote hashes max_age auto_size description",
+	"union":    "upstreams action_policy create_policy search_policy cache_time min_free_space description",
 }
 
 // SecretFields lists parameter keys whose values must never be echoed back to
@@ -45,6 +106,13 @@ var SecretFields = []string{
 	"key_file_pass",
 	"password",
 	"password2",
+	"token",
+	"client_secret",
+	"key",
+	"service_account_credentials",
+	"sas_url",
+	"auth_token",
+	"application_credential_secret",
 }
 
 // ObscuredFields lists parameter keys stored using rclone's password obfuscation.
@@ -63,13 +131,34 @@ func IsObscuredField(key string) bool {
 	return slices.Contains(ObscuredFields, key)
 }
 
+func IsOpenSyncMetaField(key string) bool {
+	return openSyncMetaFields[key]
+}
+
 func IsSupportedType(typ string) bool {
 	_, ok := fields[typ]
 	return ok
 }
 
 func IsRemoteFormType(typ string) bool {
-	return typ == "s3" || typ == "webdav" || typ == "sftp" || typ == "smb" || typ == "crypt"
+	return typ != "" && typ != "local" && IsSupportedType(typ)
+}
+
+func SupportedRemoteTypes() []string {
+	return slices.Clone(supportedRemoteOrder)
+}
+
+func IsWrapperType(typ string) bool {
+	switch typ {
+	case "crypt", "chunker", "compress", "hasher":
+		return true
+	default:
+		return false
+	}
+}
+
+func IsCompositeType(typ string) bool {
+	return IsWrapperType(typ) || typ == "union"
 }
 
 func ValidName(s string) bool {
@@ -78,6 +167,158 @@ func ValidName(s string) bool {
 
 func validName(s string) bool {
 	return namePattern.MatchString(s) && strings.TrimSpace(s) == s && !strings.HasPrefix(strings.ToLower(s), "_opensync_") && !strings.EqualFold(s, Local) && !strings.EqualFold(s, "RCLONE_CONFIG")
+}
+
+// ValidateBwLimit validates an rclone --bwlimit value (empty, single rate, up:down, or timetable).
+func ValidateBwLimit(value string) error {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil
+	}
+	if len(trimmed) > 256 || strings.HasPrefix(trimmed, "-") || strings.IndexFunc(trimmed, unicode.IsControl) >= 0 {
+		return errors.New("限速格式无效，支持如 10M、500K、10M:2M 或分时段规则 08:00,5M 23:00,off")
+	}
+	tokens := strings.Fields(trimmed)
+	validRate := func(spec string) bool {
+		if spec == "" {
+			return false
+		}
+		if up, down, hasColon := strings.Cut(spec, ":"); hasColon {
+			if strings.Contains(down, ":") {
+				return false
+			}
+			return bwRatePartPattern.MatchString(up) && bwRatePartPattern.MatchString(down)
+		}
+		return bwRatePartPattern.MatchString(spec)
+	}
+	if len(tokens) == 1 && !strings.Contains(tokens[0], ",") {
+		if !validRate(tokens[0]) {
+			return errors.New("限速格式无效，支持如 10M、500K、10M:2M 或分时段规则 08:00,5M 23:00,off")
+		}
+		return nil
+	}
+	for _, tok := range tokens {
+		m := bwScheduleTokenPattern.FindStringSubmatch(tok)
+		if m == nil || !validRate(m[1]) {
+			return errors.New("限速格式无效，支持如 10M、500K、10M:2M 或分时段规则 08:00,5M 23:00,off")
+		}
+	}
+	return nil
+}
+
+// ValidateProxyURL validates an optional outbound HTTP/HTTPS/SOCKS5 proxy URL.
+func ValidateProxyURL(value string) error {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil
+	}
+	if len(trimmed) > 512 || strings.IndexFunc(trimmed, unicode.IsSpace) >= 0 || strings.IndexFunc(trimmed, unicode.IsControl) >= 0 {
+		return errors.New("代理地址无效，仅支持 http://、https://、socks5:// 或 socks5h:// URL")
+	}
+	u, err := url.Parse(trimmed)
+	if err != nil || u.Hostname() == "" {
+		return errors.New("代理地址无效，仅支持 http://、https://、socks5:// 或 socks5h:// URL")
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https", "socks5", "socks5h":
+	default:
+		return errors.New("代理地址无效，仅支持 http://、https://、socks5:// 或 socks5h:// URL")
+	}
+	if port := u.Port(); port != "" {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return errors.New("代理地址端口无效（应为 1–65535）")
+		}
+	}
+	return nil
+}
+
+// ValidateModifyWindow validates an optional rclone --modify-window Go duration.
+func ValidateModifyWindow(value string) error {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil
+	}
+	if len(trimmed) > 32 || strings.HasPrefix(trimmed, "-") || strings.IndexFunc(trimmed, unicode.IsControl) >= 0 {
+		return errors.New("时间精度容差格式无效，请使用如 1s、2s、100ms、1m（最大 24h）")
+	}
+	d, err := time.ParseDuration(trimmed)
+	if err != nil || d <= 0 || d > 24*time.Hour {
+		return errors.New("时间精度容差格式无效，请使用如 1s、2s、100ms、1m（最大 24h）")
+	}
+	return nil
+}
+
+// UnionUpstream represents one entry in an rclone union backend's upstreams field.
+type UnionUpstream struct {
+	Target string // e.g. "remote:sub" or "/abs/local/path"
+	Suffix string // "", ":ro", or ":nc"
+}
+
+// ParseUnionUpstreams parses rclone's whitespace-separated (optionally quoted)
+// upstreams specification.
+func ParseUnionUpstreams(raw string) ([]UnionUpstream, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, errors.New("缺少上游存储列表 upstreams")
+	}
+	var tokens []string
+	var cur strings.Builder
+	inQuote := false
+	for i := 0; i < len(raw); i++ {
+		ch := raw[i]
+		switch {
+		case ch == '"':
+			inQuote = !inQuote
+		case !inQuote && (ch == ' ' || ch == '\t'):
+			if cur.Len() > 0 {
+				tokens = append(tokens, cur.String())
+				cur.Reset()
+			}
+		default:
+			cur.WriteByte(ch)
+		}
+	}
+	if inQuote {
+		return nil, errors.New("upstreams 引号未闭合")
+	}
+	if cur.Len() > 0 {
+		tokens = append(tokens, cur.String())
+	}
+	if len(tokens) == 0 {
+		return nil, errors.New("缺少上游存储列表 upstreams")
+	}
+	out := make([]UnionUpstream, 0, len(tokens))
+	for _, tok := range tokens {
+		suffix := ""
+		target := tok
+		if strings.HasSuffix(target, ":ro") {
+			suffix = ":ro"
+			target = strings.TrimSuffix(target, ":ro")
+		} else if strings.HasSuffix(target, ":nc") {
+			suffix = ":nc"
+			target = strings.TrimSuffix(target, ":nc")
+		}
+		target = normalizeCryptRemote(target)
+		if target == "" {
+			return nil, errors.New("upstreams 包含空的上游条目")
+		}
+		out = append(out, UnionUpstream{Target: target, Suffix: suffix})
+	}
+	return out, nil
+}
+
+// FormatUnionUpstreams formats union upstreams back into rclone's upstreams string.
+func FormatUnionUpstreams(items []UnionUpstream) string {
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		token := item.Target + item.Suffix
+		if strings.ContainsAny(token, " \t") {
+			token = `"` + token + `"`
+		}
+		parts = append(parts, token)
+	}
+	return strings.Join(parts, " ")
 }
 
 // FindKey performs a case-insensitive lookup matching Validate's uniqueness rule.
@@ -177,6 +418,23 @@ func NormalizeParams(raw map[string]string) map[string]string {
 			}
 			continue
 		}
+		if key == "service_account_credentials" || key == "token" {
+			v = strings.TrimSpace(v)
+			if v == "" {
+				continue
+			}
+			// Compact multiline JSON so INI line-based formatting stays valid.
+			if strings.ContainsAny(v, "\r\n") {
+				var obj any
+				if json.Unmarshal([]byte(v), &obj) == nil {
+					if compact, err := json.Marshal(obj); err == nil {
+						v = string(compact)
+					}
+				}
+			}
+			out[key] = v
+			continue
+		}
 		v = strings.TrimSpace(v)
 		if v == "" {
 			continue
@@ -184,7 +442,7 @@ func NormalizeParams(raw map[string]string) map[string]string {
 		if typ == "s3" && key == "endpoint" {
 			v = strings.TrimRight(v, "/")
 		}
-		if typ == "crypt" && key == "remote" {
+		if IsWrapperType(typ) && key == "remote" {
 			v = normalizeCryptRemote(v)
 		}
 		if v != "" {
@@ -256,14 +514,14 @@ func RemoteSummary(p map[string]string) string {
 			parts = append(parts, v)
 		}
 		return strings.Join(parts, " · ")
-	case "webdav":
+	case "webdav", "http":
 		urlStr := strings.TrimSpace(p["url"])
 		user := strings.TrimSpace(p["user"])
 		if user != "" && urlStr != "" {
 			return urlStr + " · " + user
 		}
 		return urlStr
-	case "sftp", "smb":
+	case "sftp", "smb", "ftp":
 		host := strings.TrimSpace(p["host"])
 		port := strings.TrimSpace(p["port"])
 		user := strings.TrimSpace(p["user"])
@@ -279,9 +537,87 @@ func RemoteSummary(p map[string]string) string {
 			return user + "@" + addr
 		}
 		return addr
-	case "crypt":
+	case "b2":
+		if acct := strings.TrimSpace(p["account"]); acct != "" {
+			return "B2 · " + acct
+		}
+		return "Backblaze B2"
+	case "onedrive":
+		var parts []string
+		if v := strings.TrimSpace(p["drive_type"]); v != "" {
+			parts = append(parts, v)
+		}
+		if v := strings.TrimSpace(p["region"]); v != "" {
+			parts = append(parts, v)
+		}
+		if len(parts) > 0 {
+			return "OneDrive · " + strings.Join(parts, " · ")
+		}
+		return "OneDrive"
+	case "drive":
+		if td := strings.TrimSpace(p["team_drive"]); td != "" {
+			return "Google Drive · Team Drive"
+		}
+		if root := strings.TrimSpace(p["root_folder_id"]); root != "" {
+			return "Google Drive · " + root
+		}
+		return "Google Drive"
+	case "dropbox":
+		return "Dropbox"
+	case "box":
+		if v := strings.TrimSpace(p["box_sub_type"]); v != "" {
+			return "Box · " + v
+		}
+		return "Box"
+	case "pcloud":
+		if h := strings.TrimSpace(p["hostname"]); h != "" {
+			return "pCloud · " + h
+		}
+		if u := strings.TrimSpace(p["username"]); u != "" {
+			return "pCloud · " + u
+		}
+		return "pCloud"
+	case "mega":
+		if u := strings.TrimSpace(p["user"]); u != "" {
+			return "MEGA · " + u
+		}
+		return "MEGA"
+	case "azureblob":
+		if acct := strings.TrimSpace(p["account"]); acct != "" {
+			return "Azure Blob · " + acct
+		}
+		if ep := strings.TrimSpace(p["endpoint"]); ep != "" {
+			return "Azure Blob · " + ep
+		}
+		return "Azure Blob"
+	case "googlecloudstorage":
+		var parts []string
+		if v := strings.TrimSpace(p["project_number"]); v != "" {
+			parts = append(parts, v)
+		}
+		if v := strings.TrimSpace(p["location"]); v != "" {
+			parts = append(parts, v)
+		}
+		if len(parts) > 0 {
+			return "GCS · " + strings.Join(parts, " · ")
+		}
+		return "Google Cloud Storage"
+	case "swift":
+		if v := strings.TrimSpace(p["auth"]); v != "" {
+			return "Swift · " + v
+		}
+		if v := strings.TrimSpace(p["storage_url"]); v != "" {
+			return "Swift · " + v
+		}
+		return "OpenStack Swift"
+	case "crypt", "chunker", "compress", "hasher":
 		if r := strings.TrimSpace(p["remote"]); r != "" {
 			return "底层 " + r
+		}
+		return ""
+	case "union":
+		if u := strings.TrimSpace(p["upstreams"]); u != "" {
+			return "合并 " + u
 		}
 		return ""
 	default:
@@ -333,6 +669,56 @@ func Decode(stored string) (Config, error) {
 	return c, c.Validate()
 }
 
+// RedactConfigForBackup returns a copy of stored native engine JSON where all
+// secret parameter values are replaced by RedactedSecretPlaceholder while
+// preserving non-secret remote definitions. An empty pure-local "{}" config
+// stays "{}" unchanged so pure-local backups round-trip without secrets.
+func RedactConfigForBackup(stored string) (string, bool, error) {
+	var c Config
+	if err := json.Unmarshal([]byte(stored), &c); err != nil || c == nil {
+		return "", false, errors.New("原生引擎配置不可读")
+	}
+	if len(c) == 0 {
+		return "{}", false, nil
+	}
+	out := make(Config, len(c))
+	redactedAny := false
+	for name, params := range c {
+		cp := make(map[string]string, len(params))
+		for k, v := range params {
+			if v != "" && IsSecretField(k) {
+				cp[k] = RedactedSecretPlaceholder
+				redactedAny = true
+			} else {
+				cp[k] = v
+			}
+		}
+		out[name] = cp
+	}
+	raw, err := json.Marshal(out)
+	if err != nil {
+		return "", false, err
+	}
+	return string(raw), redactedAny, nil
+}
+
+// ConfigContainsRedactedSecrets reports whether a raw native config JSON
+// contains any redacted secret placeholders from a non-secret backup export.
+func ConfigContainsRedactedSecrets(stored string) bool {
+	var c Config
+	if json.Unmarshal([]byte(stored), &c) != nil {
+		return false
+	}
+	for _, params := range c {
+		for k, v := range params {
+			if IsSecretField(k) && v == RedactedSecretPlaceholder {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Merge validates the whole dependency graph before any configuration is committed.
 func (c Config) Merge(in Config) (Config, error) {
 	merged := Config{}
@@ -348,6 +734,185 @@ func (c Config) Merge(in Config) (Config, error) {
 	return merged, merged.Validate()
 }
 
+// Rename returns a new Config with oldName renamed to newName and updates every
+// wrapper/union reference pointing to oldName.
+func (c Config) Rename(oldName, newName string) (Config, error) {
+	actualOld, ok := c.FindKey(oldName)
+	if !ok {
+		return nil, fmt.Errorf("存储 %q 不存在", oldName)
+	}
+	newName = strings.TrimSpace(newName)
+	if !validName(newName) {
+		return nil, fmt.Errorf("存储名称 %q 无效（1–64 个字符，不能使用保留名或首尾空格）", newName)
+	}
+	if strings.EqualFold(actualOld, newName) && actualOld == newName {
+		return nil, errors.New("新名称与原名称相同")
+	}
+	if existing, exists := c.FindKey(newName); exists && !strings.EqualFold(existing, actualOld) {
+		return nil, fmt.Errorf("存储 %q 已存在，请使用其他名称", existing)
+	}
+
+	next := make(Config, len(c))
+	for name, params := range c {
+		cp := maps.Clone(params)
+		key := name
+		if name == actualOld {
+			key = newName
+		}
+		if IsWrapperType(cp["type"]) {
+			if ref, sub, cutOK := strings.Cut(cp["remote"], ":"); cutOK && strings.EqualFold(ref, actualOld) {
+				cp["remote"] = newName + ":" + sub
+			}
+		}
+		if cp["type"] == "union" && cp["upstreams"] != "" {
+			if ups, err := ParseUnionUpstreams(cp["upstreams"]); err == nil {
+				changed := false
+				for i := range ups {
+					if ref, sub, cutOK := strings.Cut(ups[i].Target, ":"); cutOK && strings.EqualFold(ref, actualOld) {
+						ups[i].Target = newName + ":" + sub
+						changed = true
+					}
+				}
+				if changed {
+					cp["upstreams"] = FormatUnionUpstreams(ups)
+				}
+			}
+		}
+		next[key] = cp
+	}
+	if err := next.Validate(); err != nil {
+		return nil, err
+	}
+	return next, nil
+}
+
+// ExportINI formats selected (or all) remotes into standard rclone.conf INI.
+// When encryptPassword is non-empty, rclone encrypts the output using that password.
+func (c Config) ExportINI(ctx context.Context, names []string, encryptPassword string) (string, error) {
+	if len(c) == 0 {
+		return "", errors.New("当前没有可导出的远端存储配置")
+	}
+	selected := map[string]bool{}
+	if len(names) == 0 {
+		for k := range c {
+			selected[k] = true
+		}
+	} else {
+		var queue []string
+		for _, raw := range names {
+			raw = strings.TrimSpace(raw)
+			if raw == "" {
+				continue
+			}
+			key, ok := c.FindKey(raw)
+			if !ok {
+				return "", fmt.Errorf("存储 %q 不存在", raw)
+			}
+			if !selected[key] {
+				selected[key] = true
+				queue = append(queue, key)
+			}
+		}
+		// Automatically pull transitive wrapper/union remote dependencies so the
+		// exported rclone.conf is self-contained.
+		for len(queue) > 0 {
+			cur := queue[0]
+			queue = queue[1:]
+			for _, dep := range c.remoteDependencies(cur) {
+				if dep != Local && c[dep] != nil && !selected[dep] {
+					selected[dep] = true
+					queue = append(queue, dep)
+				}
+			}
+		}
+	}
+	if len(selected) == 0 {
+		return "", errors.New("请至少选择一个要导出的存储配置")
+	}
+
+	var b strings.Builder
+	for _, name := range slices.Sorted(maps.Keys(selected)) {
+		p := c[name]
+		fmt.Fprintf(&b, "[%s]\n", name)
+		fmt.Fprintf(&b, "type = %s\n", p["type"])
+		for _, k := range slices.Sorted(maps.Keys(p)) {
+			if k == "type" || IsOpenSyncMetaField(k) {
+				continue
+			}
+			v := p[k]
+			if v == "" {
+				continue
+			}
+			// INI format is single-line; known_hosts is multiline and cannot be
+			// represented cleanly in standard rclone.conf without known_hosts_file.
+			if k == "known_hosts" {
+				continue
+			}
+			fmt.Fprintf(&b, "%s = %s\n", k, v)
+		}
+		b.WriteByte('\n')
+	}
+	plainINI := b.String()
+	if encryptPassword == "" {
+		return plainINI, nil
+	}
+	if len(encryptPassword) > 1024 || strings.IndexFunc(encryptPassword, unicode.IsControl) >= 0 {
+		return "", errors.New("导出加密密码格式无效")
+	}
+
+	dir, err := os.MkdirTemp(nativeTempDir(), "opensync-export-")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(dir)
+	confPath := filepath.Join(dir, "rclone.conf")
+	if err := os.WriteFile(confPath, []byte(plainINI), 0600); err != nil {
+		return "", err
+	}
+	// Pass the encryption password exclusively via environment variable so it
+	// never appears on process argv or disk.
+	cmd, err := command(ctx, "config", "encryption", "set", "--config", confPath, "--password-command", "printenv OPENSYNC_EXPORT_PASS")
+	if err != nil {
+		return "", err
+	}
+	cmd.Env = append(cmd.Env, "OPENSYNC_EXPORT_PASS="+encryptPassword)
+	if _, _, err := limitedOutputWithStderr(cmd, 64<<10); err != nil {
+		return "", errors.New("加密导出 rclone.conf 失败")
+	}
+	encrypted, err := os.ReadFile(confPath)
+	if err != nil {
+		return "", err
+	}
+	return string(encrypted), nil
+}
+
+func (c Config) remoteDependencies(name string) []string {
+	p := c[name]
+	if p == nil {
+		return nil
+	}
+	switch p["type"] {
+	case "crypt", "chunker", "compress", "hasher":
+		ref, _, ok := strings.Cut(p["remote"], ":")
+		if ok && ref != "" {
+			return []string{ref}
+		}
+	case "union":
+		ups, err := ParseUnionUpstreams(p["upstreams"])
+		if err != nil {
+			return nil
+		}
+		var deps []string
+		for _, up := range ups {
+			if ref, _, ok := strings.Cut(up.Target, ":"); ok && ref != "" {
+				deps = append(deps, ref)
+			}
+		}
+		return deps
+	}
+	return nil
+}
+
 func cleanRelative(s string) bool {
 	return !strings.ContainsAny(s, "\\\r\n\x00") && !strings.HasPrefix(s, "/") && (s == "" || path.Clean(s) == s && s != "." && s != ".." && !strings.HasPrefix(s, "../"))
 }
@@ -358,6 +923,10 @@ func disallowedFieldError(name, typ, field string) error {
 		return fmt.Errorf("存储 %q 出于安全限制不支持文件路径 known_hosts_file，请改用内嵌公钥 known_hosts", name)
 	case typ == "sftp" && field == "key_file":
 		return fmt.Errorf("存储 %q 出于安全限制不支持本地私钥路径 key_file，请改用内嵌私钥 key_pem", name)
+	case (typ == "drive" || typ == "googlecloudstorage") && field == "service_account_file":
+		return fmt.Errorf("存储 %q 出于安全限制不支持本地凭据文件路径 service_account_file，请改用内嵌 JSON 字段 service_account_credentials", name)
+	case typ == "azureblob" && field == "service_principal_file":
+		return fmt.Errorf("存储 %q 出于安全限制不支持本地文件路径 service_principal_file，请改用内嵌 tenant/client_id/client_secret 或 sas_url", name)
 	case strings.HasSuffix(field, "_command") || field == "ssh" || field == "credential_process":
 		return fmt.Errorf("存储 %q 的字段 %q 受安全限制不支持", name, field)
 	default:
@@ -373,6 +942,50 @@ func validateObscuredFields(name string, p map[string]string) error {
 				return fmt.Errorf("%s 的 %s 需要 rclone 配置中的混淆值", name, k)
 			}
 		}
+	}
+	return nil
+}
+
+func validateOAuthTokenJSON(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(raw), &obj); err != nil || len(obj) == 0 {
+		return false
+	}
+	for _, k := range []string{"access_token", "refresh_token"} {
+		if s, ok := obj[k].(string); ok && strings.TrimSpace(s) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func validateInlineJSONObject(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false
+	}
+	var obj map[string]any
+	return json.Unmarshal([]byte(raw), &obj) == nil && len(obj) > 0
+}
+
+func validateBoolField(name, key, val string) error {
+	if val != "" && val != "true" && val != "false" {
+		return fmt.Errorf("%s 的 %s 必须为 true 或 false", name, key)
+	}
+	return nil
+}
+
+func validatePortField(name, val string) error {
+	if val == "" {
+		return nil
+	}
+	n, err := strconv.Atoi(val)
+	if err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("%s 的端口无效（应为 1–65535）", name)
 	}
 	return nil
 }
@@ -405,6 +1018,18 @@ func ValidateEntry(name string, p map[string]string, plainSecrets bool) error {
 			return fmt.Errorf("存储 %q 的字段 %q 格式无效", name, k)
 		}
 	}
+	if err := validateBoolField(name, "insecure_skip_verify", p["insecure_skip_verify"]); err != nil {
+		return err
+	}
+	if err := validateBoolField(name, "allow_hashcheck", p["allow_hashcheck"]); err != nil {
+		return err
+	}
+	if p["proxy_url"] != "" {
+		if err := ValidateProxyURL(p["proxy_url"]); err != nil {
+			return fmt.Errorf("%s：%s", name, err.Error())
+		}
+	}
+
 	switch typ {
 	case "s3":
 		if p["access_key_id"] == "" || p["secret_access_key"] == "" || (p["env_auth"] != "" && p["env_auth"] != "false") {
@@ -413,25 +1038,30 @@ func ValidateEntry(name string, p map[string]string, plainSecrets bool) error {
 		if p["endpoint"] != "" && !validS3Endpoint(p["endpoint"]) {
 			return fmt.Errorf("%s 的 S3 端点无效（请填写如 oss-cn-hangzhou.aliyuncs.com 或 https://...）", name)
 		}
-		if v := p["force_path_style"]; v != "" && v != "true" && v != "false" {
-			return fmt.Errorf("%s 的 force_path_style 必须为 true 或 false", name)
-		}
-		if v := p["no_check_bucket"]; v != "" && v != "true" && v != "false" {
-			return fmt.Errorf("%s 的 no_check_bucket 必须为 true 或 false", name)
+		for _, bk := range []string{"force_path_style", "no_check_bucket", "v2_auth", "disable_http2", "directory_markers", "leave_parts_on_error", "no_head", "no_head_object"} {
+			if err := validateBoolField(name, bk, p[bk]); err != nil {
+				return err
+			}
 		}
 	case "webdav":
 		if !validURL(p["url"]) {
 			return fmt.Errorf("%s 的 WebDAV 地址无效（请填写有效的 HTTP/HTTPS 地址）", name)
 		}
-	case "sftp", "smb":
+	case "http":
+		if !validURL(p["url"]) {
+			return fmt.Errorf("%s 的 HTTP 地址无效（请填写有效的 HTTP/HTTPS 地址）", name)
+		}
+		for _, bk := range []string{"no_head", "no_slash"} {
+			if err := validateBoolField(name, bk, p[bk]); err != nil {
+				return err
+			}
+		}
+	case "sftp", "smb", "ftp":
 		if p["host"] == "" || strings.ContainsAny(p["host"], "/\\@ \t") || p["user"] == "" {
 			return fmt.Errorf("%s 需要填写有效的主机地址和用户名", name)
 		}
-		if v := p["port"]; v != "" {
-			n, e := strconv.Atoi(v)
-			if e != nil || n < 1 || n > 65535 {
-				return fmt.Errorf("%s 的端口无效（应为 1–65535）", name)
-			}
+		if err := validatePortField(name, p["port"]); err != nil {
+			return err
 		}
 		if typ == "sftp" {
 			if p["known_hosts"] != "" {
@@ -444,9 +1074,91 @@ func ValidateEntry(name string, p map[string]string, plainSecrets bool) error {
 			if p["pass"] == "" && p["key_pem"] == "" {
 				return fmt.Errorf("%s 需要填写密码或内嵌 SSH 私钥", name)
 			}
-			if p["shell_type"] != "" && p["shell_type"] != "none" {
+			if p["shell_type"] != "" && p["shell_type"] != "none" && !(p["shell_type"] == "unix" && p["allow_hashcheck"] == "true") {
 				return fmt.Errorf("%s 仅支持 SFTP 文件协议", name)
 			}
+		}
+		if typ == "ftp" {
+			for _, bk := range []string{"tls", "explicit_tls", "disable_tls13", "no_check_certificate", "writing_mdtm", "force_list_hidden"} {
+				if err := validateBoolField(name, bk, p[bk]); err != nil {
+					return err
+				}
+			}
+		}
+	case "b2":
+		if p["account"] == "" || p["key"] == "" {
+			return fmt.Errorf("%s 需要填写 B2 Account ID（account）和 Application Key（key）", name)
+		}
+		if p["endpoint"] != "" && !validS3Endpoint(p["endpoint"]) {
+			return fmt.Errorf("%s 的 B2 端点无效", name)
+		}
+	case "onedrive":
+		if !validateOAuthTokenJSON(p["token"]) {
+			return fmt.Errorf("%s 需要填写有效的 OAuth token（JSON 中需包含 access_token 或 refresh_token）", name)
+		}
+	case "drive":
+		hasToken := p["token"] != ""
+		hasSA := p["service_account_credentials"] != ""
+		if !hasToken && !hasSA {
+			return fmt.Errorf("%s 需要填写有效的 OAuth token 或内嵌 service_account_credentials JSON", name)
+		}
+		if hasToken && !validateOAuthTokenJSON(p["token"]) {
+			return fmt.Errorf("%s 的 OAuth token 格式无效", name)
+		}
+		if hasSA && !validateInlineJSONObject(p["service_account_credentials"]) {
+			return fmt.Errorf("%s 的 service_account_credentials 必须为有效 JSON", name)
+		}
+	case "dropbox", "box":
+		if !validateOAuthTokenJSON(p["token"]) {
+			return fmt.Errorf("%s 需要填写有效的 OAuth token（JSON 中需包含 access_token 或 refresh_token）", name)
+		}
+	case "pcloud":
+		hasToken := p["token"] != ""
+		hasUserPass := p["username"] != "" && p["password"] != ""
+		if !hasToken && !hasUserPass {
+			return fmt.Errorf("%s 需要填写有效的 OAuth token 或用户名+密码", name)
+		}
+		if hasToken && !validateOAuthTokenJSON(p["token"]) {
+			return fmt.Errorf("%s 的 OAuth token 格式无效", name)
+		}
+	case "mega":
+		if p["user"] == "" || p["pass"] == "" {
+			return fmt.Errorf("%s 需要填写 MEGA 账号（user）和密码（pass）", name)
+		}
+	case "azureblob":
+		hasSAS := p["sas_url"] != ""
+		hasKey := p["account"] != "" && p["key"] != ""
+		hasSP := p["account"] != "" && p["tenant"] != "" && p["client_id"] != "" && p["client_secret"] != ""
+		if !hasSAS && !hasKey && !hasSP {
+			return fmt.Errorf("%s 需要填写 SAS URL，或 Account + Key，或 Account + Service Principal 凭据", name)
+		}
+		if hasSAS && !validURLWithQuery(p["sas_url"]) {
+			return fmt.Errorf("%s 的 sas_url 不是有效的 HTTP/HTTPS 地址", name)
+		}
+	case "googlecloudstorage":
+		hasToken := p["token"] != ""
+		hasSA := p["service_account_credentials"] != ""
+		anon := p["anonymous"] == "true"
+		if !hasToken && !hasSA && !anon {
+			return fmt.Errorf("%s 需要填写 OAuth token、service_account_credentials JSON 或开启 anonymous", name)
+		}
+		if hasToken && !validateOAuthTokenJSON(p["token"]) {
+			return fmt.Errorf("%s 的 OAuth token 格式无效", name)
+		}
+		if hasSA && !validateInlineJSONObject(p["service_account_credentials"]) {
+			return fmt.Errorf("%s 的 service_account_credentials 必须为有效 JSON", name)
+		}
+	case "swift":
+		hasAuth := p["auth"] != "" && (p["key"] != "" || p["application_credential_secret"] != "")
+		hasTokenAuth := p["storage_url"] != "" && p["auth_token"] != ""
+		if !hasAuth && !hasTokenAuth {
+			return fmt.Errorf("%s 需要填写 auth 认证地址与密钥，或 storage_url + auth_token", name)
+		}
+		if p["auth"] != "" && !validURL(p["auth"]) {
+			return fmt.Errorf("%s 的 auth 地址无效", name)
+		}
+		if p["storage_url"] != "" && !validURL(p["storage_url"]) {
+			return fmt.Errorf("%s 的 storage_url 地址无效", name)
 		}
 	case "crypt":
 		if p["password"] == "" {
@@ -454,6 +1166,14 @@ func ValidateEntry(name string, p map[string]string, plainSecrets bool) error {
 		}
 		if strings.TrimSpace(p["remote"]) == "" {
 			return fmt.Errorf("%s 缺少底层路径", name)
+		}
+	case "chunker", "compress", "hasher":
+		if strings.TrimSpace(p["remote"]) == "" {
+			return fmt.Errorf("%s 缺少底层路径 remote", name)
+		}
+	case "union":
+		if _, err := ParseUnionUpstreams(p["upstreams"]); err != nil {
+			return fmt.Errorf("%s：%s", name, err.Error())
 		}
 	}
 	if !plainSecrets {
@@ -476,24 +1196,61 @@ func (c Config) Validate() error {
 		if err := ValidateEntry(name, p, false); err != nil {
 			return err
 		}
-		if p["type"] == "crypt" {
+		if IsWrapperType(p["type"]) {
 			ref, sub, ok := strings.Cut(p["remote"], ":")
 			if !ok || !cleanRelative(sub) || (ref != Local && c[ref] == nil) {
 				return fmt.Errorf("%s 的底层路径必须引用已配置的存储或本地授权目录", name)
 			}
 			if ref == Local && sub == "" {
-				return errors.New("Crypt 需要指定一个本地授权目录")
+				return fmt.Errorf("%s 需要指定一个本地授权目录", name)
+			}
+		}
+		if p["type"] == "union" {
+			ups, err := ParseUnionUpstreams(p["upstreams"])
+			if err != nil {
+				return fmt.Errorf("%s：%s", name, err.Error())
+			}
+			for _, up := range ups {
+				ref, sub, ok := strings.Cut(up.Target, ":")
+				if !ok || !cleanRelative(sub) || (ref != Local && c[ref] == nil) {
+					return fmt.Errorf("%s 的上游路径 %q 必须引用已配置的存储或本地授权目录", name, up.Target)
+				}
+				if ref == Local && sub == "" {
+					return fmt.Errorf("%s 的本地上游需要指定授权目录", name)
+				}
 			}
 		}
 	}
-	for name := range c {
-		seen := map[string]bool{}
-		for ref := name; c[ref]["type"] == "crypt"; {
-			if seen[ref] {
-				return fmt.Errorf("%s 存在 Crypt 循环引用", name)
+	// DFS cycle detection across all composite (wrapper + union) remotes.
+	const (
+		unvisited = 0
+		visiting  = 1
+		visited   = 2
+	)
+	state := make(map[string]int, len(c))
+	var visit func(name string) error
+	visit = func(name string) error {
+		switch state[name] {
+		case visiting:
+			return fmt.Errorf("%s 存在循环引用", name)
+		case visited:
+			return nil
+		}
+		state[name] = visiting
+		for _, dep := range c.remoteDependencies(name) {
+			if dep == Local || c[dep] == nil {
+				continue
 			}
-			seen[ref] = true
-			ref, _, _ = strings.Cut(c[ref]["remote"], ":")
+			if err := visit(dep); err != nil {
+				return err
+			}
+		}
+		state[name] = visited
+		return nil
+	}
+	for _, name := range slices.Sorted(maps.Keys(c)) {
+		if err := visit(name); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -502,6 +1259,23 @@ func (c Config) Validate() error {
 func validURL(s string) bool {
 	u, e := url.Parse(s)
 	if e != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return false
+	}
+	if strings.HasSuffix(u.Host, ":") {
+		return false
+	}
+	if port := u.Port(); port != "" {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return false
+		}
+	}
+	return true
+}
+
+func validURLWithQuery(s string) bool {
+	u, e := url.Parse(s)
+	if e != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
 		return false
 	}
 	if strings.HasSuffix(u.Host, ":") {
@@ -535,16 +1309,51 @@ func Prepare(ctx context.Context, existing, additions Config, plain bool) error 
 	return PrepareWithSkipObscure(ctx, existing, additions, plain, nil)
 }
 
+func rewriteCompositeTarget(target string, existing, additions Config) (string, error) {
+	target = normalizeCryptRemote(target)
+	if alias, sub, ok := strings.Cut(target, ":"); ok && strings.HasPrefix(sub, "/") {
+		isLocalAlias := false
+		if actual, found := additions.FindKey(alias); found && additions[actual]["type"] == "local" {
+			isLocalAlias = true
+		} else if existing != nil {
+			if actual, found := existing.FindKey(alias); found && existing[actual]["type"] == "local" {
+				isLocalAlias = true
+			}
+		}
+		if isLocalAlias {
+			target = sub
+		}
+	}
+	if strings.HasPrefix(target, "/") {
+		v, e := virtualLocal(target)
+		if e != nil {
+			return "", e
+		}
+		return Local + ":" + strings.TrimPrefix(v, "/"+Local+"/"), nil
+	}
+	if ref, sub, ok := strings.Cut(target, ":"); ok && ref != Local {
+		if actual, found := additions.FindKey(ref); found {
+			return actual + ":" + sub, nil
+		}
+		if existing != nil {
+			if actual, found := existing.FindKey(ref); found {
+				return actual + ":" + sub, nil
+			}
+		}
+	}
+	return target, nil
+}
+
 // PrepareWithSkipObscure normalizes incoming entries, validates their basic
 // shape before doing any network/rclone work, captures missing SFTP host keys,
-// obscures newly provided plaintext secrets, and translates local crypt paths
+// obscures newly provided plaintext secrets, and translates local composite paths
 // while consulting both additions and existing stored remotes.
 func PrepareWithSkipObscure(ctx context.Context, existing, additions Config, plain bool, skipObscure map[string]map[string]bool) error {
 	for name, raw := range additions {
 		p := NormalizeParams(raw)
-		if p["type"] == "sftp" && p["shell_type"] == "unix" {
+		if p["type"] == "sftp" && p["shell_type"] == "unix" && p["allow_hashcheck"] != "true" {
 			// rclone defaults SFTP remotes to shell_type=unix; normalize to none
-			// because OpenSync strictly uses pure SFTP file operations.
+			// unless the user explicitly opts into allow_hashcheck.
 			p["shell_type"] = "none"
 		}
 		additions[name] = p
@@ -586,42 +1395,26 @@ func PrepareWithSkipObscure(ctx context.Context, existing, additions Config, pla
 				p[key] = strings.TrimSpace(string(out))
 			}
 		}
-		if p["type"] == "crypt" {
-			target := normalizeCryptRemote(p["remote"])
-			if alias, sub, ok := strings.Cut(target, ":"); ok && strings.HasPrefix(sub, "/") {
-				isLocalAlias := false
-				if actual, found := additions.FindKey(alias); found && additions[actual]["type"] == "local" {
-					isLocalAlias = true
-				} else if existing != nil {
-					if actual, found := existing.FindKey(alias); found && existing[actual]["type"] == "local" {
-						isLocalAlias = true
-					}
-				}
-				if isLocalAlias {
-					target = sub
-				}
+		if IsWrapperType(p["type"]) {
+			rewritten, err := rewriteCompositeTarget(p["remote"], existing, additions)
+			if err != nil {
+				return err
 			}
-			if strings.HasPrefix(target, "/") {
-				v, e := virtualLocal(target)
-				if e != nil {
-					return e
-				}
-				p["remote"] = Local + ":" + strings.TrimPrefix(v, "/"+Local+"/")
-			} else if ref, sub, ok := strings.Cut(target, ":"); ok && ref != Local {
-				if actual, found := additions.FindKey(ref); found {
-					p["remote"] = actual + ":" + sub
-				} else if existing != nil {
-					if actual, found := existing.FindKey(ref); found {
-						p["remote"] = actual + ":" + sub
-					} else {
-						p["remote"] = target
-					}
-				} else {
-					p["remote"] = target
-				}
-			} else {
-				p["remote"] = target
+			p["remote"] = rewritten
+		}
+		if p["type"] == "union" {
+			ups, err := ParseUnionUpstreams(p["upstreams"])
+			if err != nil {
+				return err
 			}
+			for i := range ups {
+				rewritten, err := rewriteCompositeTarget(ups[i].Target, existing, additions)
+				if err != nil {
+					return err
+				}
+				ups[i].Target = rewritten
+			}
+			p["upstreams"] = FormatUnionUpstreams(ups)
 		}
 	}
 	return nil

@@ -90,12 +90,62 @@ func jobExtVal(job map[string]interface{}, key string, fallback interface{}) int
 
 // AddJob inserts a new job
 func AddJob(job map[string]interface{}) (int64, error) {
-	hasExt, _ := tableHasColumnDBErr(GetDB(), "job", "copyConcurrency")
+	hasNativeOpts, _ := tableHasColumnDBErr(GetDB(), "job", "bwLimit")
+	hasExt := hasNativeOpts
+	if !hasExt {
+		hasExt, _ = tableHasColumnDBErr(GetDB(), "job", "copyConcurrency")
+	}
 	var (
 		id  int64
 		err error
 	)
-	if hasExt {
+	if hasNativeOpts {
+		id, err = ExecuteInsert(
+			`INSERT INTO job (enable, remark, srcPath, dstPath, alistId, useCacheT, scanIntervalT, useCacheS, scanIntervalS,
+			 method, interval, isCron, month, day, day_of_week, hour, minute, second, exclude,
+			 minFileSize, maxFileSize, dstMap,
+			 copyConcurrency, scanConcurrency, maxRetries, compareMode, conflictPolicy, deleteEmptySrcDirs,
+			 trashEnable, trashDir, trashRetentionDays, filterMode, include, minFileAgeMinutes, olderThanDays, newerThanDays,
+			 windowEnable, windowStart, windowEnd, windowStopOutside, notifyMode, notifyIds,
+			 bwLimit, tpsLimit, tpsLimitBurst, modifyWindow, fastList, multiThreadStreams, createEmptySrcDirs, followSymlinks, extraFlags)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			job["enable"], job["remark"], job["srcPath"], job["dstPath"], job["alistId"],
+			job["useCacheT"], job["scanIntervalT"], job["useCacheS"], job["scanIntervalS"],
+			job["method"], job["interval"], job["isCron"],
+			job["month"], job["day"], job["day_of_week"],
+			job["hour"], job["minute"], job["second"], job["exclude"],
+			job["minFileSize"], job["maxFileSize"], job["dstMap"],
+			jobExtVal(job, "copyConcurrency", 0),
+			jobExtVal(job, "scanConcurrency", 0),
+			jobExtVal(job, "maxRetries", -1),
+			jobExtVal(job, "compareMode", 0),
+			jobExtVal(job, "conflictPolicy", 0),
+			jobExtVal(job, "deleteEmptySrcDirs", 0),
+			jobExtVal(job, "trashEnable", 0),
+			jobExtVal(job, "trashDir", ".opensync-trash"),
+			jobExtVal(job, "trashRetentionDays", 30),
+			jobExtVal(job, "filterMode", 0),
+			job["include"],
+			jobExtVal(job, "minFileAgeMinutes", 0),
+			jobExtVal(job, "olderThanDays", 0),
+			jobExtVal(job, "newerThanDays", 0),
+			jobExtVal(job, "windowEnable", 0),
+			job["windowStart"],
+			job["windowEnd"],
+			jobExtVal(job, "windowStopOutside", 0),
+			jobExtVal(job, "notifyMode", 0),
+			job["notifyIds"],
+			job["bwLimit"],
+			jobExtVal(job, "tpsLimit", 0.0),
+			jobExtVal(job, "tpsLimitBurst", 0),
+			job["modifyWindow"],
+			jobExtVal(job, "fastList", 0),
+			jobExtVal(job, "multiThreadStreams", 0),
+			jobExtVal(job, "createEmptySrcDirs", 0),
+			jobExtVal(job, "followSymlinks", 0),
+			job["extraFlags"],
+		)
+	} else if hasExt {
 		id, err = ExecuteInsert(
 			`INSERT INTO job (enable, remark, srcPath, dstPath, alistId, useCacheT, scanIntervalT, useCacheS, scanIntervalS,
 			 method, interval, isCron, month, day, day_of_week, hour, minute, second, exclude,
@@ -163,12 +213,62 @@ func UpdateJob(job map[string]interface{}) error {
 	if jobID <= 0 {
 		return fmt.Errorf("update job: missing or invalid id")
 	}
-	hasExt, _ := tableHasColumnDBErr(GetDB(), "job", "copyConcurrency")
+	hasNativeOpts, _ := tableHasColumnDBErr(GetDB(), "job", "bwLimit")
+	hasExt := hasNativeOpts
+	if !hasExt {
+		hasExt, _ = tableHasColumnDBErr(GetDB(), "job", "copyConcurrency")
+	}
 	var (
 		affected int64
 		err      error
 	)
-	if hasExt {
+	if hasNativeOpts {
+		affected, err = executeUpdateAffected(
+			`UPDATE job SET enable=?, remark=?, srcPath=?, dstPath=?, alistId=?, useCacheT=?, scanIntervalT=?,
+			 useCacheS=?, scanIntervalS=?, method=?, interval=?, isCron=?, month=?, day=?,
+			 day_of_week=?, hour=?, minute=?, second=?, exclude=?, minFileSize=?, maxFileSize=?, dstMap=?,
+			 copyConcurrency=?, scanConcurrency=?, maxRetries=?, compareMode=?, conflictPolicy=?, deleteEmptySrcDirs=?,
+			 trashEnable=?, trashDir=?, trashRetentionDays=?, filterMode=?, include=?, minFileAgeMinutes=?, olderThanDays=?, newerThanDays=?,
+			 windowEnable=?, windowStart=?, windowEnd=?, windowStopOutside=?, notifyMode=?, notifyIds=?,
+			 bwLimit=?, tpsLimit=?, tpsLimitBurst=?, modifyWindow=?, fastList=?, multiThreadStreams=?, createEmptySrcDirs=?, followSymlinks=?, extraFlags=? WHERE id=?`,
+			job["enable"], job["remark"], job["srcPath"], job["dstPath"], job["alistId"],
+			job["useCacheT"], job["scanIntervalT"], job["useCacheS"], job["scanIntervalS"],
+			job["method"], job["interval"], job["isCron"],
+			job["month"], job["day"], job["day_of_week"],
+			job["hour"], job["minute"], job["second"], job["exclude"],
+			job["minFileSize"], job["maxFileSize"], job["dstMap"],
+			jobExtVal(job, "copyConcurrency", 0),
+			jobExtVal(job, "scanConcurrency", 0),
+			jobExtVal(job, "maxRetries", -1),
+			jobExtVal(job, "compareMode", 0),
+			jobExtVal(job, "conflictPolicy", 0),
+			jobExtVal(job, "deleteEmptySrcDirs", 0),
+			jobExtVal(job, "trashEnable", 0),
+			jobExtVal(job, "trashDir", ".opensync-trash"),
+			jobExtVal(job, "trashRetentionDays", 30),
+			jobExtVal(job, "filterMode", 0),
+			job["include"],
+			jobExtVal(job, "minFileAgeMinutes", 0),
+			jobExtVal(job, "olderThanDays", 0),
+			jobExtVal(job, "newerThanDays", 0),
+			jobExtVal(job, "windowEnable", 0),
+			job["windowStart"],
+			job["windowEnd"],
+			jobExtVal(job, "windowStopOutside", 0),
+			jobExtVal(job, "notifyMode", 0),
+			job["notifyIds"],
+			job["bwLimit"],
+			jobExtVal(job, "tpsLimit", 0.0),
+			jobExtVal(job, "tpsLimitBurst", 0),
+			job["modifyWindow"],
+			jobExtVal(job, "fastList", 0),
+			jobExtVal(job, "multiThreadStreams", 0),
+			jobExtVal(job, "createEmptySrcDirs", 0),
+			jobExtVal(job, "followSymlinks", 0),
+			job["extraFlags"],
+			jobID,
+		)
+	} else if hasExt {
 		affected, err = executeUpdateAffected(
 			`UPDATE job SET enable=?, remark=?, srcPath=?, dstPath=?, alistId=?, useCacheT=?, scanIntervalT=?,
 			 useCacheS=?, scanIntervalS=?, method=?, interval=?, isCron=?, month=?, day=?,

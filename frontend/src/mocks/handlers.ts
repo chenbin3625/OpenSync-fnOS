@@ -64,8 +64,11 @@ function validateJobInput(body: Record<string, unknown>): string | null {
   );
   if (hasParentTraversal) return "缺少必要参数";
   const method = Number(body.method ?? 0);
-  if (!Number.isInteger(method) || method < 0 || method > 2) {
+  if (!Number.isInteger(method) || method < 0 || method > 3) {
     return "缺少必要参数";
+  }
+  if (method === 3 && (srcPath.length !== 1 || dstPath.length !== 1)) {
+    return "双向同步模式只允许一个源目录和一个目标目录";
   }
   const isCron = Number(body.isCron ?? 0);
   if (!Number.isInteger(isCron) || isCron < 0 || isCron > 2) {
@@ -244,6 +247,46 @@ export const handlers = [
       }),
     );
   }),
+  http.post(`${apiBase}/native/storage/rename`, async ({ request }) => {
+    const body = await readBody(request);
+    if (!body || typeof body.oldName !== "string" || typeof body.newName !== "string") {
+      return fail("缺少必要参数");
+    }
+    const res = mockStore.renameNativeRemote(body.oldName, body.newName);
+    return typeof res === "string" ? fail(res) : ok(res);
+  }),
+  http.post(`${apiBase}/native/storage/export`, async ({ request }) => {
+    const body = await readBody(request);
+    if (!body) return fail("请求内容无效");
+    const res = mockStore.exportNativeConfig(
+      Array.isArray(body.names) ? body.names.map(String) : undefined,
+      typeof body.password === "string" ? body.password : undefined,
+    );
+    return typeof res === "string" ? fail(res) : ok(res);
+  }),
+  http.post(`${apiBase}/native/storage/about`, async ({ request }) => {
+    const body = await readBody(request);
+    if (!body || typeof body.name !== "string") return fail("缺少必要参数");
+    const res = mockStore.aboutNativeStorage(body.name);
+    return typeof res === "string" ? fail(res) : ok(res);
+  }),
+  http.post(`${apiBase}/native/storage/browse`, async ({ request }) => {
+    const body = await readBody(request);
+    if (!body) return fail("请求内容无效");
+    const res = mockStore.browseNativeStorage(
+      typeof body.path === "string" ? body.path : "/",
+    );
+    return typeof res === "string" ? fail(res) : ok(res);
+  }),
+  http.post(`${apiBase}/native/storage/restore`, async ({ request }) => {
+    const body = await readBody(request);
+    if (!body) return fail("请求内容无效");
+    const err = mockStore.restoreNativeFile({
+      srcPath: typeof body.srcPath === "string" ? body.srcPath : "",
+      dstLocalDir: typeof body.dstLocalDir === "string" ? body.dstLocalDir : "",
+    });
+    return err ? fail(err) : ok(null);
+  }),
   http.post(`${apiBase}/native/storage/import/preview`, async ({ request }) => {
     const body = await readBody(request);
     if (!body || typeof body.config !== "string") return fail("请求内容无效");
@@ -363,6 +406,23 @@ export const handlers = [
     const id = numberParam(new URL(request.url).searchParams, "id");
     if (id === undefined) return fail("缺少任务 ID");
     mockStore.cancelDryRun(id);
+    return ok(null);
+  }),
+  http.post(`${apiBase}/job/check`, async ({ request }) => {
+    const body = await readBody(request);
+    if (!body || body.id === undefined) return fail("缺少任务 ID");
+    const res = mockStore.startJobCheck(Number(body.id), Boolean(body.download));
+    return res ? ok(res) : fail("任务不存在");
+  }),
+  http.get(`${apiBase}/job/check`, ({ request }) => {
+    const id = numberParam(new URL(request.url).searchParams, "id");
+    if (id === undefined) return fail("缺少任务 ID");
+    return ok(mockStore.getJobCheck(id));
+  }),
+  http.delete(`${apiBase}/job/check`, ({ request }) => {
+    const id = numberParam(new URL(request.url).searchParams, "id");
+    if (id === undefined) return fail("缺少任务 ID");
+    mockStore.cancelJobCheck(id);
     return ok(null);
   }),
   http.post(`${apiBase}/job/filter/test`, async ({ request }) => {

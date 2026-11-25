@@ -235,7 +235,19 @@ export default function TaskEditor({
         seedForm.scanIntervalT ||
         seedForm.copyConcurrency ||
         seedForm.scanConcurrency ||
-        seedForm.maxRetries >= 0,
+        seedForm.maxRetries >= 0 ||
+        seedForm.bwLimit ||
+        seedForm.tpsLimit ||
+        seedForm.tpsLimitBurst ||
+        seedForm.modifyWindow ||
+        seedForm.fastList ||
+        seedForm.multiThreadStreams ||
+        seedForm.createEmptySrcDirs ||
+        seedForm.followSymlinks ||
+        seedForm.extraFlags?.noUpdateModtime ||
+        seedForm.extraFlags?.inplace ||
+        seedForm.extraFlags?.checkFirst ||
+        seedForm.extraFlags?.s3NoHead,
     ),
   );
   const [runAfterCreate, setRunAfterCreate] = useState(false);
@@ -319,9 +331,12 @@ export default function TaskEditor({
     if (key === "fileSizeRange") return msg;
     if (
       key === "dstPath" &&
-      form.method === 2 &&
+      (form.method === 2 || form.method === 3) &&
       form.dstPath.length > 1
     ) {
+      return msg;
+    }
+    if (key === "srcPath" && form.method === 3 && form.srcPath.length > 1) {
       return msg;
     }
     return "";
@@ -394,13 +409,22 @@ export default function TaskEditor({
     const nextEngineId = Number(nextValue);
     if (nextEngineId === form.alistId) return;
     const applySwitch = () => {
+      const nextIsNative =
+        engines.find((engine) => engine.id === nextEngineId)?.kind === "rclone";
       setDirty(true);
       setForm((current) => ({
         ...current,
         alistId: nextEngineId,
-        ...(engines.find((engine) => engine.id === nextEngineId)?.kind === "rclone"
-          ? { method: 0, trashEnable: false, conflictPolicy: 0, useCacheS: false, useCacheT: false, scanIntervalS: 0, scanIntervalT: 0 }
-          : {}),
+        ...(nextIsNative
+          ? {
+              useCacheS: false,
+              useCacheT: false,
+              scanIntervalS: 0,
+              scanIntervalT: 0,
+            }
+          : {
+              method: current.method === 3 ? 0 : current.method,
+            }),
         srcPath: [],
         dstPath: [],
         // 文件夹过滤记录的是旧引擎源目录下的相对路径，换引擎后不再对应
@@ -436,9 +460,12 @@ export default function TaskEditor({
     change("srcPath", nextPaths);
   };
 
-  const dstMultiple = form.method !== 2 || form.dstPath.length > 1;
+  const srcMultiple = form.method !== 3 || form.srcPath.length > 1;
+  const dstMultiple =
+    (form.method !== 2 && form.method !== 3) || form.dstPath.length > 1;
   const activeMethodOption = methodOptions[form.method] ?? methodOptions[0];
-  const isDestructiveMethod = form.method === 1 || form.method === 2;
+  const isDestructiveMethod =
+    form.method === 1 || form.method === 2 || form.method === 3;
 
   // Schedule preview data
   const cronErrors = useMemo(
@@ -470,10 +497,23 @@ export default function TaskEditor({
   }, [intervalDraft, intervalUnit, form.interval]);
 
   const activeAdvancedCount =
-    (form.useCacheS ? 1 : 0) +
-    (form.useCacheT ? 1 : 0) +
-    (Number(form.scanIntervalS || 0) > 0 ? 1 : 0) +
-    (Number(form.scanIntervalT || 0) > 0 ? 1 : 0) +
+    (nativeEngine
+      ? (form.bwLimit.trim() ? 1 : 0) +
+        (Number(form.tpsLimit || 0) > 0 ? 1 : 0) +
+        (Number(form.tpsLimitBurst || 0) > 0 ? 1 : 0) +
+        (form.modifyWindow.trim() ? 1 : 0) +
+        (form.fastList ? 1 : 0) +
+        (Number(form.multiThreadStreams || 0) > 0 ? 1 : 0) +
+        (form.createEmptySrcDirs ? 1 : 0) +
+        (form.followSymlinks ? 1 : 0) +
+        (form.extraFlags?.noUpdateModtime ? 1 : 0) +
+        (form.extraFlags?.inplace ? 1 : 0) +
+        (form.extraFlags?.checkFirst ? 1 : 0) +
+        (form.extraFlags?.s3NoHead ? 1 : 0)
+      : (form.useCacheS ? 1 : 0) +
+        (form.useCacheT ? 1 : 0) +
+        (Number(form.scanIntervalS || 0) > 0 ? 1 : 0) +
+        (Number(form.scanIntervalT || 0) > 0 ? 1 : 0)) +
     (Number(form.copyConcurrency || 0) > 0 ? 1 : 0) +
     (Number(form.scanConcurrency || 0) > 0 ? 1 : 0) +
     (Number(form.maxRetries) >= 0 ? 1 : 0);
@@ -724,7 +764,7 @@ export default function TaskEditor({
                       <Select
                         aria-labelledby={methodLabelId}
                         value={form.method}
-                        optionList={(nativeEngine ? methodOptions.slice(0,1) : methodOptions).map((method, value) => ({
+                        optionList={(nativeEngine ? methodOptions : methodOptions.slice(0, 3)).map((method, value) => ({
                           value,
                           label: method.name,
                         }))}
@@ -748,22 +788,26 @@ export default function TaskEditor({
 
                   <div className="form-grid">
                     <Field
-                      label="源路径"
+                      label={form.method === 3 ? "源路径（单选）" : "源路径"}
                       required
                       error={showStepError(0, "srcPath")}
                       fieldId="srcPath"
                     >
                       <RemotePaths
-                        key={`src-${form.alistId}`}
+                        key={`src-${form.alistId}-${srcMultiple ? "m" : "s"}`}
                         engineId={form.alistId}
                         value={form.srcPath}
                         onChange={handleSrcPathChange}
-                        multiple
+                        multiple={srcMultiple}
                         ariaLabel="选择源目录"
                       />
                     </Field>
                     <Field
-                      label={form.method === 2 ? "目标路径（单选）" : "目标路径"}
+                      label={
+                        form.method === 2 || form.method === 3
+                          ? "目标路径（单选）"
+                          : "目标路径"
+                      }
                       required
                       error={showStepError(0, "dstPath")}
                       fieldId="dstPath"
@@ -780,23 +824,64 @@ export default function TaskEditor({
                   </div>
 
                   {nativeEngine && (
-                    <Field label="输入目标路径" hint="仅有存储桶权限或目标文件夹尚不存在时，可直接添加路径。源目录请从本地授权目录中选择。">
+                    <Field
+                      label="手动输入路径"
+                      hint="原生引擎支持本地↔本地、本地↔远端、远端↔远端双向任意组合；仅有单桶权限或目录尚未创建时可直接输入路径。"
+                    >
                       <div className="field-group">
-                        <Input value={nativeTarget} onChange={setNativeTarget} placeholder="/存储名称/存储桶/备份目录" />
-                        <Button
-                          disabled={(() => {
-                            const t = nativeTarget.trim();
-                            return !t.startsWith("/") || t === "/" || t.split("/").filter(Boolean).length === 0;
-                          })()}
-                          onClick={() => {
-                            const cleaned = nativeTarget.trim().replace(/\/+$/, "");
-                            if (!cleaned || cleaned === "/") return;
-                            change("dstPath", Array.from(new Set([...form.dstPath, cleaned])));
-                            setNativeTarget("");
-                          }}
-                        >
-                          添加路径
-                        </Button>
+                        <Input
+                          value={nativeTarget}
+                          onChange={setNativeTarget}
+                          placeholder="/存储名称/存储桶/子目录"
+                        />
+                        <div className="native-section-actions">
+                          <Button
+                            type="tertiary"
+                            disabled={(() => {
+                              const t = nativeTarget.trim();
+                              return (
+                                !t.startsWith("/") ||
+                                t === "/" ||
+                                t.split("/").filter(Boolean).length === 0
+                              );
+                            })()}
+                            onClick={() => {
+                              const cleaned = nativeTarget.trim().replace(/\/+$/, "");
+                              if (!cleaned || cleaned === "/") return;
+                              handleSrcPathChange(
+                                form.method === 3
+                                  ? [cleaned]
+                                  : Array.from(new Set([...form.srcPath, cleaned])),
+                              );
+                              setNativeTarget("");
+                            }}
+                          >
+                            添加到源路径
+                          </Button>
+                          <Button
+                            disabled={(() => {
+                              const t = nativeTarget.trim();
+                              return (
+                                !t.startsWith("/") ||
+                                t === "/" ||
+                                t.split("/").filter(Boolean).length === 0
+                              );
+                            })()}
+                            onClick={() => {
+                              const cleaned = nativeTarget.trim().replace(/\/+$/, "");
+                              if (!cleaned || cleaned === "/") return;
+                              change(
+                                "dstPath",
+                                form.method === 2 || form.method === 3
+                                  ? [cleaned]
+                                  : Array.from(new Set([...form.dstPath, cleaned])),
+                              );
+                              setNativeTarget("");
+                            }}
+                          >
+                            添加到目标路径
+                          </Button>
+                        </div>
                       </div>
                     </Field>
                   )}
@@ -809,7 +894,8 @@ export default function TaskEditor({
                     currentJobId={job?.id}
                     engineId={form.alistId}
                     onKeepFirstDst={
-                      form.method === 2 && form.dstPath.length > 1
+                      (form.method === 2 || form.method === 3) &&
+                      form.dstPath.length > 1
                         ? () => change("dstPath", form.dstPath.slice(0, 1))
                         : undefined
                     }
@@ -848,7 +934,7 @@ export default function TaskEditor({
                         <Field label="同名冲突处理">
                           <Select
                             value={form.conflictPolicy}
-                            optionList={(nativeEngine ? conflictPolicyOptions.slice(0,2) : conflictPolicyOptions).map((o) => ({
+                            optionList={conflictPolicyOptions.map((o) => ({
                               label: o.label,
                               value: o.value,
                             }))}
@@ -864,7 +950,6 @@ export default function TaskEditor({
                         >
                           <Switch
                             aria-label="启用目标端回收站"
-                            disabled={nativeEngine}
                             checked={form.trashEnable}
                             onChange={(v) => change("trashEnable", v)}
                           />
@@ -1445,7 +1530,11 @@ export default function TaskEditor({
                         className="advanced-options-chevron"
                         aria-hidden="true"
                       />
-                      <span>高级选项（目录缓存、防风控限流与并发覆盖）</span>
+                      <span>
+                        {nativeEngine
+                          ? "高级选项（限速、流控、并发与 rclone 调优）"
+                          : "高级选项（目录缓存、防风控限流与并发覆盖）"}
+                      </span>
                       {activeAdvancedCount > 0 && (
                         <Tag size="small" color="blue" type="light">
                           已配置 {activeAdvancedCount} 项
@@ -1454,64 +1543,64 @@ export default function TaskEditor({
                     </button>
                     {advancedOpen && (
                       <div className="advanced-options-body">
-                        <SettingRow
-                          label="源端缓存"
-                          variant="bordered"
-                          tip="开启后优先使用引擎缓存目录列表，减少远程请求次数，提升同步速度"
-                        >
-                          <Switch
-                            aria-label="源端缓存"
-                            disabled={nativeEngine}
-                            checked={form.useCacheS}
-                            onChange={(value) => change("useCacheS", value)}
-                          />
-                        </SettingRow>
-                        <SettingRow
-                          label="目标缓存"
-                          variant="bordered"
-                          tip="开启后优先使用引擎缓存目录列表，减少远程请求次数，提升同步速度"
-                        >
-                          <Switch
-                            aria-label="目标缓存"
-                            disabled={nativeEngine}
-                            checked={form.useCacheT}
-                            onChange={(value) => change("useCacheT", value)}
-                          />
-                        </SettingRow>
-                        <div className="form-grid form-grid--two">
-                          <Field
-                            label="源端扫描间隔（秒）"
-                            hint="0–300，每次列目录后延迟，防网盘触发 QPS 风控"
-                          >
-                            <Input
-                              inputMode="numeric"
-                              disabled={nativeEngine}
-                              value={String(form.scanIntervalS)}
-                              onChange={(v) =>
-                                change(
-                                  "scanIntervalS",
-                                  Math.max(0, Math.min(300, Math.trunc(Number(v) || 0))),
-                                )
-                              }
-                            />
-                          </Field>
-                          <Field
-                            label="目标端扫描间隔（秒）"
-                            hint="0–300，每次列目录后延迟"
-                          >
-                            <Input
-                              inputMode="numeric"
-                              disabled={nativeEngine}
-                              value={String(form.scanIntervalT)}
-                              onChange={(v) =>
-                                change(
-                                  "scanIntervalT",
-                                  Math.max(0, Math.min(300, Math.trunc(Number(v) || 0))),
-                                )
-                              }
-                            />
-                          </Field>
-                        </div>
+                        {!nativeEngine && (
+                          <>
+                            <SettingRow
+                              label="源端缓存"
+                              variant="bordered"
+                              tip="开启后优先使用引擎缓存目录列表，减少远程请求次数，提升同步速度"
+                            >
+                              <Switch
+                                aria-label="源端缓存"
+                                checked={form.useCacheS}
+                                onChange={(value) => change("useCacheS", value)}
+                              />
+                            </SettingRow>
+                            <SettingRow
+                              label="目标缓存"
+                              variant="bordered"
+                              tip="开启后优先使用引擎缓存目录列表，减少远程请求次数，提升同步速度"
+                            >
+                              <Switch
+                                aria-label="目标缓存"
+                                checked={form.useCacheT}
+                                onChange={(value) => change("useCacheT", value)}
+                              />
+                            </SettingRow>
+                            <div className="form-grid form-grid--two">
+                              <Field
+                                label="源端扫描间隔（秒）"
+                                hint="0–300，每次列目录后延迟，防网盘触发 QPS 风控"
+                              >
+                                <Input
+                                  inputMode="numeric"
+                                  value={String(form.scanIntervalS)}
+                                  onChange={(v) =>
+                                    change(
+                                      "scanIntervalS",
+                                      Math.max(0, Math.min(300, Math.trunc(Number(v) || 0))),
+                                    )
+                                  }
+                                />
+                              </Field>
+                              <Field
+                                label="目标端扫描间隔（秒）"
+                                hint="0–300，每次列目录后延迟"
+                              >
+                                <Input
+                                  inputMode="numeric"
+                                  value={String(form.scanIntervalT)}
+                                  onChange={(v) =>
+                                    change(
+                                      "scanIntervalT",
+                                      Math.max(0, Math.min(300, Math.trunc(Number(v) || 0))),
+                                    )
+                                  }
+                                />
+                              </Field>
+                            </div>
+                          </>
+                        )}
                         <div className="form-grid form-grid--three">
                           <Field label="操作并发覆盖" hint="0 = 跟随全局设置 (1–100)">
                             <Input
@@ -1555,6 +1644,181 @@ export default function TaskEditor({
                             />
                           </Field>
                         </div>
+                        {nativeEngine && (
+                          <>
+                            <Field
+                              label="带宽限制（--bwlimit）"
+                              hint="留空跟随系统设置；支持单速（如 10M）或分时段（如 08:00,5M 23:00,off）"
+                            >
+                              <div className="field-group">
+                                <Input
+                                  value={form.bwLimit}
+                                  placeholder="如 10M 或 08:00,5M 23:00,off"
+                                  showClear
+                                  onChange={(v) => change("bwLimit", v)}
+                                />
+                                <div className="schedule-chips">
+                                  {[
+                                    { label: "跟随全局", value: "" },
+                                    { label: "5M", value: "5M" },
+                                    { label: "20M", value: "20M" },
+                                    { label: "50M", value: "50M" },
+                                    { label: "日间限 5M", value: "08:00,5M 23:00,off" },
+                                  ].map((preset) => (
+                                    <button
+                                      key={preset.label}
+                                      type="button"
+                                      className={`schedule-chip${form.bwLimit.trim() === preset.value ? " is-active" : ""}`}
+                                      onClick={() => change("bwLimit", preset.value)}
+                                    >
+                                      {preset.label}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            </Field>
+                            <div className="form-grid form-grid--two">
+                              <Field
+                                label="API 限流（--tpslimit）"
+                                hint="每秒请求上限，0 表示不限（防云盘 429）"
+                              >
+                                <Input
+                                  inputMode="decimal"
+                                  value={String(form.tpsLimit)}
+                                  onChange={(v) => {
+                                    const n = Number(v);
+                                    change(
+                                      "tpsLimit",
+                                      Number.isFinite(n) && n >= 0 ? Math.min(10000, n) : 0,
+                                    );
+                                  }}
+                                />
+                              </Field>
+                              <Field
+                                label="API 突发上限（--tpslimit-burst）"
+                                hint="0 表示使用 rclone 默认值"
+                              >
+                                <Input
+                                  inputMode="numeric"
+                                  value={String(form.tpsLimitBurst)}
+                                  onChange={(v) =>
+                                    change(
+                                      "tpsLimitBurst",
+                                      Math.max(0, Math.min(10000, Math.trunc(Number(v) || 0))),
+                                    )
+                                  }
+                                />
+                              </Field>
+                            </div>
+                            <div className="form-grid form-grid--two">
+                              <Field
+                                label="时间精度容差（--modify-window）"
+                                hint="留空默认；FAT32/SMB/部分网盘可填 1s 或 2s"
+                              >
+                                <Input
+                                  value={form.modifyWindow}
+                                  placeholder="如 1s / 2s / 1m"
+                                  showClear
+                                  onChange={(v) => change("modifyWindow", v)}
+                                />
+                              </Field>
+                              <Field
+                                label="单文件多线程流数（--multi-thread-streams）"
+                                hint="0 使用默认（4）；1–64，加速单一大文件传输"
+                              >
+                                <Input
+                                  inputMode="numeric"
+                                  value={String(form.multiThreadStreams)}
+                                  onChange={(v) =>
+                                    change(
+                                      "multiThreadStreams",
+                                      Math.max(0, Math.min(64, Math.trunc(Number(v) || 0))),
+                                    )
+                                  }
+                                />
+                              </Field>
+                            </div>
+                            <SettingRow
+                              label="快速列表（--fast-list）"
+                              variant="bordered"
+                              tip="在支持的远端（S3 / B2 / GCS / Azure 等）批量递归列目录，大幅减少 API 事务次数，略微增加内存占用"
+                            >
+                              <Switch
+                                aria-label="快速列表"
+                                checked={form.fastList}
+                                onChange={(v) => change("fastList", v)}
+                              />
+                            </SettingRow>
+                            <SettingRow
+                              label="同步空子目录（--create-empty-src-dirs）"
+                              variant="bordered"
+                              tip="在目标端保留源目录中不含任何文件的空目录结构"
+                            >
+                              <Switch
+                                aria-label="同步空子目录"
+                                checked={form.createEmptySrcDirs}
+                                onChange={(v) => change("createEmptySrcDirs", v)}
+                              />
+                            </SettingRow>
+                            <SettingRow
+                              label="跟随本地符号链接"
+                              variant="bordered"
+                              tip="开启后跟随源端本地授权目录内指向同授权目录内部的符号链接（跨出授权目录的链接仍会被安全忽略）"
+                            >
+                              <Switch
+                                aria-label="跟随本地符号链接"
+                                checked={form.followSymlinks}
+                                onChange={(v) => change("followSymlinks", v)}
+                              />
+                            </SettingRow>
+                            <div className="native-checkbox-group">
+                              <Checkbox
+                                checked={Boolean(form.extraFlags?.noUpdateModtime)}
+                                onChange={(e) =>
+                                  change("extraFlags", {
+                                    ...form.extraFlags,
+                                    noUpdateModtime: Boolean(e.target.checked),
+                                  })
+                                }
+                              >
+                                跳过仅修改时间变更的元数据更新（--no-update-modtime）
+                              </Checkbox>
+                              <Checkbox
+                                checked={Boolean(form.extraFlags?.inplace)}
+                                onChange={(e) =>
+                                  change("extraFlags", {
+                                    ...form.extraFlags,
+                                    inplace: Boolean(e.target.checked),
+                                  })
+                                }
+                              >
+                                原地覆盖目标文件，不创建临时文件（--inplace）
+                              </Checkbox>
+                              <Checkbox
+                                checked={Boolean(form.extraFlags?.checkFirst)}
+                                onChange={(e) =>
+                                  change("extraFlags", {
+                                    ...form.extraFlags,
+                                    checkFirst: Boolean(e.target.checked),
+                                  })
+                                }
+                              >
+                                先完成全部差异比对再传输（--check-first）
+                              </Checkbox>
+                              <Checkbox
+                                checked={Boolean(form.extraFlags?.s3NoHead)}
+                                onChange={(e) =>
+                                  change("extraFlags", {
+                                    ...form.extraFlags,
+                                    s3NoHead: Boolean(e.target.checked),
+                                  })
+                                }
+                              >
+                                跳过 S3 上传后 HEAD 校验以减少 API 调用（--s3-no-head）
+                              </Checkbox>
+                            </div>
+                          </>
+                        )}
                       </div>
                     )}
                   </div>

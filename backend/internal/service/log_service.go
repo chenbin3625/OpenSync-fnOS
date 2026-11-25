@@ -101,7 +101,7 @@ func AppLogWriter() io.Writer {
 
 var (
 	logBearerPattern   = regexp.MustCompile(`(?i)((?:authorization\s*[:=]\s*)?bearer\s+|authorization\s*[:=]\s*|x-gotify-key\s*[:=]\s*)([^\s"',;]+)`)
-	logKeyValuePattern = regexp.MustCompile(`(?i)((?:access_token|token|secret|password|passwd|sendkey|apikey|api_key|key|sign|bot_token)\s*[:=]\s*)([^\s"',;&]+)`)
+	logKeyValuePattern = regexp.MustCompile(`(?i)((?:access_token|refresh_token|bearer_token|session_token|auth_token|bot_token|token|secret_access_key|client_secret|application_credential_secret|secret|password2|password|passwd|pass|key_file_pass|sas_url|sendkey|apikey|api_key|key|sign)\s*[:=]\s*)([^\s"',;&]+)`)
 	logTelegramPattern = regexp.MustCompile(`(bot\d+:)[A-Za-z0-9_-]{8,}`)
 )
 

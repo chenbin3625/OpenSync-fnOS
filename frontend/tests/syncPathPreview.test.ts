@@ -5,6 +5,7 @@ import {
   commonSrcSelectionParent,
   dstPathForSrcSelection,
   jobDstMapKey,
+  stripNativeLocalRootID,
   syncPathContains,
 } from "../src/lib/syncPathPreview";
 import {
@@ -370,5 +371,162 @@ describe("syncPathPreview parity with backend path mapping", () => {
       engineId: 9,
     });
     expect(differentEngine.conflicts).toEqual([]);
+  });
+
+  it("strips native local rootID fingerprints from derived multi-source destinations unless colliding", () => {
+    expect(stripNativeLocalRootID("docker~b3fbe6ed1ca9")).toEqual({
+      base: "docker",
+      stripped: true,
+    });
+    expect(stripNativeLocalRootID("my~dir~0123456789ab")).toEqual({
+      base: "my~dir",
+      stripped: true,
+    });
+    expect(stripNativeLocalRootID("..~0123456789ab")).toEqual({
+      base: "..~0123456789ab",
+      stripped: false,
+    });
+    expect(stripNativeLocalRootID("docker~B3FBE6ED1CA9")).toEqual({
+      base: "docker~B3FBE6ED1CA9",
+      stripped: false,
+    });
+
+    const multiRoots = buildSyncPathPreview({
+      srcPaths: [
+        "/本地/docker~b3fbe6ed1ca9",
+        "/本地/X~35c37bec9b16",
+        "/本地/photos~5f78544a37a3",
+        "/本地/sec~972efbdc2b1f",
+        "/本地/sync~bd3b4223a876",
+      ],
+      dstPaths: ["/openlist/quark"],
+    });
+    expect(multiRoots.rule).toBe("shared-parent");
+    expect(multiRoots.commonParent).toBe("/本地");
+    expect(multiRoots.conflicts).toEqual([]);
+    expect(multiRoots.items.map((item) => item.resolvedDst)).toEqual([
+      "/openlist/quark/docker/",
+      "/openlist/quark/X/",
+      "/openlist/quark/photos/",
+      "/openlist/quark/sec/",
+      "/openlist/quark/sync/",
+    ]);
+    expect(multiRoots.items.map((item) => item.appendedSuffix)).toEqual([
+      "docker/",
+      "X/",
+      "photos/",
+      "sec/",
+      "sync/",
+    ]);
+
+    // Subdirectories under different local roots keep deeper names intact.
+    const nestedRoots = buildSyncPathPreview({
+      srcPaths: [
+        "/本地/docker~b3fbe6ed1ca9/foo~0123456789ab",
+        "/本地/photos~5f78544a37a3/2025",
+      ],
+      dstPaths: ["/openlist/quark"],
+    });
+    expect(nestedRoots.items.map((item) => item.resolvedDst)).toEqual([
+      "/openlist/quark/docker/foo~0123456789ab/",
+      "/openlist/quark/photos/2025/",
+    ]);
+
+    // Subdirectories under the same local root display a clean shared parent.
+    const sameRootSubdirs = buildSyncPathPreview({
+      srcPaths: [
+        "/本地/docker~b3fbe6ed1ca9/nginx",
+        "/本地/docker~b3fbe6ed1ca9/redis",
+      ],
+      dstPaths: ["/openlist/quark"],
+    });
+    expect(sameRootSubdirs.commonParent).toBe("/本地/docker");
+    expect(sameRootSubdirs.items.map((item) => item.resolvedDst)).toEqual([
+      "/openlist/quark/nginx/",
+      "/openlist/quark/redis/",
+    ]);
+
+    // Two distinct volumes sharing a folder name (case-insensitively) retain
+    // their fingerprints while non-colliding siblings still strip cleanly.
+    const collidingRoots = buildSyncPathPreview({
+      srcPaths: [
+        "/本地/Photos~111111111111",
+        "/本地/photos~222222222222",
+        "/本地/sec~972efbdc2b1f",
+      ],
+      dstPaths: ["/openlist/quark"],
+    });
+    expect(collidingRoots.conflicts).toEqual([]);
+    expect(collidingRoots.items.map((item) => item.resolvedDst)).toEqual([
+      "/openlist/quark/Photos~111111111111/",
+      "/openlist/quark/photos~222222222222/",
+      "/openlist/quark/sec/",
+    ]);
+
+    // Root vs subdirectory of same-named roots on different volumes never nests.
+    const rootVsSub = buildSyncPathPreview({
+      srcPaths: [
+        "/本地/docker~111111111111",
+        "/本地/docker~222222222222/sub",
+      ],
+      dstPaths: ["/openlist/quark"],
+    });
+    expect(rootVsSub.conflicts).toEqual([]);
+    expect(rootVsSub.items.map((item) => item.resolvedDst)).toEqual([
+      "/openlist/quark/docker~111111111111/",
+      "/openlist/quark/docker~222222222222/sub/",
+    ]);
+
+    // Local-to-local backup preserves the target local rootID while cleaning source suffixes.
+    const localToLocal = buildSyncPathPreview({
+      srcPaths: [
+        "/本地/docker~b3fbe6ed1ca9",
+        "/本地/photos~5f78544a37a3",
+      ],
+      dstPaths: ["/本地/backup~112233445566"],
+    });
+    expect(localToLocal.conflicts).toEqual([]);
+    expect(localToLocal.items.map((item) => item.resolvedDst)).toEqual([
+      "/本地/backup~112233445566/docker/",
+      "/本地/backup~112233445566/photos/",
+    ]);
+
+    // Cross-alias case-insensitive leaf collision disambiguates cleanly.
+    const crossAlias = buildSyncPathPreview({
+      srcPaths: [
+        "/本地/docker~111111111111",
+        "/disk/other~222222222222/Docker",
+      ],
+      dstPaths: ["/openlist/quark"],
+    });
+    expect(crossAlias.rule).toBe("disambiguated-base-name");
+    expect(crossAlias.conflicts).toEqual([]);
+    expect(crossAlias.items.map((item) => item.resolvedDst)).toEqual([
+      "/openlist/quark/本地/docker/",
+      "/openlist/quark/disk/other/Docker/",
+    ]);
+
+    // Existing saved jobs keep their legacy hashed destination via dstMap until dstPath changes.
+    const legacyDstMap = JSON.stringify({
+      version: 1,
+      base: ["/openlist/quark/"],
+      map: {
+        [jobDstMapKey("/本地/docker~b3fbe6ed1ca9", "/openlist/quark")]:
+          "/openlist/quark/docker~b3fbe6ed1ca9/",
+      },
+    });
+    const preserved = buildSyncPathPreview({
+      srcPaths: [
+        "/本地/docker~b3fbe6ed1ca9",
+        "/本地/sec~972efbdc2b1f",
+      ],
+      dstPaths: ["/openlist/quark"],
+      storedDstMap: legacyDstMap,
+    });
+    expect(preserved.hasPreservedMapping).toBe(true);
+    expect(preserved.items.map((item) => item.resolvedDst)).toEqual([
+      "/openlist/quark/docker~b3fbe6ed1ca9/",
+      "/openlist/quark/sec/",
+    ]);
   });
 });

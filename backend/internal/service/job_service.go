@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"opensync/internal/config"
 	"opensync/internal/mapper"
 	"opensync/internal/msg"
+	"opensync/internal/native"
 	"opensync/pkg/util"
 	"strconv"
 	"strings"
@@ -522,7 +524,107 @@ func normalizeJobExtendedFields(job map[string]interface{}) error {
 	} else {
 		job["notifyIds"] = nil
 	}
+	// Native rclone transfer tuning fields
+	if raw, ok := job["bwLimit"]; ok && raw != nil {
+		bw := strings.TrimSpace(util.StringValue(raw))
+		if bw == "" {
+			job["bwLimit"] = nil
+		} else {
+			if err := config.ValidateBwLimit(bw); err != nil {
+				return publicError(err.Error())
+			}
+			job["bwLimit"] = bw
+		}
+	} else {
+		job["bwLimit"] = nil
+	}
+	if raw, ok := job["tpsLimit"]; ok && raw != nil && raw != "" {
+		f, valid := strictJobFloat64(raw)
+		if !valid || f < 0 || f > 1000 {
+			return publicError(msg.T(msg.TPSLimitInvalid))
+		}
+		job["tpsLimit"] = f
+	} else {
+		job["tpsLimit"] = float64(0)
+	}
+	if raw, ok := job["tpsLimitBurst"]; ok && raw != nil && raw != "" {
+		n, valid := strictJobInt(raw)
+		if !valid || n < 0 || n > 1000 {
+			return publicError(msg.T(msg.TPSLimitBurstInvalid))
+		}
+		job["tpsLimitBurst"] = n
+	} else {
+		job["tpsLimitBurst"] = 0
+	}
+	if raw, ok := job["modifyWindow"]; ok && raw != nil {
+		mw := strings.TrimSpace(util.StringValue(raw))
+		if mw == "" {
+			job["modifyWindow"] = nil
+		} else {
+			if err := native.ValidateModifyWindow(mw); err != nil {
+				return publicError(msg.T(msg.ModifyWindowInvalid))
+			}
+			job["modifyWindow"] = mw
+		}
+	} else {
+		job["modifyWindow"] = nil
+	}
+	for _, key := range []string{"fastList", "createEmptySrcDirs", "followSymlinks"} {
+		if raw, ok := job[key]; ok && raw != nil && raw != "" {
+			n, valid := strictJobEnable(raw)
+			if !valid {
+				return publicError(msg.T(msg.LostPart))
+			}
+			job[key] = n
+		} else {
+			job[key] = 0
+		}
+	}
+	if raw, ok := job["multiThreadStreams"]; ok && raw != nil && raw != "" {
+		n, valid := strictJobInt(raw)
+		if !valid || n < 0 || n > 64 {
+			return publicError(msg.T(msg.MultiThreadStreamsInvalid))
+		}
+		job["multiThreadStreams"] = n
+	} else {
+		job["multiThreadStreams"] = 0
+	}
+	if raw, ok := job["extraFlags"]; ok && raw != nil {
+		_, canonical, err := parseNativeExtraFlags(raw)
+		if err != nil {
+			return err
+		}
+		if canonical == "" {
+			job["extraFlags"] = nil
+		} else {
+			job["extraFlags"] = canonical
+		}
+	} else {
+		job["extraFlags"] = nil
+	}
 	return nil
+}
+
+func strictJobFloat64(value interface{}) (float64, bool) {
+	switch v := value.(type) {
+	case float64:
+		return v, !math.IsNaN(v) && !math.IsInf(v, 0)
+	case float32:
+		f := float64(v)
+		return f, !math.IsNaN(f) && !math.IsInf(f, 0)
+	case int:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case json.Number:
+		f, err := strconv.ParseFloat(string(v), 64)
+		return f, err == nil && !math.IsNaN(f) && !math.IsInf(f, 0)
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		return f, err == nil && !math.IsNaN(f) && !math.IsInf(f, 0)
+	default:
+		return 0, false
+	}
 }
 
 func ValidateJobInput(job map[string]interface{}) error {
@@ -587,11 +689,14 @@ func validateJobInput(job map[string]interface{}, rejectNestedDst bool) error {
 		}
 		method = parsed
 	}
-	if method < 0 || method > 2 {
+	if method < 0 || method > 3 {
 		return publicError(msg.T(msg.LostPart))
 	}
 	if method == 2 && len(dstPaths) != 1 {
 		return publicError("移动模式只允许一个目标目录")
+	}
+	if method == 3 && (len(srcPaths) != 1 || len(dstPaths) != 1) {
+		return publicError("双向同步仅支持单个源目录与单个目标目录")
 	}
 
 	isCron := 0
@@ -836,6 +941,9 @@ func addJobClient(job map[string]interface{}, isInit bool) (int64, error) {
 		}
 		row, err := alistDeps.GetAlistByID(util.ToInt64(job["alistId"]))
 		if err == nil {
+			if util.ToInt(job["method"]) == 3 && util.StringValue(row["url"]) != native.EngineURL {
+				return 0, publicError("双向同步仅支持原生 rclone 引擎")
+			}
 			if err := validateNativeJob(job, row); err != nil {
 				return 0, err
 			}
@@ -905,7 +1013,11 @@ func EditJobClient(job map[string]interface{}) error {
 		var row map[string]interface{}
 		row, alistErr = alistDeps.GetAlistByID(util.ToInt64(job["alistId"]))
 		if alistErr == nil {
-			conflictErr = validateNativeJob(job, row)
+			if util.ToInt(job["method"]) == 3 && util.StringValue(row["url"]) != native.EngineURL {
+				conflictErr = publicError("双向同步仅支持原生 rclone 引擎")
+			} else {
+				conflictErr = validateNativeJob(job, row)
+			}
 		}
 		if alistErr == nil && conflictErr == nil {
 			updateErr = mapper.UpdateJob(job)
@@ -933,6 +1045,13 @@ func EditJobClient(job map[string]interface{}) error {
 	if jobConfigInvalidatesPendingDeletes(prevConfig, job) {
 		pendingDeleteApprovals.ClearForJob(jobID)
 	}
+	if prevConfig != nil &&
+		(fmt.Sprint(prevConfig["method"]) != fmt.Sprint(job["method"]) ||
+			fmt.Sprint(prevConfig["srcPath"]) != fmt.Sprint(job["srcPath"]) ||
+			fmt.Sprint(prevConfig["dstPath"]) != fmt.Sprint(job["dstPath"]) ||
+			fmt.Sprint(prevConfig["alistId"]) != fmt.Sprint(job["alistId"])) {
+		cleanupBisyncWorkDir(jobID)
+	}
 	return nil
 }
 
@@ -947,7 +1066,7 @@ func jobConfigInvalidatesPendingDeletes(prev, next map[string]interface{}) bool 
 		"alistId", "method", "srcPath", "dstPath", "dstMap",
 		"exclude", "include", "filterMode",
 		"minFileSize", "maxFileSize", "minFileAgeMinutes", "olderThanDays", "newerThanDays",
-		"compareMode", "conflictPolicy",
+		"compareMode", "conflictPolicy", "followSymlinks", "modifyWindow",
 	} {
 		if fmt.Sprint(prev[key]) != fmt.Sprint(next[key]) {
 			return true
@@ -1014,6 +1133,7 @@ func RemoveJobClient(jobID int64) error {
 			return fmt.Errorf("delete job: %w", err)
 		}
 		pendingDeleteApprovals.ClearForJob(jobID)
+		cleanupBisyncWorkDir(jobID)
 		return nil
 	}
 	// Release loadMu before pausing and waiting for idle: holding loadMu across
@@ -1075,6 +1195,7 @@ func RemoveJobClient(jobID int64) error {
 		jobClientListMu.Unlock()
 		loadMu.Unlock()
 		pendingDeleteApprovals.ClearForJob(jobID)
+		cleanupBisyncWorkDir(jobID)
 		return nil
 	}
 	// Row still exists: roll back to the previous state and allow a retry.

@@ -81,7 +81,9 @@ type NativeStorageState struct {
 	Remark            string                 `json:"remark"`
 	MaxConcurrentJobs int                    `json:"maxConcurrentJobs"`
 	RcloneAvailable   bool                   `json:"rcloneAvailable"`
+	RcloneVersion     string                 `json:"rcloneVersion,omitempty"`
 	RcloneError       string                 `json:"rcloneError,omitempty"`
+	SupportedTypes    []string               `json:"supportedTypes"`
 	LocalRoots        []native.LocalRootInfo `json:"localRoots"`
 	Remotes           []NativeRemoteItem     `json:"remotes"`
 }
@@ -132,13 +134,30 @@ func loadExistingNativeRow() (int64, native.Config, error) {
 func collectNativeRemoteReferences(alistID int64, c native.Config) (jobsByRemote map[string][]string, cryptsByRemote map[string][]string) {
 	jobsByRemote = map[string][]string{}
 	cryptsByRemote = map[string][]string{}
-	for name, params := range c {
-		if params["type"] != "crypt" {
-			continue
+	addDep := func(target, owner string) {
+		if target == "" || target == owner {
+			return
 		}
-		ref, _, _ := strings.Cut(params["remote"], ":")
-		if target, ok := c.FindKey(ref); ok && target != name {
-			cryptsByRemote[target] = append(cryptsByRemote[target], name)
+		if !slices.Contains(cryptsByRemote[target], owner) {
+			cryptsByRemote[target] = append(cryptsByRemote[target], owner)
+		}
+	}
+	for name, params := range c {
+		typ := params["type"]
+		if native.IsWrapperType(typ) {
+			ref, _, _ := strings.Cut(params["remote"], ":")
+			if target, ok := c.FindKey(ref); ok {
+				addDep(target, name)
+			}
+		} else if typ == "union" {
+			if ups, err := native.ParseUnionUpstreams(params["upstreams"]); err == nil {
+				for _, up := range ups {
+					ref, _, _ := strings.Cut(up.Target, ":")
+					if target, ok := c.FindKey(ref); ok {
+						addDep(target, name)
+					}
+				}
+			}
 		}
 	}
 	for k := range cryptsByRemote {
@@ -184,13 +203,15 @@ func GetNativeStorageState(ctx context.Context) (*NativeStorageState, error) {
 	}
 	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	rcloneErr := native.Available(checkCtx)
+	rcloneVer, rcloneErr := native.Version(checkCtx)
 	state := &NativeStorageState{
 		EngineID:          id,
 		Enabled:           id > 0,
 		Remark:            remark,
 		MaxConcurrentJobs: mc,
 		RcloneAvailable:   rcloneErr == nil,
+		RcloneVersion:     rcloneVer,
+		SupportedTypes:    native.SupportedRemoteTypes(),
 		LocalRoots:        native.AuthorizedRoots(),
 		Remotes:           make([]NativeRemoteItem, 0, len(c)),
 	}
@@ -725,7 +746,7 @@ func TestNativeStorage(ctx context.Context, in NativeStorageTestInput) (*NativeS
 			probePath = bucketPath
 		}
 	}
-	entries, listErr := testCfg.List(probeCtx, probePath)
+	entries, listErr := testCfg.ListWithOptions(probeCtx, probePath, native.SessionOptions{ProxyURL: globalNativeProxyURL()})
 	latency := time.Since(start).Milliseconds()
 	if listErr != nil {
 		if params["type"] == "s3" && params["no_check_bucket"] == "true" && strings.Contains(listErr.Error(), "403") {
@@ -820,14 +841,26 @@ func DeleteNativeStorage(name string) error {
 		return publicError(fmt.Sprintf("存储 %q 不存在", name))
 	}
 
-	// Prevent breaking crypt remotes that layer on top of this remote.
+	// Prevent breaking composite remotes (crypt/chunker/compress/hasher/union) that layer on top of this remote.
 	for otherName, params := range c {
-		if otherName == target || params["type"] != "crypt" {
+		if otherName == target {
 			continue
 		}
-		ref, _, _ := strings.Cut(params["remote"], ":")
-		if strings.EqualFold(ref, target) {
-			return publicError(fmt.Sprintf("存储 %q 正被加密存储 %q 引用，请先删除对应加密存储", target, otherName))
+		typ := params["type"]
+		if native.IsWrapperType(typ) {
+			ref, _, _ := strings.Cut(params["remote"], ":")
+			if strings.EqualFold(ref, target) {
+				return publicError(fmt.Sprintf("存储 %q 正被组合存储 %q（%s）引用，请先删除对应存储", target, otherName, typ))
+			}
+		} else if typ == "union" {
+			if ups, err := native.ParseUnionUpstreams(params["upstreams"]); err == nil {
+				for _, up := range ups {
+					ref, _, _ := strings.Cut(up.Target, ":")
+					if strings.EqualFold(ref, target) {
+						return publicError(fmt.Sprintf("存储 %q 正被合并存储 %q（union）引用，请先修改或删除对应存储", target, otherName))
+					}
+				}
+			}
 		}
 	}
 
@@ -893,13 +926,26 @@ func validateNativeJob(job, row map[string]interface{}) error {
 	if c == nil || e != nil {
 		return e
 	}
-	if util.ToInt(job["method"]) != 0 || util.ToInt(job["conflictPolicy"]) == 2 || util.ToBool(job["trashEnable"]) {
-		return publicError("原生备份支持单向复制和跳过同名文件")
+	method := util.ToInt(job["method"])
+	if method < 0 || method > 3 {
+		return publicError("不支持的同步方式")
 	}
-	for _, src := range parsePathList(job["srcPath"]) {
-		for _, dst := range parsePathList(job["dstPath"]) {
-			if _, _, e = c.Pair(src, jobDstForSrc(job, src, dst)); e != nil {
-				return publicError(e.Error())
+	srcPaths := parsePathList(job["srcPath"])
+	dstPaths := parsePathList(job["dstPath"])
+	if method == 3 && (len(srcPaths) != 1 || len(dstPaths) != 1) {
+		return publicError("双向同步仅支持单个源目录与单个目标目录")
+	}
+	for _, src := range srcPaths {
+		for _, dst := range dstPaths {
+			epSrc, epDst, err := c.Pair(src, jobDstForSrc(job, src, dst))
+			if err != nil {
+				return publicError(err.Error())
+			}
+			if method == 3 && (epSrc.ReadOnly || epDst.ReadOnly) {
+				return publicError("双向同步的两端均需支持读写，不能使用只读 HTTP 存储")
+			}
+			if method == 2 && epSrc.ReadOnly {
+				return publicError("移动模式需要删除源文件，不能使用只读 HTTP 存储作为源")
 			}
 		}
 	}
@@ -951,62 +997,112 @@ type nativePairsOutcome struct {
 }
 
 func runNativePairs(ctx context.Context, c native.Config, job map[string]interface{}, dry bool, selected map[nativeItemKey]bool, onEvent func(string, string, native.Event)) nativePairsOutcome {
-	if util.ToInt(job["method"]) != 0 || util.ToInt(job["conflictPolicy"]) == 2 || util.ToBool(job["trashEnable"]) {
-		return nativePairsOutcome{err: errors.New("原生备份仅支持单向复制"), untrackedPairFailure: true}
-	}
-	limits := taskRuntimeLimitsForJob(job)
-	exclude := buildJobExcludeMatcher(job)
-	include := buildJobIncludeMatcher(job)
-	now := time.Now()
-	opts := native.CopyOptions{Transfers: limits.CopyConcurrency, Checkers: limits.ScanConcurrency, Retries: limits.MaxRetries, Compare: util.ToInt(job["compareMode"]), SkipExisting: util.ToInt(job["conflictPolicy"]) == 1, DryRun: dry,
-		Include: func(p string, info os.FileInfo) bool {
-			if exclude.matchesListed(p, info.IsDir()) {
-				return false
-			}
-			return info.IsDir() || include.matchesListed(p) && jobAllowsFileMeta(job, FileMetadata{Size: info.Size(), Modified: info.ModTime().Unix()}, now)
-		}}
+	return runNativePairsWithTask(ctx, nil, c, job, dry, selected, onEvent)
+}
 
-	var out nativePairsOutcome
-	var errs []error
+func runNativePairsWithTask(ctx context.Context, jt *JobTask, c native.Config, job map[string]interface{}, dry bool, selected map[nativeItemKey]bool, onEvent func(string, string, native.Event)) nativePairsOutcome {
+	backupDir := ""
+	if !dry {
+		backupDir = nativeTrashBackupSubdir(jt, job)
+	}
+	baseOpts := buildNativeCopyOptions(job, dry, backupDir)
+
+	type pairTarget struct{ src, dst string }
+	var pairs []pairTarget
 	for _, src := range parsePathList(job["srcPath"]) {
 		for _, base := range parsePathList(job["dstPath"]) {
-			if ctx.Err() != nil {
-				out.err = ctx.Err()
-				return out
-			}
-			dst := jobDstForSrc(job, src, base)
-			pairOptions := opts
-			if selected != nil {
-				pairOptions.Include = func(p string, st os.FileInfo) bool {
-					if st.IsDir() {
-						return opts.Include(p, st)
-					}
-					key := nativeItemKey{path.Join(src, p), path.Join(dst, p)}
-					if !selected[key] || !opts.Include(p, st) {
-						return false
-					}
+			pairs = append(pairs, pairTarget{src: src, dst: jobDstForSrc(job, src, base)})
+		}
+	}
+
+	var (
+		out      nativePairsOutcome
+		mu       sync.Mutex
+		errs     []error
+		eventMu  sync.Mutex
+	)
+
+	runOne := func(pt pairTarget) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		pairOptions := baseOpts
+		if selected != nil {
+			pairOptions.Include = func(p string, st os.FileInfo) bool {
+				if st.IsDir() {
+					return baseOpts.Include(p, st)
+				}
+				key := nativeItemKey{path.Join(pt.src, p), path.Join(pt.dst, p)}
+				mu.Lock()
+				allowed := selected[key]
+				if allowed && baseOpts.Include(p, st) {
 					delete(selected, key)
+					mu.Unlock()
 					return true
 				}
+				mu.Unlock()
+				return false
 			}
-			pairFileFailed := false
-			e := c.Copy(ctx, src, dst, pairOptions, func(v native.Event) {
-				if v.Failed {
-					pairFileFailed = true
-					out.hadFileFailure = true
+		}
+		pairFileFailed := false
+		e := c.Copy(ctx, pt.src, pt.dst, pairOptions, func(v native.Event) {
+			if v.Failed {
+				pairFileFailed = true
+				mu.Lock()
+				out.hadFileFailure = true
+				mu.Unlock()
+			}
+			eventMu.Lock()
+			onEvent(pt.src, pt.dst, v)
+			eventMu.Unlock()
+		})
+		if e != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			mu.Lock()
+			errs = append(errs, e)
+			if !pairFileFailed {
+				out.untrackedPairFailure = true
+			}
+			mu.Unlock()
+			return e
+		}
+		return nil
+	}
+
+	// Use bounded concurrent pair execution for multi-pair live runs without
+	// targeted retry filters; keep sequential order for dry-run and single-pair.
+	if !dry && selected == nil && len(pairs) > 1 {
+		workers := min(nativePairMaxConcurrency, len(pairs))
+		sem := make(chan struct{}, workers)
+		var wg sync.WaitGroup
+		for _, pt := range pairs {
+			pt := pt
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				select {
+				case sem <- struct{}{}:
+					defer func() { <-sem }()
+				case <-ctx.Done():
+					return
 				}
-				onEvent(src, dst, v)
-			})
-			if e != nil {
+				_ = runOne(pt)
+			}()
+		}
+		wg.Wait()
+		if ctx.Err() != nil {
+			out.err = ctx.Err()
+			return out
+		}
+	} else {
+		for _, pt := range pairs {
+			if e := runOne(pt); e != nil {
 				if ctx.Err() != nil {
 					out.err = ctx.Err()
 					return out
 				}
-				errs = append(errs, e)
-				if !pairFileFailed {
-					out.untrackedPairFailure = true
-				}
-				// In dry-run mode fail fast so preview errors surface immediately.
 				if dry {
 					out.err = e
 					return out
@@ -1014,6 +1110,7 @@ func runNativePairs(ctx context.Context, c native.Config, job map[string]interfa
 			}
 		}
 	}
+
 	if len(selected) > 0 && len(errs) == 0 {
 		out.err = errors.New("部分重试文件已移动、被过滤或不属于当前任务")
 		out.untrackedPairFailure = true
@@ -1058,31 +1155,120 @@ func (jt *JobTask) runNative() {
 			return
 		}
 	}
-	var pair nativeItemKey
-	var completed, baseBytes, prevScannedDirs, pairScannedDirs, prevScannedFiles, pairScannedFiles, prevCheckedFiles, pairCheckedFiles int64
-	outcome := runNativePairs(jt.context(), jt.nativeConfig, jt.Job, false, selected, func(src, dst string, v native.Event) {
-		if key := (nativeItemKey{src, dst}); key != pair {
-			prevScannedDirs += pairScannedDirs
-			pairScannedDirs = 0
-			prevScannedFiles += pairScannedFiles
-			pairScannedFiles = 0
-			prevCheckedFiles += pairCheckedFiles
-			pairCheckedFiles = 0
-			pair = key
-			baseBytes = completed
+
+	method := util.ToInt(jt.Job["method"])
+	switch method {
+	case 1:
+		err := jt.runNativeFullSync(selected)
+		jt.ScanFinish.Store(true)
+		jt.Waiting.reset()
+		jt.nativeStats.Store(nil)
+		if jt.context().Err() == nil {
+			jt.drained.Store(true)
+		}
+		persist := jt.persistRemainingTaskItems()
+		if err != nil && !jt.hasAnyFailedItem() && jt.context().Err() == nil {
+			jt.finishFailedTask(err.Error())
+			return
+		}
+		jt.finishSubmittedTask(persist)
+		return
+
+	case 2:
+		err := jt.runNativeMove(selected)
+		jt.ScanFinish.Store(true)
+		jt.Waiting.reset()
+		jt.nativeStats.Store(nil)
+		if jt.context().Err() == nil {
+			jt.drained.Store(true)
+		}
+		persist := jt.persistRemainingTaskItems()
+		if err != nil && !jt.hasAnyFailedItem() && jt.context().Err() == nil {
+			jt.finishFailedTask(err.Error())
+			return
+		}
+		jt.finishSubmittedTask(persist)
+		return
+
+	case 3:
+		err := jt.runNativeBisync()
+		jt.ScanFinish.Store(true)
+		jt.Waiting.reset()
+		jt.nativeStats.Store(nil)
+		if jt.context().Err() == nil {
+			jt.drained.Store(true)
+		}
+		persist := jt.persistRemainingTaskItems()
+		if err != nil && !jt.hasAnyFailedItem() && jt.context().Err() == nil {
+			jt.finishFailedTask(err.Error())
+			return
+		}
+		jt.finishSubmittedTask(persist)
+		return
+	}
+
+	// Method 0: Incremental copy with multi-pair progress aggregation & waiting queue.
+	type pairProgress struct {
+		scannedDirs  int64
+		scannedFiles int64
+		checkedFiles int64
+		bytes        int64
+		totalBytes   int64
+		transfers    int64
+		totalTrans   int64
+		speed        float64
+		transferring []native.TransferItem
+		src, dst     string
+	}
+	pairState := map[nativeItemKey]*pairProgress{}
+	getPair := func(src, dst string) *pairProgress {
+		k := nativeItemKey{src, dst}
+		ps := pairState[k]
+		if ps == nil {
+			ps = &pairProgress{src: src, dst: dst}
+			pairState[k] = ps
+		}
+		return ps
+	}
+	publishAggregateStats := func(lastSrc, lastDst string) {
+		var agg native.Stats
+		var totalDirs, totalFiles, totalChecked int64
+		for _, ps := range pairState {
+			totalDirs += ps.scannedDirs
+			totalFiles += ps.scannedFiles
+			totalChecked += ps.checkedFiles
+			agg.Bytes += ps.bytes
+			agg.TotalBytes += ps.totalBytes
+			agg.Transfers += ps.transfers
+			agg.TotalTransfers += ps.totalTrans
+			agg.Speed += ps.speed
+			agg.Transferring = append(agg.Transferring, ps.transferring...)
+		}
+		jt.ScanTotalDirs.Store(totalDirs)
+		jt.ScanDoneDirs.Store(totalDirs)
+		jt.ScanTotalFiles.Store(totalFiles)
+		jt.ScanCheckedFiles.Store(totalChecked)
+		jt.nativeStats.Store(&nativeProgressSnapshot{
+			src:   lastSrc,
+			dst:   lastDst,
+			stats: &agg,
+		})
+		jt.notifyProgressChange()
+	}
+
+	outcome := runNativePairsWithTask(jt.context(), jt, jt.nativeConfig, jt.Job, false, selected, func(src, dst string, v native.Event) {
+		ps := getPair(src, dst)
+		if len(v.PendingFiles) > 0 {
+			jt.populateNativeWaiting(src, dst, v.PendingFiles)
 		}
 		if v.ScanDirs > 0 || v.ScanFiles > 0 || v.ScanDone {
-			if v.ScanDirs > pairScannedDirs {
-				pairScannedDirs = v.ScanDirs
+			if v.ScanDirs > ps.scannedDirs {
+				ps.scannedDirs = v.ScanDirs
 			}
-			if v.ScanFiles > pairScannedFiles {
-				pairScannedFiles = v.ScanFiles
+			if v.ScanFiles > ps.scannedFiles {
+				ps.scannedFiles = v.ScanFiles
 			}
-			totalDirs := prevScannedDirs + pairScannedDirs
-			jt.ScanTotalDirs.Store(totalDirs)
-			jt.ScanDoneDirs.Store(totalDirs)
-			jt.ScanTotalFiles.Store(prevScannedFiles + pairScannedFiles)
-			jt.notifyProgressChange()
+			publishAggregateStats(src, dst)
 			return
 		}
 		if v.Stats != nil {
@@ -1090,25 +1276,29 @@ func (jt *JobTask) runNative() {
 				jt.FirstSync.CompareAndSwap(0, time.Now().Unix())
 			}
 			checked := v.Stats.Checks
-			if pairScannedFiles > 0 && checked > pairScannedFiles {
-				checked = pairScannedFiles
+			if ps.scannedFiles > 0 && checked > ps.scannedFiles {
+				checked = ps.scannedFiles
 			}
-			if checked > pairCheckedFiles {
-				pairCheckedFiles = checked
-				jt.ScanCheckedFiles.Store(prevCheckedFiles + pairCheckedFiles)
+			if checked > ps.checkedFiles {
+				ps.checkedFiles = checked
 			}
-			statsCopy := *v.Stats
-			statsCopy.Bytes += baseBytes
-			statsCopy.TotalBytes += baseBytes
-			jt.nativeStats.Store(&nativeProgressSnapshot{
-				src:   src,
-				dst:   dst,
-				stats: &statsCopy,
-			})
-			jt.notifyProgressChange()
+			ps.bytes = v.Stats.Bytes
+			ps.totalBytes = v.Stats.TotalBytes
+			ps.transfers = v.Stats.Transfers
+			ps.totalTrans = v.Stats.TotalTransfers
+			ps.speed = v.Stats.Speed
+			ps.transferring = v.Stats.Transferring
+			publishAggregateStats(src, dst)
+			return
+		}
+		if v.File == "" {
 			return
 		}
 		jt.FirstSync.CompareAndSwap(0, time.Now().Unix())
+		srcDir := path.Join(src, path.Dir(v.File))
+		dstDir := path.Join(dst, path.Dir(v.File))
+		base := path.Base(v.File)
+		jt.Waiting.removeMatching(srcDir, dstDir, base)
 		status := taskStatusSuccess
 		var itemErr *string
 		if v.Failed {
@@ -1118,12 +1308,14 @@ func (jt *JobTask) runNative() {
 			}
 			itemErr = &text
 			status = taskStatusFailed
-		} else {
-			completed += v.Size
 		}
-		jt.appendFinish(NewCopyJobTaskItem(jt.TaskID, path.Join(src, path.Dir(v.File)), path.Join(dst, path.Dir(v.File)), path.Base(v.File), v.Size, "", status, itemErr, taskItemFile, taskItemTypeCopy, time.Now().Unix()))
+		jt.appendFinish(NewCopyJobTaskItem(jt.TaskID, srcDir, dstDir, base, v.Size, "", status, itemErr, taskItemFile, taskItemTypeCopy, time.Now().Unix()))
 	})
+	if jt.context().Err() == nil {
+		cleanupNativeExpiredTrash(jt.context(), jt.nativeConfig, jt.TaskID, jt.Job)
+	}
 	jt.ScanFinish.Store(true)
+	jt.Waiting.reset()
 	jt.nativeStats.Store(nil)
 	if jt.context().Err() == nil {
 		jt.drained.Store(true)
@@ -1234,24 +1426,25 @@ func nativeHealth(ctx context.Context, row map[string]interface{}, sendAlert boo
 					defer cancel()
 					params := c[name]
 					status := "work"
+					probeOpts := native.SessionOptions{ProxyURL: globalNativeProxyURL()}
 					if params["type"] == "s3" {
 						if bucketPath, hasBucket := s3Buckets[name]; hasBucket {
 							// Probe the configured bucket directly when available so
 							// bucket-scoped IAM credentials without ListAllMyBuckets pass.
-							if _, err := c.List(probeCtx, bucketPath); err != nil {
+							if _, err := c.ListWithOptions(probeCtx, bucketPath, probeOpts); err != nil {
 								status = err.Error()
 							}
 						} else if params["no_check_bucket"] == "true" {
 							// Bucket-scoped S3 with no_check_bucket and no bound job yet:
 							// tolerate 403 ListBuckets errors, while still surfacing auth or
 							// network errors so broken endpoints/credentials are visible.
-							if _, err := c.List(probeCtx, "/"+name); err != nil && !strings.Contains(err.Error(), "403") {
+							if _, err := c.ListWithOptions(probeCtx, "/"+name, probeOpts); err != nil && !strings.Contains(err.Error(), "403") {
 								status = err.Error()
 							}
-						} else if _, err := c.List(probeCtx, "/"+name); err != nil {
+						} else if _, err := c.ListWithOptions(probeCtx, "/"+name, probeOpts); err != nil {
 							status = err.Error()
 						}
-					} else if _, err := c.List(probeCtx, "/"+name); err != nil {
+					} else if _, err := c.ListWithOptions(probeCtx, "/"+name, probeOpts); err != nil {
 						status = err.Error()
 					}
 					results[i] = EngineStorageStatus{MountPath: "/" + name, Driver: params["type"], Status: status}
@@ -1273,7 +1466,7 @@ func nativeBackupKey(url, user, secret string) error {
 	if user != "rclone" {
 		return fmt.Errorf("无效的原生备份引擎")
 	}
-	if strings.TrimSpace(secret) != "" && !isMaskedSecretValue(secret) {
+	if strings.TrimSpace(secret) != "" && !isMaskedSecretValue(secret) && !native.ConfigContainsRedactedSecrets(secret) {
 		_, e := native.Decode(secret)
 		return e
 	}

@@ -4858,3 +4858,64 @@ body[theme-mode="dark"] .kpi-dot--pulse {
   color: var(--semi-color-danger);
   line-height: 1.4;
 }
+
+.native-about-line {
+  font-size: var(--font-size-small);
+  line-height: 1.4;
+}
+
+.native-browse-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--semi-color-border);
+  background: var(--surface-soft);
+}
+
+.native-browse-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-small);
+}
+
+.native-browse-list {
+  max-height: 360px;
+  overflow: auto;
+}
+
+.native-browse-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--semi-color-primary);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.native-browse-link:hover {
+  text-decoration: underline;
+}
+
+.native-browse-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--semi-color-text-0);
+}
+
+.check-modal-toolbar {
+  display: grid;
+  gap: 8px;
+}
+
+.text-setting {
+  width: min(340px, 100%);
+}

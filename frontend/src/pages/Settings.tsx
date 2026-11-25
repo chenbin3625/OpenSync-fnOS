@@ -99,6 +99,20 @@ const fields = [
     unit: "天",
     tip: "历史任务记录保留天数，0 表示不自动清理",
   },
+  {
+    key: "defaultBwLimit",
+    label: "默认带宽限制",
+    kind: "text",
+    placeholder: "如 10M 或 08:00,5M 23:00,off（留空不限速）",
+    tip: "原生 rclone 引擎默认带宽上限，任务未单独设置限速时生效；支持分时段格式如 08:00,5M 23:00,off",
+  },
+  {
+    key: "proxyUrl",
+    label: "全局代理地址",
+    kind: "text",
+    placeholder: "如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080",
+    tip: "原生 rclone 引擎访问远端存储时使用的全局 HTTP / HTTPS / SOCKS5 代理（本地授权目录自动直连）",
+  },
 ] as const;
 type SettingsForm = Record<(typeof fields)[number]["key"], string>;
 
@@ -113,6 +127,10 @@ const cardGroups = [
       "scheduledFullSyncConfirm",
       "fullSyncApprovalTimeout",
     ] as const,
+  },
+  {
+    title: "原生引擎与网络",
+    keys: ["defaultBwLimit", "proxyUrl"] as const,
   },
   {
     title: "监控与历史",
@@ -272,6 +290,29 @@ export default function Settings() {
     const values: SystemSettings = { ...resource.data };
     for (const field of fields) {
       const input = form[field.key].trim();
+      if ("kind" in field && field.kind === "text") {
+        if (field.key === "proxyUrl" && input) {
+          try {
+            const parsed = new URL(input);
+            if (
+              !["http:", "https:", "socks5:", "socks5h:"].includes(
+                parsed.protocol,
+              ) ||
+              !parsed.hostname
+            ) {
+              Toast.warning(
+                "全局代理地址仅支持 http://、https://、socks5:// 或 socks5h://",
+              );
+              return;
+            }
+          } catch {
+            Toast.warning("全局代理地址格式无效");
+            return;
+          }
+        }
+        values[field.key] = input;
+        continue;
+      }
       const value = Number(input);
       if (
         !/^\d+$/.test(input) ||
@@ -360,6 +401,19 @@ export default function Settings() {
             setForm((f) => f && { ...f, [field.key]: checked ? "1" : "0" });
           }}
         />
+      ) : "kind" in field && field.kind === "text" ? (
+        <div className="text-setting">
+          <Input
+            aria-label={field.label}
+            value={form![field.key]}
+            placeholder={field.placeholder}
+            showClear
+            disabled={action.busy}
+            onChange={(value) => {
+              setForm((f) => f && { ...f, [field.key]: value });
+            }}
+          />
+        </div>
       ) : (
         <div className="numeric-setting">
           <Input

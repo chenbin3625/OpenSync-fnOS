@@ -101,6 +101,59 @@ func DeleteNativeStorage(c *gin.Context) {
 	handleServiceVoid(c, func() error { return service.DeleteNativeStorage(name) })
 }
 
+func RenameNativeStorage(c *gin.Context) {
+	var in service.NativeRenameInput
+	if !bindJSONStrict(c, &in) {
+		return
+	}
+	handleService(c, func() (interface{}, error) {
+		return service.RenameNativeStorage(c.Request.Context(), in)
+	})
+}
+
+func ExportNativeConfig(c *gin.Context) {
+	var in service.NativeExportInput
+	if !bindJSONStrict(c, &in) {
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	handleService(c, func() (interface{}, error) {
+		return service.ExportNativeConfig(c.Request.Context(), in)
+	})
+}
+
+func AboutNativeStorage(c *gin.Context) {
+	var in service.NativeAboutInput
+	if !bindJSONStrict(c, &in) {
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	handleService(c, func() (interface{}, error) {
+		return service.AboutNativeStorage(c.Request.Context(), in)
+	})
+}
+
+func BrowseNativeStorage(c *gin.Context) {
+	var in service.NativeBrowseInput
+	if !bindJSONStrict(c, &in) {
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	handleService(c, func() (interface{}, error) {
+		return service.BrowseNativeStorage(c.Request.Context(), in)
+	})
+}
+
+func RestoreNativeFile(c *gin.Context) {
+	var in service.NativeRestoreInput
+	if !bindJSONStrict(c, &in) {
+		return
+	}
+	handleServiceVoid(c, func() error {
+		return service.RestoreNativeFile(c.Request.Context(), in)
+	})
+}
+
 // AddAlist handles POST /svr/alist
 func AddAlist(c *gin.Context) {
 	var req map[string]interface{}

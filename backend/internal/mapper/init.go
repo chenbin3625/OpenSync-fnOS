@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const currentVersion = 261123
+const currentVersion = 261124
 
 // InitSQL initializes the database schema and runs migrations
 func InitSQL() {
@@ -85,6 +85,15 @@ func InitSQL() {
 				windowStopOutside integer DEFAULT 0,
 				notifyMode integer DEFAULT 0,
 				notifyIds text DEFAULT NULL,
+				bwLimit text DEFAULT NULL,
+				tpsLimit real DEFAULT 0,
+				tpsLimitBurst integer DEFAULT 0,
+				modifyWindow text DEFAULT NULL,
+				fastList integer DEFAULT 0,
+				multiThreadStreams integer DEFAULT 0,
+				createEmptySrcDirs integer DEFAULT 0,
+				followSymlinks integer DEFAULT 0,
+				extraFlags text DEFAULT NULL,
 				createTime integer DEFAULT (strftime('%s', 'now')),
 				UNIQUE (srcPath, dstPath, alistId)
 			)`,
@@ -439,6 +448,19 @@ func migrationStatements(fromVersion int64) []string {
 			createdAt integer NOT NULL,
 			expiresAt integer DEFAULT 0
 		)`)
+	}
+	if fromVersion < 261124 {
+		stmts = append(stmts,
+			"ALTER TABLE job ADD COLUMN bwLimit text DEFAULT NULL",
+			"ALTER TABLE job ADD COLUMN tpsLimit real DEFAULT 0",
+			"ALTER TABLE job ADD COLUMN tpsLimitBurst integer DEFAULT 0",
+			"ALTER TABLE job ADD COLUMN modifyWindow text DEFAULT NULL",
+			"ALTER TABLE job ADD COLUMN fastList integer DEFAULT 0",
+			"ALTER TABLE job ADD COLUMN multiThreadStreams integer DEFAULT 0",
+			"ALTER TABLE job ADD COLUMN createEmptySrcDirs integer DEFAULT 0",
+			"ALTER TABLE job ADD COLUMN followSymlinks integer DEFAULT 0",
+			"ALTER TABLE job ADD COLUMN extraFlags text DEFAULT NULL",
+		)
 	}
 	stmts = append(stmts, fmt.Sprintf("UPDATE schema_version SET version=%d", currentVersion))
 	return stmts
