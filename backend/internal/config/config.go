@@ -48,8 +48,22 @@ type ServerConfig struct {
 	// DefaultBwLimit is the global default rclone bandwidth limit (empty = unlimited).
 	DefaultBwLimit string
 	// ProxyURL is the optional global outbound proxy URL for native rclone transfers.
-	ProxyURL  string
-	PasswdStr string
+	ProxyURL string
+	// LocalMaxConcurrentJobs caps concurrent jobs accessing local authorized roots (0 = unlimited).
+	LocalMaxConcurrentJobs int
+	// MinFreeSpaceMB aborts transfers before writing when destination free space is below this MiB threshold (0 = disabled).
+	MinFreeSpaceMB int
+	// AutoResumeInterrupted automatically resumes tasks interrupted by service restart/crash (0 = off, 1 = on).
+	AutoResumeInterrupted int
+	// DigestEnable enables scheduled daily/weekly summary notifications (0 = off, 1 = on).
+	DigestEnable int
+	// DigestSchedule is "daily" or "weekly" (empty = disabled).
+	DigestSchedule string
+	// DigestHour is the hour of day (0..23) to send digest notifications.
+	DigestHour int
+	// DigestWeekday is the weekday (0=Sunday..6=Saturday) for weekly digests.
+	DigestWeekday int
+	PasswdStr     string
 	// AllowedOrigins lists the origins allowed to perform mutations. Entries are
 	// full origins ("http://nas.example:5666") or bare hosts ("nas.example");
 	// full origins match scheme and effective port exactly, while bare hosts
@@ -121,11 +135,23 @@ type SystemSettings struct {
 	EngineHealthCheckInterval int    `json:"engineHealthCheckInterval"`
 	DefaultBwLimit            string `json:"defaultBwLimit"`
 	ProxyURL                  string `json:"proxyUrl"`
+	LocalMaxConcurrentJobs    int    `json:"localMaxConcurrentJobs"`
+	MinFreeSpaceMB            int    `json:"minFreeSpaceMB"`
+	AutoResumeInterrupted     int    `json:"autoResumeInterrupted"`
+	DigestEnable              int    `json:"digestEnable"`
+	DigestSchedule            string `json:"digestSchedule"`
+	DigestHour                int    `json:"digestHour"`
+	DigestWeekday             int    `json:"digestWeekday"`
 }
 
 var (
-	bwRatePartPattern      = regexp.MustCompile(`^(?i:off|0|[0-9]+(?:\.[0-9]+)?(?:[bkmgtp]i?b?)?)$`)
+	bwRatePartPattern      = regexp.MustCompile(`^(?i:off|0|[0-9]+(?:\.[0-9]+)?(?:b|[kmgtp](?:i|ib)?)?)$`)
 	bwScheduleTokenPattern = regexp.MustCompile(`^(?:(?i:mon|tue|wed|thu|fri|sat|sun)-)?(?:[01]?[0-9]|2[0-3]):[0-5][0-9],(.+)$`)
+)
+
+const (
+	maxBwLimitLen    = 1024
+	maxBwLimitTokens = 128
 )
 
 func validBwRateSpec(spec string) bool {
@@ -147,10 +173,13 @@ func ValidateBwLimit(value string) error {
 	if trimmed == "" {
 		return nil
 	}
-	if len(trimmed) > 256 || strings.HasPrefix(trimmed, "-") || strings.IndexFunc(trimmed, unicode.IsControl) >= 0 {
+	if len(trimmed) > maxBwLimitLen || strings.HasPrefix(trimmed, "-") || strings.IndexFunc(trimmed, unicode.IsControl) >= 0 {
 		return errors.New(msg.T(msg.BwLimitInvalid))
 	}
 	tokens := strings.Fields(trimmed)
+	if len(tokens) > maxBwLimitTokens {
+		return errors.New(msg.T(msg.BwLimitInvalid))
+	}
 	if len(tokens) == 1 && !strings.Contains(tokens[0], ",") {
 		if !validBwRateSpec(tokens[0]) {
 			return errors.New(msg.T(msg.BwLimitInvalid))
@@ -369,6 +398,9 @@ var knownConfigKeys = map[string]struct{}{
 	"scan_concurrency": {}, "max_retries": {}, "scheduled_full_sync_confirm": {},
 	"full_sync_approval_timeout": {}, "engine_health_check_interval": {},
 	"default_bw_limit": {}, "proxy_url": {},
+	"local_max_concurrent_jobs": {}, "min_free_space_mb": {},
+	"auto_resume_interrupted": {}, "digest_enable": {},
+	"digest_schedule": {}, "digest_hour": {}, "digest_weekday": {},
 	"allowed_origins": {}, "locale": {},
 }
 
@@ -427,6 +459,13 @@ func loadServerConfig(passwdStr string) (ServerConfig, error) {
 	sCfg.EngineHealthCheckInterval = envIntConfigValue("OPENSYNC_ENGINE_HEALTH_CHECK_INTERVAL", sCfg.EngineHealthCheckInterval)
 	sCfg.DefaultBwLimit = envStringConfigValue("OPENSYNC_DEFAULT_BW_LIMIT", sCfg.DefaultBwLimit)
 	sCfg.ProxyURL = envStringConfigValue("OPENSYNC_PROXY_URL", sCfg.ProxyURL)
+	sCfg.LocalMaxConcurrentJobs = envIntConfigValue("OPENSYNC_LOCAL_MAX_CONCURRENT_JOBS", sCfg.LocalMaxConcurrentJobs)
+	sCfg.MinFreeSpaceMB = envIntConfigValue("OPENSYNC_MIN_FREE_SPACE_MB", sCfg.MinFreeSpaceMB)
+	sCfg.AutoResumeInterrupted = envIntConfigValue("OPENSYNC_AUTO_RESUME_INTERRUPTED", sCfg.AutoResumeInterrupted)
+	sCfg.DigestEnable = envIntConfigValue("OPENSYNC_DIGEST_ENABLE", sCfg.DigestEnable)
+	sCfg.DigestSchedule = envStringConfigValue("OPENSYNC_DIGEST_SCHEDULE", sCfg.DigestSchedule)
+	sCfg.DigestHour = envIntConfigValue("OPENSYNC_DIGEST_HOUR", sCfg.DigestHour)
+	sCfg.DigestWeekday = envIntConfigValue("OPENSYNC_DIGEST_WEEKDAY", sCfg.DigestWeekday)
 	sCfg.AllowedOrigins = splitList(os.Getenv("OPENSYNC_ALLOWED_ORIGINS"))
 	sCfg.Locale = envStringConfigValue("OPENSYNC_LOCALE", sCfg.Locale)
 	for _, name := range deprecatedConfigEnv {
@@ -483,6 +522,27 @@ func loadServerConfig(passwdStr string) (ServerConfig, error) {
 		if v, ok := opensync["proxy_url"]; ok {
 			sCfg.ProxyURL = strings.TrimSpace(v)
 		}
+		if v, ok := opensync["local_max_concurrent_jobs"]; ok {
+			sCfg.LocalMaxConcurrentJobs = intConfigValue(v, sCfg.LocalMaxConcurrentJobs, "local_max_concurrent_jobs")
+		}
+		if v, ok := opensync["min_free_space_mb"]; ok {
+			sCfg.MinFreeSpaceMB = intConfigValue(v, sCfg.MinFreeSpaceMB, "min_free_space_mb")
+		}
+		if v, ok := opensync["auto_resume_interrupted"]; ok {
+			sCfg.AutoResumeInterrupted = intConfigValue(v, sCfg.AutoResumeInterrupted, "auto_resume_interrupted")
+		}
+		if v, ok := opensync["digest_enable"]; ok {
+			sCfg.DigestEnable = intConfigValue(v, sCfg.DigestEnable, "digest_enable")
+		}
+		if v, ok := opensync["digest_schedule"]; ok {
+			sCfg.DigestSchedule = strings.ToLower(strings.TrimSpace(v))
+		}
+		if v, ok := opensync["digest_hour"]; ok {
+			sCfg.DigestHour = intConfigValue(v, sCfg.DigestHour, "digest_hour")
+		}
+		if v, ok := opensync["digest_weekday"]; ok {
+			sCfg.DigestWeekday = intConfigValue(v, sCfg.DigestWeekday, "digest_weekday")
+		}
 		if v, ok := opensync["allowed_origins"]; ok {
 			sCfg.AllowedOrigins = splitList(v)
 		}
@@ -516,6 +576,13 @@ func clampServerConfig(sCfg *ServerConfig) {
 	sCfg.EngineHealthCheckInterval = clampManagedInt("engine_health_check_interval", sCfg.EngineHealthCheckInterval)
 	sCfg.DefaultBwLimit = clampManagedString("default_bw_limit", sCfg.DefaultBwLimit)
 	sCfg.ProxyURL = clampManagedString("proxy_url", sCfg.ProxyURL)
+	sCfg.LocalMaxConcurrentJobs = clampManagedInt("local_max_concurrent_jobs", sCfg.LocalMaxConcurrentJobs)
+	sCfg.MinFreeSpaceMB = clampManagedInt("min_free_space_mb", sCfg.MinFreeSpaceMB)
+	sCfg.AutoResumeInterrupted = clampManagedInt("auto_resume_interrupted", sCfg.AutoResumeInterrupted)
+	sCfg.DigestEnable = clampManagedInt("digest_enable", sCfg.DigestEnable)
+	sCfg.DigestSchedule = clampManagedString("digest_schedule", sCfg.DigestSchedule)
+	sCfg.DigestHour = clampManagedInt("digest_hour", sCfg.DigestHour)
+	sCfg.DigestWeekday = clampManagedInt("digest_weekday", sCfg.DigestWeekday)
 }
 
 func clampManagedString(key, value string) string {
@@ -531,6 +598,12 @@ func clampManagedString(key, value string) string {
 			return ""
 		}
 		return trimmed
+	case "digest_schedule":
+		low := strings.ToLower(trimmed)
+		if low != "daily" && low != "weekly" {
+			return ""
+		}
+		return low
 	default:
 		return trimmed
 	}
@@ -557,6 +630,18 @@ func clampManagedInt(key string, value int) int {
 		return clampInt(value, MinFullSyncApprovalTimeout, MaxFullSyncApprovalTimeout, DefaultFullSyncApprovalTimeout)
 	case "engine_health_check_interval":
 		return clampInt(value, MinEngineHealthCheckInterval, MaxEngineHealthCheckInterval, DefaultEngineHealthCheckInterval)
+	case "local_max_concurrent_jobs":
+		return clampInt(value, 0, 50, 0)
+	case "min_free_space_mb":
+		return clampInt(value, 0, 10485760, 0)
+	case "auto_resume_interrupted":
+		return clampInt(value, 0, 1, 0)
+	case "digest_enable":
+		return clampInt(value, 0, 1, 0)
+	case "digest_hour":
+		return clampInt(value, 0, 23, 0)
+	case "digest_weekday":
+		return clampInt(value, 0, 6, 0)
 	default:
 		return value
 	}
@@ -604,7 +689,148 @@ func settingsFromServer(s ServerConfig) SystemSettings {
 		EngineHealthCheckInterval: s.EngineHealthCheckInterval,
 		DefaultBwLimit:            s.DefaultBwLimit,
 		ProxyURL:                  s.ProxyURL,
+		LocalMaxConcurrentJobs:    s.LocalMaxConcurrentJobs,
+		MinFreeSpaceMB:            s.MinFreeSpaceMB,
+		AutoResumeInterrupted:     s.AutoResumeInterrupted,
+		DigestEnable:              s.DigestEnable,
+		DigestSchedule:            s.DigestSchedule,
+		DigestHour:                s.DigestHour,
+		DigestWeekday:             s.DigestWeekday,
 	}
+}
+
+// GetEffectiveLocale returns the active backend locale ("zh" or "en").
+func GetEffectiveLocale() string {
+	_ = GetConfig()
+	return msg.Locale()
+}
+
+// UpdateLocale sets the active backend locale ("zh" or "en") and persists it
+// to config.ini without disturbing other settings or comments.
+func UpdateLocale(raw string) error {
+	trimmed := strings.ToLower(strings.TrimSpace(raw))
+	switch trimmed {
+	case "zh", "zh-cn", "zh_cn":
+		trimmed = "zh"
+	case "en", "en-us", "en_us":
+		trimmed = "en"
+	default:
+		return errors.New("仅支持简体中文（zh）或英文（en）")
+	}
+	GetConfig()
+	configMu.Lock()
+	defer configMu.Unlock()
+
+	if err := writeSingleKeyToConfigFile("locale", trimmed); err != nil {
+		return fmt.Errorf("%w: %w", ErrConfigWrite, err)
+	}
+	msg.SetLocale(trimmed)
+	nextServer := sysConfig.Server
+	nextServer.Locale = msg.Locale()
+	sysConfig = &Config{DB: sysConfig.DB, Server: nextServer}
+	return nil
+}
+
+func writeSingleKeyToConfigFile(targetKey, targetVal string) error {
+	if !validConfigValue(targetVal) {
+		return fmt.Errorf("拒绝写入非法的配置值 %s=%q", targetKey, targetVal)
+	}
+	if err := os.MkdirAll(ConfigDir(), 0700); err != nil {
+		return err
+	}
+	cfgPath := filepath.Join(ConfigDir(), "config.ini")
+	existing, err := os.ReadFile(cfgPath)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	var out []string
+	written := false
+	inOpensync := false
+	sawOpensync := false
+	if err == nil {
+		content := strings.TrimPrefix(string(existing), "\ufeff")
+		for _, line := range strings.Split(content, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if sectionName, isSection := parseSectionHeader(trimmed); isSection {
+				if inOpensync && !written {
+					out = append(out, targetKey+"="+targetVal)
+					written = true
+				}
+				inOpensync = sectionName == "opensync"
+				sawOpensync = sawOpensync || inOpensync
+				if inOpensync {
+					out = append(out, "[opensync]")
+				} else {
+					out = append(out, line)
+				}
+				continue
+			}
+			if inOpensync {
+				if k, _, isKV := strings.Cut(trimmed, "="); isKV && strings.TrimSpace(k) == targetKey {
+					if !written {
+						out = append(out, targetKey+"="+targetVal)
+						written = true
+					}
+					continue
+				}
+			}
+			out = append(out, line)
+		}
+	}
+	if !written {
+		if inOpensync {
+			trailing := []string{}
+			for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
+				trailing = append(trailing, out[len(out)-1])
+				out = out[:len(out)-1]
+			}
+			out = append(out, targetKey+"="+targetVal)
+			out = append(out, trailing...)
+		} else if !sawOpensync {
+			if len(out) > 0 && strings.TrimSpace(out[len(out)-1]) != "" {
+				out = append(out, "")
+			}
+			out = append(out, "[opensync]", targetKey+"="+targetVal)
+		} else {
+			out = append(out, targetKey+"="+targetVal)
+		}
+	}
+	content := strings.Join(out, "\n")
+	if !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+	tmpFile, err := os.CreateTemp(ConfigDir(), "config.ini.*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmpFile.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmpFile.WriteString(content); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
+	if err := tmpFile.Chmod(0600); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
+	if err := tmpFile.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, cfgPath); err != nil {
+		return err
+	}
+	cleanup = false
+	_ = syncDir(ConfigDir())
+	return nil
 }
 
 // ErrConfigWrite marks a failure to persist config.ini. The wrapped cause
@@ -654,6 +880,13 @@ func UpdateSystemSettingsWith(update func(current SystemSettings) SystemSettings
 	nextServer.EngineHealthCheckInterval = settings.EngineHealthCheckInterval
 	nextServer.DefaultBwLimit = strings.TrimSpace(settings.DefaultBwLimit)
 	nextServer.ProxyURL = strings.TrimSpace(settings.ProxyURL)
+	nextServer.LocalMaxConcurrentJobs = settings.LocalMaxConcurrentJobs
+	nextServer.MinFreeSpaceMB = settings.MinFreeSpaceMB
+	nextServer.AutoResumeInterrupted = settings.AutoResumeInterrupted
+	nextServer.DigestEnable = settings.DigestEnable
+	nextServer.DigestSchedule = strings.ToLower(strings.TrimSpace(settings.DigestSchedule))
+	nextServer.DigestHour = settings.DigestHour
+	nextServer.DigestWeekday = settings.DigestWeekday
 
 	if err := writeConfigFile(nextServer, cfg.Server); err != nil {
 		var conflict *configConflictError
@@ -684,6 +917,12 @@ func validateSystemSettings(settings SystemSettings) error {
 		{msg.T(msg.SettingsSchedConfirm), settings.ScheduledFullSyncConfirm, 0, 1},
 		{msg.T(msg.SettingsApprovalTimeout), settings.FullSyncApprovalTimeout, MinFullSyncApprovalTimeout, MaxFullSyncApprovalTimeout},
 		{msg.T(msg.SettingsHealthCheckInterval), settings.EngineHealthCheckInterval, MinEngineHealthCheckInterval, MaxEngineHealthCheckInterval},
+		{"本地存储最大并发任务数", settings.LocalMaxConcurrentJobs, 0, 50},
+		{"最小保留磁盘空间(MB)", settings.MinFreeSpaceMB, 0, 10485760},
+		{"服务重启自动续跑中断任务", settings.AutoResumeInterrupted, 0, 1},
+		{"定时摘要通知开关", settings.DigestEnable, 0, 1},
+		{"摘要发送小时", settings.DigestHour, 0, 23},
+		{"摘要发送星期", settings.DigestWeekday, 0, 6},
 	}
 	for _, item := range checks {
 		if item.value < item.min || item.value > item.max {
@@ -695,6 +934,11 @@ func validateSystemSettings(settings SystemSettings) error {
 	}
 	if err := ValidateProxyURL(settings.ProxyURL); err != nil {
 		return err
+	}
+	switch strings.ToLower(strings.TrimSpace(settings.DigestSchedule)) {
+	case "", "daily", "weekly":
+	default:
+		return errors.New("摘要发送周期仅支持 daily 或 weekly")
 	}
 	return nil
 }
@@ -720,6 +964,8 @@ var configManagedKeys = []string{
 	"task_save", "task_timeout", "copy_concurrency", "scan_concurrency", "max_retries",
 	"scheduled_full_sync_confirm", "full_sync_approval_timeout", "engine_health_check_interval",
 	"default_bw_limit", "proxy_url",
+	"local_max_concurrent_jobs", "min_free_space_mb", "auto_resume_interrupted",
+	"digest_enable", "digest_schedule", "digest_hour", "digest_weekday",
 }
 
 func configManagedValues(sCfg ServerConfig) map[string]string {
@@ -734,6 +980,13 @@ func configManagedValues(sCfg ServerConfig) map[string]string {
 		"engine_health_check_interval": strconv.Itoa(sCfg.EngineHealthCheckInterval),
 		"default_bw_limit":             strings.TrimSpace(sCfg.DefaultBwLimit),
 		"proxy_url":                    strings.TrimSpace(sCfg.ProxyURL),
+		"local_max_concurrent_jobs":    strconv.Itoa(sCfg.LocalMaxConcurrentJobs),
+		"min_free_space_mb":            strconv.Itoa(sCfg.MinFreeSpaceMB),
+		"auto_resume_interrupted":      strconv.Itoa(sCfg.AutoResumeInterrupted),
+		"digest_enable":                strconv.Itoa(sCfg.DigestEnable),
+		"digest_schedule":              strings.ToLower(strings.TrimSpace(sCfg.DigestSchedule)),
+		"digest_hour":                  strconv.Itoa(sCfg.DigestHour),
+		"digest_weekday":               strconv.Itoa(sCfg.DigestWeekday),
 	}
 }
 
@@ -915,6 +1168,18 @@ func managedIntValue(key string, sCfg ServerConfig) (int, bool) {
 		return sCfg.FullSyncApprovalTimeout, true
 	case "engine_health_check_interval":
 		return sCfg.EngineHealthCheckInterval, true
+	case "local_max_concurrent_jobs":
+		return sCfg.LocalMaxConcurrentJobs, true
+	case "min_free_space_mb":
+		return sCfg.MinFreeSpaceMB, true
+	case "auto_resume_interrupted":
+		return sCfg.AutoResumeInterrupted, true
+	case "digest_enable":
+		return sCfg.DigestEnable, true
+	case "digest_hour":
+		return sCfg.DigestHour, true
+	case "digest_weekday":
+		return sCfg.DigestWeekday, true
 	}
 	return 0, false
 }
@@ -925,6 +1190,8 @@ func managedStringValue(key string, sCfg ServerConfig) (string, bool) {
 		return strings.TrimSpace(sCfg.DefaultBwLimit), true
 	case "proxy_url":
 		return strings.TrimSpace(sCfg.ProxyURL), true
+	case "digest_schedule":
+		return strings.ToLower(strings.TrimSpace(sCfg.DigestSchedule)), true
 	}
 	return "", false
 }

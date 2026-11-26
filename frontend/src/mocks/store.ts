@@ -11,6 +11,7 @@ import type {
   JobCheckResult,
   JobItem,
   NativeAboutInfo,
+  NativeAuthStepSnapshot,
   NativeBrowseResult,
   NativeCopyURLResult,
   NativeDedupeResult,
@@ -558,6 +559,16 @@ export class MockStore {
   private nextTaskId = 7000;
   private dryRuns = new Map<number, DryRunResult>();
   private jobChecks = new Map<number, JobCheckResult>();
+  private nativeAuthSessions = new Map<
+    string,
+    {
+      snapshot: NativeAuthStepSnapshot;
+      oauthState: string;
+      secrets: Record<string, string>;
+      publicOptions: Record<string, string>;
+    }
+  >();
+  private nextAuthSessionSeq = 1;
   private engineHealthMap = new Map<number, EngineHealth>();
   private nativeRemotes = new Map<string, Record<string, string>>();
   private nativeLocalRoots: NativeLocalRoot[] = [
@@ -972,15 +983,20 @@ export class MockStore {
     options?: Record<string, string>;
     replace?: boolean;
     maxConcurrentJobs?: number;
+    authSessionId?: string;
   }): string | null {
     const name = (input.name || "").trim();
-    const opts = input.options || {};
+    const opts = { ...(input.options || {}) };
     if (Object.keys(opts).length === 0) {
       const eng = this.ensureNativeEngine(undefined, input.maxConcurrentJobs);
       this.engineHealthMap.delete(eng.id);
       return null;
     }
     if (!name) return "请输入存储名称";
+    if (input.authSessionId) {
+      const err = this.mergeMockAuthSession(input.authSessionId, opts);
+      if (err) return err;
+    }
     const existingKey = [...this.nativeRemotes.keys()].find(
       (k) => k.toLowerCase() === name.toLowerCase(),
     );
@@ -995,6 +1011,9 @@ export class MockStore {
     }
     const targetKey = existingKey || name;
     this.nativeRemotes.set(targetKey, { ...opts });
+    if (input.authSessionId) {
+      this.nativeAuthSessions.delete(input.authSessionId);
+    }
     const eng = this.ensureNativeEngine(undefined, input.maxConcurrentJobs);
     this.engineHealthMap.delete(eng.id);
     return null;
@@ -1004,6 +1023,7 @@ export class MockStore {
     name: string;
     options: Record<string, string>;
     clearSecrets?: string[];
+    authSessionId?: string;
   }): string | null {
     const name = (input.name || "").trim();
     const existingKey = [...this.nativeRemotes.keys()].find(
@@ -1019,6 +1039,10 @@ export class MockStore {
       ...input.options,
       type: oldParams.type,
     };
+    if (input.authSessionId) {
+      const err = this.mergeMockAuthSession(input.authSessionId, next);
+      if (err) return err;
+    }
     for (const secretKey of [
       "secret_access_key",
       "session_token",
@@ -1033,6 +1057,9 @@ export class MockStore {
       "client_secret",
       "service_account_credentials",
       "sas_url",
+      "auth_token",
+      "trust_token",
+      "cookies",
       "application_credential_secret",
     ]) {
       if (!next[secretKey] && !clearSet.has(secretKey) && oldParams[secretKey]) {
@@ -1040,9 +1067,436 @@ export class MockStore {
       }
     }
     this.nativeRemotes.set(existingKey, next);
+    if (input.authSessionId) {
+      this.nativeAuthSessions.delete(input.authSessionId);
+    }
     const eng = this.syncNativeEngineMetadata();
     if (eng) this.engineHealthMap.delete(eng.id);
     return null;
+  }
+
+  private mergeMockAuthSession(
+    sessionId: string,
+    target: Record<string, string>,
+  ): string | null {
+    const sess = this.nativeAuthSessions.get(sessionId);
+    if (!sess || sess.snapshot.status !== "completed") {
+      return "授权会话不存在或尚未完成，请重新完成授权";
+    }
+    if (target.type && target.type !== sess.snapshot.type) {
+      return "授权会话与当前所选存储类型不匹配，请重新授权";
+    }
+    for (const [k, v] of Object.entries(sess.publicOptions)) {
+      if (!target[k] && v) target[k] = v;
+    }
+    for (const [k, v] of Object.entries(sess.secrets)) {
+      if (v) target[k] = v;
+    }
+    return null;
+  }
+
+  startNativeStorageAuth(input: {
+    type: string;
+    options?: Record<string, string>;
+  }): NativeAuthStepSnapshot | string {
+    const typ = (input.type || "").trim();
+    const opts = input.options || {};
+    const interactive = new Set([
+      "onedrive",
+      "drive",
+      "dropbox",
+      "box",
+      "pcloud",
+      "yandex",
+      "jottacloud",
+      "hidrive",
+      "huaweidrive",
+      "googlecloudstorage",
+      "iclouddrive",
+      "seafile",
+    ]);
+    if (!interactive.has(typ)) {
+      return `存储类型 "${typ}" 不需要引导授权，请直接填写表单参数`;
+    }
+    if (typ === "iclouddrive" && (!opts.apple_id?.trim() || !opts.password)) {
+      return "请先填写 Apple ID 和密码后再发起登录验证";
+    }
+    if (typ === "seafile" && (!opts.url?.trim() || !opts.user?.trim() || !opts.pass)) {
+      return "请先填写有效的 Seafile 服务地址、账号和密码后再发起两步验证登录";
+    }
+    const sessionId = `mock-auth-${this.nextAuthSessionSeq++}`;
+    const oauthState = `mock-state-${sessionId}`;
+    const expiresAt = Math.floor(Date.now() / 1000) + 600;
+
+    if (typ === "jottacloud") {
+      const snapshot: NativeAuthStepSnapshot = {
+        sessionId,
+        type: typ,
+        status: "question",
+        question: {
+          state: "auth_type_done",
+          name: "config_type",
+          help: "Type of authentication.",
+          default: "standard",
+          exclusive: true,
+          type: "string",
+          examples: [
+            { value: "standard", help: "Standard authentication (Personal login token)" },
+            { value: "traditional", help: "Traditional authentication (OAuth)" },
+          ],
+        },
+        expiresAt,
+      };
+      this.nativeAuthSessions.set(sessionId, {
+        snapshot,
+        oauthState,
+        secrets: {},
+        publicOptions: {},
+      });
+      return snapshot;
+    }
+
+    if (typ === "iclouddrive") {
+      const snapshot: NativeAuthStepSnapshot = {
+        sessionId,
+        type: typ,
+        status: "question",
+        question: {
+          state: "2fa_code",
+          name: "2fa_code",
+          help: "Enter the 6-digit Apple 2FA verification code",
+          required: true,
+          type: "string",
+        },
+        expiresAt,
+      };
+      this.nativeAuthSessions.set(sessionId, {
+        snapshot,
+        oauthState,
+        secrets: {},
+        publicOptions: {},
+      });
+      return snapshot;
+    }
+
+    if (typ === "seafile") {
+      const snapshot: NativeAuthStepSnapshot = {
+        sessionId,
+        type: typ,
+        status: "question",
+        question: {
+          state: "2fa_do",
+          name: "config_2fa",
+          help: "Two-factor authentication: please enter your 2FA code",
+          required: true,
+          type: "string",
+        },
+        expiresAt,
+      };
+      this.nativeAuthSessions.set(sessionId, {
+        snapshot,
+        oauthState,
+        secrets: {},
+        publicOptions: {},
+      });
+      return snapshot;
+    }
+
+    const redirectUri =
+      typ === "onedrive" || typ === "dropbox" || typ === "pcloud"
+        ? "http://localhost:53682/"
+        : "http://127.0.0.1:53682/";
+    const snapshot: NativeAuthStepSnapshot = {
+      sessionId,
+      type: typ,
+      status: "oauth",
+      authUrl: `https://auth.example.com/${typ}/authorize?redirect_uri=${encodeURIComponent(redirectUri)}&state=${oauthState}`,
+      redirectUri,
+      expiresAt,
+    };
+    this.nativeAuthSessions.set(sessionId, {
+      snapshot,
+      oauthState,
+      secrets: {},
+      publicOptions: {},
+    });
+    return snapshot;
+  }
+
+  getNativeStorageAuth(sessionId: string): NativeAuthStepSnapshot | string {
+    const sess = this.nativeAuthSessions.get(sessionId);
+    if (!sess) return "授权会话不存在或已过期，请重新发起授权";
+    return sess.snapshot;
+  }
+
+  submitNativeStorageAuthCallback(
+    sessionId: string,
+    callbackUrl: string,
+  ): NativeAuthStepSnapshot | string {
+    const sess = this.nativeAuthSessions.get(sessionId);
+    if (!sess) return "授权会话不存在或已过期，请重新发起授权";
+    if (sess.snapshot.status !== "oauth") return sess.snapshot;
+
+    const trimmed = callbackUrl.trim();
+    const queryStr = trimmed.includes("?")
+      ? trimmed.slice(trimmed.indexOf("?") + 1).split("#")[0]
+      : trimmed;
+    const params = new URLSearchParams(queryStr);
+    if (params.get("error")) {
+      return `网盘拒绝了授权（${params.get("error")}）`;
+    }
+    if (!params.get("code")) {
+      return "回调网址中缺少授权码（code 参数）";
+    }
+    const gotState = params.get("state");
+    if (gotState && gotState !== sess.oauthState) {
+      return "回调网址中的 state 与当前授权会话不匹配";
+    }
+
+    const typ = sess.snapshot.type;
+    sess.secrets.token = JSON.stringify({
+      access_token: `mock-access-${sessionId}`,
+      refresh_token: `mock-refresh-${sessionId}`,
+      expiry: "2099-01-01T00:00:00Z",
+    });
+
+    if (typ === "onedrive") {
+      sess.snapshot = {
+        ...sess.snapshot,
+        status: "question",
+        authUrl: undefined,
+        redirectUri: undefined,
+        question: {
+          state: "choose_type_done",
+          name: "config_type",
+          help: "Type of connection",
+          default: "onedrive",
+          exclusive: true,
+          type: "string",
+          examples: [
+            { value: "onedrive", help: "OneDrive Personal or Business" },
+            { value: "sharepoint", help: "Root Sharepoint site" },
+          ],
+        },
+      };
+      return sess.snapshot;
+    }
+
+    if (typ === "drive") {
+      sess.snapshot = {
+        ...sess.snapshot,
+        status: "question",
+        authUrl: undefined,
+        redirectUri: undefined,
+        question: {
+          state: "teamdrive",
+          name: "config_change_team_drive",
+          help: "Configure this as a Shared Drive (Team Drive)?",
+          default: "false",
+          exclusive: true,
+          type: "bool",
+          examples: [
+            { value: "false", help: "No" },
+            { value: "true", help: "Yes" },
+          ],
+        },
+      };
+      return sess.snapshot;
+    }
+
+    if (typ === "pcloud") {
+      sess.publicOptions.hostname = params.get("hostname") || "api.pcloud.com";
+    }
+
+    sess.snapshot = {
+      sessionId,
+      type: typ,
+      status: "completed",
+      publicOptions: { ...sess.publicOptions },
+      configuredSecrets: Object.keys(sess.secrets),
+      expiresAt: Math.floor(Date.now() / 1000) + 1800,
+    };
+    return sess.snapshot;
+  }
+
+  continueNativeStorageAuth(
+    sessionId: string,
+    state: string,
+    answer: string,
+  ): NativeAuthStepSnapshot | string {
+    const sess = this.nativeAuthSessions.get(sessionId);
+    if (!sess) return "授权会话不存在或已过期，请重新发起授权";
+    if (sess.snapshot.status !== "question" || !sess.snapshot.question) {
+      return sess.snapshot;
+    }
+    if (state && state !== sess.snapshot.question.state) {
+      return "配置步骤已变更，请按当前提示重新提交";
+    }
+    const typ = sess.snapshot.type;
+
+    if (typ === "onedrive" && state === "choose_type_done") {
+      sess.snapshot = {
+        ...sess.snapshot,
+        status: "question",
+        question: {
+          state: "driveid_final",
+          name: "config_driveid",
+          help: "Select drive",
+          default: "b!mock-onedrive-01",
+          exclusive: true,
+          type: "string",
+          examples: [
+            { value: "b!mock-onedrive-01", help: "OneDrive 个人版 (personal)" },
+            { value: "b!mock-onedrive-02", help: "OneDrive 商业版 (business)" },
+          ],
+        },
+      };
+      return sess.snapshot;
+    }
+
+    if (typ === "onedrive" && state === "driveid_final") {
+      sess.publicOptions.drive_id = answer || "b!mock-onedrive-01";
+      sess.publicOptions.drive_type =
+        answer === "b!mock-onedrive-02" ? "business" : "personal";
+      sess.snapshot = {
+        sessionId,
+        type: typ,
+        status: "completed",
+        publicOptions: { ...sess.publicOptions },
+        configuredSecrets: Object.keys(sess.secrets),
+        expiresAt: Math.floor(Date.now() / 1000) + 1800,
+      };
+      return sess.snapshot;
+    }
+
+    if (typ === "drive" && state === "teamdrive") {
+      if (answer === "true") {
+        sess.snapshot = {
+          ...sess.snapshot,
+          status: "question",
+          question: {
+            state: "teamdrive_ok",
+            name: "config_team_drive",
+            help: "Choose a Shared Drive",
+            default: "0AMockTeamDrive01",
+            exclusive: true,
+            type: "string",
+            examples: [
+              { value: "0AMockTeamDrive01", help: "家庭共享盘" },
+            ],
+          },
+        };
+        return sess.snapshot;
+      }
+      sess.snapshot = {
+        sessionId,
+        type: typ,
+        status: "completed",
+        publicOptions: { ...sess.publicOptions },
+        configuredSecrets: Object.keys(sess.secrets),
+        expiresAt: Math.floor(Date.now() / 1000) + 1800,
+      };
+      return sess.snapshot;
+    }
+
+    if (typ === "drive" && state === "teamdrive_ok") {
+      sess.publicOptions.team_drive = answer;
+      sess.snapshot = {
+        sessionId,
+        type: typ,
+        status: "completed",
+        publicOptions: { ...sess.publicOptions },
+        configuredSecrets: Object.keys(sess.secrets),
+        expiresAt: Math.floor(Date.now() / 1000) + 1800,
+      };
+      return sess.snapshot;
+    }
+
+    if (typ === "jottacloud" && state === "auth_type_done") {
+      if (answer === "traditional") {
+        sess.snapshot = {
+          ...sess.snapshot,
+          status: "oauth",
+          question: undefined,
+          authUrl: `https://id.jottacloud.com/auth/realms/jottacloud/protocol/openid-connect/auth?state=${sess.oauthState}`,
+          redirectUri: "http://127.0.0.1:53682/",
+        };
+        return sess.snapshot;
+      }
+      sess.snapshot = {
+        ...sess.snapshot,
+        status: "question",
+        question: {
+          state: "standard_token",
+          name: "config_login_token",
+          help: "Personal login token from https://www.jottacloud.com/web/secure",
+          required: true,
+          type: "string",
+        },
+      };
+      return sess.snapshot;
+    }
+
+    if (typ === "jottacloud" && state === "standard_token") {
+      if (!answer.trim()) return "请输入个人登录令牌";
+      sess.secrets.token = JSON.stringify({
+        access_token: `mock-jotta-${sessionId}`,
+        refresh_token: `mock-jotta-refresh-${sessionId}`,
+      });
+      sess.publicOptions.configVersion = "1";
+      sess.snapshot = {
+        sessionId,
+        type: typ,
+        status: "completed",
+        publicOptions: { ...sess.publicOptions },
+        configuredSecrets: Object.keys(sess.secrets),
+        expiresAt: Math.floor(Date.now() / 1000) + 1800,
+      };
+      return sess.snapshot;
+    }
+
+    if (typ === "iclouddrive") {
+      if (!answer.trim()) return "请输入 Apple 两步验证码";
+      sess.secrets.trust_token = `mock-trust-${sessionId}`;
+      sess.secrets.cookies = `mock-cookies-${sessionId}`;
+      sess.snapshot = {
+        sessionId,
+        type: typ,
+        status: "completed",
+        publicOptions: {},
+        configuredSecrets: ["trust_token", "cookies"],
+        expiresAt: Math.floor(Date.now() / 1000) + 1800,
+      };
+      return sess.snapshot;
+    }
+
+    if (typ === "seafile") {
+      if (!answer.trim()) return "请输入 Seafile 2FA 验证码";
+      sess.secrets.auth_token = `mock-seafile-token-${sessionId}`;
+      sess.snapshot = {
+        sessionId,
+        type: typ,
+        status: "completed",
+        publicOptions: {},
+        configuredSecrets: ["auth_token"],
+        expiresAt: Math.floor(Date.now() / 1000) + 1800,
+      };
+      return sess.snapshot;
+    }
+
+    sess.snapshot = {
+      sessionId,
+      type: typ,
+      status: "completed",
+      publicOptions: { ...sess.publicOptions },
+      configuredSecrets: Object.keys(sess.secrets),
+      expiresAt: Math.floor(Date.now() / 1000) + 1800,
+    };
+    return sess.snapshot;
+  }
+
+  cancelNativeStorageAuth(sessionId: string): void {
+    this.nativeAuthSessions.delete(sessionId);
   }
 
   deleteNativeRemote(name: string): string | null {
@@ -1587,6 +2041,7 @@ export class MockStore {
         return {
           ...job,
           running: Boolean(current),
+          paused: Boolean(current?.paused),
           queued: false,
           pendingApproval: this.pendingApprovals.has(job.id),
           lastStatus: latest?.status ?? 0,
@@ -1696,7 +2151,47 @@ export class MockStore {
 
   getCurrentTask(jobId: number): CurrentTaskData | null {
     const task = this.currentTasks.get(jobId);
-    return task ? { ...task } : null;
+    if (!task) return null;
+    if (task.paused) {
+      return {
+        ...task,
+        speed: 0,
+        remainTime: 0,
+      };
+    }
+    return { ...task };
+  }
+
+  pauseTask(taskId: number): void {
+    for (const task of this.currentTasks.values()) {
+      if (task.taskId === taskId) {
+        task.paused = true;
+        return;
+      }
+    }
+  }
+
+  resumeTask(taskId: number): void {
+    for (const task of this.currentTasks.values()) {
+      if (task.taskId === taskId) {
+        task.paused = false;
+        return;
+      }
+    }
+  }
+
+  setTaskLiveBwLimit(taskId: number, bwLimit: string): void {
+    const trimmed = bwLimit.trim();
+    const effective =
+      trimmed === "" || trimmed === "0" || trimmed.toLowerCase() === "off"
+        ? ""
+        : trimmed;
+    for (const task of this.currentTasks.values()) {
+      if (task.taskId === taskId) {
+        task.liveBwLimit = effective;
+        return;
+      }
+    }
   }
 
   /** Marks a running task as aborted and keeps a history record (status 4). */
@@ -1763,6 +2258,7 @@ export class MockStore {
     action?: string;
     pause?: boolean;
     abort?: boolean;
+    bwLimit?: string;
   }): void {
     if (input.taskId !== undefined) {
       const taskId = numberValue(input.taskId, 0);
@@ -1778,6 +2274,11 @@ export class MockStore {
       }
       if (input.action === "stop") this.stopTask(taskId);
       if (input.action === "retry") this.retryTask(taskId);
+      if (input.action === "pause") this.pauseTask(taskId);
+      if (input.action === "resume") this.resumeTask(taskId);
+      if (input.action === "bwlimit") {
+        this.setTaskLiveBwLimit(taskId, input.bwLimit ?? "");
+      }
       return;
     }
     const jobId = numberValue(input.id, 0);
@@ -2037,6 +2538,7 @@ export class MockStore {
         srcPath: job.srcPath,
         dstPath: job.dstPath,
         running: Boolean(current),
+        paused: Boolean(current?.paused),
         queued: false,
         currentTaskId: current?.taskId ?? 0,
         pendingApproval: approval,

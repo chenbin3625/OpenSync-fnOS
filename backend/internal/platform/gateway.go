@@ -129,7 +129,7 @@ func sameOriginWrite(c *gin.Context, allowedOrigins []string) bool {
 	// is never sent. HTML forms cannot produce it at all. The app's own client
 	// (frontend/src/api/client.ts) sets it on every request, including DELETEs
 	// that carry their arguments in the query string.
-	if !jsonContentType(c.GetHeader("Content-Type")) {
+	if !allowedWriteContentType(c) {
 		return false
 	}
 
@@ -159,6 +159,22 @@ func sameOriginWrite(c *gin.Context, allowedOrigins []string) bool {
 		return false
 	}
 	return originAllowed(origin, allowedOrigins)
+}
+
+// allowedWriteContentType verifies that every state-changing request carries a
+// non-CORS-safelisted media type (application/json everywhere, plus
+// application/octet-stream solely for binary storage uploads). Neither can be
+// sent by an HTML form or a cross-origin fetch without a CORS preflight.
+func allowedWriteContentType(c *gin.Context) bool {
+	ct := c.GetHeader("Content-Type")
+	if jsonContentType(ct) {
+		return true
+	}
+	if c.Request.Method == http.MethodPost && strings.HasSuffix(c.Request.URL.Path, "/svr/native/storage/upload") {
+		mediaType, _, err := mime.ParseMediaType(ct)
+		return err == nil && mediaType == "application/octet-stream"
+	}
+	return false
 }
 
 // jsonContentType reports whether a Content-Type header value is

@@ -10,8 +10,10 @@ import { IconFolderStroked, IconRefresh } from "@douyinfe/semi-icons";
 import type { TreeNodeData } from "@douyinfe/semi-ui/lib/es/tree/interface";
 import { buildPathTreeData } from "../pages/Home/homeUtils";
 import { formatDisplayPath } from "../lib/syncPathPreview";
+import { isPathDisabledInPicker } from "../lib/taskForm";
 import { useAsyncTree } from "../lib/useAsyncTree";
 import { splitDirPath } from "../lib/treeUtils";
+import type { NativeRemoteItem } from "../types";
 
 function seed(paths: string[]): TreeNodeData[] {
   const convert = (
@@ -78,6 +80,27 @@ function mergeMissingNodes(
   return result;
 }
 
+function applyDisabledPickerNodes(
+  nodes: TreeNodeData[],
+  remotes?: readonly NativeRemoteItem[],
+): TreeNodeData[] {
+  return nodes.map((node) => {
+    const nodePath = String(node.value ?? node.key ?? "");
+    const disabled = isPathDisabledInPicker(nodePath, remotes);
+    const children = node.children?.length
+      ? applyDisabledPickerNodes(node.children, remotes)
+      : node.children;
+    if (disabled === Boolean(node.disabled) && children === node.children) {
+      return node;
+    }
+    return {
+      ...node,
+      disabled,
+      ...(children ? { children } : {}),
+    };
+  });
+}
+
 export function RemotePaths({
   id,
   engineId,
@@ -85,6 +108,7 @@ export function RemotePaths({
   onChange,
   // 多选只负责保留用户明确勾选的目录，不做“选父自动选子”的隐藏级联。
   multiple = false,
+  remotes,
   ariaLabel,
   "aria-labelledby": ariaLabelledBy,
 }: {
@@ -93,6 +117,7 @@ export function RemotePaths({
   value: string[];
   onChange: (paths: string[]) => void;
   multiple?: boolean;
+  remotes?: readonly NativeRemoteItem[];
   /** 同一表单中有多个目录选择框时，用不同名称让读屏用户区分 */
   ariaLabel?: string;
   "aria-labelledby"?: string;
@@ -135,11 +160,12 @@ export function RemotePaths({
   }, [engineId, resetTree, loadData]);
 
   // Keep manually added paths (e.g. non-existent native target subdirectories)
-  // present in treeData so TreeSelect renders and removes their tags reliably.
-  const displayTreeData = useMemo(
-    () => (value.length ? mergeMissingNodes(treeData, seed(value)) : treeData),
-    [treeData, value],
-  );
+  // present in treeData so TreeSelect renders and removes their tags reliably,
+  // while disabling non-syncable synthetic roots (/, /本地, bucketless object stores).
+  const displayTreeData = useMemo(() => {
+    const merged = value.length ? mergeMissingNodes(treeData, seed(value)) : treeData;
+    return applyDisabledPickerNodes(merged, remotes);
+  }, [treeData, value, remotes]);
 
   // 节点名不换行，过长时可横向滚动；悬停显示完整路径
   const renderLabel = useCallback(

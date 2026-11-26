@@ -142,7 +142,25 @@ func TestNativeTransfers(t *testing.T) {
 				t.Fatalf("repeat %d", n)
 			}
 			write("version2", stamp.Add(time.Minute))
-			if n := run(false); n != 1 {
+			if kind == "webdav" {
+				// Standard WebDAV (vendor=other, e.g. OpenList / AList) defaults to
+				// size-only under Compare=0 to avoid pulling remote files locally for
+				// comparison; explicit Compare=2 still detects same-size changes.
+				if n := run(false); n != 0 {
+					t.Fatalf("standard webdav Compare=0 same-size update should skip without download, got %d", n)
+				}
+				explicitCount := 0
+				if e := c.Copy(ctx, sv, dest, CopyOptions{Transfers: 2, Checkers: 2, Compare: 2}, func(v Event) {
+					if v.File != "" {
+						explicitCount++
+					}
+				}); e != nil {
+					t.Fatal(e)
+				}
+				if explicitCount != 1 {
+					t.Fatalf("standard webdav Compare=2 same-size update %d", explicitCount)
+				}
+			} else if n := run(false); n != 1 {
 				t.Fatalf("same-size update %d", n)
 			}
 			if e := os.Remove(file); e != nil {

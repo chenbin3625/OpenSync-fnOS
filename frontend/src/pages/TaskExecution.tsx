@@ -4,6 +4,7 @@ import Checkbox from "@douyinfe/semi-ui/lib/es/checkbox";
 import DatePicker from "@douyinfe/semi-ui/lib/es/datePicker";
 import Divider from "@douyinfe/semi-ui/lib/es/divider";
 import Progress from "@douyinfe/semi-ui/lib/es/progress";
+import Select from "@douyinfe/semi-ui/lib/es/select";
 import SideSheet from "@douyinfe/semi-ui/lib/es/sideSheet";
 import Table from "@douyinfe/semi-ui/lib/es/table";
 import Tabs from "@douyinfe/semi-ui/lib/es/tabs";
@@ -16,7 +17,9 @@ import {
   IconDownload,
   IconEyeOpenedStroked,
   IconPause,
+  IconPlay,
   IconRefresh,
+  IconStop,
 } from "@douyinfe/semi-icons";
 import { api } from "../api/client";
 import {
@@ -125,32 +128,110 @@ export const Realtime = memo(function Realtime({
     confirmStopTask(() =>
       action.run(async () => {
         await api.taskAction(task.taskId, "stop");
+        window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
         await refreshCurrentTask();
       }),
     );
+  const togglePause = () => {
+    const resuming = Boolean(task.paused);
+    void action.run(async () => {
+      try {
+        await api.taskAction(task.taskId, resuming ? "resume" : "pause");
+        Toast.success(resuming ? "已继续传输" : "已暂停传输");
+        window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
+        await refreshCurrentTask();
+      } catch (err) {
+        errorToast(err);
+      }
+    });
+  };
+  const updateLiveBwLimit = (rate: string) =>
+    void action.run(async () => {
+      try {
+        await api.taskAction(task.taskId, "bwlimit", undefined, { bwLimit: rate });
+        Toast.success(rate && rate !== "off" ? `实时限速已调整为 ${rate}` : "已解除实时限速");
+        await refreshCurrentTask();
+      } catch (err) {
+        errorToast(err);
+      }
+    });
+  const currentBw = (task.liveBwLimit || "").trim();
+  const bwOptions = [
+    { label: "不限速", value: "off" },
+    { label: "限速 5M/s", value: "5M" },
+    { label: "限速 10M/s", value: "10M" },
+    { label: "限速 20M/s", value: "20M" },
+    { label: "限速 50M/s", value: "50M" },
+    { label: "限速 100M/s", value: "100M" },
+  ];
+  const bwSelectValue =
+    !currentBw || currentBw.toLowerCase() === "off"
+      ? "off"
+      : bwOptions.some((o) => o.value === currentBw)
+        ? currentBw
+        : currentBw;
+  const effectiveBwOptions = bwOptions.some((o) => o.value === bwSelectValue)
+    ? bwOptions
+    : [{ label: `限速 ${bwSelectValue}`, value: bwSelectValue }, ...bwOptions];
   return (
     <div className="execution-view flex-column">
       <div className="execution-top">
         <div className="execution-header">
-          <h2>
-            {task.scanFinish
-              ? "正在同步"
-              : task.firstSync
-                ? "正在同步（扫描中）"
-                : "正在扫描目录"}
+          <h2 style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <span>
+              {task.paused
+                ? "传输已暂停"
+                : task.scanFinish
+                  ? "正在同步"
+                  : task.firstSync
+                    ? "正在同步（扫描中）"
+                    : "正在扫描目录"}
+            </span>
+            {task.paused && (
+              <Tag size="small" color="orange" type="light">
+                已暂停
+              </Tag>
+            )}
           </h2>
-          <Button
-            type="danger"
-            size="small"
-            icon={<IconPause aria-hidden="true" />}
-            onClick={stop}
-            disabled={action.busy}
-          >
-            停止任务
-          </Button>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <Select
+              size="small"
+              aria-label="运行中动态限速"
+              value={bwSelectValue}
+              optionList={effectiveBwOptions}
+              disabled={action.busy}
+              style={{ width: 126 }}
+              onChange={(v) => updateLiveBwLimit(String(v || "off"))}
+            />
+            <Button
+              type={task.paused ? "primary" : "tertiary"}
+              theme={task.paused ? "solid" : "light"}
+              size="small"
+              icon={task.paused ? <IconPlay aria-hidden="true" /> : <IconPause aria-hidden="true" />}
+              onClick={togglePause}
+              disabled={action.busy}
+            >
+              {task.paused ? "继续传输" : "暂停"}
+            </Button>
+            <Button
+              type="danger"
+              size="small"
+              icon={<IconStop aria-hidden="true" />}
+              onClick={stop}
+              disabled={action.busy}
+            >
+              停止任务
+            </Button>
+          </div>
         </div>
         <div className="execution-metrics">
-          <span>{formatSize(task.speed)}/s</span>
+          <span>实时 {formatSize(task.speed)}/s</span>
+          {task.speedAvg > 0 && (
+            <>
+              <Divider layout="vertical" margin={8} />
+              <span>均速 {formatSize(task.speedAvg)}/s</span>
+            </>
+          )}
           <Divider layout="vertical" margin={8} />
           <span>
             已完成 {formatSize(task.doneSize)} /{" "}
@@ -158,11 +239,21 @@ export const Realtime = memo(function Realtime({
           </span>
           <Divider layout="vertical" margin={8} />
           <span>已运行 {formatDuration(task.duration)}</span>
+          {task.remainTime > 0 && !task.paused && (
+            <>
+              <Divider layout="vertical" margin={8} />
+              <span>预计剩余 {formatDuration(task.remainTime)}</span>
+            </>
+          )}
         </div>
         <Progress
           percent={Math.round(percent)}
           showInfo
-          stroke="var(--semi-color-primary)"
+          stroke={
+            task.paused
+              ? "var(--semi-color-warning)"
+              : "var(--semi-color-primary)"
+          }
         />
         {taskError && (
           <InlineNotice
@@ -374,7 +465,11 @@ export const History = memo(function History({
         />
         {!disableRetry && (
           <IconButton
-            label="重试未完成项"
+            label={
+              record.status === 4 || record.status === 5
+                ? "继续上次中断 / 重试未完成项"
+                : "重试未完成项"
+            }
             icon={<IconRefresh aria-hidden="true" />}
             disabled={action.busy}
             onClick={() => retry(record)}
@@ -746,9 +841,22 @@ export const FileTable = memo(function FileTable({
         render: (_: unknown, record: TaskItem) => {
           if (record.status === 1) {
             const pct = taskProgressPercent(record.progress);
+            const hasDone =
+              typeof record.doneBytes === "number" && record.doneBytes > 0;
+            const hasSpeed =
+              typeof record.speed === "number" && record.speed > 0;
             return (
-              <div className="file-progress">
-                <span className="file-progress-pct">{pct}%</span>
+              <div className="file-progress" style={{ flexDirection: "column", alignItems: "stretch", gap: 3 }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, fontSize: 12 }}>
+                  <span className="file-progress-pct">{pct}%</span>
+                  {(hasDone || hasSpeed) && (
+                    <span className="muted" style={{ fontSize: 11, whiteSpace: "nowrap" }}>
+                      {hasDone ? formatSize(record.doneBytes!) : ""}
+                      {hasDone && hasSpeed ? " · " : ""}
+                      {hasSpeed ? `${formatSize(record.speed!)}/s` : ""}
+                    </span>
+                  )}
+                </div>
                 <Progress
                   percent={pct}
                   showInfo={false}
@@ -1103,6 +1211,51 @@ function FileDetails({
             </Button>
           </div>
         </div>
+        {resource.data?.errorGroups && resource.data.errorGroups.length > 0 && (
+          <div
+            className="error-groups-bar"
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              alignItems: "center",
+              gap: 6,
+              padding: "8px 12px",
+              marginBottom: 8,
+              borderRadius: 8,
+              background: "var(--semi-color-fill-0)",
+              fontSize: 12,
+            }}
+          >
+            <span className="muted" style={{ fontWeight: 500 }}>
+              失败原因聚类：
+            </span>
+            {resource.data.errorGroups.slice(0, 8).map((g) => {
+              const active = keyword === g.reason && hasError === 1;
+              return (
+                <button
+                  key={g.reason}
+                  type="button"
+                  className={`schedule-chip${active ? " is-active" : ""}`}
+                  title={g.reason}
+                  onClick={() => {
+                    if (active) {
+                      setInput("");
+                      setKeyword("");
+                      setHasError(undefined);
+                    } else {
+                      setInput(g.reason);
+                      setKeyword(g.reason);
+                      setHasError(1);
+                    }
+                    setPage(1);
+                  }}
+                >
+                  {g.reason.length > 36 ? `${g.reason.slice(0, 36)}…` : g.reason} ({g.count})
+                </button>
+              );
+            })}
+          </div>
+        )}
         {resource.error ? (
           <LoadState
             loading={false}

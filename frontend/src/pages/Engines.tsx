@@ -1,4 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Input from "@douyinfe/semi-ui/lib/es/input";
 import Modal from "@douyinfe/semi-ui/lib/es/modal";
@@ -22,6 +23,7 @@ import { api } from "../api/client";
 import {
   NativeStorageEditor,
   remoteTypeLabels,
+  validateRemoteName,
   type NativeEditorMode,
 } from "../components/NativeStorageEditor";
 import {
@@ -59,6 +61,7 @@ interface StorageModalState {
 }
 
 export default function Engines() {
+  const navigate = useNavigate();
   const nativeState = useResource((signal) => api.nativeStorageState(signal));
   const engines = useResource((signal) => api.engines(signal));
 
@@ -227,8 +230,9 @@ export default function Engines() {
   const handleExecuteRename = async () => {
     if (!renameTarget) return;
     const trimmed = renameNewName.trim();
-    if (!trimmed) {
-      Toast.warning("请输入新的存储名称");
+    const nameErr = validateRemoteName(trimmed);
+    if (nameErr) {
+      Toast.warning(nameErr);
       return;
     }
     setRenaming(true);
@@ -384,6 +388,11 @@ export default function Engines() {
                         : `全局最多 ${maxConcurrent} 并发`}
                     </Tag>
                   )}
+                  {Number(state.localMaxConcurrentJobs || 0) > 0 && (
+                    <Tag size="small" type="light" color="violet">
+                      本地最多 {state.localMaxConcurrentJobs} 并发
+                    </Tag>
+                  )}
                   {(localActiveJobs > 0 || localQueuedJobs > 0) && (
                     <Tag size="small" type="light" color="cyan">
                       运行 {localActiveJobs}
@@ -514,8 +523,21 @@ export default function Engines() {
                         </Tag>
                       )}
                       {item.usedByJobs.length > 0 && (
-                        <Tag size="small" type="light" color="cyan">
+                        <Tag
+                          size="small"
+                          type="light"
+                          color="cyan"
+                          style={{ cursor: "pointer" }}
+                          onClick={() =>
+                            navigate(`/?storage=${encodeURIComponent(item.name)}`)
+                          }
+                        >
                           {item.usedByJobs.length} 个任务
+                        </Tag>
+                      )}
+                      {Number(item.maxConcurrentJobs || 0) > 0 && (
+                        <Tag size="small" type="light" color="violet">
+                          单存储限 {item.maxConcurrentJobs} 并发
                         </Tag>
                       )}
                       {item.usedByCrypts.length > 0 && (

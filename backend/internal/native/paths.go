@@ -236,31 +236,39 @@ func resolveLocalEntry(sub string, allowFile bool) (string, error) {
 }
 
 type Endpoint struct {
-	Path             string
-	RemoteName       string
-	Backend          string
-	Vendor           string
-	LocalPath        string
-	Identity         string
-	BackingIdentity  string
-	UnionBackingIDs  []string
-	CryptScope       string
-	Sub              string
-	IsCrypt          bool
-	IsLocal          bool
-	ReadOnly         bool
-	AllowHashCheck   bool
+	Path              string
+	RemoteName        string
+	Backend           string
+	Vendor            string
+	LocalPath         string
+	Identity          string
+	BackingIdentity   string
+	UnionBackingIDs   []string
+	CryptScope        string
+	Sub               string
+	IsCrypt           bool
+	IsLocal           bool
+	ReadOnly          bool
+	AllowHashCheck    bool
+	UnreliableModTime bool
 }
 
 func wrapperChainFingerprint(c Config, start string) string {
 	h := sha256.New()
-	for ref := start; IsWrapperType(c[ref]["type"]); {
+	ref := start
+	if canonical, ok := c.FindKey(ref); ok {
+		ref = canonical
+	}
+	for IsWrapperType(c[ref]["type"]) {
 		p := c[ref]
 		fmt.Fprintf(h, "%s\x00", p["type"])
 		for _, k := range slices.Sorted(maps.Keys(p)) {
 			fmt.Fprintf(h, "%s=%s\x00", k, p[k])
 		}
 		ref, _, _ = strings.Cut(p["remote"], ":")
+		if canonical, ok := c.FindKey(ref); ok {
+			ref = canonical
+		}
 	}
 	return hex.EncodeToString(h.Sum(nil)[:12])
 }
@@ -291,12 +299,18 @@ func (c Config) resolveEndpoint(v string, allowFile bool) (Endpoint, error) {
 	if !strings.HasPrefix(v, "/") || !cleanRelative(sub) {
 		return Endpoint{}, errors.New("无效的备份路径")
 	}
-	if name == Local || c[name]["type"] == "local" {
+	canonicalName := name
+	if strings.EqualFold(name, Local) {
+		canonicalName = Local
+	} else if matched, ok := c.FindKey(name); ok {
+		canonicalName = matched
+	}
+	if canonicalName == Local || (c[canonicalName] != nil && c[canonicalName]["type"] == "local") {
 		p, e := resolveLocalEntry(sub, allowFile)
 		id := "/local" + p
 		return Endpoint{
 			Path:            p,
-			RemoteName:      name,
+			RemoteName:      canonicalName,
 			Backend:         "local",
 			LocalPath:       p,
 			Identity:        id,
@@ -305,27 +319,41 @@ func (c Config) resolveEndpoint(v string, allowFile bool) (Endpoint, error) {
 			IsLocal:         true,
 		}, e
 	}
-	if c[name] == nil {
+	if c[canonicalName] == nil {
 		return Endpoint{}, errors.New("备份存储不存在")
 	}
 
 	isCrypt := false
 	isReadOnlyWrapper := false
 	hasWrapper := false
-	ref := name
-	var backing string
+	ref := canonicalName
+	var cryptBacking string
 	rest := sub
 	for IsWrapperType(c[ref]["type"]) {
 		hasWrapper = true
-		if c[ref]["type"] == "crypt" {
-			isCrypt = true
-		}
-		if c[ref]["type"] == "archive" {
+		typ := c[ref]["type"]
+		if typ == "archive" {
 			isReadOnlyWrapper = true
 		}
 		var prefix string
 		ref, prefix, _ = strings.Cut(c[ref]["remote"], ":")
-		backing = prefix
+		if strings.EqualFold(ref, Local) {
+			ref = Local
+		} else if matched, ok := c.FindKey(ref); ok {
+			ref = matched
+		}
+		if typ == "crypt" {
+			if !isCrypt {
+				isCrypt = true
+				cryptBacking = strings.Trim(prefix, "/")
+			} else {
+				cryptBacking = strings.TrimSuffix(strings.Trim(prefix+"/"+cryptBacking, "/"), "/")
+			}
+		} else if isCrypt {
+			// Wrapper sits below crypt (e.g. crypt -> chunker -> s3:bucket/base):
+			// accumulate physical prefix beneath the encrypted root.
+			cryptBacking = strings.TrimSuffix(strings.Trim(prefix+"/"+cryptBacking, "/"), "/")
+		}
 		rest = strings.TrimSuffix(strings.Trim(prefix+"/"+rest, "/"), "/")
 	}
 
@@ -343,14 +371,15 @@ func (c Config) resolveEndpoint(v string, allowFile bool) (Endpoint, error) {
 	}
 
 	result := Endpoint{
-		Path:           name + ":" + sub,
-		RemoteName:     name,
-		Backend:        backend,
-		Vendor:         vendor,
-		Sub:            sub,
-		IsCrypt:        isCrypt,
-		ReadOnly:       backend == "http" || isReadOnlyWrapper,
-		AllowHashCheck: allowHashCheck,
+		Path:              canonicalName + ":" + sub,
+		RemoteName:        canonicalName,
+		Backend:           backend,
+		Vendor:            vendor,
+		Sub:               sub,
+		IsCrypt:           isCrypt,
+		ReadOnly:          backend == "http" || isReadOnlyWrapper,
+		AllowHashCheck:    allowHashCheck,
+		UnreliableModTime: backend == "webdav" && !webdavVendorHasReliableModTime(vendor),
 	}
 
 	// Never include credentials or access keys in a path identity. Aliases of
@@ -358,13 +387,17 @@ func (c Config) resolveEndpoint(v string, allowFile bool) (Endpoint, error) {
 	location := resolveBackendLocation(backend, ref, options)
 	backingScope := rest
 	if isCrypt {
-		backingScope = backing
+		backingScope = cryptBacking
 	}
 	result.BackingIdentity = path.Join("/", backend, location, backingScope)
 	result.Identity = result.BackingIdentity
 
 	if ref == Local || (options != nil && options["type"] == "local") {
-		p, e := resolveLocal(backing)
+		localTarget := rest
+		if isCrypt {
+			localTarget = cryptBacking
+		}
+		p, e := resolveLocalEntry(localTarget, allowFile && !isCrypt)
 		if e != nil {
 			return Endpoint{}, e
 		}
@@ -392,6 +425,10 @@ func (c Config) resolveEndpoint(v string, allowFile bool) (Endpoint, error) {
 			}
 			if ep, err := c.Resolve(targetPath); err == nil {
 				backingIDs = append(backingIDs, ep.BackingIdentity)
+				backingIDs = append(backingIDs, ep.UnionBackingIDs...)
+				if !ep.HasReliableModTime() {
+					result.UnreliableModTime = true
+				}
 			}
 		}
 		result.UnionBackingIDs = backingIDs
@@ -402,21 +439,30 @@ func (c Config) resolveEndpoint(v string, allowFile bool) (Endpoint, error) {
 			return Endpoint{}, err
 		}
 		var backingIDs []string
+		mountName, mountSub, _ := strings.Cut(rest, "/")
 		for _, up := range ups {
+			if mountName != "" && up.Name != mountName {
+				continue
+			}
 			uRef, uSub, _ := strings.Cut(up.Target, ":")
 			targetPath := "/" + uRef
-			if uSub != "" {
-				targetPath += "/" + uSub
+			combinedSub := strings.TrimSuffix(strings.Trim(uSub+"/"+mountSub, "/"), "/")
+			if combinedSub != "" {
+				targetPath += "/" + combinedSub
 			}
 			if ep, err := c.Resolve(targetPath); err == nil {
 				backingIDs = append(backingIDs, ep.BackingIdentity)
+				backingIDs = append(backingIDs, ep.UnionBackingIDs...)
+				if !ep.HasReliableModTime() {
+					result.UnreliableModTime = true
+				}
 			}
 		}
 		result.UnionBackingIDs = backingIDs
 	}
 
 	if isCrypt {
-		fp := wrapperChainFingerprint(c, name)
+		fp := wrapperChainFingerprint(c, canonicalName)
 		result.CryptScope = path.Join(result.BackingIdentity, fp)
 		result.Identity = path.Join("/crypt", result.CryptScope, sub)
 	}
@@ -567,7 +613,7 @@ func (c Config) ListWithOptions(ctx context.Context, v string, opts SessionOptio
 	}
 
 	n, sub, _ := strings.Cut(strings.Trim(v, "/"), "/")
-	if n == Local || c[n]["type"] == "local" {
+	if c.isLocalName(n) {
 		if sub == "" {
 			for _, r := range authorizedRoots() {
 				push(r.Path, path.Join(v, r.ID))
@@ -593,21 +639,22 @@ func (c Config) ListWithOptions(ctx context.Context, v string, opts SessionOptio
 			}
 		}
 	} else {
-		if c[n] == nil || !cleanRelative(sub) {
+		canonical, ok := c.FindKey(n)
+		if !ok || !cleanRelative(sub) {
 			return nil, errors.New("远端路径无效")
 		}
-		session, e := c.SessionFor([]SessionSpec{{Name: n, Mode: diskReadOnly}}, opts)
+		session, e := c.SessionFor([]SessionSpec{{Name: canonical, Mode: diskReadOnly}}, opts)
 		if e != nil {
 			return nil, e
 		}
 		defer session.Close()
-		cmd, e := session.Cmd(ctx, "lsjson", "--dirs-only", "--no-mimetype", "--no-modtime", "--", n+":"+sub)
+		cmd, e := session.Cmd(ctx, "lsjson", "--dirs-only", "--no-mimetype", "--no-modtime", "--", canonical+":"+sub)
 		if e != nil {
 			return nil, e
 		}
 		out, stderr, e := limitedOutputWithStderr(cmd, 16<<20)
 		if e != nil {
-			return nil, classifyRcloneError(c[n]["type"], stderr)
+			return nil, classifyRcloneError(c[canonical]["type"], stderr)
 		}
 		var rows []struct {
 			Name  string

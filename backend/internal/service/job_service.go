@@ -11,10 +11,13 @@ import (
 	"opensync/internal/msg"
 	"opensync/internal/native"
 	"opensync/pkg/util"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/robfig/cron/v3"
 )
 
 var (
@@ -41,8 +44,15 @@ var scheduleTaskNumUpdateFn = scheduleTaskNumUpdate
 // InitJobs loads and starts all enabled jobs on startup
 func InitJobs() {
 	logger := log.Default()
+	native.SetMD5CachePath(filepath.Join(config.DataDir(), "md5cache.json"))
 	if _, err := EnsureNativeEngine(); err != nil {
 		logger.Printf("Failed to ensure built-in rclone engine: %v", err)
+	}
+	var interruptedTasks []map[string]interface{}
+	if config.GetSystemSettings().AutoResumeInterrupted == 1 {
+		if rows, err := mapper.ListRunningJobTasks(); err == nil {
+			interruptedTasks = rows
+		}
 	}
 	if err := mapper.UpdateJobTaskStatusByStatus(); err != nil {
 		logger.Printf("Failed to mark unfinished task history as aborted: %v", err)
@@ -83,9 +93,121 @@ func InitJobs() {
 	for _, jobID := range legacyJobIDs {
 		pendingDeleteApprovals.ClearForJob(jobID)
 	}
+	// Start filesystem watchers for enabled jobs configured with watchEnable.
+	jobClientListMu.RLock()
+	loadedClients := make([]*JobClient, 0, len(jobClientList))
+	for _, c := range jobClientList {
+		loadedClients = append(loadedClients, c)
+	}
+	jobClientListMu.RUnlock()
+	for _, c := range loadedClients {
+		jobFSWatchers.SyncJob(c)
+	}
+	if len(interruptedTasks) > 0 && config.GetSystemSettings().AutoResumeInterrupted == 1 {
+		go resumeInterruptedTasksOnStartup(interruptedTasks)
+	}
+	go catchUpMissedScheduledJobs(loadedClients)
+}
+
+func catchUpMissedScheduledJobs(clients []*JobClient) {
+	if len(clients) == 0 {
+		return
+	}
+	latestTasks, err := mapper.GetLatestTaskPerJob()
+	if err != nil {
+		return
+	}
+	now := time.Now()
+	for _, jc := range clients {
+		if jc == nil || !jc.enabled() || jc.isClosing() || jc.isBusy() {
+			continue
+		}
+		job := jc.jobSnapshot()
+		if job == nil {
+			continue
+		}
+		extra, _, extraErr := parseNativeExtraFlags(job["extraFlags"])
+		if extraErr != nil || !extra.MissedCatchUp {
+			continue
+		}
+		isCron := util.ToInt(job["isCron"])
+		if isCron == 2 {
+			continue
+		}
+		if !JobInTimeWindow(job, now) {
+			continue
+		}
+		jobID := jc.idSnapshot()
+		var lastRunTS int64
+		if lt, ok := latestTasks[jobID]; ok && lt != nil {
+			lastRunTS = util.ToInt64(lt["runTime"])
+			if lastRunTS <= 0 {
+				lastRunTS = util.ToInt64(lt["createTime"])
+			}
+		}
+		if lastRunTS <= 0 {
+			continue
+		}
+		missed := false
+		if isCron == 0 {
+			intervalMin := util.ToInt64(job["interval"])
+			if intervalMin > 0 && now.Unix()-lastRunTS >= intervalMin*60+60 {
+				missed = true
+			}
+		} else if isCron == 1 {
+			if spec, specErr := buildCronSpec(job); specErr == nil && spec != "" {
+				parser := cron.NewParser(cron.Second | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+				if sched, parseErr := parser.Parse(spec); parseErr == nil {
+					nextAfterLast := sched.Next(time.Unix(lastRunTS, 0).In(schedulerLocation()))
+					if !nextAfterLast.IsZero() && nextAfterLast.Before(now.Add(-time.Minute)) {
+						missed = true
+					}
+				}
+			}
+		}
+		if missed {
+			if jc.DoScheduled() {
+				log.Printf("Missed-schedule catch-up triggered for job %d", jobID)
+			}
+		}
+	}
+}
+
+func resumeInterruptedTasksOnStartup(rows []map[string]interface{}) {
+	// Deduplicate by jobID keeping the newest interrupted task ID per job.
+	latestByJob := make(map[int64]int64, len(rows))
+	for _, r := range rows {
+		tid := util.ToInt64(r["id"])
+		jid := util.ToInt64(r["jobId"])
+		if jid > 0 && tid > latestByJob[jid] {
+			latestByJob[jid] = tid
+		}
+	}
+	for jobID, taskID := range latestByJob {
+		jobClientListMu.RLock()
+		jc := jobClientList[jobID]
+		jobClientListMu.RUnlock()
+		if jc == nil || !jc.enabled() || jc.isClosing() {
+			continue
+		}
+		if util.ToInt(jc.jobSnapshot()["method"]) != 3 {
+			if err := jc.DoRetryFailedTaskItems(taskID); err == nil {
+				log.Printf("Auto-resumed interrupted task %d for job %d", taskID, jobID)
+				continue
+			}
+		}
+		if err := jc.DoManual(); err == nil {
+			log.Printf("Auto-restarted interrupted job %d after service restart", jobID)
+		}
+	}
 }
 
 func ShutdownJobs(ctx context.Context) {
+	// Stop filesystem watchers and background storage transfer workers first.
+	jobFSWatchers.StopAll()
+	ShutdownNativeTransfers()
+	native.FlushMD5Cache()
+
 	// Stop the retention cleanup first and wait for it within ctx: it may be
 	// mid-VACUUM, and the caller closes the database right after this returns.
 	if !stopTaskRetentionCleanup(ctx) {
@@ -456,7 +578,11 @@ func normalizeJobExtendedFields(job map[string]interface{}) error {
 	}
 	trashDir, err := normalizeTrashDir(util.StringValue(job["trashDir"]))
 	if err != nil {
-		return err
+		if util.ToInt(job["trashEnable"]) == 0 || util.ToInt(job["method"]) == 2 {
+			trashDir = defaultTrashDir
+		} else {
+			return err
+		}
 	}
 	job["trashDir"] = trashDir
 	if raw, ok := job["trashRetentionDays"]; ok && raw != nil && raw != "" {
@@ -940,7 +1066,24 @@ func CreateJobClient(job map[string]interface{}) (int64, error) {
 	return addJobClient(job, false)
 }
 
+func jobHasStandardWebDAVDst(c native.Config, job map[string]interface{}) bool {
+	if c == nil || job == nil {
+		return false
+	}
+	for _, dst := range parsePathList(job["dstPath"]) {
+		ep, err := c.Resolve(dst)
+		if err == nil && !ep.HasReliableModTime() {
+			return true
+		}
+	}
+	return false
+}
+
 func addJobClient(job map[string]interface{}, isInit bool) (int64, error) {
+	compareModeSpecified := false
+	if raw, ok := job["compareMode"]; ok && raw != nil && raw != "" {
+		compareModeSpecified = true
+	}
 	if !isInit {
 		if id, ok := strictJobInt64(job["alistId"]); !ok || id <= 0 {
 			nativeID, err := EnsureNativeEngine()
@@ -987,6 +1130,11 @@ func addJobClient(job map[string]interface{}, isInit bool) (int64, error) {
 		if err := validateNativeJob(job, row); err != nil {
 			return 0, err
 		}
+		if !compareModeSpecified {
+			if cfg, cfgErr := nativeConfig(row); cfgErr == nil && jobHasStandardWebDAVDst(cfg, job) {
+				job["compareMode"] = 1
+			}
+		}
 	}
 	client, err := NewJobClient(job, isInit)
 	if err != nil {
@@ -995,6 +1143,9 @@ func addJobClient(job map[string]interface{}, isInit bool) (int64, error) {
 	jobClientListMu.Lock()
 	jobClientList[client.JobID] = client
 	jobClientListMu.Unlock()
+	if !isInit {
+		jobFSWatchers.SyncJob(client)
+	}
 	return client.JobID, nil
 }
 
@@ -1097,6 +1248,7 @@ func EditJobClient(job map[string]interface{}) error {
 	if jobConfigInvalidatesBisyncState(prevConfig, job) {
 		cleanupBisyncWorkDir(jobID)
 	}
+	jobFSWatchers.SyncJob(client)
 	return nil
 }
 
@@ -1265,6 +1417,7 @@ func RemoveJobClient(jobID int64) error {
 		loadMu.Unlock()
 		pendingDeleteApprovals.ClearForJob(jobID)
 		cleanupBisyncWorkDir(jobID)
+		jobFSWatchers.Stop(jobID)
 		return nil
 	}
 	// Row still exists: roll back to the previous state and allow a retry.
@@ -1288,7 +1441,11 @@ func ContinueJob(jobID int64) error {
 	if err != nil {
 		return err
 	}
-	return client.ResumeJob()
+	if err := client.ResumeJob(); err != nil {
+		return err
+	}
+	jobFSWatchers.SyncJob(client)
+	return nil
 }
 
 // PauseJob disables a job
@@ -1311,7 +1468,11 @@ func PauseJob(jobID int64) error {
 	if util.ToInt(client.jobSnapshot()["isCron"]) == 2 {
 		return publicError(msg.T(msg.CannotDisableManualJob))
 	}
-	return client.StopJob(false)
+	if err := client.StopJob(false); err != nil {
+		return err
+	}
+	jobFSWatchers.Stop(jobID)
+	return nil
 }
 
 // AbortJob aborts a running job
@@ -1352,8 +1513,88 @@ func StopTask(taskID int64) error {
 	return nil
 }
 
+func findRunningTaskByID(taskID int64) (*JobTask, error) {
+	job, err := mapper.GetJobByTaskID(taskID)
+	if err != nil {
+		return nil, publicErrorIf(err, msg.T(msg.JobNotFound))
+	}
+	jobID := util.ToInt64(job["id"])
+	jobClientListMu.RLock()
+	client := jobClientList[jobID]
+	jobClientListMu.RUnlock()
+	if client == nil {
+		return nil, publicError(msg.T(msg.TaskNotRunningStop))
+	}
+	task := client.currentTask()
+	if task == nil || task.TaskID != taskID {
+		return nil, publicError(msg.T(msg.TaskNotRunningStop))
+	}
+	return task, nil
+}
+
+// PauseTaskTransfer suspends a running task's transfer workers without aborting it.
+func PauseTaskTransfer(taskID int64) error {
+	task, err := findRunningTaskByID(taskID)
+	if err != nil {
+		return err
+	}
+	return task.PauseTransfer()
+}
+
+// ResumeTaskTransfer resumes a paused running task's transfer workers.
+func ResumeTaskTransfer(taskID int64) error {
+	task, err := findRunningTaskByID(taskID)
+	if err != nil {
+		return err
+	}
+	return task.ResumeTransfer()
+}
+
+// SetTaskLiveBwLimit dynamically changes bandwidth limit on an actively running task.
+func SetTaskLiveBwLimit(ctx context.Context, taskID int64, rate string) error {
+	task, err := findRunningTaskByID(taskID)
+	if err != nil {
+		return err
+	}
+	return task.SetLiveBwLimit(ctx, rate)
+}
+
+// ApplyGlobalDefaultBwLimitAsync propagates an updated global default bandwidth
+// limit to all currently running tasks that inherit the global default.
+func ApplyGlobalDefaultBwLimitAsync(rate string) {
+	jobClientListMu.RLock()
+	tasks := make([]*JobTask, 0, len(jobClientList))
+	for _, client := range jobClientList {
+		if client == nil {
+			continue
+		}
+		if task := client.currentTask(); task != nil {
+			tasks = append(tasks, task)
+		}
+	}
+	jobClientListMu.RUnlock()
+	if len(tasks) == 0 {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for _, task := range tasks {
+			_ = task.ApplyGlobalBwLimit(ctx, rate)
+		}
+	}()
+}
+
 func ApproveFullSyncTask(taskID int64) error {
 	return pendingDeleteApprovals.ApproveByTaskID(taskID)
+}
+
+func ApproveFullSyncTaskPaths(taskID int64, selectedPaths []string) error {
+	return pendingDeleteApprovals.ApproveByTaskIDPaths(taskID, selectedPaths)
+}
+
+func ExcludeFullSyncApprovalPaths(taskID int64, selectedPaths []string) (int, error) {
+	return pendingDeleteApprovals.ExcludeByTaskIDPaths(taskID, selectedPaths)
 }
 
 func RejectFullSyncTask(taskID int64) error {
@@ -1438,6 +1679,7 @@ func addJobNextRunTimes(result map[string]interface{}) {
 		legacyOpenList := legacyEngineIDs[util.ToInt64(row["alistId"])]
 		next := int64(0)
 		running := false
+		paused := false
 		if !legacyOpenList {
 			if client := clients[jobID]; client != nil {
 				if nextTime, scheduled := client.nextRunTime(); scheduled {
@@ -1445,6 +1687,7 @@ func addJobNextRunTimes(result map[string]interface{}) {
 				}
 				if task := client.currentTask(); task != nil {
 					running = true
+					paused = task.isPaused()
 				}
 			}
 		} else {
@@ -1453,8 +1696,11 @@ func addJobNextRunTimes(result map[string]interface{}) {
 		row["legacyOpenList"] = legacyOpenList
 		row["nextRunTime"] = next
 		row["running"] = running
+		row["paused"] = running && paused
 		row["queued"] = !legacyOpenList && queuedSet[jobID]
 		row["pendingApproval"] = !legacyOpenList && pendingDeleteApprovals.Has(jobID)
+		row["watching"] = !legacyOpenList && jobFSWatchers.IsWatching(jobID)
+		row["checkRunning"] = !legacyOpenList && IsJobCheckRunning(jobID)
 		if latest, ok := latestTasks[jobID]; ok {
 			row["lastStatus"] = util.ToInt(latest["status"])
 		}
@@ -1674,6 +1920,11 @@ func GetTaskItemList(req map[string]interface{}) (map[string]interface{}, error)
 	result, err := mapper.GetJobTaskItemList(req)
 	if err := publicErrorIf(err, msg.T(msg.ListTooLarge)); err != nil {
 		return nil, err
+	}
+	if taskID := util.ToInt64(req["taskId"]); taskID > 0 && result != nil {
+		if groups, gErr := mapper.GetTaskErrorGroups(taskID, 20); gErr == nil && len(groups) > 0 {
+			result["errorGroups"] = groups
+		}
 	}
 	return result, nil
 }

@@ -513,16 +513,139 @@ func (m *pendingDeleteManager) findLockedByJobID(jobID int64, now time.Time) (*p
 func (m *pendingDeleteManager) ApproveByTaskID(taskID int64) error {
 	return m.startExecution(func(now time.Time) (*pendingDeleteRecord, error) {
 		return m.findLockedByTaskID(taskID, now)
-	})
+	}, nil)
+}
+
+// ApproveByTaskIDPaths approves only the explicitly selected destination paths
+// (leaving unselected pending items untouched on destination).
+func (m *pendingDeleteManager) ApproveByTaskIDPaths(taskID int64, selectedPaths []string) error {
+	selectedSet := make(map[string]struct{}, len(selectedPaths))
+	for _, p := range selectedPaths {
+		if cleaned := strings.TrimSpace(p); cleaned != "" {
+			selectedSet[cleaned] = struct{}{}
+		}
+	}
+	if len(selectedSet) == 0 {
+		return publicError("请至少选择一个要删除的项目")
+	}
+	return m.startExecution(func(now time.Time) (*pendingDeleteRecord, error) {
+		return m.findLockedByTaskID(taskID, now)
+	}, selectedSet)
 }
 
 func (m *pendingDeleteManager) ApproveByJobID(jobID int64) error {
 	return m.startExecution(func(now time.Time) (*pendingDeleteRecord, error) {
 		return m.findLockedByJobID(jobID, now)
-	})
+	}, nil)
 }
 
-func (m *pendingDeleteManager) startExecution(lookup func(time.Time) (*pendingDeleteRecord, error)) error {
+// ExcludeByTaskIDPaths appends exclusion rules for the selected pending-delete
+// destination paths to the job configuration and removes them from the pending
+// approval list so future mirror runs will leave those entries untouched.
+func (m *pendingDeleteManager) ExcludeByTaskIDPaths(taskID int64, selectedPaths []string) (int, error) {
+	if len(selectedPaths) == 0 {
+		return 0, publicError("请至少选择一项要加入排除规则的路径")
+	}
+	selectedSet := make(map[string]struct{}, len(selectedPaths))
+	for _, p := range selectedPaths {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			selectedSet[trimmed] = struct{}{}
+		}
+	}
+	now := time.Now()
+	m.mu.Lock()
+	rec, err := m.findLockedByTaskID(taskID, now)
+	if err != nil {
+		m.mu.Unlock()
+		return 0, err
+	}
+	if rec.Status == pendingApprovalStatusExecuting {
+		m.mu.Unlock()
+		return 0, publicError(msg.T(msg.FullSyncApprovalExecuting))
+	}
+	jobID := rec.JobID
+	var rulesToAdd []string
+	var remaining []pendingDeleteTarget
+	for _, t := range rec.Targets {
+		objPath := t.objectPath()
+		if _, chosen := selectedSet[objPath]; chosen {
+			rel := strings.TrimPrefix(objPath, normalizeDirPath(t.DstRoot))
+			rel = strings.TrimPrefix(rel, "/")
+			if rel != "" {
+				if t.IsDir && !strings.HasSuffix(rel, "/") {
+					rel += "/"
+				}
+				rulesToAdd = append(rulesToAdd, rel)
+			}
+			continue
+		}
+		remaining = append(remaining, t)
+	}
+	m.mu.Unlock()
+
+	if len(rulesToAdd) == 0 {
+		return 0, publicError("未匹配到可加入排除规则的待删除项")
+	}
+
+	job, err := mapper.GetJobByID(jobID)
+	if err != nil {
+		return 0, publicErrorIf(err, msg.T(msg.JobNotFound))
+	}
+	existing := strings.TrimSpace(util.StringValue(job["exclude"]))
+	existingLines := make(map[string]struct{})
+	var mergedLines []string
+	for _, line := range strings.Split(existing, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		existingLines[line] = struct{}{}
+		mergedLines = append(mergedLines, line)
+	}
+	added := 0
+	for _, rule := range rulesToAdd {
+		if _, dup := existingLines[rule]; dup {
+			continue
+		}
+		existingLines[rule] = struct{}{}
+		mergedLines = append(mergedLines, rule)
+		added++
+	}
+	if added > 0 {
+		job["exclude"] = strings.Join(mergedLines, "\n")
+		if err := EditJobClient(job); err != nil {
+			return 0, err
+		}
+	}
+
+	// Update or clear the pending deletion approval with the remaining unselected targets.
+	if len(remaining) == 0 {
+		m.ClearForJob(jobID)
+	} else {
+		m.mu.Lock()
+		if !m.stopped {
+			jobSnap := cloneJobConfig(job)
+			jobName := approvalJobName(jobID, jobSnap)
+			nextRec := &pendingDeleteRecord{
+				JobID:     jobID,
+				JobName:   jobName,
+				TaskID:    taskID,
+				JobConfig: jobSnap,
+				Targets:   remaining,
+				Approval:  buildApprovalFromTargets(jobID, jobName, taskID, remaining),
+				Status:    pendingApprovalStatusPending,
+				CreatedAt: now.Unix(),
+			}
+			m.armExpiryTimerLocked(nextRec, effectiveFullSyncApprovalWait())
+			m.byJob[jobID] = nextRec
+			persistPendingDeleteRecord(nextRec)
+		}
+		m.mu.Unlock()
+	}
+	return len(rulesToAdd), nil
+}
+
+func (m *pendingDeleteManager) startExecution(lookup func(time.Time) (*pendingDeleteRecord, error), selectedPaths map[string]struct{}) error {
 	now := time.Now()
 	m.mu.Lock()
 	if m.stopped {
@@ -537,6 +660,20 @@ func (m *pendingDeleteManager) startExecution(lookup func(time.Time) (*pendingDe
 	if rec.Status == pendingApprovalStatusExecuting {
 		m.mu.Unlock()
 		return publicError(msg.T(msg.FullSyncApprovalExecuting))
+	}
+	if len(selectedPaths) > 0 {
+		filtered := make([]pendingDeleteTarget, 0, len(selectedPaths))
+		for _, t := range rec.Targets {
+			if _, ok := selectedPaths[t.objectPath()]; ok {
+				filtered = append(filtered, t)
+			}
+		}
+		if len(filtered) == 0 {
+			m.mu.Unlock()
+			return publicError("未匹配到有效的待删除项")
+		}
+		rec.Targets = filtered
+		rec.Approval = buildApprovalFromTargets(rec.JobID, rec.JobName, rec.TaskID, rec.Targets)
 	}
 	if rec.expiryTimer != nil {
 		rec.expiryTimer.Stop()

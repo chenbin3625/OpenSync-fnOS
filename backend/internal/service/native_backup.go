@@ -9,14 +9,85 @@ import (
 	"os"
 	"path"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"opensync/internal/config"
 	"opensync/internal/mapper"
 	"opensync/internal/native"
 	"opensync/pkg/util"
 )
+
+func init() {
+	native.RegisterTokenUpdateHook(persistRefreshedNativeTokens)
+}
+
+// persistRefreshedNativeTokens atomically writes rclone-refreshed OAuth/session
+// tokens back into encrypted SQLite storage without logging secret values.
+func persistRefreshedNativeTokens(updates map[string]map[string]string) {
+	if len(updates) == 0 {
+		return
+	}
+	alistMutationMu.Lock()
+	defer alistMutationMu.Unlock()
+
+	id, remark, _, c, err := loadExistingNativeRowFull()
+	if err != nil || id == 0 || len(c) == 0 {
+		return
+	}
+	var updatedNames []string
+	for name, fields := range updates {
+		canonical, ok := c.FindKey(name)
+		if !ok || c[canonical] == nil {
+			continue
+		}
+		changed := false
+		for k, v := range fields {
+			if k != "token" && k != "client_access_token" && k != "client_refresh_token" {
+				continue
+			}
+			if v != "" && c[canonical][k] != v {
+				c[canonical][k] = v
+				changed = true
+			}
+		}
+		if changed {
+			updatedNames = append(updatedNames, canonical)
+		}
+	}
+	if len(updatedNames) == 0 {
+		return
+	}
+	data, err := json.Marshal(c)
+	if err != nil {
+		return
+	}
+	secret := string(data)
+	if err := mapper.UpdateAlist(id, remark, native.EngineURL, &secret); err == nil {
+		slices.Sort(updatedNames)
+		// Never log token values; only remote names.
+		fmt.Printf("OpenSync: persisted refreshed OAuth tokens for remotes %v\n", updatedNames)
+	}
+}
+
+func nativeStorageConcurrencyLimits(c native.Config) map[string]int {
+	limits := map[string]int{}
+	if c != nil {
+		for k, v := range c.StorageConcurrencyLimits() {
+			limits[k] = v
+		}
+	}
+	if localCap := config.GetSystemSettings().LocalMaxConcurrentJobs; localCap > 0 {
+		limits[native.Local] = localCap
+	}
+	return limits
+}
+
+func refreshNativeStorageConcurrencyLimits(c native.Config) {
+	engineQueue.RefreshStorageLimits(nativeStorageConcurrencyLimits(c))
+}
 
 type NativeStorageInput struct {
 	ConfigPassword    string            `json:"configPassword"`
@@ -25,17 +96,20 @@ type NativeStorageInput struct {
 	Config            string            `json:"config"`
 	Replace           bool              `json:"replace"`
 	MaxConcurrentJobs *int              `json:"maxConcurrentJobs,omitempty"`
+	AuthSessionID     string            `json:"authSessionId,omitempty"`
 }
 
 type NativeEngineInput struct {
-	Remark            *string `json:"remark,omitempty"`
-	MaxConcurrentJobs *int    `json:"maxConcurrentJobs,omitempty"`
+	Remark                 *string `json:"remark,omitempty"`
+	MaxConcurrentJobs      *int    `json:"maxConcurrentJobs,omitempty"`
+	LocalMaxConcurrentJobs *int    `json:"localMaxConcurrentJobs,omitempty"`
 }
 
 type NativeRemoteEditInput struct {
-	Name         string            `json:"name"`
-	Options      map[string]string `json:"options"`
-	ClearSecrets []string          `json:"clearSecrets,omitempty"`
+	Name          string            `json:"name"`
+	Options       map[string]string `json:"options"`
+	ClearSecrets  []string          `json:"clearSecrets,omitempty"`
+	AuthSessionID string            `json:"authSessionId,omitempty"`
 }
 
 type NativeImportInput struct {
@@ -51,10 +125,11 @@ type NativeImportResult struct {
 }
 
 type NativeStorageTestInput struct {
-	Name         string            `json:"name"`
-	Options      map[string]string `json:"options,omitempty"`
-	Editing      bool              `json:"editing,omitempty"`
-	ClearSecrets []string          `json:"clearSecrets,omitempty"`
+	Name          string            `json:"name"`
+	Options       map[string]string `json:"options,omitempty"`
+	Editing       bool              `json:"editing,omitempty"`
+	ClearSecrets  []string          `json:"clearSecrets,omitempty"`
+	AuthSessionID string            `json:"authSessionId,omitempty"`
 }
 
 type NativeStorageTestResult struct {
@@ -73,17 +148,19 @@ type NativeRemoteItem struct {
 	ConfiguredSecrets []string          `json:"configuredSecrets"`
 	UsedByJobs        []string          `json:"usedByJobs"`
 	UsedByCrypts      []string          `json:"usedByCrypts"`
+	MaxConcurrentJobs int               `json:"maxConcurrentJobs"`
 	ActiveJobs        int               `json:"activeJobs"`
 	QueuedJobs        int               `json:"queuedJobs"`
 }
 
 type NativeStorageState struct {
-	EngineID          int64                  `json:"engineId"`
-	Enabled           bool                   `json:"enabled"`
-	Remark            string                 `json:"remark"`
-	MaxConcurrentJobs int                    `json:"maxConcurrentJobs"`
-	LocalActiveJobs   int                    `json:"localActiveJobs"`
-	LocalQueuedJobs   int                    `json:"localQueuedJobs"`
+	EngineID               int64                  `json:"engineId"`
+	Enabled                bool                   `json:"enabled"`
+	Remark                 string                 `json:"remark"`
+	MaxConcurrentJobs      int                    `json:"maxConcurrentJobs"`
+	LocalMaxConcurrentJobs int                    `json:"localMaxConcurrentJobs"`
+	LocalActiveJobs        int                    `json:"localActiveJobs"`
+	LocalQueuedJobs        int                    `json:"localQueuedJobs"`
 	RcloneAvailable   bool                   `json:"rcloneAvailable"`
 	RcloneVersion     string                 `json:"rcloneVersion,omitempty"`
 	RcloneError       string                 `json:"rcloneError,omitempty"`
@@ -250,17 +327,18 @@ func GetNativeStorageState(ctx context.Context) (*NativeStorageState, error) {
 	rcloneVer, rcloneErr := native.Version(checkCtx)
 	localActive, localQueued := engineQueue.StorageStats(native.Local)
 	state := &NativeStorageState{
-		EngineID:          id,
-		Enabled:           id > 0,
-		Remark:            remark,
-		MaxConcurrentJobs: mc,
-		LocalActiveJobs:   localActive,
-		LocalQueuedJobs:   localQueued,
-		RcloneAvailable:   rcloneErr == nil,
-		RcloneVersion:     rcloneVer,
-		SupportedTypes:    native.SupportedRemoteTypes(),
-		LocalRoots:        native.AuthorizedRoots(),
-		Remotes:           make([]NativeRemoteItem, 0, len(c)),
+		EngineID:               id,
+		Enabled:                id > 0,
+		Remark:                 remark,
+		MaxConcurrentJobs:      mc,
+		LocalMaxConcurrentJobs: config.GetSystemSettings().LocalMaxConcurrentJobs,
+		LocalActiveJobs:        localActive,
+		LocalQueuedJobs:        localQueued,
+		RcloneAvailable:        rcloneErr == nil,
+		RcloneVersion:          rcloneVer,
+		SupportedTypes:         native.SupportedRemoteTypes(),
+		LocalRoots:             native.AuthorizedRoots(),
+		Remotes:                make([]NativeRemoteItem, 0, len(c)),
 	}
 	if rcloneErr != nil {
 		state.RcloneError = rcloneErr.Error()
@@ -278,6 +356,7 @@ func GetNativeStorageState(ctx context.Context) (*NativeStorageState, error) {
 			usedCrypts = []string{}
 		}
 		activeJobs, queuedJobs := engineQueue.StorageStats(name)
+		remoteCap, _ := strconv.Atoi(strings.TrimSpace(params["max_concurrent_jobs"]))
 		state.Remotes = append(state.Remotes, NativeRemoteItem{
 			Name:              name,
 			Type:              params["type"],
@@ -286,6 +365,7 @@ func GetNativeStorageState(ctx context.Context) (*NativeStorageState, error) {
 			ConfiguredSecrets: secrets,
 			UsedByJobs:        usedJobs,
 			UsedByCrypts:      usedCrypts,
+			MaxConcurrentJobs: remoteCap,
 			ActiveJobs:        activeJobs,
 			QueuedJobs:        queuedJobs,
 		})
@@ -314,10 +394,15 @@ func SaveNativeEngine(ctx context.Context, in NativeEngineInput) (*NativeStorage
 			return nil, publicError("最大并发任务数必须在 0–50 之间")
 		}
 	}
+	if in.LocalMaxConcurrentJobs != nil {
+		if *in.LocalMaxConcurrentJobs < 0 || *in.LocalMaxConcurrentJobs > 50 {
+			return nil, publicError("本地存储最大并发任务数必须在 0–50 之间")
+		}
+	}
 
 	alistRefMu.Lock()
 	alistMutationMu.Lock()
-	id, existingRemark, _, _, err := loadExistingNativeRowFull()
+	id, existingRemark, _, existingCfg, err := loadExistingNativeRowFull()
 	if err != nil {
 		alistMutationMu.Unlock()
 		alistRefMu.Unlock()
@@ -337,6 +422,16 @@ func SaveNativeEngine(ctx context.Context, in NativeEngineInput) (*NativeStorage
 		if addErr != nil {
 			return nil, addErr
 		}
+		if in.LocalMaxConcurrentJobs != nil {
+			localCap := *in.LocalMaxConcurrentJobs
+			if cfgErr := config.UpdateSystemSettingsWith(func(cur config.SystemSettings) config.SystemSettings {
+				cur.LocalMaxConcurrentJobs = localCap
+				return cur
+			}); cfgErr != nil {
+				return nil, publicError(cfgErr.Error())
+			}
+			refreshNativeStorageConcurrencyLimits(existingCfg)
+		}
 		RemoveEngineHealth(newID)
 		return GetNativeStorageState(ctx)
 	}
@@ -348,6 +443,16 @@ func SaveNativeEngine(ctx context.Context, in NativeEngineInput) (*NativeStorage
 	}
 	if in.MaxConcurrentJobs != nil {
 		engineQueue.RefreshLimit(id, *in.MaxConcurrentJobs)
+	}
+	if in.LocalMaxConcurrentJobs != nil {
+		localCap := *in.LocalMaxConcurrentJobs
+		if cfgErr := config.UpdateSystemSettingsWith(func(cur config.SystemSettings) config.SystemSettings {
+			cur.LocalMaxConcurrentJobs = localCap
+			return cur
+		}); cfgErr != nil {
+			return nil, publicError(cfgErr.Error())
+		}
+		refreshNativeStorageConcurrencyLimits(existingCfg)
 	}
 	return GetNativeStorageState(ctx)
 }
@@ -420,6 +525,8 @@ func SaveNativeStorage(ctx context.Context, in NativeStorageInput) error {
 		}
 	}
 	additions := native.Config{}
+	var skipObscure map[string]map[string]bool
+	authSessionID := strings.TrimSpace(in.AuthSessionID)
 	if in.Config != "" {
 		if len(in.Options) != 0 {
 			return publicError("请选择表单或配置文件其中一种方式")
@@ -438,7 +545,14 @@ func SaveNativeStorage(ctx context.Context, in NativeStorageInput) error {
 		if clean["type"] == "" {
 			return publicError("请选择存储类型")
 		}
-		additions[name] = clean
+		merged, skipped, mergeErr := mergeAuthSessionIntoParams(authSessionID, clean, nil, nil)
+		if mergeErr != nil {
+			return mergeErr
+		}
+		additions[name] = merged
+		if len(skipped) > 0 {
+			skipObscure = map[string]map[string]bool{name: skipped}
+		}
 	} else if strings.TrimSpace(in.Name) != "" {
 		return publicError("请填写存储配置参数")
 	}
@@ -453,7 +567,7 @@ func SaveNativeStorage(ctx context.Context, in NativeStorageInput) error {
 		if err := precheckAdditionsAgainstExisting(existingSnapshot, additions, in.Replace); err != nil {
 			return err
 		}
-		if err := native.Prepare(ctx, existingSnapshot, additions, in.Config == ""); err != nil {
+		if err := native.PrepareWithSkipObscure(ctx, existingSnapshot, additions, in.Config == "", skipObscure); err != nil {
 			return publicError(err.Error())
 		}
 	}
@@ -469,6 +583,7 @@ func SaveNativeStorage(ctx context.Context, in NativeStorageInput) error {
 	}
 
 	replaced := false
+	var replacedNames []string
 	if in.Replace && len(additions) > 0 {
 		// Match case-insensitively to align with Config.Validate, and preserve
 		// the canonical stored key so existing jobs referencing that remote name
@@ -482,6 +597,7 @@ func SaveNativeStorage(ctx context.Context, in NativeStorageInput) error {
 				delete(c, matched)
 				normalized[matched] = params
 				replaced = true
+				replacedNames = append(replacedNames, matched)
 			} else {
 				normalized[name] = params
 			}
@@ -493,10 +609,10 @@ func SaveNativeStorage(ctx context.Context, in NativeStorageInput) error {
 		return publicError(e.Error())
 	}
 
-	// If existing remotes were replaced, ensure existing native jobs remain valid
-	// and non-overlapping against the updated configuration.
+	// If existing remotes were replaced, ensure jobs affected by the replaced
+	// remotes remain valid and non-overlapping against the updated configuration.
 	if replaced && id > 0 {
-		if err := validateExistingNativeJobs(id, c); err != nil {
+		if err := validateExistingNativeJobs(id, c, replacedNames); err != nil {
 			return err
 		}
 	}
@@ -519,7 +635,11 @@ func SaveNativeStorage(ctx context.Context, in NativeStorageInput) error {
 		}
 	}
 	if e == nil && id > 0 {
+		refreshNativeStorageConcurrencyLimits(c)
 		RemoveEngineHealth(id)
+	}
+	if e == nil && authSessionID != "" {
+		native.ConsumeAuthSession(authSessionID)
 	}
 	return e
 }
@@ -544,6 +664,11 @@ func UpdateNativeStorage(ctx context.Context, in NativeRemoteEditInput) error {
 		return publicError(fmt.Sprintf("存储 %q 不存在", name))
 	}
 	mergedParams, skipFields, err := mergeEditRemoteParams(existingSnapshot[canonicalName], in.Options, in.ClearSecrets)
+	if err != nil {
+		return err
+	}
+	authSessionID := strings.TrimSpace(in.AuthSessionID)
+	mergedParams, skipFields, err = mergeAuthSessionIntoParams(authSessionID, mergedParams, in.ClearSecrets, skipFields)
 	if err != nil {
 		return err
 	}
@@ -576,7 +701,7 @@ func UpdateNativeStorage(ctx context.Context, in NativeRemoteEditInput) error {
 	if err := c.Validate(); err != nil {
 		return publicError(err.Error())
 	}
-	if err := validateExistingNativeJobs(id, c); err != nil {
+	if err := validateExistingNativeJobs(id, c, []string{liveName}); err != nil {
 		return err
 	}
 	data, err := json.Marshal(c)
@@ -587,7 +712,11 @@ func UpdateNativeStorage(ctx context.Context, in NativeRemoteEditInput) error {
 	if err := mapper.UpdateAlist(id, remark, native.EngineURL, &secret); err != nil {
 		return err
 	}
+	refreshNativeStorageConcurrencyLimits(c)
 	RemoveEngineHealth(id)
+	if authSessionID != "" {
+		native.ConsumeAuthSession(authSessionID)
+	}
 	return nil
 }
 
@@ -663,7 +792,7 @@ func ImportNativeStorage(ctx context.Context, in NativeImportInput) (*NativeImpo
 		return nil, publicError(err.Error())
 	}
 	if len(result.Replaced) > 0 && id > 0 {
-		if err := validateExistingNativeJobs(id, merged); err != nil {
+		if err := validateExistingNativeJobs(id, merged, result.Replaced); err != nil {
 			return nil, err
 		}
 	}
@@ -753,6 +882,10 @@ func TestNativeStorage(ctx context.Context, in NativeStorageTestInput) (*NativeS
 			if mergeErr != nil {
 				return nil, mergeErr
 			}
+			mergedParams, skipFields, mergeErr = mergeAuthSessionIntoParams(in.AuthSessionID, mergedParams, in.ClearSecrets, skipFields)
+			if mergeErr != nil {
+				return nil, mergeErr
+			}
 			additions := native.Config{matched: mergedParams}
 			if err := native.PrepareWithSkipObscure(probeCtx, testCfg, additions, true, map[string]map[string]bool{matched: skipFields}); err != nil {
 				return nil, publicError(err.Error())
@@ -777,8 +910,16 @@ func TestNativeStorage(ctx context.Context, in NativeStorageTestInput) (*NativeS
 			if clean["type"] == "" {
 				return nil, publicError("请选择存储类型")
 			}
-			additions := native.Config{name: clean}
-			if err := native.Prepare(probeCtx, testCfg, additions, true); err != nil {
+			mergedParams, skipFields, mergeErr := mergeAuthSessionIntoParams(in.AuthSessionID, clean, nil, nil)
+			if mergeErr != nil {
+				return nil, mergeErr
+			}
+			additions := native.Config{name: mergedParams}
+			var skipMap map[string]map[string]bool
+			if len(skipFields) > 0 {
+				skipMap = map[string]map[string]bool{name: skipFields}
+			}
+			if err := native.PrepareWithSkipObscure(probeCtx, testCfg, additions, true, skipMap); err != nil {
 				return nil, publicError(err.Error())
 			}
 			testCfg[name] = additions[name]
@@ -796,7 +937,10 @@ func TestNativeStorage(ctx context.Context, in NativeStorageTestInput) (*NativeS
 			probePath = bucketPath
 		}
 	}
-	entries, listErr := testCfg.ListWithOptions(probeCtx, probePath, native.SessionOptions{ProxyURL: globalNativeProxyURL()})
+	entries, listErr := testCfg.ListWithOptions(probeCtx, probePath, native.SessionOptions{
+		ProxyURL:            globalNativeProxyURL(),
+		DisableTokenPersist: len(in.Options) > 0,
+	})
 	latency := time.Since(start).Milliseconds()
 	if listErr != nil {
 		if params["type"] == "s3" && params["no_check_bucket"] == "true" && strings.Contains(listErr.Error(), "403") {
@@ -821,20 +965,53 @@ func TestNativeStorage(ctx context.Context, in NativeStorageTestInput) (*NativeS
 	}, nil
 }
 
-func validateExistingNativeJobs(alistID int64, c native.Config) error {
+func jobUsesAnyRemote(job map[string]interface{}, c native.Config, affected map[string]bool) bool {
+	if len(affected) == 0 {
+		return true
+	}
+	for _, p := range append(parsePathList(job["srcPath"]), parsePathList(job["dstPath"])...) {
+		seg, _, _ := strings.Cut(strings.TrimPrefix(p, "/"), "/")
+		if canonical, ok := c.FindKey(seg); ok && affected[canonical] {
+			return true
+		}
+	}
+	return false
+}
+
+func validateExistingNativeJobs(alistID int64, c native.Config, changedRemotes []string) error {
 	rows, err := mapper.GetJobListAll()
 	if err != nil {
 		return err
+	}
+	var affectedSet map[string]bool
+	if len(changedRemotes) > 0 {
+		affectedSet = c.AffectedRemotes(changedRemotes)
 	}
 	type target struct {
 		virtual string
 		ep      native.Endpoint
 	}
 	var allTargets []target
+	var affectedJobs []map[string]interface{}
 	for _, job := range rows {
 		if util.ToInt64(job["alistId"]) != alistID {
 			continue
 		}
+		if jobUsesAnyRemote(job, c, affectedSet) {
+			affectedJobs = append(affectedJobs, job)
+			continue
+		}
+		// Unrelated jobs (e.g. pointing to a temporarily unplugged local drive)
+		// must not block editing an unrelated remote's credentials; still record
+		// any currently resolvable writable targets so affected jobs cannot
+		// collide with them.
+		for _, v := range writablePathsForJob(job) {
+			if ep, err := c.Resolve(v); err == nil {
+				allTargets = append(allTargets, target{v, ep})
+			}
+		}
+	}
+	for _, job := range affectedJobs {
 		for _, src := range parsePathList(job["srcPath"]) {
 			for _, dst := range parsePathList(job["dstPath"]) {
 				if _, _, err := c.Pair(src, jobDstForSrc(job, src, dst)); err != nil {
@@ -952,6 +1129,7 @@ func DeleteNativeStorage(name string) error {
 	if err := mapper.UpdateAlist(id, remark, native.EngineURL, &secret); err != nil {
 		return err
 	}
+	refreshNativeStorageConcurrencyLimits(c)
 	RemoveEngineHealth(id)
 	return nil
 }
@@ -1192,6 +1370,24 @@ func runNativePairsWithTask(ctx context.Context, jt *JobTask, c native.Config, j
 		backupDir = nativeTrashBackupSubdir(jt, job)
 	}
 	baseOpts := buildNativeCopyOptions(job, dry, backupDir)
+	if jt != nil {
+		baseOpts.Controller = jt.controller()
+		if jt.ForceOverwrite {
+			baseOpts.ForceOverwrite = true
+		}
+		if len(jt.OnlyFiles) > 0 {
+			only := make([]native.PendingFile, 0, len(jt.OnlyFiles))
+			for _, rel := range jt.OnlyFiles {
+				rel = strings.TrimPrefix(path.Clean("/"+rel), "/")
+				if rel != "" && rel != "." && !strings.HasPrefix(rel, "../") {
+					only = append(only, native.PendingFile{Path: rel})
+				}
+			}
+			if len(only) > 0 {
+				baseOpts.OnlyFiles = only
+			}
+		}
+	}
 
 	type pairTarget struct{ src, dst string }
 	var pairs []pairTarget
@@ -1211,6 +1407,9 @@ func runNativePairsWithTask(ctx context.Context, jt *JobTask, c native.Config, j
 	runOne := func(pt pairTarget) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if err := baseOpts.Controller.WaitIfPaused(ctx); err != nil {
+			return err
 		}
 		pairOptions := baseOpts
 		if selected != nil {
@@ -1303,6 +1502,37 @@ func runNativePairsWithTask(ctx context.Context, jt *JobTask, c native.Config, j
 	return out
 }
 
+// checkDestinationFreeSpace enforces the global minFreeSpaceMB safety floor
+// before a task writes to any destination storage that reports free capacity.
+func checkDestinationFreeSpace(ctx context.Context, cfg native.Config, job map[string]interface{}) error {
+	minMB := config.GetSystemSettings().MinFreeSpaceMB
+	if minMB <= 0 {
+		return nil
+	}
+	minBytes := int64(minMB) * 1024 * 1024
+	checked := make(map[string]struct{})
+	for _, dst := range parsePathList(job["dstPath"]) {
+		seg, _, _ := strings.Cut(strings.TrimPrefix(strings.TrimSpace(dst), "/"), "/")
+		if seg == "" {
+			continue
+		}
+		if _, done := checked[seg]; done {
+			continue
+		}
+		checked[seg] = struct{}{}
+		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		info, err := cfg.About(probeCtx, seg, native.SessionOptions{ProxyURL: globalNativeProxyURL()})
+		cancel()
+		if err != nil || info == nil || !info.Supported || info.Free == nil {
+			continue
+		}
+		if *info.Free < minBytes {
+			return fmt.Errorf("目标存储 %q 剩余空间不足（当前可用 %s，低于安全阈值 %d MB），已中止同步保护磁盘", seg, util.ConvertBytes(*info.Free), minMB)
+		}
+	}
+	return nil
+}
+
 func (jt *JobTask) runNative() {
 	defer jt.cancelTaskRuntime()
 	defer func() {
@@ -1312,6 +1542,10 @@ func (jt *JobTask) runNative() {
 		}
 	}()
 	if err := validateNativeDestinations(jt.nativeConfig, jt.Job); err != nil {
+		jt.finishFailedTask(err.Error())
+		return
+	}
+	if err := checkDestinationFreeSpace(jt.context(), jt.nativeConfig, jt.Job); err != nil {
 		jt.finishFailedTask(err.Error())
 		return
 	}
@@ -1337,6 +1571,11 @@ func (jt *JobTask) runNative() {
 	}
 
 	method := util.ToInt(jt.Job["method"])
+	// Targeted repair runs (from consistency check one-click repair) always copy
+	// only the differing/missing files without running destructive mirror/move phases.
+	if len(jt.OnlyFiles) > 0 && jt.ForceOverwrite {
+		method = 0
+	}
 	switch method {
 	case 1:
 		err := jt.runNativeFullSync(selected)
@@ -1502,6 +1741,14 @@ func (jt *JobTask) runNative() {
 	})
 	if jt.context().Err() == nil {
 		cleanupNativeExpiredTrash(jt.context(), jt.nativeConfig, jt.TaskID, jt.Job)
+	} else {
+		var fallbackPairs [][2]string
+		for _, src := range parsePathList(jt.Job["srcPath"]) {
+			for _, base := range parsePathList(jt.Job["dstPath"]) {
+				fallbackPairs = append(fallbackPairs, [2]string{src, jobDstForSrc(jt.Job, src, base)})
+			}
+		}
+		jt.recordInterruptedPendingItems(fallbackPairs)
 	}
 	jt.ScanFinish.Store(true)
 	jt.Waiting.reset()
@@ -1530,10 +1777,14 @@ func decorateNative(row map[string]interface{}) {
 	details := map[string]map[string]string{}
 	for k, p := range c {
 		types[k] = p["type"]
-		details[k] = map[string]string{
+		info := map[string]string{
 			"type":    p["type"],
 			"summary": native.RemoteSummary(p),
 		}
+		if c.RemoteHasCrypt(k) {
+			info["hasCrypt"] = "true"
+		}
+		details[k] = info
 	}
 	row["remotes"] = types
 	row["remoteDetails"] = details
@@ -1557,13 +1808,14 @@ func collectS3ProbeBuckets(alistID int64, c native.Config) map[string]string {
 		}
 		for _, raw := range append(parsePathList(job["dstPath"]), parsePathList(job["srcPath"])...) {
 			name, sub, _ := strings.Cut(strings.TrimPrefix(raw, "/"), "/")
-			if c[name]["type"] != "s3" || sub == "" {
+			canonical, ok := c.FindKey(name)
+			if !ok || c[canonical]["type"] != "s3" || sub == "" {
 				continue
 			}
 			bucket, _, _ := strings.Cut(sub, "/")
 			if bucket != "" {
-				if _, exists := buckets[name]; !exists {
-					buckets[name] = "/" + name + "/" + bucket
+				if _, exists := buckets[canonical]; !exists {
+					buckets[canonical] = "/" + canonical + "/" + bucket
 				}
 			}
 		}

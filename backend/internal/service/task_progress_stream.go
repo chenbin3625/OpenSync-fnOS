@@ -14,6 +14,8 @@ const maxProgressSubscribersPerJob = 8
 
 type progressItemState struct {
 	progress   float64
+	doneBytes  int64
+	speed      float64
 	status     int
 	generation uint64
 }
@@ -499,8 +501,10 @@ func (item streamDoingItem) streamKey() progressItemKey {
 
 func (item streamDoingItem) streamState() progressItemState {
 	return progressItemState{
-		progress: item.Progress,
-		status:   item.Status,
+		progress:  item.Progress,
+		doneBytes: item.DoneBytes,
+		speed:     item.Speed,
+		status:    item.Status,
 	}
 }
 
@@ -510,6 +514,8 @@ func (item streamDoingItem) toPatch(includePaths bool) streamDoingPatch {
 		AlistTaskID: item.AlistTaskID,
 		Status:      item.Status,
 		Progress:    item.Progress,
+		DoneBytes:   item.DoneBytes,
+		Speed:       item.Speed,
 	}
 	if includePaths {
 		patch.FileName = item.FileName
@@ -572,7 +578,7 @@ func (h *progressHub) updateFrame(jobID int64, payload *jobCurrentPayload, snaps
 		if sameTask {
 			if !exists {
 				fileSetChanged = true
-			} else if previous.progress != state.progress || previous.status != state.status {
+			} else if previous.progress != state.progress || previous.status != state.status || previous.doneBytes != state.doneBytes || previous.speed != state.speed {
 				patch = append(patch, item.toPatch(item.ID == 0 && item.AlistTaskID == ""))
 			}
 		}

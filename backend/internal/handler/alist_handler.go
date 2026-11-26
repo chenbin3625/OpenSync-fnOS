@@ -1,8 +1,15 @@
 package handler
 
 import (
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"opensync/internal/msg"
 	"opensync/internal/service"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -247,6 +254,186 @@ func SetTierNativeStorage(c *gin.Context) {
 	}
 	handleServiceVoid(c, func() error {
 		return service.SetTierNativeStorage(c.Request.Context(), in)
+	})
+}
+
+func StartNativeStorageAuth(c *gin.Context) {
+	var in service.NativeStorageAuthStartInput
+	if !bindJSONStrict(c, &in) {
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	handleService(c, func() (interface{}, error) {
+		return service.StartNativeStorageAuth(c.Request.Context(), in)
+	})
+}
+
+func GetNativeStorageAuth(c *gin.Context) {
+	sessionID := c.Query("sessionId")
+	if sessionID == "" {
+		respondError(c, msg.T(msg.LostPart))
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	handleService(c, func() (interface{}, error) {
+		return service.GetNativeStorageAuth(sessionID)
+	})
+}
+
+func SubmitNativeStorageAuthCallback(c *gin.Context) {
+	var in service.NativeStorageAuthCallbackInput
+	if !bindJSONStrict(c, &in) {
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	handleService(c, func() (interface{}, error) {
+		return service.SubmitNativeStorageAuthCallback(c.Request.Context(), in)
+	})
+}
+
+func ContinueNativeStorageAuth(c *gin.Context) {
+	var in service.NativeStorageAuthContinueInput
+	if !bindJSONStrict(c, &in) {
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	handleService(c, func() (interface{}, error) {
+		return service.ContinueNativeStorageAuth(c.Request.Context(), in)
+	})
+}
+
+func CancelNativeStorageAuth(c *gin.Context) {
+	sessionID := c.Query("sessionId")
+	if sessionID == "" {
+		respondError(c, msg.T(msg.LostPart))
+		return
+	}
+	handleServiceVoid(c, func() error {
+		return service.CancelNativeStorageAuth(sessionID)
+	})
+}
+
+func ListNativeTransfers(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	respondOK(c, service.ListNativeTransfers())
+}
+
+func StartAsyncRestoreNativeFile(c *gin.Context) {
+	var in service.NativeRestoreInput
+	if !bindJSONStrict(c, &in) {
+		return
+	}
+	handleService(c, func() (interface{}, error) {
+		return service.StartAsyncRestoreNativeFile(in)
+	})
+}
+
+func StartAsyncCopyURLNativeStorage(c *gin.Context) {
+	var in service.NativeCopyURLInput
+	if !bindJSONStrict(c, &in) {
+		return
+	}
+	handleService(c, func() (interface{}, error) {
+		return service.StartAsyncCopyURLNativeStorage(in)
+	})
+}
+
+func StartBatchNativeStorageAction(c *gin.Context) {
+	var in service.NativeBatchInput
+	if !bindJSONStrict(c, &in) {
+		return
+	}
+	handleService(c, func() (interface{}, error) {
+		return service.StartBatchNativeStorageAction(in)
+	})
+}
+
+func CancelOrClearNativeTransfers(c *gin.Context) {
+	if c.Query("completed") == "1" {
+		service.ClearCompletedNativeTransfers()
+		respondOK(c, nil)
+		return
+	}
+	id := strings.TrimSpace(c.Query("id"))
+	if id == "" {
+		respondError(c, msg.T(msg.LostPart))
+		return
+	}
+	handleServiceVoid(c, func() error {
+		return service.CancelNativeTransfer(id)
+	})
+}
+
+func BrowseNativeTrash(c *gin.Context) {
+	var in service.NativeTrashBrowseInput
+	if !bindJSONStrict(c, &in) {
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	handleService(c, func() (interface{}, error) {
+		return service.BrowseNativeTrash(c.Request.Context(), in)
+	})
+}
+
+func RestoreNativeTrashItem(c *gin.Context) {
+	var in service.NativeTrashRestoreInput
+	if !bindJSONStrict(c, &in) {
+		return
+	}
+	handleServiceVoid(c, func() error {
+		return service.RestoreNativeTrashItem(c.Request.Context(), in)
+	})
+}
+
+func DownloadNativeStorageFile(c *gin.Context) {
+	vPath := strings.TrimSpace(c.Query("path"))
+	if vPath == "" {
+		respondError(c, msg.T(msg.LostPart))
+		return
+	}
+	rc, fileName, size, err := service.OpenNativeStorageDownload(c.Request.Context(), vPath)
+	if err != nil {
+		respondServiceError(c, err)
+		return
+	}
+	defer rc.Close()
+
+	safeASCII := strings.Map(func(r rune) rune {
+		if r >= 0x20 && r <= 0x7e && r != '"' && r != '\\' && r != ';' {
+			return r
+		}
+		return '_'
+	}, fileName)
+	if safeASCII == "" {
+		safeASCII = "download"
+	}
+	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"; filename*=UTF-8''%s`, safeASCII, url.PathEscape(fileName)))
+	c.Header("Content-Type", "application/octet-stream")
+	c.Header("Cache-Control", "no-store")
+	if size >= 0 {
+		c.Header("Content-Length", strconv.FormatInt(size, 10))
+	}
+	c.Status(http.StatusOK)
+	_, _ = io.Copy(c.Writer, rc)
+}
+
+func UploadNativeStorageFile(c *gin.Context) {
+	dirPath := strings.TrimSpace(c.Query("dir"))
+	fileName := strings.TrimSpace(c.Query("fileName"))
+	if dirPath == "" || fileName == "" {
+		respondError(c, msg.T(msg.LostPart))
+		return
+	}
+	// Extend read deadline for large streaming uploads while keeping default 60s on normal JSON routes.
+	rc := http.NewResponseController(c.Writer)
+	_ = rc.SetReadDeadline(time.Now().Add(30 * time.Minute))
+
+	handleService(c, func() (interface{}, error) {
+		written, err := service.UploadNativeStorageFile(c.Request.Context(), dirPath, fileName, c.Request.Body)
+		if err != nil {
+			return nil, err
+		}
+		return gin.H{"fileName": fileName, "size": written}, nil
 	})
 }
 

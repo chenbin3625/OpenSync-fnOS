@@ -129,10 +129,20 @@ type fullSyncPlan struct {
 	scanIncomplete bool
 	srcScanFailed  bool
 	dstScanFailed  bool
+	// deepCheckSameSize is set for native pairs whose compareMode cannot be
+	// decided from listing metadata alone (e.g. explicit compareMode=2 on a
+	// hashless backend). Same-size files without both MD5 hashes are routed to
+	// rclone check --download.
+	deepCheckSameSize bool
+	// compareMode overrides util.ToInt(job["compareMode"]) when hasCompareMode
+	// is set (e.g. effective size-only compare for OpenList / standard WebDAV).
+	compareMode    int
+	hasCompareMode bool
 	// planErr is the first panic captured from a concurrent compareDir branch.
 	// A partially built plan is never executed: it could not have weighed its
 	// own deletions and may treat unmatched entries as extra.
-	planErr error
+	planErr      error
+	trackRenames bool
 }
 
 // fail records the first plan-branch panic; later panics are ignored.
@@ -227,6 +237,9 @@ func (plan *fullSyncPlan) build(job map[string]interface{}) {
 	if util.ToInt(job["conflictPolicy"]) == 2 && plan.dst != nil {
 		plan.dst.protectConflictBackups()
 	}
+	if extra, _, err := parseNativeExtraFlags(job["extraFlags"]); err == nil {
+		plan.trackRenames = extra.TrackRenames
+	}
 	plan.compareDir(job, "", "")
 }
 
@@ -316,6 +329,9 @@ func (plan *fullSyncPlan) compareDir(job map[string]interface{}, srcRelDir, dstR
 	var children []childPair
 	now := time.Now()
 	compareMode := util.ToInt(job["compareMode"])
+	if plan.hasCompareMode {
+		compareMode = plan.compareMode
+	}
 	conflictPolicy := util.ToInt(job["conflictPolicy"])
 
 	for _, name := range sortedFileListKeys(srcItems) {
@@ -378,7 +394,11 @@ func (plan *fullSyncPlan) compareDir(job map[string]interface{}, srcRelDir, dstR
 				// never compared; the source file is in range now and must
 				// replace it. Leaving it in place silently blocked the update
 				// forever, with no record saying why.
-				if !nameExcluded && (sizeExcluded || fileChangedWithMode(metadata, dstMetadata, compareMode)) {
+				changed := fileChangedWithMode(metadata, dstMetadata, compareMode)
+				if !changed && plan.deepCheckSameSize && metadata.Size == dstMetadata.Size && !(isMD5Digest(metadata.MD5) && isMD5Digest(dstMetadata.MD5)) {
+					changed = true
+				}
+				if !nameExcluded && (sizeExcluded || changed) {
 					plan.addChanged(newFullSyncFile(srcDir, dstDir, name, metadata))
 				}
 				continue
@@ -1030,6 +1050,8 @@ func (plan *fullSyncPlan) relocations() []fullSyncRelocation {
 	sort.Strings(keys)
 
 	var result []fullSyncRelocation
+	matchedTargets := make(map[string]struct{})
+	matchedSources := make(map[string]struct{})
 	for _, key := range keys {
 		targets := targetGroups[key]
 		sources := sourceGroups[key]
@@ -1041,9 +1063,69 @@ func (plan *fullSyncPlan) relocations() []fullSyncRelocation {
 		}
 		for i := 0; i < count; i++ {
 			result = append(result, fullSyncRelocation{source: sources[i], target: targets[i]})
+			matchedTargets[targets[i].target] = struct{}{}
+			matchedSources[sources[i].object] = struct{}{}
+		}
+	}
+
+	// Pass 2: When --track-renames is enabled on Full Sync, also match remaining
+	// renamed files (different filename) with identical non-zero size and valid MD5.
+	if plan.trackRenames {
+		renameTargets := make(map[string][]*fullSyncFile)
+		for _, file := range plan.newFiles {
+			if _, used := matchedTargets[file.target]; used {
+				continue
+			}
+			key := fullSyncRenameKey(file.metadata)
+			if key != "" {
+				renameTargets[key] = append(renameTargets[key], file)
+			}
+		}
+		renameSources := make(map[string][]*fullSyncExtraFile)
+		for _, file := range plan.extraFiles {
+			if _, used := matchedSources[file.object]; used {
+				continue
+			}
+			key := fullSyncRenameKey(file.metadata)
+			if key != "" {
+				renameSources[key] = append(renameSources[key], file)
+			}
+		}
+		renameKeys := make([]string, 0, len(renameTargets))
+		for key := range renameTargets {
+			if len(renameSources[key]) > 0 {
+				renameKeys = append(renameKeys, key)
+			}
+		}
+		sort.Strings(renameKeys)
+		for _, key := range renameKeys {
+			targets := renameTargets[key]
+			sources := renameSources[key]
+			sort.Slice(targets, func(i, j int) bool { return targets[i].target < targets[j].target })
+			sort.Slice(sources, func(i, j int) bool { return sources[i].object < sources[j].object })
+			count := len(targets)
+			if len(sources) < count {
+				count = len(sources)
+			}
+			for i := 0; i < count; i++ {
+				result = append(result, fullSyncRelocation{source: sources[i], target: targets[i]})
+			}
 		}
 	}
 	return result
+}
+
+func fullSyncRenameKey(metadata FileMetadata) string {
+	// Require non-zero size + well-formed MD5 so empty placeholder files are
+	// never cross-renamed arbitrarily.
+	if metadata.Size <= 0 {
+		return ""
+	}
+	md5 := normalizeMD5(metadata.MD5)
+	if !isMD5Digest(md5) {
+		return ""
+	}
+	return fmt.Sprintf("%d\x00%s", metadata.Size, md5)
 }
 
 func fullSyncRelocationKey(name string, metadata FileMetadata) string {

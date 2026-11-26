@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { setupServer } from "msw/node";
 import { handlers, resetMockStore } from "../src/mocks/handlers";
 import type {
+  NativeAuthStepSnapshot,
   NativeImportPreview,
   NativeImportResult,
   NativeStorageState,
@@ -351,5 +352,162 @@ describe("native storage mock API lifecycle", () => {
       }),
     );
     expect(cleanupRes.code).toBe(200);
+  });
+
+  it("supports GUI-guided cloud drive auth flows (OneDrive OAuth + drive picker, Jottacloud token, iCloud 2FA)", async () => {
+    // 1. OneDrive: start -> callback -> choose_type -> choose drive -> save via authSessionId
+    const startOd = await json<NativeAuthStepSnapshot>(
+      await fetch(`${apiUrl}/native/storage/auth/start`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "onedrive", options: { region: "cn" } }),
+      }),
+    );
+    expect(startOd.code).toBe(200);
+    expect(startOd.data.status).toBe("oauth");
+    expect(startOd.data.authUrl).toContain("https://");
+
+    const stateParam = new URL(startOd.data.authUrl!).searchParams.get("state")!;
+    const afterCb = await json<NativeAuthStepSnapshot>(
+      await fetch(`${apiUrl}/native/storage/auth/callback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId: startOd.data.sessionId,
+          callbackUrl: `http://localhost:53682/?code=mock-code&state=${stateParam}`,
+        }),
+      }),
+    );
+    expect(afterCb.code).toBe(200);
+    expect(afterCb.data.status).toBe("question");
+    expect(afterCb.data.question?.name).toBe("config_type");
+
+    const afterType = await json<NativeAuthStepSnapshot>(
+      await fetch(`${apiUrl}/native/storage/auth/continue`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId: startOd.data.sessionId,
+          state: afterCb.data.question!.state,
+          answer: "onedrive",
+        }),
+      }),
+    );
+    expect(afterType.code).toBe(200);
+    expect(afterType.data.status).toBe("question");
+    expect(afterType.data.question?.name).toBe("config_driveid");
+
+    const completedOd = await json<NativeAuthStepSnapshot>(
+      await fetch(`${apiUrl}/native/storage/auth/continue`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId: startOd.data.sessionId,
+          state: afterType.data.question!.state,
+          answer: "b!mock-onedrive-01",
+        }),
+      }),
+    );
+    expect(completedOd.code).toBe(200);
+    expect(completedOd.data.status).toBe("completed");
+    expect(completedOd.data.publicOptions?.drive_id).toBe("b!mock-onedrive-01");
+    expect(completedOd.data.configuredSecrets).toContain("token");
+
+    const saveOd = await json<null>(
+      await fetch(`${apiUrl}/native/storage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: "MyOneDrive",
+          options: {
+            type: "onedrive",
+            region: "cn",
+            drive_id: completedOd.data.publicOptions?.drive_id || "",
+            drive_type: completedOd.data.publicOptions?.drive_type || "",
+          },
+          authSessionId: completedOd.data.sessionId,
+        }),
+      }),
+    );
+    expect(saveOd.code).toBe(200);
+
+    const stateAfterOd = await json<NativeStorageState>(
+      await fetch(`${apiUrl}/native/storage`),
+    );
+    const savedOd = stateAfterOd.data.remotes.find((r) => r.name === "MyOneDrive");
+    expect(savedOd?.options.drive_id).toBe("b!mock-onedrive-01");
+    expect(savedOd?.configuredSecrets).toContain("token");
+    expect(savedOd?.options.token).toBeUndefined();
+
+    // 2. Jottacloud: start -> standard -> personal login token -> completed
+    const startJotta = await json<NativeAuthStepSnapshot>(
+      await fetch(`${apiUrl}/native/storage/auth/start`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "jottacloud" }),
+      }),
+    );
+    expect(startJotta.code).toBe(200);
+    expect(startJotta.data.status).toBe("question");
+
+    const jottaTokenStep = await json<NativeAuthStepSnapshot>(
+      await fetch(`${apiUrl}/native/storage/auth/continue`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId: startJotta.data.sessionId,
+          state: startJotta.data.question!.state,
+          answer: "standard",
+        }),
+      }),
+    );
+    expect(jottaTokenStep.code).toBe(200);
+    expect(jottaTokenStep.data.question?.name).toBe("config_login_token");
+
+    const jottaDone = await json<NativeAuthStepSnapshot>(
+      await fetch(`${apiUrl}/native/storage/auth/continue`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId: startJotta.data.sessionId,
+          state: jottaTokenStep.data.question!.state,
+          answer: "eyJ-mock-personal-token",
+        }),
+      }),
+    );
+    expect(jottaDone.code).toBe(200);
+    expect(jottaDone.data.status).toBe("completed");
+    expect(jottaDone.data.configuredSecrets).toContain("token");
+
+    // 3. iCloud Drive 2FA flow: start -> submit 6-digit code -> completed with trust_token & cookies
+    const startIcloud = await json<NativeAuthStepSnapshot>(
+      await fetch(`${apiUrl}/native/storage/auth/start`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "iclouddrive",
+          options: { apple_id: "user@icloud.com", password: "secret" },
+        }),
+      }),
+    );
+    expect(startIcloud.code).toBe(200);
+    expect(startIcloud.data.status).toBe("question");
+
+    const icloudDone = await json<NativeAuthStepSnapshot>(
+      await fetch(`${apiUrl}/native/storage/auth/continue`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId: startIcloud.data.sessionId,
+          state: startIcloud.data.question!.state,
+          answer: "654321",
+        }),
+      }),
+    );
+    expect(icloudDone.code).toBe(200);
+    expect(icloudDone.data.status).toBe("completed");
+    expect(icloudDone.data.configuredSecrets).toEqual(
+      expect.arrayContaining(["trust_token", "cookies"]),
+    );
   });
 });

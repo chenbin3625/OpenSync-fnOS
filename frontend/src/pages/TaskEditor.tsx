@@ -34,6 +34,7 @@ import {
   SettingRow,
   errorToast,
 } from "../components/common";
+import { BwLimitEditor } from "../components/BwLimitEditor";
 import { ExcludeTree } from "../components/ExcludeTree";
 import { FileTypeFilter } from "../components/FileTypeFilter";
 import { RemotePaths } from "../components/RemotePaths";
@@ -62,16 +63,22 @@ import {
   type SchedulePresetMode,
 } from "../lib/schedule";
 import {
+  applyTaskScenarioPreset,
   buildJobPayload,
   defaultJobForm,
+  findStandardWebDAVRemotesForPaths,
   isExcludePatternEnabled,
   jobToForm,
   parseExcludeFolders,
+  resolveAutoCompareModeForDst,
   shouldClearExcludeFoldersOnSrcChange,
   systemDirFilterGroups,
+  taskScenarioPresets,
   updateExcludeFolders,
   updateExcludePatterns,
   validateJobFormFields,
+  validateManualSyncPath,
+  type CompareModeSource,
   type JobFieldErrorKey,
   type JobForm,
 } from "../lib/taskForm";
@@ -202,6 +209,8 @@ export default function TaskEditor({
   const nativeStorage = useResource((signal) => api.nativeStorageState(signal));
   const [nativeTarget, setNativeTarget] = useState("");
   const notifications = useResource((signal) => api.notifications(signal));
+  const systemSettings = useResource((signal) => api.settings(signal));
+  const [bwLimitError, setBwLimitError] = useState<string | null>(null);
   const [fileSizeDrafts, setFileSizeDrafts] = useState<FileSizeDrafts>({});
   const [sizeEnabled, setSizeEnabled] = useState<{ min: boolean; max: boolean }>(
     () => ({
@@ -234,6 +243,9 @@ export default function TaskEditor({
         seedForm.deleteEmptySrcDirs,
     ),
   );
+  const [compareModeSource, setCompareModeSource] = useState<CompareModeSource>(
+    () => (seedForm.compareMode !== 0 ? "manual" : "default"),
+  );
   const [advancedOpen, setAdvancedOpen] = useState<boolean>(() =>
     Boolean(
       seedForm.copyConcurrency ||
@@ -265,6 +277,15 @@ export default function TaskEditor({
         seedForm.extraFlags?.userAgent ||
         seedForm.extraFlags?.ioTimeout ||
         seedForm.extraFlags?.conTimeout ||
+        Number(seedForm.extraFlags?.lowLevelRetries || 0) > 0 ||
+        seedForm.extraFlags?.retriesSleep ||
+        seedForm.extraFlags?.resumeEnable ||
+        seedForm.extraFlags?.watchEnable ||
+        Number(seedForm.extraFlags?.autoRetryMax || 0) > 0 ||
+        Number(seedForm.extraFlags?.postSyncJobId || 0) > 0 ||
+        seedForm.extraFlags?.checkSchedule ||
+        seedForm.extraFlags?.missedCatchUp ||
+        seedForm.extraFlags?.directStream ||
         seedForm.extraFlags?.bisyncResyncMode ||
         Number(seedForm.extraFlags?.bisyncMaxDelete || 0) > 0 ||
         seedForm.extraFlags?.bisyncForce,
@@ -317,8 +338,9 @@ export default function TaskEditor({
       storedDstMap: job?.dstMap,
       existingJobs,
       sizeEnabled,
+      remotes: nativeStorage.data?.remotes,
     }),
-    [job?.dstMap, existingJobs, sizeEnabled],
+    [job?.dstMap, existingJobs, sizeEnabled, nativeStorage.data?.remotes],
   );
   const validation = useMemo(
     () => validateJobFormFields(mergedForm, validationOptions),
@@ -368,8 +390,12 @@ export default function TaskEditor({
       return;
     }
     for (let i = 0; i < targetStep; i++) {
-      const err = validation.stepErrors[i];
+      const err =
+        validation.stepErrors[i] || (i === 1 && bwLimitError ? bwLimitError : "");
       if (err) {
+        if (i === 1 && (validation.fields.bwLimit || bwLimitError)) {
+          setAdvancedOpen(true);
+        }
         markStepValidated(i);
         Toast.warning(err);
         setStep(i);
@@ -381,8 +407,13 @@ export default function TaskEditor({
   };
 
   const nextStep = () => {
-    const err = validation.stepErrors[step];
+    const err =
+      validation.stepErrors[step] ||
+      (step === 1 && bwLimitError ? bwLimitError : "");
     if (err) {
+      if (step === 1 && (validation.fields.bwLimit || bwLimitError)) {
+        setAdvancedOpen(true);
+      }
       markStepValidated(step);
       Toast.warning(err);
       scrollToFirstError();
@@ -394,10 +425,18 @@ export default function TaskEditor({
   const previousStep = () => setStep((s) => Math.max(s - 1, 0));
 
   const save = () => {
-    const invalidStep = validation.stepErrors.findIndex(Boolean);
+    const stepErrorsWithBw = [
+      validation.stepErrors[0],
+      validation.stepErrors[1] || bwLimitError || "",
+      validation.stepErrors[2],
+    ];
+    const invalidStep = stepErrorsWithBw.findIndex(Boolean);
     if (invalidStep >= 0) {
+      if (invalidStep === 1 && (validation.fields.bwLimit || bwLimitError)) {
+        setAdvancedOpen(true);
+      }
       setValidatedSteps(new Set([0, 1, 2]));
-      Toast.warning(validation.stepErrors[invalidStep]);
+      Toast.warning(stepErrorsWithBw[invalidStep]);
       if (isNew) setStep(invalidStep);
       else setActiveTab(taskEditorTabs[invalidStep].key);
       scrollToFirstError();
@@ -437,29 +476,85 @@ export default function TaskEditor({
     change("srcPath", nextPaths);
   };
 
-  // Detect standard WebDAV (vendor=other / OpenList / AList) in selected paths
-  // so we can recommend "size-only" compare mode to avoid full read-back checks.
-  const matchedStandardWebDAVNames = useMemo(() => {
+  const handleDstPathChange = (nextPaths: string[]) => {
     const remotes = nativeStorage.data?.remotes;
-    if (!remotes?.length) return [] as string[];
-    const standardDavMap = new Map<string, string>();
-    for (const remote of remotes) {
-      if (remote.type !== "webdav") continue;
-      const vendor = (remote.options?.vendor || "").trim().toLowerCase();
-      if (!vendor || vendor === "other") {
-        standardDavMap.set(remote.name.toLowerCase(), remote.name);
+    const prevMatched = findStandardWebDAVRemotesForPaths(form.dstPath, remotes);
+    const shouldAutoResolve =
+      (isNew && !initialDraft) ||
+      compareModeSource === "auto" ||
+      (compareModeSource === "default" && prevMatched.length === 0);
+    if (shouldAutoResolve) {
+      const resolved = resolveAutoCompareModeForDst({
+        dstPaths: nextPaths,
+        remotes,
+        currentCompareMode: form.compareMode,
+        source: compareModeSource,
+      });
+      if (resolved.source !== compareModeSource) {
+        setCompareModeSource(resolved.source);
+      }
+      if (resolved.compareMode !== form.compareMode) {
+        patch({ dstPath: nextPaths, compareMode: resolved.compareMode });
+        return;
       }
     }
-    if (standardDavMap.size === 0) return [] as string[];
-    const hits = new Set<string>();
-    for (const p of [...form.srcPath, ...form.dstPath]) {
-      const seg = p.replace(/^\/+/, "").split("/")[0]?.toLowerCase();
-      if (seg && standardDavMap.has(seg)) {
-        hits.add(standardDavMap.get(seg)!);
-      }
+    change("dstPath", nextPaths);
+  };
+
+  useEffect(() => {
+    if (
+      !isNew ||
+      initialDraft ||
+      !nativeStorage.data?.remotes?.length ||
+      form.dstPath.length === 0
+    ) {
+      return;
     }
-    return Array.from(hits);
-  }, [nativeStorage.data?.remotes, form.srcPath, form.dstPath]);
+    const resolved = resolveAutoCompareModeForDst({
+      dstPaths: form.dstPath,
+      remotes: nativeStorage.data.remotes,
+      currentCompareMode: form.compareMode,
+      source: compareModeSource,
+    });
+    if (resolved.source !== compareModeSource) {
+      setCompareModeSource(resolved.source);
+    }
+    if (resolved.compareMode !== form.compareMode) {
+      setForm((current) =>
+        current.compareMode === resolved.compareMode
+          ? current
+          : { ...current, compareMode: resolved.compareMode },
+      );
+    }
+  }, [
+    isNew,
+    initialDraft,
+    nativeStorage.data?.remotes,
+    form.dstPath,
+    form.compareMode,
+    compareModeSource,
+    setForm,
+  ]);
+
+  // Detect standard WebDAV (vendor=other / OpenList / AList) in selected paths
+  // (including through crypt/chunker/alias/union/combine wrappers) so we can
+  // default destination OpenList jobs to size-only and warn if MD5 is chosen.
+  const matchedDstStandardWebDAVNames = useMemo(
+    () =>
+      findStandardWebDAVRemotesForPaths(
+        form.dstPath,
+        nativeStorage.data?.remotes,
+      ),
+    [nativeStorage.data?.remotes, form.dstPath],
+  );
+  const matchedStandardWebDAVNames = useMemo(
+    () =>
+      findStandardWebDAVRemotesForPaths(
+        [...form.srcPath, ...form.dstPath],
+        nativeStorage.data?.remotes,
+      ),
+    [nativeStorage.data?.remotes, form.srcPath, form.dstPath],
+  );
 
   const srcMultiple = form.method !== 3 || form.srcPath.length > 1;
   const dstMultiple =
@@ -524,6 +619,15 @@ export default function TaskEditor({
     (form.extraFlags?.userAgent?.trim() ? 1 : 0) +
     (form.extraFlags?.ioTimeout?.trim() ? 1 : 0) +
     (form.extraFlags?.conTimeout?.trim() ? 1 : 0) +
+    (Number(form.extraFlags?.lowLevelRetries || 0) > 0 ? 1 : 0) +
+    (form.extraFlags?.retriesSleep?.trim() ? 1 : 0) +
+    (form.extraFlags?.resumeEnable ? 1 : 0) +
+    (form.extraFlags?.watchEnable ? 1 : 0) +
+    (Number(form.extraFlags?.autoRetryMax || 0) > 0 ? 1 : 0) +
+    (Number(form.extraFlags?.postSyncJobId || 0) > 0 ? 1 : 0) +
+    (form.extraFlags?.checkSchedule?.trim() ? 1 : 0) +
+    (form.extraFlags?.missedCatchUp ? 1 : 0) +
+    (form.extraFlags?.directStream ? 1 : 0) +
     (form.extraFlags?.bisyncResyncMode?.trim() ? 1 : 0) +
     (Number(form.extraFlags?.bisyncMaxDelete || 0) > 0 ? 1 : 0) +
     (form.extraFlags?.bisyncForce ? 1 : 0) +
@@ -791,6 +895,7 @@ export default function TaskEditor({
                         value={form.srcPath}
                         onChange={handleSrcPathChange}
                         multiple={srcMultiple}
+                        remotes={nativeStorage.data?.remotes}
                         ariaLabel="选择源目录"
                       />
                     </Field>
@@ -808,8 +913,9 @@ export default function TaskEditor({
                         key={`dst-${form.alistId}-${dstMultiple ? "m" : "s"}`}
                         engineId={form.alistId}
                         value={form.dstPath}
-                        onChange={(paths) => change("dstPath", paths)}
+                        onChange={handleDstPathChange}
                         multiple={dstMultiple}
+                        remotes={nativeStorage.data?.remotes}
                         ariaLabel="选择目标目录"
                       />
                     </Field>
@@ -828,21 +934,21 @@ export default function TaskEditor({
                       <div className="native-section-actions">
                         <Button
                           type="tertiary"
-                          disabled={(() => {
-                            const t = nativeTarget.trim();
-                            return (
-                              !t.startsWith("/") ||
-                              t === "/" ||
-                              t.split("/").filter(Boolean).length === 0
-                            );
-                          })()}
+                          disabled={!nativeTarget.trim()}
                           onClick={() => {
-                            const cleaned = nativeTarget.trim().replace(/\/+$/, "");
-                            if (!cleaned || cleaned === "/") return;
+                            const check = validateManualSyncPath(
+                              nativeTarget,
+                              nativeStorage.data?.remotes,
+                              { role: "src", method: form.method },
+                            );
+                            if (check.error) {
+                              Toast.warning(check.error);
+                              return;
+                            }
                             handleSrcPathChange(
                               form.method === 3
-                                ? [cleaned]
-                                : Array.from(new Set([...form.srcPath, cleaned])),
+                                ? [check.normalized]
+                                : Array.from(new Set([...form.srcPath, check.normalized])),
                             );
                             setNativeTarget("");
                           }}
@@ -850,22 +956,21 @@ export default function TaskEditor({
                           添加到源路径
                         </Button>
                         <Button
-                          disabled={(() => {
-                            const t = nativeTarget.trim();
-                            return (
-                              !t.startsWith("/") ||
-                              t === "/" ||
-                              t.split("/").filter(Boolean).length === 0
-                            );
-                          })()}
+                          disabled={!nativeTarget.trim()}
                           onClick={() => {
-                            const cleaned = nativeTarget.trim().replace(/\/+$/, "");
-                            if (!cleaned || cleaned === "/") return;
-                            change(
-                              "dstPath",
+                            const check = validateManualSyncPath(
+                              nativeTarget,
+                              nativeStorage.data?.remotes,
+                              { role: "dst", method: form.method },
+                            );
+                            if (check.error) {
+                              Toast.warning(check.error);
+                              return;
+                            }
+                            handleDstPathChange(
                               form.method === 2 || form.method === 3
-                                ? [cleaned]
-                                : Array.from(new Set([...form.dstPath, cleaned])),
+                                ? [check.normalized]
+                                : Array.from(new Set([...form.dstPath, check.normalized])),
                             );
                             setNativeTarget("");
                           }}
@@ -875,17 +980,47 @@ export default function TaskEditor({
                       </div>
                     </div>
                   </Field>
-                  {matchedStandardWebDAVNames.length > 0 && form.compareMode !== 1 && (
+                  {matchedDstStandardWebDAVNames.length > 0 && form.compareMode === 1 && (
+                    <div className="sync-method-banner webdav-compare-tip" role="status">
+                      <IconInfoCircle aria-hidden="true" size="small" />
+                      <span>
+                        目标存储为标准 WebDAV（{matchedDstStandardWebDAVNames.join("、")}，如 OpenList / AList），已默认使用「<strong>仅按文件大小</strong>」比对，避免拉取大量远端资源到本地校验。
+                      </span>
+                    </div>
+                  )}
+                  {matchedStandardWebDAVNames.length > 0 && form.compareMode === 2 && (
                     <div className="sync-method-banner is-warning webdav-compare-tip" role="status">
                       <IconAlertTriangle aria-hidden="true" size="small" />
                       <span>
-                        已选择标准 WebDAV 存储（{matchedStandardWebDAVNames.join("、")}，如 OpenList / AList）。标准 WebDAV 默认比对会触发文件读回校验并消耗流量，建议将「文件比对方式」切换为 <strong>仅大小</strong>。
+                        已选择标准 WebDAV 存储（{matchedStandardWebDAVNames.join("、")}，如 OpenList / AList）。当前「大小 + MD5」比对方式会拉取远端文件到本地校验并消耗大量流量，建议切换为 <strong>仅按文件大小</strong>。
                       </span>
                       <Button
                         size="small"
                         type="primary"
                         theme="light"
                         onClick={() => {
+                          setCompareModeSource("manual");
+                          change("compareMode", 1);
+                          setPolicyOpen(true);
+                          Toast.success("已将文件比对方式设为「仅大小」");
+                        }}
+                      >
+                        设为仅大小
+                      </Button>
+                    </div>
+                  )}
+                  {matchedStandardWebDAVNames.length > 0 && form.compareMode === 0 && (
+                    <div className="sync-method-banner webdav-compare-tip" role="status">
+                      <IconInfoCircle aria-hidden="true" size="small" />
+                      <span>
+                        已选择标准 WebDAV 存储（{matchedStandardWebDAVNames.join("、")}，如 OpenList / AList）。执行时默认比对会自动按 <strong>仅大小</strong> 比对以避免拉取远端资源到本地，也可显式设为 <strong>仅按文件大小</strong>。
+                      </span>
+                      <Button
+                        size="small"
+                        type="primary"
+                        theme="light"
+                        onClick={() => {
+                          setCompareModeSource("manual");
                           change("compareMode", 1);
                           setPolicyOpen(true);
                           Toast.success("已将文件比对方式设为「仅大小」");
@@ -903,10 +1038,15 @@ export default function TaskEditor({
                     existingJobs={existingJobs}
                     currentJobId={job?.id}
                     engineId={form.alistId}
+                    onKeepFirstSrc={
+                      form.method === 3 && form.srcPath.length > 1
+                        ? () => handleSrcPathChange(form.srcPath.slice(0, 1))
+                        : undefined
+                    }
                     onKeepFirstDst={
                       (form.method === 2 || form.method === 3) &&
                       form.dstPath.length > 1
-                        ? () => change("dstPath", form.dstPath.slice(0, 1))
+                        ? () => handleDstPathChange(form.dstPath.slice(0, 1))
                         : undefined
                     }
                   />
@@ -938,7 +1078,10 @@ export default function TaskEditor({
                               label: o.label,
                               value: o.value,
                             }))}
-                            onChange={(v) => change("compareMode", Number(v))}
+                            onChange={(v) => {
+                              setCompareModeSource("manual");
+                              change("compareMode", Number(v));
+                            }}
                           />
                         </Field>
                         {form.method === 2 ? (
@@ -1568,6 +1711,246 @@ export default function TaskEditor({
                     </button>
                     {advancedOpen && (
                       <div className="advanced-options-body">
+                        <Field
+                          label="一键场景预设"
+                          hint="点击自动填入推荐的断点续传、并发与重试参数，应用后仍可按需微调"
+                        >
+                          <div className="schedule-chips">
+                            {taskScenarioPresets.map((preset) => (
+                              <button
+                                key={preset.key}
+                                type="button"
+                                className="schedule-chip"
+                                title={preset.desc}
+                                onClick={() => {
+                                  if (preset.key === "cold_archive") {
+                                    setCompareModeSource("manual");
+                                  }
+                                  setForm((prev) =>
+                                    applyTaskScenarioPreset(prev, preset.key),
+                                  );
+                                  setDirty(true);
+                                  Toast.success(`已应用「${preset.label}」推荐配置`);
+                                }}
+                              >
+                                {preset.label}
+                              </button>
+                            ))}
+                          </div>
+                        </Field>
+                        <SettingRow
+                          label="开启大文件断点续传"
+                          variant="bordered"
+                          tip="支持远端到本地下载（分片续传）与本地到 S3 分片上传续传；中断后再次运行或重试将从已传字节/分片继续"
+                        >
+                          <Switch
+                            aria-label="开启大文件断点续传"
+                            checked={Boolean(form.extraFlags?.resumeEnable)}
+                            onChange={(v) =>
+                              change("extraFlags", {
+                                ...form.extraFlags,
+                                resumeEnable: v,
+                              })
+                            }
+                          />
+                        </SettingRow>
+                        {form.extraFlags?.resumeEnable && (
+                          <Field
+                            label="断点续传最小文件阈值（MB）"
+                            hint="0 表示默认 50 MB；仅超过该大小的文件走断点续传通道，小文件继续高速并发传输"
+                          >
+                            <Input
+                              inputMode="numeric"
+                              value={String(form.extraFlags?.resumeMinSizeMB || 0)}
+                              onChange={(v) =>
+                                change("extraFlags", {
+                                  ...form.extraFlags,
+                                  resumeMinSizeMB: Math.max(
+                                    0,
+                                    Math.min(10240, Math.trunc(Number(v) || 0)),
+                                  ),
+                                })
+                              }
+                            />
+                          </Field>
+                        )}
+                        <SettingRow
+                          label="本地目录实时监听同步（inotify）"
+                          variant="bordered"
+                          tip="当源目录包含本地授权目录时，自动监测文件新建、修改与删除，在静默防抖后自动触发增量同步"
+                        >
+                          <Switch
+                            aria-label="本地目录实时监听同步"
+                            checked={Boolean(form.extraFlags?.watchEnable)}
+                            onChange={(v) =>
+                              change("extraFlags", {
+                                ...form.extraFlags,
+                                watchEnable: v,
+                              })
+                            }
+                          />
+                        </SettingRow>
+                        {form.extraFlags?.watchEnable && (
+                          <Field
+                            label="变动防抖等待（秒）"
+                            hint="默认 30 秒（2–3600），避免文件连续写入期间频繁触发同步"
+                          >
+                            <Input
+                              inputMode="numeric"
+                              value={String(form.extraFlags?.watchDebounceSec || 30)}
+                              onChange={(v) =>
+                                change("extraFlags", {
+                                  ...form.extraFlags,
+                                  watchDebounceSec: Math.max(
+                                    0,
+                                    Math.min(3600, Math.trunc(Number(v) || 0)),
+                                  ),
+                                })
+                              }
+                            />
+                          </Field>
+                        )}
+                        <div className="form-grid form-grid--three">
+                          <Field
+                            label="弱网底层重试（--low-level-retries）"
+                            hint="0 默认 10 次（0–50）"
+                          >
+                            <Input
+                              inputMode="numeric"
+                              value={String(form.extraFlags?.lowLevelRetries || 0)}
+                              onChange={(v) =>
+                                change("extraFlags", {
+                                  ...form.extraFlags,
+                                  lowLevelRetries: Math.max(
+                                    0,
+                                    Math.min(50, Math.trunc(Number(v) || 0)),
+                                  ),
+                                })
+                              }
+                            />
+                          </Field>
+                          <Field
+                            label="重试间隔（--retries-sleep）"
+                            hint="如 5s / 30s / 1m（留空默认）"
+                          >
+                            <Input
+                              value={form.extraFlags?.retriesSleep || ""}
+                              placeholder="如 10s / 30s"
+                              showClear
+                              onChange={(v) =>
+                                change("extraFlags", {
+                                  ...form.extraFlags,
+                                  retriesSleep: v,
+                                })
+                              }
+                            />
+                          </Field>
+                          <Field
+                            label="定时一致性校验"
+                            hint="周期后台校验并在发现差异时告警"
+                          >
+                            <Select
+                              value={form.extraFlags?.checkSchedule || ""}
+                              optionList={[
+                                { label: "关闭", value: "" },
+                                { label: "每日自动校验", value: "daily" },
+                                { label: "每周自动校验", value: "weekly" },
+                                { label: "每月自动校验", value: "monthly" },
+                              ]}
+                              onChange={(v) =>
+                                change("extraFlags", {
+                                  ...form.extraFlags,
+                                  checkSchedule: String(v || ""),
+                                })
+                              }
+                            />
+                          </Field>
+                        </div>
+                        <div className="form-grid form-grid--three">
+                          <Field
+                            label="失败自动重试次数"
+                            hint="0 关闭；1–10 次，仅重跑失败项"
+                          >
+                            <Input
+                              inputMode="numeric"
+                              value={String(form.extraFlags?.autoRetryMax || 0)}
+                              onChange={(v) =>
+                                change("extraFlags", {
+                                  ...form.extraFlags,
+                                  autoRetryMax: Math.max(
+                                    0,
+                                    Math.min(10, Math.trunc(Number(v) || 0)),
+                                  ),
+                                })
+                              }
+                            />
+                          </Field>
+                          <Field
+                            label="自动重试延迟（分钟）"
+                            hint="默认 5 分钟（1–1440）"
+                          >
+                            <Input
+                              inputMode="numeric"
+                              value={String(form.extraFlags?.autoRetryDelayMin || 0)}
+                              onChange={(v) =>
+                                change("extraFlags", {
+                                  ...form.extraFlags,
+                                  autoRetryDelayMin: Math.max(
+                                    0,
+                                    Math.min(1440, Math.trunc(Number(v) || 0)),
+                                  ),
+                                })
+                              }
+                            />
+                          </Field>
+                          <Field
+                            label="成功后串联触发任务"
+                            hint="同步完成后自动执行另一个任务"
+                          >
+                            <Select
+                              value={Number(form.extraFlags?.postSyncJobId || 0)}
+                              optionList={[
+                                { label: "不串联", value: 0 },
+                                ...(existingJobs || [])
+                                  .filter((j) => j.id !== form.id)
+                                  .map((j) => ({
+                                    label: j.remark?.trim() || `任务 #${j.id}`,
+                                    value: j.id,
+                                  })),
+                              ]}
+                              onChange={(v) =>
+                                change("extraFlags", {
+                                  ...form.extraFlags,
+                                  postSyncJobId: Math.max(0, Math.trunc(Number(v) || 0)),
+                                })
+                              }
+                            />
+                          </Field>
+                        </div>
+                        <div className="native-checkbox-group">
+                          <Checkbox
+                            checked={Boolean(form.extraFlags?.missedCatchUp)}
+                            onChange={(e) =>
+                              change("extraFlags", {
+                                ...form.extraFlags,
+                                missedCatchUp: Boolean(e.target.checked),
+                              })
+                            }
+                          >
+                            NAS 关机/重启错过定时窗口时，启动后自动补跑一次
+                          </Checkbox>
+                          <Checkbox
+                            checked={Boolean(form.extraFlags?.directStream)}
+                            onChange={(e) =>
+                              change("extraFlags", {
+                                ...form.extraFlags,
+                                directStream: Boolean(e.target.checked),
+                              })
+                            }
+                          >
+                            海量文件直接流式同步（跳过前端预扫描与待传清单，大幅降低内存与扫描耗时）
+                          </Checkbox>
+                        </div>
                         <div className="form-grid form-grid--three">
                           <Field label="操作并发覆盖" hint="0 = 跟随全局设置 (1–100)">
                             <Input
@@ -1612,36 +1995,20 @@ export default function TaskEditor({
                           </Field>
                         </div>
                         <Field
-                          label="带宽限制（--bwlimit）"
-                              hint="留空跟随系统设置；支持单速（如 10M）或分时段（如 08:00,5M 23:00,off）"
-                            >
-                              <div className="field-group">
-                                <Input
-                                  value={form.bwLimit}
-                                  placeholder="如 10M 或 08:00,5M 23:00,off"
-                                  showClear
-                                  onChange={(v) => change("bwLimit", v)}
-                                />
-                                <div className="schedule-chips">
-                                  {[
-                                    { label: "跟随全局", value: "" },
-                                    { label: "5M", value: "5M" },
-                                    { label: "20M", value: "20M" },
-                                    { label: "50M", value: "50M" },
-                                    { label: "日间限 5M", value: "08:00,5M 23:00,off" },
-                                  ].map((preset) => (
-                                    <button
-                                      key={preset.label}
-                                      type="button"
-                                      className={`schedule-chip${form.bwLimit.trim() === preset.value ? " is-active" : ""}`}
-                                      onClick={() => change("bwLimit", preset.value)}
-                                    >
-                                      {preset.label}
-                                    </button>
-                                  ))}
-                                </div>
-                              </div>
-                            </Field>
+                          label="带宽限制"
+                          fieldId="bwLimit"
+                          error={bwLimitError || showStepError(1, "bwLimit")}
+                          hint="留空跟随系统全局默认；支持单任务固定限速、定时分时段限速或强制不限速"
+                        >
+                          <BwLimitEditor
+                            allowInherit
+                            compact
+                            globalDefault={systemSettings.data?.defaultBwLimit || ""}
+                            value={form.bwLimit}
+                            onChange={(v) => change("bwLimit", v)}
+                            onValidityChange={setBwLimitError}
+                          />
+                        </Field>
                             <div className="form-grid form-grid--two">
                               <Field
                                 label="API 限流（--tpslimit）"
@@ -1794,6 +2161,7 @@ export default function TaskEditor({
                               </Checkbox>
                               <Checkbox
                                 checked={Boolean(form.extraFlags?.trackRenames)}
+                                disabled={form.method !== 1 && form.method !== 3}
                                 onChange={(e) =>
                                   change("extraFlags", {
                                     ...form.extraFlags,
@@ -1801,7 +2169,7 @@ export default function TaskEditor({
                                   })
                                 }
                               >
-                                启用重命名追踪，避免重命名后重传（--track-renames）
+                                启用重命名追踪，避免重命名后重传（--track-renames，仅全量镜像与双向同步生效）
                               </Checkbox>
                               <Checkbox
                                 checked={Boolean(form.extraFlags?.useMmap)}

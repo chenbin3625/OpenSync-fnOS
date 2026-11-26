@@ -8,11 +8,14 @@ import Tabs from "@douyinfe/semi-ui/lib/es/tabs";
 import Tag from "@douyinfe/semi-ui/lib/es/tag";
 import {
   IconAlertTriangle,
+  IconDownload,
   IconRefresh,
   IconTickCircle,
+  IconWrench,
 } from "@douyinfe/semi-icons";
+import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import { api } from "../api/client";
-import { EmptyState, InlineNotice, errorToast } from "./common";
+import { EmptyState, InlineNotice, confirmAction, errorToast } from "./common";
 import type { JobCheckResult } from "../types";
 
 type CheckTab = "differ" | "missingOnDst" | "missingOnSrc" | "errors";
@@ -31,6 +34,7 @@ export function CheckModal({
   const [checkMode, setCheckMode] = useState<"check" | "download" | "cryptcheck">("check");
   const [result, setResult] = useState<JobCheckResult | null>(null);
   const [starting, setStarting] = useState(false);
+  const [repairing, setRepairing] = useState(false);
   const [error, setError] = useState("");
   const [activeTab, setActiveTab] = useState<CheckTab>("differ");
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -143,17 +147,59 @@ export function CheckModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobId]);
 
-  const handleClose = async () => {
+  // Closing the modal keeps a running check active in the background so users
+  // can continue navigating without losing verification progress.
+  const handleDismiss = () => {
+    runGenRef.current += 1;
+    stopPolling();
+    onClose();
+  };
+
+  const handleCancelCheck = async () => {
     runGenRef.current += 1;
     stopPolling();
     if (result?.status === "running") {
       try {
         await api.cancelJobCheck(jobId);
+        Toast.info("已中止一致性校验");
       } catch (err) {
         errorToast(err);
       }
     }
     onClose();
+  };
+
+  const handleExport = (format: "csv" | "txt") => {
+    const link = document.createElement("a");
+    link.href = api.exportJobCheckUrl(jobId, format);
+    link.download = `check-report-job-${jobId}.${format}`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  };
+
+  const handleRepair = () => {
+    if (!result) return;
+    const count = result.differCount + result.missingOnDstCount;
+    confirmAction({
+      title: `一键修复 ${count} 个差异/缺失文件？`,
+      content:
+        "将仅对校验发现的「内容差异」与「目标缺失」文件执行强制覆盖同步，不会删除目标端多余文件。",
+      okText: "立即修复",
+      onOk: async () => {
+        setRepairing(true);
+        try {
+          const res = await api.repairJobCheck(jobId);
+          Toast.success(`已提交定向修复（共 ${res.repairCount} 个文件），请在实时任务查看进度`);
+          window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
+          handleDismiss();
+        } catch (err) {
+          errorToast(err);
+        } finally {
+          setRepairing(false);
+        }
+      },
+    });
   };
 
   const isRunning = starting || result?.status === "running";
@@ -193,20 +239,58 @@ export function CheckModal({
       centered
       className="editor-modal dry-run-modal"
       title={`数据一致性校验 · ${jobName}`}
-      onCancel={() => void handleClose()}
+      onCancel={handleDismiss}
       footer={
-        <div className="editor-actions">
+        <div className="editor-actions" style={{ flexWrap: "wrap", gap: 8 }}>
           <Button
             type="tertiary"
             className="editor-actions-start"
             icon={<IconRefresh aria-hidden="true" />}
-            disabled={isRunning}
+            disabled={isRunning || repairing}
             onClick={() => void startCheck(checkMode)}
           >
             重新校验
           </Button>
-          <Button type="tertiary" onClick={() => void handleClose()}>
-            {isRunning ? "中止校验" : "关闭"}
+          {result && result.status === "completed" && (
+            <>
+              <Button
+                type="tertiary"
+                icon={<IconDownload aria-hidden="true" />}
+                onClick={() => handleExport("csv")}
+              >
+                导出 CSV
+              </Button>
+              <Button
+                type="tertiary"
+                icon={<IconDownload aria-hidden="true" />}
+                onClick={() => handleExport("txt")}
+              >
+                导出 TXT
+              </Button>
+              {result.differCount + result.missingOnDstCount > 0 && (
+                <Button
+                  type="primary"
+                  theme="solid"
+                  icon={<IconWrench aria-hidden="true" />}
+                  loading={repairing}
+                  onClick={handleRepair}
+                >
+                  一键修复 ({result.differCount + result.missingOnDstCount})
+                </Button>
+              )}
+            </>
+          )}
+          {isRunning && (
+            <Button
+              type="danger"
+              theme="light"
+              onClick={() => void handleCancelCheck()}
+            >
+              中止校验
+            </Button>
+          )}
+          <Button type="tertiary" onClick={handleDismiss}>
+            {isRunning ? "后台继续" : "关闭"}
           </Button>
         </div>
       }

@@ -2,15 +2,107 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"encoding/csv"
 	"fmt"
 	"opensync/internal/mapper"
 	"opensync/internal/msg"
+	"opensync/internal/native"
 	"opensync/pkg/util"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
+
+type dashboardQuotaItem struct {
+	Name      string `json:"name"`
+	Type      string `json:"type"`
+	Supported bool   `json:"supported"`
+	Total     *int64 `json:"total,omitempty"`
+	Used      *int64 `json:"used,omitempty"`
+	Free      *int64 `json:"free,omitempty"`
+	Message   string `json:"message,omitempty"`
+}
+
+var (
+	dashboardQuotaCacheMu   sync.Mutex
+	dashboardQuotaCacheAt   time.Time
+	dashboardQuotaCacheData []dashboardQuotaItem
+)
+
+func getCachedDashboardStorageQuotas() []dashboardQuotaItem {
+	const ttl = 5 * time.Minute
+	dashboardQuotaCacheMu.Lock()
+	if !dashboardQuotaCacheAt.IsZero() && time.Since(dashboardQuotaCacheAt) < ttl && dashboardQuotaCacheData != nil {
+		cp := append([]dashboardQuotaItem(nil), dashboardQuotaCacheData...)
+		dashboardQuotaCacheMu.Unlock()
+		return cp
+	}
+	dashboardQuotaCacheMu.Unlock()
+
+	_, cfg, err := loadExistingNativeRow()
+	if err != nil {
+		return []dashboardQuotaItem{}
+	}
+	type target struct {
+		name string
+		typ  string
+	}
+	targets := []target{{name: native.Local, typ: "local"}}
+	names := make([]string, 0, len(cfg))
+	for name := range cfg {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		typ := strings.TrimSpace(cfg[name]["type"])
+		if typ == "" {
+			continue
+		}
+		targets = append(targets, target{name: name, typ: typ})
+	}
+	// Cap concurrent probes so dashboard remains fast even with many remotes.
+	if len(targets) > 12 {
+		targets = targets[:12]
+	}
+	items := make([]dashboardQuotaItem, len(targets))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 4)
+	opts := native.SessionOptions{ProxyURL: globalNativeProxyURL()}
+	for i, t := range targets {
+		wg.Add(1)
+		go func(idx int, tgt target) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			probeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			info, aboutErr := cfg.About(probeCtx, tgt.name, opts)
+			if aboutErr != nil || info == nil {
+				items[idx] = dashboardQuotaItem{Name: tgt.name, Type: tgt.typ, Supported: false}
+				return
+			}
+			items[idx] = dashboardQuotaItem{
+				Name:      tgt.name,
+				Type:      tgt.typ,
+				Supported: info.Supported,
+				Total:     info.Total,
+				Used:      info.Used,
+				Free:      info.Free,
+				Message:   info.Message,
+			}
+		}(i, t)
+	}
+	wg.Wait()
+
+	dashboardQuotaCacheMu.Lock()
+	dashboardQuotaCacheAt = time.Now()
+	dashboardQuotaCacheData = items
+	dashboardQuotaCacheMu.Unlock()
+	return append([]dashboardQuotaItem(nil), items...)
+}
 
 // GetDashboardOverview aggregates KPI counters, pending full-sync approvals,
 // recent 7-day execution metrics, and per-job status cards for /dashboard.
@@ -27,21 +119,58 @@ func GetDashboardOverview() (map[string]interface{}, error) {
 	if err != nil {
 		latestTasks = map[int64]map[string]interface{}{}
 	}
-	since7d := time.Now().AddDate(0, 0, -7).Unix()
+	now := time.Now().In(schedulerLocation())
+	since7d := now.AddDate(0, 0, -7).Unix()
+	since30d := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, schedulerLocation()).AddDate(0, 0, -29).Unix()
+
+	type dailyBucket struct {
+		Date        string `json:"date"`
+		Runs        int64  `json:"runs"`
+		SuccessRuns int64  `json:"successRuns"`
+		FailRuns    int64  `json:"failRuns"`
+		Files       int64  `json:"files"`
+		Bytes       int64  `json:"bytes"`
+	}
+	dailyBuckets := make([]dailyBucket, 30)
+	bucketIndex := make(map[string]int, 30)
+	for i := 0; i < 30; i++ {
+		day := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, schedulerLocation()).AddDate(0, 0, -(29 - i))
+		key := day.Format("2006-01-02")
+		dailyBuckets[i] = dailyBucket{Date: key}
+		bucketIndex[key] = i
+	}
+
 	var totalRuns, successRuns, failRuns, stoppedRuns, totalFiles, totalBytes int64
-	if err := mapper.ForEachRecentTask(since7d, func(status int, taskNum string) error {
-		totalRuns++
-		switch status {
-		case 2, 8:
-			successRuns++
-		case 3, 5, 6, 7, 10:
-			failRuns++
-		case 4:
-			stoppedRuns++
-		}
+	if err := mapper.ForEachRecentTaskWithTime(since30d, func(ts int64, status int, taskNum string) error {
+		var files, sz int64
 		if parsed := parseTaskNumJSON(taskNum); parsed != nil {
-			totalFiles += util.ToInt64(parsed["successNum"])
-			totalBytes += util.ToInt64(parsed["sumSize"])
+			files = util.ToInt64(parsed["successNum"])
+			sz = util.ToInt64(parsed["sumSize"])
+		}
+		if ts >= since7d {
+			totalRuns++
+			switch status {
+			case 2, 8:
+				successRuns++
+			case 3, 5, 6, 7, 10:
+				failRuns++
+			case 4:
+				stoppedRuns++
+			}
+			totalFiles += files
+			totalBytes += sz
+		}
+		dayKey := time.Unix(ts, 0).In(schedulerLocation()).Format("2006-01-02")
+		if idx, ok := bucketIndex[dayKey]; ok {
+			dailyBuckets[idx].Runs++
+			switch status {
+			case 2, 8:
+				dailyBuckets[idx].SuccessRuns++
+			case 3, 5, 6, 7, 10:
+				dailyBuckets[idx].FailRuns++
+			}
+			dailyBuckets[idx].Files += files
+			dailyBuckets[idx].Bytes += sz
 		}
 		return nil
 	}); err != nil {
@@ -97,6 +226,7 @@ func GetDashboardOverview() (map[string]interface{}, error) {
 		}
 		nextRunTime := int64(0)
 		running := false
+		paused := false
 		currentTaskID := int64(0)
 		approval := pendingDeleteApprovals.GetByJobID(jobID)
 		var liveNum *taskNumStats
@@ -111,6 +241,7 @@ func GetDashboardOverview() (map[string]interface{}, error) {
 				runningJobs++
 				currentTaskID = task.TaskID
 				payload := task.getCurrentPayload()
+				paused = payload.Paused
 				numCopy := payload.Num
 				liveNum = &numCopy
 				total := payload.DoneSize + payload.RemainSize
@@ -182,7 +313,10 @@ func GetDashboardOverview() (map[string]interface{}, error) {
 			"windowEnd":       job["windowEnd"],
 			"nextRunTime":     nextRunTime,
 			"running":         running,
+			"paused":          running && paused,
 			"queued":          queued,
+			"watching":        !legacyOpenList && jobFSWatchers.IsWatching(jobID),
+			"checkRunning":    !legacyOpenList && IsJobCheckRunning(jobID),
 			"currentTaskId":   currentTaskID,
 			"pendingApproval": approval,
 			"liveNum":         liveNum,
@@ -212,6 +346,8 @@ func GetDashboardOverview() (map[string]interface{}, error) {
 		},
 		"pendingApprovals": pendingApprovals,
 		"jobs":             jobSummaries,
+		"dailyTrend":       dailyBuckets,
+		"storageQuotas":    getCachedDashboardStorageQuotas(),
 	}, nil
 }
 

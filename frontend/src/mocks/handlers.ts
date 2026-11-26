@@ -1,5 +1,6 @@
 import { http, HttpResponse, type DefaultBodyType } from "msw";
 import { MockStore, createMockStore, type MockStoreSeed } from "./store";
+import { validateBwLimitExpression } from "../lib/bwLimit";
 
 const apiBase = "*/app/opensync/svr";
 
@@ -49,6 +50,10 @@ function validateSettingsPatch(
     if (!Number.isInteger(value) || value < range.min || value > range.max) {
       return `${range.name}必须在${range.min}到${range.max}之间`;
     }
+  }
+  if (typeof body.defaultBwLimit === "string") {
+    const bwErr = validateBwLimitExpression(body.defaultBwLimit);
+    if (bwErr) return bwErr;
   }
   return null;
 }
@@ -214,6 +219,8 @@ export const handlers = [
         body.maxConcurrentJobs === undefined
           ? undefined
           : Number(body.maxConcurrentJobs),
+      authSessionId:
+        typeof body.authSessionId === "string" ? body.authSessionId : undefined,
     });
     return err ? fail(err) : ok(null);
   }),
@@ -228,6 +235,8 @@ export const handlers = [
       clearSecrets: Array.isArray(body.clearSecrets)
         ? body.clearSecrets.map(String)
         : undefined,
+      authSessionId:
+        typeof body.authSessionId === "string" ? body.authSessionId : undefined,
     });
     return err ? fail(err) : ok(null);
   }),
@@ -370,6 +379,59 @@ export const handlers = [
       tier: body.tier,
     });
     return err ? fail(err) : ok(null);
+  }),
+  http.post(`${apiBase}/native/storage/auth/start`, async ({ request }) => {
+    const body = await readBody(request);
+    if (!body || typeof body.type !== "string") return fail("缺少存储类型");
+    const res = mockStore.startNativeStorageAuth({
+      type: body.type,
+      options: recordBody(body.options) as Record<string, string> | undefined,
+    });
+    return typeof res === "string" ? fail(res) : ok(res);
+  }),
+  http.get(`${apiBase}/native/storage/auth/status`, ({ request }) => {
+    const sessionId = new URL(request.url).searchParams.get("sessionId") || "";
+    if (!sessionId.trim()) return fail("缺少必要参数");
+    const res = mockStore.getNativeStorageAuth(sessionId);
+    return typeof res === "string" ? fail(res) : ok(res);
+  }),
+  http.post(`${apiBase}/native/storage/auth/callback`, async ({ request }) => {
+    const body = await readBody(request);
+    if (
+      !body ||
+      typeof body.sessionId !== "string" ||
+      typeof body.callbackUrl !== "string"
+    ) {
+      return fail("缺少必要参数");
+    }
+    const res = mockStore.submitNativeStorageAuthCallback(
+      body.sessionId,
+      body.callbackUrl,
+    );
+    return typeof res === "string" ? fail(res) : ok(res);
+  }),
+  http.post(`${apiBase}/native/storage/auth/continue`, async ({ request }) => {
+    const body = await readBody(request);
+    if (
+      !body ||
+      typeof body.sessionId !== "string" ||
+      typeof body.state !== "string" ||
+      typeof body.answer !== "string"
+    ) {
+      return fail("缺少必要参数");
+    }
+    const res = mockStore.continueNativeStorageAuth(
+      body.sessionId,
+      body.state,
+      body.answer,
+    );
+    return typeof res === "string" ? fail(res) : ok(res);
+  }),
+  http.delete(`${apiBase}/native/storage/auth`, ({ request }) => {
+    const sessionId = new URL(request.url).searchParams.get("sessionId") || "";
+    if (!sessionId.trim()) return fail("缺少必要参数");
+    mockStore.cancelNativeStorageAuth(sessionId);
+    return ok(null);
   }),
   http.post(`${apiBase}/native/storage/import/preview`, async ({ request }) => {
     const body = await readBody(request);
@@ -672,8 +734,10 @@ export const handlers = [
     if (body.taskId !== undefined) {
       if (
         typeof body.action !== "string" ||
-        !["stop", "retry", "approve", "reject"].includes(body.action)
+        !["stop", "retry", "approve", "reject", "pause", "resume", "bwlimit"].includes(body.action)
       )
+        return fail("缺少必要参数");
+      if (body.bwLimit !== undefined && body.action !== "bwlimit")
         return fail("缺少必要参数");
     } else if (body.pause === undefined) {
       // Manual run: an empty body used to fall through and run every job.
@@ -687,6 +751,7 @@ export const handlers = [
       action: typeof body.action === "string" ? body.action : undefined,
       pause: typeof body.pause === "boolean" ? body.pause : undefined,
       abort: typeof body.abort === "boolean" ? body.abort : undefined,
+      bwLimit: typeof body.bwLimit === "string" ? body.bwLimit : undefined,
     });
     return ok(null);
   }),

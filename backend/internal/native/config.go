@@ -29,10 +29,10 @@ const RedactedSecretPlaceholder = "***REDACTED***"
 type Config map[string]map[string]string
 
 var namePattern = regexp.MustCompile("^[\\p{L}\\p{N}_][\\p{L}\\p{N}_. -]{0,63}$")
-var regexpKey = regexp.MustCompile("^[a-z][a-z0-9_]*$")
+var regexpKey = regexp.MustCompile("^[a-z0-9][a-zA-Z0-9_]*$")
 
 var (
-	bwRatePartPattern      = regexp.MustCompile(`^(?i:off|0|[0-9]+(?:\.[0-9]+)?(?:[bkmgtp]i?b?)?)$`)
+	bwRatePartPattern      = regexp.MustCompile(`^(?i:off|0|[0-9]+(?:\.[0-9]+)?(?:b|[kmgtp](?:i|ib)?)?)$`)
 	bwScheduleTokenPattern = regexp.MustCompile(`^(?:(?i:mon|tue|wed|thu|fri|sat|sun)-)?(?:[01]?[0-9]|2[0-3]):[0-5][0-9],(.+)$`)
 )
 
@@ -89,6 +89,7 @@ var openSyncMetaFields = map[string]bool{
 	"insecure_skip_verify": true,
 	"proxy_url":            true,
 	"allow_hashcheck":      true,
+	"max_concurrent_jobs":  true,
 }
 
 var fields = map[string]string{
@@ -100,29 +101,29 @@ var fields = map[string]string{
 	"ftp":                 "host user port pass tls explicit_tls disable_tls13 concurrency idle_timeout no_check_certificate shut_timeout writing_mdtm force_list_hidden insecure_skip_verify description",
 	"http":                "url headers no_head no_slash insecure_skip_verify proxy_url description",
 	"b2":                  "account key endpoint hard_delete chunk_size upload_cutoff copy_cutoff download_url memory_pool_flush_time insecure_skip_verify proxy_url description",
-	"onedrive":            "token drive_id drive_type client_id client_secret region auth_url token_url chunk_size expose_onenote_files server_side_across_configs insecure_skip_verify proxy_url description",
-	"drive":               "token client_id client_secret scope root_folder_id team_drive service_account_credentials shared_with_me trashed_only chunk_size upload_cutoff ack_abuse server_side_across_configs insecure_skip_verify proxy_url description",
-	"dropbox":             "token client_id client_secret chunk_size shared_files shared_folders impersonate insecure_skip_verify proxy_url description",
-	"box":                 "token client_id client_secret root_folder_id box_sub_type owned_by insecure_skip_verify proxy_url description",
-	"pcloud":              "token client_id client_secret hostname username password root_folder_id insecure_skip_verify proxy_url description",
+	"onedrive":            "token drive_id drive_type root_folder_id client_id client_secret region tenant auth_url token_url chunk_size expose_onenote_files server_side_across_configs insecure_skip_verify proxy_url description",
+	"drive":               "token client_id client_secret auth_url token_url scope root_folder_id team_drive service_account_credentials shared_with_me trashed_only chunk_size upload_cutoff ack_abuse server_side_across_configs insecure_skip_verify proxy_url description",
+	"dropbox":             "token client_id client_secret auth_url token_url chunk_size shared_files shared_folders impersonate insecure_skip_verify proxy_url description",
+	"box":                 "token client_id client_secret auth_url token_url root_folder_id box_sub_type owned_by insecure_skip_verify proxy_url description",
+	"pcloud":              "token client_id client_secret auth_url token_url hostname username password root_folder_id insecure_skip_verify proxy_url description",
 	"mega":                "user pass debug hard_delete use_https insecure_skip_verify proxy_url description",
 	"azureblob":           "account key sas_url endpoint tenant client_id client_secret access_tier archive_tier chunk_size upload_cutoff no_check_container insecure_skip_verify proxy_url description",
 	"azurefiles":          "account env_auth key sas_url connection_string tenant client_id client_secret username password endpoint share_name chunk_size upload_concurrency max_stream_size insecure_skip_verify proxy_url description",
-	"googlecloudstorage":  "project_number service_account_credentials token client_id client_secret location storage_class bucket_policy_only object_acl bucket_acl anonymous endpoint insecure_skip_verify proxy_url description",
+	"googlecloudstorage":  "project_number service_account_credentials token client_id client_secret auth_url token_url location storage_class bucket_policy_only object_acl bucket_acl anonymous endpoint insecure_skip_verify proxy_url description",
 	"swift":               "user key auth domain tenant tenant_id tenant_domain region storage_url auth_token application_credential_id application_credential_name application_credential_secret auth_version chunk_size no_chunk insecure_skip_verify proxy_url description",
 	"oracleobjectstorage": "provider namespace compartment region endpoint storage_tier upload_cutoff chunk_size upload_concurrency leave_parts_on_error attempt_resume_upload no_check_bucket insecure_skip_verify proxy_url description",
 	"qingstor":            "env_auth access_key_id secret_access_key endpoint zone connection_retries upload_cutoff chunk_size upload_concurrency insecure_skip_verify proxy_url description",
 	"storj":               "provider access_grant satellite_address api_key passphrase insecure_skip_verify proxy_url description",
-	"yandex":              "token client_id client_secret hard_delete spoof_ua upload_wait app_folder insecure_skip_verify proxy_url description",
+	"yandex":              "token client_id client_secret auth_url token_url hard_delete spoof_ua upload_wait app_folder insecure_skip_verify proxy_url description",
 	"koofr":               "provider endpoint mountid setmtime user password insecure_skip_verify proxy_url description",
-	"seafile":             "url user pass library library_key create_library auth_token insecure_skip_verify proxy_url description",
+	"seafile":             "url user pass 2fa library library_key create_library auth_token insecure_skip_verify proxy_url description",
 	"pikpak":              "user pass device_id user_agent root_folder_id use_trash trashed_only no_media_link upload_cutoff chunk_size upload_concurrency insecure_skip_verify proxy_url description",
 	"protondrive":         "username password mailbox_password otp_secret_key client_uid client_access_token client_refresh_token client_salted_key_pass replace_existing_draft enable_caching insecure_skip_verify proxy_url description",
 	"iclouddrive":         "service apple_id password trust_token cookies client_id insecure_skip_verify proxy_url description",
-	"jottacloud":          "token client_id client_secret md5_memory_limit trashed_only hard_delete upload_resume_limit no_versions insecure_skip_verify proxy_url description",
+	"jottacloud":          "token tokenURL configVersion device mountpoint client_id client_secret auth_url token_url md5_memory_limit trashed_only hard_delete upload_resume_limit no_versions insecure_skip_verify proxy_url description",
 	"filen":               "email password api_key upload_concurrency master_keys private_key public_key auth_version base_folder_uuid insecure_skip_verify proxy_url description",
-	"hidrive":             "token client_id client_secret scope_access scope_role root_prefix endpoint chunk_size upload_cutoff upload_concurrency insecure_skip_verify proxy_url description",
-	"huaweidrive":         "token client_id client_secret root_folder_id chunk_size list_chunk upload_cutoff insecure_skip_verify proxy_url description",
+	"hidrive":             "token client_id client_secret auth_url token_url scope_access scope_role root_prefix endpoint chunk_size upload_cutoff upload_concurrency insecure_skip_verify proxy_url description",
+	"huaweidrive":         "token client_id client_secret auth_url token_url root_folder_id chunk_size list_chunk upload_cutoff insecure_skip_verify proxy_url description",
 	"mailru":              "token user pass speedup_enable check_hash user_agent insecure_skip_verify proxy_url description",
 	"fichier":             "api_key shared_folder file_password folder_password cdn insecure_skip_verify proxy_url description",
 	"gofile":              "access_token root_folder_id account_id list_chunk insecure_skip_verify proxy_url description",
@@ -244,10 +245,13 @@ func ValidateBwLimit(value string) error {
 	if trimmed == "" {
 		return nil
 	}
-	if len(trimmed) > 256 || strings.HasPrefix(trimmed, "-") || strings.IndexFunc(trimmed, unicode.IsControl) >= 0 {
+	if len(trimmed) > 1024 || strings.HasPrefix(trimmed, "-") || strings.IndexFunc(trimmed, unicode.IsControl) >= 0 {
 		return errors.New("限速格式无效，支持如 10M、500K、10M:2M 或分时段规则 08:00,5M 23:00,off")
 	}
 	tokens := strings.Fields(trimmed)
+	if len(tokens) > 128 {
+		return errors.New("限速格式无效，支持如 10M、500K、10M:2M 或分时段规则 08:00,5M 23:00,off")
+	}
 	validRate := func(spec string) bool {
 		if spec == "" {
 			return false
@@ -580,6 +584,53 @@ func (c Config) FindKey(name string) (string, bool) {
 	return "", false
 }
 
+// StorageConcurrencyLimits extracts configured per-remote max_concurrent_jobs (>0)
+// limits across all remotes in c.
+func (c Config) StorageConcurrencyLimits() map[string]int {
+	limits := make(map[string]int)
+	for name, p := range c {
+		raw := strings.TrimSpace(p["max_concurrent_jobs"])
+		if raw == "" {
+			continue
+		}
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			limits[name] = n
+		}
+	}
+	return limits
+}
+
+// ExpandRemoteDependencies returns name together with all transitive backing
+// storage names (including Local if wrapped over a local root).
+func (c Config) ExpandRemoteDependencies(name string) []string {
+	if name == "" {
+		return nil
+	}
+	if name == Local {
+		return []string{Local}
+	}
+	canonical, ok := c.FindKey(name)
+	if !ok {
+		return []string{name}
+	}
+	seen := map[string]bool{canonical: true}
+	queue := []string{canonical}
+	for i := 0; i < len(queue); i++ {
+		cur := queue[i]
+		if cur == Local {
+			continue
+		}
+		for _, dep := range c.remoteDependencies(cur) {
+			if dep == "" || seen[dep] {
+				continue
+			}
+			seen[dep] = true
+			queue = append(queue, dep)
+		}
+	}
+	return queue
+}
+
 // normalizeKnownHosts cleans multiline known_hosts text by stripping blank
 // lines and '#' comment lines while keeping every host-key entry separated by '\n'.
 func normalizeKnownHosts(raw string) string {
@@ -700,7 +751,7 @@ func NormalizeParams(raw map[string]string) map[string]string {
 
 func canonicalRemoteType(typ string) string {
 	switch strings.ToLower(strings.TrimSpace(typ)) {
-	case "gcs":
+	case "gcs", "google cloud storage":
 		return "googlecloudstorage"
 	case "oos":
 		return "oracleobjectstorage"
@@ -1295,6 +1346,69 @@ func (c Config) exportLocalTarget(target string) (string, error) {
 	return abs, nil
 }
 
+// AffectedRemotes returns the canonical set of remote names that are either in
+// changed or transitively depend on any remote in changed (wrappers, union, combine).
+func (c Config) AffectedRemotes(changed []string) map[string]bool {
+	revDeps := make(map[string][]string, len(c))
+	for name := range c {
+		for _, dep := range c.remoteDependencies(name) {
+			if strings.EqualFold(dep, Local) {
+				continue
+			}
+			if canonical, ok := c.FindKey(dep); ok {
+				revDeps[canonical] = append(revDeps[canonical], name)
+			}
+		}
+	}
+	affected := make(map[string]bool, len(changed))
+	var queue []string
+	for _, raw := range changed {
+		if canonical, ok := c.FindKey(raw); ok && !affected[canonical] {
+			affected[canonical] = true
+			queue = append(queue, canonical)
+		}
+	}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		for _, parent := range revDeps[cur] {
+			if !affected[parent] {
+				affected[parent] = true
+				queue = append(queue, parent)
+			}
+		}
+	}
+	return affected
+}
+
+// RemoteHasCrypt reports whether name or any transitive composite dependency
+// (wrapper/union/combine) uses the crypt backend.
+func (c Config) RemoteHasCrypt(name string) bool {
+	visited := make(map[string]bool)
+	var walk func(cur string) bool
+	walk = func(cur string) bool {
+		canonical, ok := c.FindKey(cur)
+		if !ok || visited[canonical] {
+			return false
+		}
+		visited[canonical] = true
+		p := c[canonical]
+		if p["type"] == "crypt" {
+			return true
+		}
+		for _, dep := range c.remoteDependencies(canonical) {
+			if strings.EqualFold(dep, Local) {
+				continue
+			}
+			if walk(dep) {
+				return true
+			}
+		}
+		return false
+	}
+	return walk(name)
+}
+
 func (c Config) remoteDependencies(name string) []string {
 	p := c[name]
 	if p == nil {
@@ -1431,7 +1545,7 @@ func ValidateEntry(name string, p map[string]string, plainSecrets bool) error {
 		return fmt.Errorf("存储 %q 的后端类型不受支持", name)
 	}
 	for k, v := range p {
-		if k != "type" && !strings.Contains(" "+allowed+" ", " "+k+" ") {
+		if k != "type" && k != "max_concurrent_jobs" && !strings.Contains(" "+allowed+" ", " "+k+" ") {
 			return disallowedFieldError(name, typ, k)
 		}
 		if !regexpKey.MatchString(k) || len(v) > 65536 {
@@ -1443,6 +1557,12 @@ func ValidateEntry(name string, p map[string]string, plainSecrets bool) error {
 		}
 		if strings.IndexFunc(v, unicode.IsControl) >= 0 {
 			return fmt.Errorf("存储 %q 的字段 %q 格式无效", name, k)
+		}
+	}
+	if mc := p["max_concurrent_jobs"]; mc != "" {
+		n, err := strconv.Atoi(mc)
+		if err != nil || n < 0 || n > 50 {
+			return fmt.Errorf("%s 的单存储最大并发任务数必须为 0–50 的整数", name)
 		}
 	}
 	if err := validateBoolField(name, "insecure_skip_verify", p["insecure_skip_verify"]); err != nil {

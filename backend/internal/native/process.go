@@ -13,8 +13,33 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 )
+
+var (
+	tokenUpdateHookMu sync.RWMutex
+	tokenUpdateHook   func(updates map[string]map[string]string)
+)
+
+// RegisterTokenUpdateHook registers a process-wide callback invoked whenever
+// rclone refreshes an OAuth/session token in a writable session config file.
+func RegisterTokenUpdateHook(fn func(updates map[string]map[string]string)) {
+	tokenUpdateHookMu.Lock()
+	tokenUpdateHook = fn
+	tokenUpdateHookMu.Unlock()
+}
+
+func tokenRefreshableFields(typ string) []string {
+	switch typ {
+	case "onedrive", "drive", "dropbox", "box", "pcloud", "yandex", "jottacloud", "hidrive", "huaweidrive", "mailru", "googlecloudstorage":
+		return []string{"token"}
+	case "protondrive":
+		return []string{"client_access_token", "client_refresh_token"}
+	default:
+		return nil
+	}
+}
 
 const maxStderrCapture = 8 << 10
 
@@ -206,41 +231,111 @@ type SessionSpec struct {
 
 type SessionOptions struct {
 	ProxyURL              string
+	BwLimit               string
 	InsecureSkipVerify    bool
 	PreserveCryptChecksum bool
+	DisableTokenPersist   bool
+	OnTokenUpdate         func(updates map[string]map[string]string)
 }
 
 type Session struct {
-	dir                string
-	closers            []func()
-	configFile         *os.File
-	proxyURL           string
-	insecureSkipVerify bool
+	dir                 string
+	closers             []func()
+	configFile          *os.File
+	configPath          string
+	initialTokens       map[string]map[string]string
+	onTokenUpdate       func(updates map[string]map[string]string)
+	disableTokenPersist bool
+	proxyURL            string
+	insecureSkipVerify  bool
 }
 
 func (s *Session) Close() {
 	for _, close := range s.closers {
 		close()
 	}
-	s.configFile.Close()
+	if s.configFile != nil {
+		_ = s.configFile.Close()
+		s.configFile = nil
+	}
+	s.flushRefreshedTokens()
 	os.RemoveAll(s.dir)
 }
 
-func (s *Session) Cmd(ctx context.Context, args ...string) (*exec.Cmd, error) {
-	// Reset file offset so platforms where /dev/fd/3 shares the open file
-	// description (e.g. macOS local dev) always read the config from byte 0.
-	if _, err := s.configFile.Seek(0, io.SeekStart); err != nil {
-		return nil, err
+func (s *Session) flushRefreshedTokens() {
+	if s.configPath == "" || len(s.initialTokens) == 0 {
+		return
 	}
+	data, err := os.ReadFile(s.configPath)
+	if err != nil || len(data) == 0 {
+		return
+	}
+	parsed, err := parseRawINI(string(data))
+	if err != nil {
+		return
+	}
+	updates := map[string]map[string]string{}
+	for remoteName, tracked := range s.initialTokens {
+		sec, ok := parsed[remoteName]
+		if !ok {
+			continue
+		}
+		for field, orig := range tracked {
+			cur := strings.TrimSpace(sec[field])
+			if cur == "" || cur == orig {
+				continue
+			}
+			if field == "token" && !validateOAuthTokenJSON(cur) {
+				continue
+			}
+			if updates[remoteName] == nil {
+				updates[remoteName] = map[string]string{}
+			}
+			updates[remoteName][field] = cur
+		}
+	}
+	if len(updates) == 0 {
+		return
+	}
+	if s.onTokenUpdate != nil {
+		s.onTokenUpdate(updates)
+		return
+	}
+	if s.disableTokenPersist {
+		return
+	}
+	tokenUpdateHookMu.RLock()
+	hook := tokenUpdateHook
+	tokenUpdateHookMu.RUnlock()
+	if hook != nil {
+		hook(updates)
+	}
+}
+
+func (s *Session) Cmd(ctx context.Context, args ...string) (*exec.Cmd, error) {
 	fullArgs := make([]string, 0, len(args)+4)
-	fullArgs = append(fullArgs, "--config", "/dev/fd/3", "--ask-password=false")
+	if s.configPath != "" {
+		if s.configFile != nil {
+			_ = s.configFile.Sync()
+		}
+		fullArgs = append(fullArgs, "--config", s.configPath, "--ask-password=false")
+	} else {
+		// Reset file offset so platforms where /dev/fd/3 shares the open file
+		// description (e.g. macOS local dev) always read the config from byte 0.
+		if _, err := s.configFile.Seek(0, io.SeekStart); err != nil {
+			return nil, err
+		}
+		fullArgs = append(fullArgs, "--config", "/dev/fd/3", "--ask-password=false")
+	}
 	if s.insecureSkipVerify {
 		fullArgs = append(fullArgs, "--no-check-certificate")
 	}
 	fullArgs = append(fullArgs, args...)
 	cmd, err := command(ctx, fullArgs...)
 	if err == nil {
-		cmd.ExtraFiles = []*os.File{s.configFile}
+		if s.configPath == "" {
+			cmd.ExtraFiles = []*os.File{s.configFile}
+		}
 		if s.proxyURL != "" {
 			cmd.Env = applyProxyEnv(cmd.Env, s.proxyURL)
 		}
@@ -302,21 +397,13 @@ func (c Config) SessionFor(specs []SessionSpec, opts SessionOptions) (*Session, 
 	if e != nil {
 		return nil, e
 	}
-	f, err := os.CreateTemp(dir, "config-")
-	if err != nil {
-		os.RemoveAll(dir)
-		return nil, err
-	}
-	if err = os.Remove(f.Name()); err != nil {
-		f.Close()
-		os.RemoveAll(dir)
-		return nil, err
-	}
+	_ = os.Chmod(dir, 0700)
 	s := &Session{
-		dir:                dir,
-		configFile:         f,
-		proxyURL:           strings.TrimSpace(opts.ProxyURL),
-		insecureSkipVerify: opts.InsecureSkipVerify,
+		dir:                 dir,
+		proxyURL:            strings.TrimSpace(opts.ProxyURL),
+		insecureSkipVerify:  opts.InsecureSkipVerify,
+		disableTokenPersist: opts.DisableTokenPersist,
+		onTokenUpdate:       opts.OnTokenUpdate,
 	}
 	ok := false
 	defer func() {
@@ -330,19 +417,23 @@ func (c Config) SessionFor(specs []SessionSpec, opts SessionOptions) (*Session, 
 	checksumByRemote := map[string]bool{}
 	var queue []string
 	enqueue := func(name string, mode diskAccessMode, checksum bool) {
-		if name == "" || name == Local || c[name] == nil || c[name]["type"] == "local" {
+		if name == "" || strings.EqualFold(name, Local) {
 			return
 		}
-		if prev, exists := modeByRemote[name]; !exists {
-			modeByRemote[name] = mode
-			checksumByRemote[name] = checksum
-			queue = append(queue, name)
+		canonical, ok := c.FindKey(name)
+		if !ok || c[canonical]["type"] == "local" {
+			return
+		}
+		if prev, exists := modeByRemote[canonical]; !exists {
+			modeByRemote[canonical] = mode
+			checksumByRemote[canonical] = checksum
+			queue = append(queue, canonical)
 		} else {
 			if mode > prev {
-				modeByRemote[name] = mode
+				modeByRemote[canonical] = mode
 			}
 			if checksum {
-				checksumByRemote[name] = true
+				checksumByRemote[canonical] = true
 			}
 		}
 	}
@@ -363,14 +454,14 @@ func (c Config) SessionFor(specs []SessionSpec, opts SessionOptions) (*Session, 
 		switch p["type"] {
 		case "crypt", "chunker", "compress", "hasher", "alias", "archive":
 			ref, _, cutOK := strings.Cut(p["remote"], ":")
-			if cutOK && ref != Local && c[ref] != nil && c[ref]["type"] != "local" {
+			if cutOK && !c.isLocalName(ref) {
 				enqueue(ref, curMode, curChecksum && (opts.PreserveCryptChecksum || p["type"] != "crypt"))
 			}
 		case "union":
 			if ups, err := ParseUnionUpstreams(p["upstreams"]); err == nil {
 				for _, up := range ups {
 					ref, _, cutOK := strings.Cut(up.Target, ":")
-					if cutOK && ref != Local && c[ref] != nil && c[ref]["type"] != "local" {
+					if cutOK && !c.isLocalName(ref) {
 						upMode := curMode
 						if up.Suffix == ":ro" {
 							upMode = diskReadOnly
@@ -383,12 +474,53 @@ func (c Config) SessionFor(specs []SessionSpec, opts SessionOptions) (*Session, 
 			if ups, err := ParseCombineUpstreams(p["upstreams"]); err == nil {
 				for _, up := range ups {
 					ref, _, cutOK := strings.Cut(up.Target, ":")
-					if cutOK && ref != Local && c[ref] != nil && c[ref]["type"] != "local" {
+					if cutOK && !c.isLocalName(ref) {
 						enqueue(ref, curMode, curChecksum)
 					}
 				}
 			}
 		}
+	}
+
+	// Keep a private 0600 config file inside the 0700 temp dir when any remote
+	// uses OAuth/session tokens that rclone refreshes by rewriting its config.
+	initialTokens := map[string]map[string]string{}
+	for _, n := range queue {
+		p := c[n]
+		if p == nil {
+			continue
+		}
+		if tracked := tokenRefreshableFields(p["type"]); len(tracked) > 0 {
+			m := map[string]string{}
+			for _, field := range tracked {
+				if val := strings.TrimSpace(p[field]); val != "" {
+					m[field] = val
+				}
+			}
+			if len(m) > 0 {
+				initialTokens[n] = m
+			}
+		}
+	}
+	if len(initialTokens) > 0 {
+		configPath := filepath.Join(dir, "rclone.conf")
+		f, err := os.OpenFile(configPath, os.O_CREATE|os.O_RDWR|os.O_EXCL, 0600)
+		if err != nil {
+			return nil, err
+		}
+		s.configFile = f
+		s.configPath = configPath
+		s.initialTokens = initialTokens
+	} else {
+		f, err := os.CreateTemp(dir, "config-")
+		if err != nil {
+			return nil, err
+		}
+		if err = os.Remove(f.Name()); err != nil {
+			f.Close()
+			return nil, err
+		}
+		s.configFile = f
 	}
 
 	var conf strings.Builder

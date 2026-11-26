@@ -45,6 +45,9 @@ const maxRequestBodyBytes = 1 << 20
 // maxBackupImportBodyBytes matches the 10 MiB backup file limit in Settings UI
 // plus JSON envelope overhead ({conflictMode, payload}).
 const maxBackupImportBodyBytes = 12 << 20
+
+// maxStorageUploadBodyBytes caps single-file streaming browser uploads to 512 MiB.
+const maxStorageUploadBodyBytes = 512 << 20
 const shutdownTimeout = 30 * time.Second
 
 func newRouter(development bool, allowedOrigins []string) *gin.Engine {
@@ -69,8 +72,13 @@ func newRouterWithVersionChecker(development bool, allowedOrigins []string, chec
 		c.Header("Referrer-Policy", "same-origin")
 		c.Header("Content-Security-Policy", "frame-ancestors 'self'; object-src 'none'; base-uri 'self'")
 		bodyLimit := int64(maxRequestBodyBytes)
-		if c.Request.Method == http.MethodPost && c.Request.URL.Path == prefix+"/svr/system/import" {
-			bodyLimit = maxBackupImportBodyBytes
+		if c.Request.Method == http.MethodPost {
+			switch c.Request.URL.Path {
+			case prefix + "/svr/system/import":
+				bodyLimit = maxBackupImportBodyBytes
+			case prefix + "/svr/native/storage/upload":
+				bodyLimit = maxStorageUploadBodyBytes
+			}
 		}
 		if c.Request.ContentLength > bodyLimit {
 			c.AbortWithStatusJSON(413, gin.H{"code": 413, "msg": msg.T(msg.RequestTooLarge)})
@@ -121,6 +129,20 @@ func newRouterWithVersionChecker(development bool, allowedOrigins []string, chec
 	api.POST("/native/storage/link", handler.LinkNativeStorage)
 	api.POST("/native/storage/copyurl", handler.CopyURLNativeStorage)
 	api.POST("/native/storage/settier", handler.SetTierNativeStorage)
+	api.GET("/native/storage/transfers", handler.ListNativeTransfers)
+	api.POST("/native/storage/transfers/restore", handler.StartAsyncRestoreNativeFile)
+	api.POST("/native/storage/transfers/copyurl", handler.StartAsyncCopyURLNativeStorage)
+	api.POST("/native/storage/batch", handler.StartBatchNativeStorageAction)
+	api.DELETE("/native/storage/transfers", handler.CancelOrClearNativeTransfers)
+	api.POST("/native/storage/trash", handler.BrowseNativeTrash)
+	api.POST("/native/storage/trash/restore", handler.RestoreNativeTrashItem)
+	api.GET("/native/storage/download", handler.DownloadNativeStorageFile)
+	api.POST("/native/storage/upload", handler.UploadNativeStorageFile)
+	api.POST("/native/storage/auth/start", handler.StartNativeStorageAuth)
+	api.GET("/native/storage/auth/status", handler.GetNativeStorageAuth)
+	api.POST("/native/storage/auth/callback", handler.SubmitNativeStorageAuthCallback)
+	api.POST("/native/storage/auth/continue", handler.ContinueNativeStorageAuth)
+	api.DELETE("/native/storage/auth", handler.CancelNativeStorageAuth)
 	api.POST("/native/storage/import/preview", handler.PreviewNativeImport)
 	api.POST("/native/storage/import", handler.ImportNativeStorage)
 	api.GET("/alist", handler.GetAlist)
@@ -135,11 +157,14 @@ func newRouterWithVersionChecker(development bool, allowedOrigins []string, chec
 	api.GET("/job/items/export", handler.ExportTaskItems)
 	api.GET("/job/dry-run", handler.GetDryRun)
 	api.GET("/job/check", handler.GetJobCheck)
+	api.GET("/job/check/export", handler.ExportJobCheck)
 	api.POST("/job", handler.AddJob)
 	api.POST("/job/batch", handler.BatchJobAction)
 	api.POST("/job/tasks/delete", handler.DeleteTasksBatch)
 	api.POST("/job/dry-run", handler.StartDryRun)
 	api.POST("/job/check", handler.StartJobCheck)
+	api.POST("/job/check/repair", handler.RepairJobCheck)
+	api.POST("/job/approval/exclude", handler.ExcludePendingApproval)
 	api.POST("/job/bisync/resync", handler.ResetBisyncJob)
 	api.POST("/job/filter/test", handler.TestJobFilter)
 	api.PUT("/job", handler.UpdateJob)
@@ -149,6 +174,7 @@ func newRouterWithVersionChecker(development bool, allowedOrigins []string, chec
 	api.GET("/notify", handler.GetNotify)
 	api.POST("/notify", handler.AddNotify)
 	api.POST("/notify/test", handler.TestNotify)
+	api.POST("/notify/digest", handler.SendDigestNow)
 	api.PUT("/notify", handler.UpdateNotify)
 	api.DELETE("/notify", handler.DeleteNotify)
 	files, _ := fs.Sub(webFiles, "web")
@@ -292,6 +318,10 @@ func main() {
 	defer service.StopEngineHealthChecker()
 	stopRetention := service.StartTaskRetentionScheduler()
 	defer stopRetention()
+	stopPeriodicCheck := service.StartPeriodicCheckScheduler()
+	defer stopPeriodicCheck()
+	stopDigest := service.StartDigestScheduler()
+	defer stopDigest()
 	if err := publish.commit(); err != nil {
 		log.Fatal(err)
 	}
@@ -332,6 +362,7 @@ func main() {
 		stopJobs:        service.ShutdownJobs,
 		stopNotify:      service.ShutdownNotifyDispatcher,
 		stopNotifyTests: handler.ShutdownNotifyTests,
+		stopAuth:        service.ShutdownNativeAuthSessions,
 	}, shutdownTimeout, notifyShutdownReserve)
 }
 
@@ -353,6 +384,7 @@ type shutdownSteps struct {
 	stopJobs        func(context.Context)
 	stopNotify      func(context.Context)
 	stopNotifyTests func(context.Context)
+	stopAuth        func()
 }
 
 // gracefulShutdown stops the process in dependency order within total:
@@ -380,6 +412,9 @@ func gracefulShutdown(steps shutdownSteps, total, reserve time.Duration) {
 
 	// Ends the SSE handlers before Shutdown waits on them.
 	steps.cancelRequests()
+	if steps.stopAuth != nil {
+		steps.stopAuth()
+	}
 	if steps.stopServer(serverCtx) != nil {
 		steps.closeServer()
 	}

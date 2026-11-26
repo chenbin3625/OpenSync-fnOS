@@ -74,6 +74,8 @@ type CopyOptions struct {
 	UserAgent            string
 	IOTimeout            string
 	ConTimeout           string
+	LowLevelRetries      int
+	RetriesSleep         string
 	IgnoreSize           bool
 	CreateEmptySrcDirs   bool
 	FollowSymlinks       bool
@@ -82,6 +84,20 @@ type CopyOptions struct {
 	CheckFirst           bool
 	S3NoHead             bool
 	ProxyURL             string
+
+	// Resumable transfer, direct streaming & live runtime controls
+	ResumeEnable    bool
+	ResumeMinSizeMB int
+	ResumeMinBytes  int64
+	ResumeStateDir  string
+	DirectStream    bool
+	FilterLines     []string
+	MinSize         int64
+	MaxSize         int64
+	MinAgeMinutes   int
+	OlderThanDays   int
+	NewerThanDays   int
+	Controller      *RCController
 }
 
 type Event struct {
@@ -128,7 +144,13 @@ func parts(v string) (string, string) {
 }
 
 func (c Config) isLocalName(name string) bool {
-	return name == Local || (c[name] != nil && c[name]["type"] == "local")
+	if strings.EqualFold(name, Local) {
+		return true
+	}
+	if canonical, ok := c.FindKey(name); ok {
+		return c[canonical]["type"] == "local"
+	}
+	return false
 }
 
 // Pair resolves and validates any supported sync direction:
@@ -156,6 +178,14 @@ func within(a, b string) bool {
 	return e == nil && (rel == "." || filepath.IsLocal(rel))
 }
 
+func (ep Endpoint) SupportsNativeMD5() bool {
+	return endpointSupportsNativeMD5(ep)
+}
+
+func (ep Endpoint) HasReliableModTime() bool {
+	return endpointHasReliableModTime(ep)
+}
+
 func endpointSupportsNativeMD5(ep Endpoint) bool {
 	if ep.IsCrypt {
 		return false
@@ -172,11 +202,30 @@ func endpointSupportsNativeMD5(ep Endpoint) bool {
 	}
 }
 
+func webdavVendorHasReliableModTime(vendor string) bool {
+	return slices.Contains([]string{"owncloud", "nextcloud", "rclone", "fastmail", "sharepoint"}, strings.ToLower(strings.TrimSpace(vendor)))
+}
+
 func endpointHasReliableModTime(ep Endpoint) bool {
+	if ep.UnreliableModTime {
+		return false
+	}
 	if ep.Backend != "webdav" {
 		return true
 	}
-	return slices.Contains([]string{"owncloud", "nextcloud", "rclone", "fastmail", "sharepoint"}, ep.Vendor)
+	return webdavVendorHasReliableModTime(ep.Vendor)
+}
+
+// EffectiveCompareMode resolves the runtime comparison mode for a transfer pair.
+// Standard WebDAV endpoints (such as OpenList / AList with vendor=other) lack
+// reliable modification times and native hashes, so default mode (0) uses
+// size-only (1) to avoid downloading remote files locally for comparison.
+// Explicit content comparison (2) still performs checksum / read-back checks.
+func EffectiveCompareMode(srcEp, destEp Endpoint, compareMode int) int {
+	if compareMode == 0 && (!endpointHasReliableModTime(srcEp) || !endpointHasReliableModTime(destEp)) {
+		return 1
+	}
+	return compareMode
 }
 
 func joinRcloneRemotePath(baseArg, rel string) string {
@@ -324,12 +373,14 @@ func (c Config) Copy(ctx context.Context, src, dst string, opt CopyOptions, emit
 		return e
 	}
 	skipExisting := opt.SkipExisting || opt.ConflictPolicy == 1
+	effectiveCompare := EffectiveCompareMode(srcEp, destEp, opt.Compare)
 	// Prefer native checksum comparison (--checksum) when both endpoints expose
 	// MD5 hashes, avoiding full downloads. Fall back to `rclone check --download`
-	// when content comparison is requested on a hashless backend or default mode
-	// on standard WebDAV without reliable modtimes.
-	useChecksum := !skipExisting && !opt.ForceOverwrite && opt.Compare == 2 && endpointSupportsNativeMD5(srcEp) && endpointSupportsNativeMD5(destEp)
-	deep := !skipExisting && !opt.ForceOverwrite && ((opt.Compare == 2 && !useChecksum) || (opt.Compare == 0 && (!endpointHasReliableModTime(srcEp) || !endpointHasReliableModTime(destEp))))
+	// only when explicit content comparison (Compare == 2) is requested on a
+	// hashless backend; default mode (Compare == 0) on standard WebDAV (such as
+	// OpenList / AList) uses --size-only instead of pulling files locally.
+	useChecksum := !skipExisting && !opt.ForceOverwrite && effectiveCompare == 2 && endpointSupportsNativeMD5(srcEp) && endpointSupportsNativeMD5(destEp)
+	deep := !skipExisting && !opt.ForceOverwrite && effectiveCompare == 2 && !useChecksum
 
 	srcName, srcSub := parts(src)
 	dstName, dstSub := parts(dst)
@@ -373,12 +424,16 @@ func (c Config) Copy(ctx context.Context, src, dst string, opt CopyOptions, emit
 
 	listPath := filepath.Join(s.dir, "files")
 	fileSizes := map[string]int64{}
+	fileMeta := map[string]resumeFileMeta{}
 	var emptyDirs []string
 	var count int
 	var scannedDirs int64
 	var pending []PendingFile
 
-	if len(opt.OnlyFiles) > 0 {
+	useDirectStream := opt.DirectStream && len(opt.OnlyFiles) == 0 && !opt.ResumeEnable && !deep && !opt.DryRun && !opt.CreateEmptySrcDirs
+	if useDirectStream {
+		emit(Event{ScanDirs: 1, ScanFiles: 0, ScanDone: true})
+	} else if len(opt.OnlyFiles) > 0 {
 		f, err := os.OpenFile(listPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0600)
 		if err != nil {
 			return err
@@ -395,6 +450,7 @@ func (c Config) Copy(ctx context.Context, src, dst string, opt CopyOptions, emit
 				return err
 			}
 			fileSizes[rel] = pf.Size
+			fileMeta[rel] = resumeFileMeta{Rel: rel, Size: pf.Size}
 			if len(pending) < maxPendingEventFiles {
 				pending = append(pending, PendingFile{Path: rel, Size: pf.Size})
 			}
@@ -406,34 +462,113 @@ func (c Config) Copy(ctx context.Context, src, dst string, opt CopyOptions, emit
 		emit(Event{ScanDirs: 1, ScanFiles: int64(count), ScanDone: true, PendingFiles: pending})
 	} else if srcEp.IsLocal {
 		var walkErr error
-		count, scannedDirs, emptyDirs, pending, walkErr = prescanLocalSource(ctx, srcSub, listPath, opt, fileSizes, emit)
+		count, scannedDirs, emptyDirs, pending, walkErr = prescanLocalSource(ctx, srcSub, listPath, opt, fileSizes, fileMeta, emit)
 		if walkErr != nil {
 			return walkErr
 		}
 		emit(Event{ScanDirs: scannedDirs, ScanFiles: int64(count), ScanDone: true, PendingFiles: pending})
 	} else {
 		var walkErr error
-		count, scannedDirs, emptyDirs, pending, walkErr = prescanRemoteSource(ctx, s, srcEp.Backend, sourceArg, listPath, opt, fileSizes, emit)
+		count, scannedDirs, emptyDirs, pending, walkErr = prescanRemoteSource(ctx, s, srcEp.Backend, sourceArg, listPath, opt, fileSizes, fileMeta, emit)
 		if walkErr != nil {
 			return walkErr
 		}
 		emit(Event{ScanDirs: scannedDirs, ScanFiles: int64(count), ScanDone: true, PendingFiles: pending})
 	}
 
-	if count == 0 {
+	if !useDirectStream && count == 0 {
 		if opt.CreateEmptySrcDirs && len(emptyDirs) > 0 {
 			return handleEmptyDirs(ctx, s, destEp, dstSub, destArg, emptyDirs, opt, emit)
 		}
 		return nil
 	}
 
-	common := []string{"--checkers", strconv.Itoa(max(1, opt.Checkers)), "--retries", strconv.Itoa(max(1, opt.Retries+1)), "--low-level-retries", "3"}
+	// Partition large files into byte/part-level resumable transfers when enabled.
+	var resumeErr error
+	copyCount := count
+	if opt.ResumeEnable && !opt.DryRun && !deep && !useDirectStream && count > 0 {
+		threshold := effectiveResumeThreshold(opt)
+		canResumeDownload := destEp.IsLocal && !srcEp.IsLocal
+		var s3Canonical string
+		canResumeS3Upload := false
+		if srcEp.IsLocal && !destEp.IsLocal && destEp.Backend == "s3" {
+			if canonical, ok := c.FindKey(dstName); ok && canUseS3ResumableUpload(c[canonical]) {
+				s3Canonical = canonical
+				canResumeS3Upload = true
+			}
+		}
+		if canResumeDownload || canResumeS3Upload {
+			var resumeFiles []resumeFileMeta
+			var remainPaths []string
+			for _, rel := range slices.Sorted(func(yield func(string) bool) {
+				for k := range fileMeta {
+					if !yield(k) {
+						return
+					}
+				}
+			}) {
+				fm := fileMeta[rel]
+				if fm.Size >= threshold {
+					resumeFiles = append(resumeFiles, fm)
+				} else {
+					remainPaths = append(remainPaths, rel)
+				}
+			}
+			if len(resumeFiles) > 0 {
+				resumeOpt := opt
+				resumeOpt.Compare = effectiveCompare
+				if canResumeDownload {
+					resumeErr = resumeDownloadFilesToLocal(ctx, s, sourceArg, dstSub, resumeFiles, resumeOpt, emit)
+				} else {
+					resumeErr = resumeUploadFilesToS3(ctx, srcSub, s3Canonical, c[s3Canonical], dstSub, resumeFiles, resumeOpt, emit)
+				}
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				if len(remainPaths) == 0 {
+					if resumeErr == nil && opt.CreateEmptySrcDirs && len(emptyDirs) > 0 {
+						return handleEmptyDirs(ctx, s, destEp, dstSub, destArg, emptyDirs, opt, emit)
+					}
+					return resumeErr
+				}
+				f, rewriteErr := os.OpenFile(listPath, os.O_TRUNC|os.O_WRONLY, 0600)
+				if rewriteErr != nil {
+					return rewriteErr
+				}
+				bw := bufio.NewWriter(f)
+				for _, rel := range remainPaths {
+					if _, wErr := fmt.Fprintln(bw, rel); wErr != nil {
+						_ = f.Close()
+						return wErr
+					}
+				}
+				if err := errors.Join(bw.Flush(), f.Close()); err != nil {
+					return err
+				}
+				copyCount = len(remainPaths)
+			}
+		}
+	}
+
+	lowLevelRetries := opt.LowLevelRetries
+	if lowLevelRetries <= 0 {
+		lowLevelRetries = 10
+	}
+	common := []string{
+		"--checkers", strconv.Itoa(max(1, opt.Checkers)),
+		"--retries", strconv.Itoa(max(1, opt.Retries+1)),
+		"--low-level-retries", strconv.Itoa(lowLevelRetries),
+	}
+	if rs := strings.TrimSpace(opt.RetriesSleep); rs != "" {
+		if err := ValidateDurationSpec(rs, time.Hour, "重试间隔格式无效，如 5s、30s、1m（最大 1h）"); err != nil {
+			return err
+		}
+		common = append(common, "--retries-sleep", rs)
+	}
 	common, e = appendTuningFlags(common, opt)
 	if e != nil {
 		return e
 	}
-
-	copyCount := count
 	if deep {
 		diff := filepath.Join(s.dir, "different")
 		missing := filepath.Join(s.dir, "missing")
@@ -449,6 +584,12 @@ func (c Config) Copy(ctx context.Context, src, dst string, opt CopyOptions, emit
 		}
 		if e = cmd.Start(); e != nil {
 			return e
+		}
+		var detachCheck func()
+		var stopCheckWake func() bool
+		if opt.Controller != nil && cmd.Process != nil {
+			detachCheck = opt.Controller.Attach(cmd.Process.Pid, "", "", "")
+			stopCheckWake = context.AfterFunc(ctx, func() { opt.Controller.ResumeAllProcesses() })
 		}
 		checkErrBuf := &tailBuffer{limit: maxStderrCapture}
 		checkScan := bufio.NewScanner(checkLogs)
@@ -475,9 +616,18 @@ func (c Config) Copy(ctx context.Context, src, dst string, opt CopyOptions, emit
 			}
 		}
 		if checkScan.Err() != nil {
-			_ = cmd.Process.Kill()
+			if cmd.Process != nil {
+				_ = resumeProcess(cmd.Process.Pid)
+				_ = cmd.Process.Kill()
+			}
 		}
 		runErr := cmd.Wait()
+		if stopCheckWake != nil {
+			stopCheckWake()
+		}
+		if detachCheck != nil {
+			detachCheck()
+		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -531,11 +681,33 @@ func (c Config) Copy(ctx context.Context, src, dst string, opt CopyOptions, emit
 		}
 	}
 
-	args := []string{"copy", "--use-json-log", "--log-level", "INFO", "--stats", "1s", "--transfers", strconv.Itoa(max(1, opt.Transfers)), "--files-from-raw", listPath}
-	if copyCount <= noTraverseFileThreshold {
-		args = append(args, "--no-traverse")
+	args := []string{"copy", "--use-json-log", "--log-level", "INFO", "--stats", "1s", "--transfers", strconv.Itoa(max(1, opt.Transfers))}
+	if useDirectStream {
+		filterFile := filepath.Join(s.dir, "filters")
+		lines := make([]string, 0, len(opt.FilterLines)+2)
+		lines = append(lines, "- "+PartialDirName+"/**", "- .opensync-*.partial")
+		lines = append(lines, opt.FilterLines...)
+		if err := os.WriteFile(filterFile, []byte(strings.Join(lines, "\n")+"\n"), 0600); err != nil {
+			return err
+		}
+		args = append(args, "--filter-from", filterFile)
+		args = appendFilterCriteriaFlags(args, opt.MinSize, opt.MaxSize, opt.MinAgeMinutes, opt.OlderThanDays, opt.NewerThanDays)
+	} else {
+		args = append(args, "--files-from-raw", listPath)
+		if copyCount <= noTraverseFileThreshold {
+			args = append(args, "--no-traverse")
+		}
 	}
 	args = append(args, common...)
+	var rcAddr, rcUser, rcPass string
+	var rcEnv []string
+	if opt.Controller != nil && !opt.DryRun {
+		var rcArgs []string
+		var ok bool
+		if rcAddr, rcUser, rcPass, rcArgs, rcEnv, ok = prepareRCArgsAndEnv(); ok {
+			args = append(args, rcArgs...)
+		}
+	}
 	previewFile := filepath.Join(s.dir, "preview")
 	if opt.DryRun {
 		args = append(args, "--dry-run", "--combined", previewFile)
@@ -544,10 +716,10 @@ func (c Config) Copy(ctx context.Context, src, dst string, opt CopyOptions, emit
 		args = append(args, "--ignore-times")
 	} else if useChecksum {
 		args = append(args, "--checksum")
-	} else if opt.Compare == 1 {
+	} else if effectiveCompare == 1 {
 		args = append(args, "--size-only")
 	}
-	if opt.IgnoreSize && opt.Compare != 1 {
+	if opt.IgnoreSize && effectiveCompare != 1 {
 		args = append(args, "--ignore-size")
 	}
 	if skipExisting {
@@ -566,12 +738,21 @@ func (c Config) Copy(ctx context.Context, src, dst string, opt CopyOptions, emit
 	if e != nil {
 		return e
 	}
+	if len(rcEnv) > 0 {
+		cmd.Env = append(cmd.Env, rcEnv...)
+	}
 	logs, e := cmd.StderrPipe()
 	if e != nil {
 		return e
 	}
 	if e = cmd.Start(); e != nil {
 		return e
+	}
+	if opt.Controller != nil && cmd.Process != nil {
+		detachRC := opt.Controller.Attach(cmd.Process.Pid, rcAddr, rcUser, rcPass)
+		defer detachRC()
+		stopWake := context.AfterFunc(ctx, func() { opt.Controller.ResumeAllProcesses() })
+		defer stopWake()
 	}
 	scan := bufio.NewScanner(logs)
 	scan.Buffer(make([]byte, 4096), 4<<20)
@@ -655,9 +836,9 @@ func (c Config) Copy(ctx context.Context, src, dst string, opt CopyOptions, emit
 			}
 		}
 		if detail := sanitizeRcloneError(lastErrMsg); detail != "" {
-			return fmt.Errorf("rclone 复制失败：%s", detail)
+			return errors.Join(resumeErr, fmt.Errorf("rclone 复制失败：%s", detail))
 		}
-		return fmt.Errorf("rclone 复制失败（%v），请检查连接、空间和写入权限", e)
+		return errors.Join(resumeErr, fmt.Errorf("rclone 复制失败（%v），请检查连接、空间和写入权限", e))
 	}
 	if opt.DryRun {
 		plan, err := os.Open(previewFile)
@@ -699,10 +880,10 @@ func (c Config) Copy(ctx context.Context, src, dst string, opt CopyOptions, emit
 	}
 	if opt.CreateEmptySrcDirs && len(emptyDirs) > 0 {
 		if err := handleEmptyDirs(ctx, s, destEp, dstSub, destArg, emptyDirs, opt, emit); err != nil {
-			return err
+			return errors.Join(resumeErr, err)
 		}
 	}
-	return nil
+	return resumeErr
 }
 
 func prescanLocalSource(
@@ -710,6 +891,7 @@ func prescanLocalSource(
 	srcSub, listPath string,
 	opt CopyOptions,
 	fileSizes map[string]int64,
+	fileMeta map[string]resumeFileMeta,
 	emit func(Event),
 ) (count int, scannedDirs int64, emptyDirs []string, pending []PendingFile, err error) {
 	volume, relative, e := openDisk(srcSub)
@@ -744,6 +926,9 @@ func prescanLocalSource(
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if err := opt.Controller.WaitIfPaused(ctx); err != nil {
+			return err
+		}
 		dirFile, openErr := source.Open(relDir)
 		if openErr != nil {
 			return errors.New("无法完整读取备份源目录")
@@ -765,6 +950,12 @@ func prescanLocalSource(
 		for _, d := range entries {
 			if err := ctx.Err(); err != nil {
 				return err
+			}
+			if err := opt.Controller.WaitIfPaused(ctx); err != nil {
+				return err
+			}
+			if isInternalPartialEntry(d.Name()) {
+				continue
 			}
 			childRel := d.Name()
 			if relDir != "." {
@@ -820,6 +1011,11 @@ func prescanLocalSource(
 				return wErr
 			}
 			fileSizes[childRel] = st.Size()
+			fileMeta[childRel] = resumeFileMeta{
+				Rel:     childRel,
+				Size:    st.Size(),
+				ModTime: st.ModTime().Unix(),
+			}
 			if len(pending) < maxPendingEventFiles {
 				pending = append(pending, PendingFile{Path: childRel, Size: st.Size()})
 			}
@@ -858,11 +1054,15 @@ func prescanRemoteSource(
 	backend, sourceArg, listPath string,
 	opt CopyOptions,
 	fileSizes map[string]int64,
+	fileMeta map[string]resumeFileMeta,
 	emit func(Event),
 ) (count int, scannedDirs int64, emptyDirs []string, pending []PendingFile, err error) {
 	lsArgs := []string{"lsjson", "-R", "--no-mimetype"}
 	if opt.FastList {
 		lsArgs = append(lsArgs, "--fast-list")
+	}
+	if opt.ResumeEnable && opt.Compare == 2 {
+		lsArgs = append(lsArgs, "--hash")
 	}
 	lsArgs = append(lsArgs, "--", sourceArg)
 	cmd, e := s.Cmd(ctx, lsArgs...)
@@ -878,10 +1078,17 @@ func prescanRemoteSource(
 	if e = cmd.Start(); e != nil {
 		return 0, 0, nil, nil, e
 	}
+	if opt.Controller != nil && cmd.Process != nil {
+		detachScan := opt.Controller.Attach(cmd.Process.Pid, "", "", "")
+		defer detachScan()
+		stopScanWake := context.AfterFunc(ctx, func() { opt.Controller.ResumeAllProcesses() })
+		defer stopScanWake()
+	}
 
 	f, e := os.OpenFile(listPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0600)
 	if e != nil {
 		if cmd.Process != nil {
+			_ = resumeProcess(cmd.Process.Pid)
 			_ = cmd.Process.Kill()
 		}
 		_ = cmd.Wait()
@@ -939,12 +1146,17 @@ func prescanRemoteSource(
 				streamErr = ctx.Err()
 				break
 			}
+			if err := opt.Controller.WaitIfPaused(ctx); err != nil {
+				streamErr = err
+				break
+			}
 			var r struct {
-				Path    string `json:"Path"`
-				Name    string `json:"Name"`
-				Size    int64  `json:"Size"`
-				ModTime string `json:"ModTime"`
-				IsDir   bool   `json:"IsDir"`
+				Path    string            `json:"Path"`
+				Name    string            `json:"Name"`
+				Size    int64             `json:"Size"`
+				ModTime string            `json:"ModTime"`
+				IsDir   bool              `json:"IsDir"`
+				Hashes  map[string]string `json:"Hashes"`
 			}
 			if decErr := dec.Decode(&r); decErr != nil {
 				streamErr = errors.New("无法解析远端源目录文件清单")
@@ -1004,6 +1216,19 @@ func prescanRemoteSource(
 				break
 			}
 			fileSizes[rel] = r.Size
+			md5Sum := ""
+			if r.Hashes != nil {
+				md5Sum = strings.ToLower(strings.TrimSpace(r.Hashes["md5"]))
+				if md5Sum == "" {
+					md5Sum = strings.ToLower(strings.TrimSpace(r.Hashes["MD5"]))
+				}
+			}
+			fileMeta[rel] = resumeFileMeta{
+				Rel:     rel,
+				Size:    r.Size,
+				ModTime: modTime.Unix(),
+				MD5:     md5Sum,
+			}
 			if len(pending) < maxPendingEventFiles {
 				pending = append(pending, PendingFile{Path: rel, Size: r.Size})
 			}
@@ -1023,6 +1248,7 @@ func prescanRemoteSource(
 
 	if streamErr != nil && !errors.Is(streamErr, io.EOF) {
 		if cmd.Process != nil {
+			_ = resumeProcess(cmd.Process.Pid)
 			_ = cmd.Process.Kill()
 			killed = true
 		}
@@ -1084,6 +1310,9 @@ func handleEmptyDirs(
 			if err := ctx.Err(); err != nil {
 				return err
 			}
+			if err := opt.Controller.WaitIfPaused(ctx); err != nil {
+				return err
+			}
 			target := path.Join(rel, d)
 			if err := mkdirAllPerm(root, target, backupDirPerm); err != nil {
 				return err
@@ -1093,6 +1322,9 @@ func handleEmptyDirs(
 	}
 	for _, d := range emptyDirs {
 		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := opt.Controller.WaitIfPaused(ctx); err != nil {
 			return err
 		}
 		cmd, err := s.Cmd(ctx, "mkdir", "--", joinRcloneRemotePath(destArg, d))

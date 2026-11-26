@@ -136,6 +136,7 @@ func ImportSystemBackup(payload SystemBackupPayload, conflictMode string) (map[s
 		if err := config.UpdateSystemSettings(*payload.Settings); err != nil {
 			warnings = append(warnings, fmt.Sprintf("系统设置未导入：%v", err))
 		} else {
+			ApplyGlobalDefaultBwLimitAsync(config.GetSystemSettings().DefaultBwLimit)
 			summary["settingsUpdated"] = true
 		}
 	}
@@ -201,7 +202,64 @@ func ImportSystemBackup(payload SystemBackupPayload, conflictMode string) (map[s
 					enginesUpdated++
 				}
 			} else {
-				enginesSkipped++
+				// On a fresh NAS, EnsureNativeEngine() pre-creates rclone://native with
+				// an empty "{}" token. In "skip" mode, merge any non-conflicting remotes
+				// from the backup into the existing native engine instead of skipping
+				// the entire engine and breaking every subsequent remote job import.
+				existingCfg, existErr := native.Decode(util.StringValue(existing["token"]))
+				if existErr != nil {
+					existingCfg = native.Config{}
+				}
+				if hasRedactedNative {
+					if len(existingCfg) == 0 {
+						warnings = append(warnings, fmt.Sprintf("内置存储 %q 的导出配置已脱敏，无法在空环境自动恢复远端凭据（请导出时勾选包含凭据或手动添加远端存储）", remark))
+					}
+					enginesSkipped++
+				} else if token != "" && !isMaskedSecretValue(token) {
+					incomingCfg, inErr := native.Decode(token)
+					if inErr != nil {
+						warnings = append(warnings, fmt.Sprintf("跳过无效的内置存储配置 %q：%v", remark, inErr))
+						enginesSkipped++
+					} else {
+						toAdd := native.Config{}
+						for rName, rParams := range incomingCfg {
+							if _, dup := existingCfg.FindKey(rName); !dup {
+								toAdd[rName] = rParams
+							}
+						}
+						if len(toAdd) == 0 {
+							enginesSkipped++
+						} else if mergedCfg, mergeErr := existingCfg.Merge(toAdd); mergeErr != nil {
+							warnings = append(warnings, fmt.Sprintf("合并内置存储 %q 的远端配置失败：%v", remark, mergeErr))
+							enginesSkipped++
+						} else if mergedJSON, mErr := json.Marshal(mergedCfg); mErr != nil {
+							warnings = append(warnings, fmt.Sprintf("序列化内置存储 %q 配置失败：%v", remark, mErr))
+							enginesSkipped++
+						} else {
+							secret := string(mergedJSON)
+							targetRemark := defaultNativeRemark(util.StringValue(existing["remark"]))
+							var mcPtr *int
+							if len(existingCfg) == 0 {
+								targetRemark = remark
+								mc := maxConcurrent
+								mcPtr = &mc
+							}
+							if err := mapper.UpdateAlistWithConcurrency(existingID, targetRemark, rawURL, &secret, mcPtr); err != nil {
+								warnings = append(warnings, fmt.Sprintf("合并内置存储 %q 失败：%v", remark, err))
+								enginesSkipped++
+							} else {
+								existing["token"] = secret
+								RemoveEngineHealth(existingID)
+								if mcPtr != nil {
+									engineQueue.RefreshLimit(existingID, *mcPtr)
+								}
+								enginesUpdated++
+							}
+						}
+					}
+				} else {
+					enginesSkipped++
+				}
 			}
 			continue
 		}

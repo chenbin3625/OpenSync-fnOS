@@ -174,7 +174,9 @@ export function calcRealtimeProgress(
   }
 
   let speed = 0;
-  if (typeof cur.speed === "number" && Number.isFinite(cur.speed)) {
+  if (cur.paused) {
+    speed = 0;
+  } else if (typeof cur.speed === "number" && Number.isFinite(cur.speed)) {
     speed = cur.speed;
   } else if (
     previous &&
@@ -201,7 +203,9 @@ export function calcRealtimeProgress(
   }
 
   let remainTime = 0;
-  if (typeof cur.remainTime === "number" && Number.isFinite(cur.remainTime)) {
+  if (cur.paused) {
+    remainTime = 0;
+  } else if (typeof cur.remainTime === "number" && Number.isFinite(cur.remainTime)) {
     remainTime = cur.remainTime;
   } else if (speedAvg > 0 && remainSize > 0) {
     remainTime = Math.ceil(remainSize / speedAvg);

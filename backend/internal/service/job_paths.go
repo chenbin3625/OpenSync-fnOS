@@ -368,11 +368,12 @@ func resolvedDstPathsForJob(job map[string]interface{}) []string {
 }
 
 // writablePathsForJob returns all directory roots that a job may write to or
-// delete from. For one-way modes this is resolvedDstPathsForJob; for bisync
-// (method == 3) both srcPath and dstPath are written/deleted bidirectionally.
+// delete from. For one-way copy/mirror modes this is resolvedDstPathsForJob;
+// for move (method == 2) and bisync (method == 3), srcPath is also mutated/deleted.
 func writablePathsForJob(job map[string]interface{}) []string {
 	paths := resolvedDstPathsForJob(job)
-	if util.ToInt(job["method"]) == 3 {
+	method := util.ToInt(job["method"])
+	if method == 2 || method == 3 {
 		for _, srcItem := range parsePathList(job["srcPath"]) {
 			paths = append(paths, normalizeDirPath(srcItem))
 		}

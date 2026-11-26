@@ -80,11 +80,26 @@ func md5FileInDisk(d diskFS, rel string) (string, error) {
 		return "", err
 	}
 	defer in.Close()
+	var cacheKey md5CacheKey
+	var hasKey bool
+	if st, statErr := in.Stat(); statErr == nil {
+		if k, ok := md5CacheKeyFromFileInfo(st); ok {
+			cacheKey = k
+			hasKey = true
+			if cached, hit := defaultMD5Cache.get(k); hit {
+				return cached, nil
+			}
+		}
+	}
 	h := md5.New()
 	if _, err := io.Copy(h, in); err != nil {
 		return "", err
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	sum := hex.EncodeToString(h.Sum(nil))
+	if hasKey {
+		defaultMD5Cache.set(cacheKey, sum)
+	}
+	return sum, nil
 }
 
 func sameDevice(info os.FileInfo, rootDev uint64, hasRootDev bool) bool {
@@ -357,6 +372,9 @@ func servePropfind(w http.ResponseWriter, r *http.Request, d diskFS, prefix stri
 		}
 		for _, entry := range entries {
 			name := entry.Name()
+			if isInternalPartialEntry(name) {
+				continue
+			}
 			childRel := path.Join(rel, name)
 			var (
 				childSt os.FileInfo

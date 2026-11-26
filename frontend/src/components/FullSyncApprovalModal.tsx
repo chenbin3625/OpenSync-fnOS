@@ -1,4 +1,6 @@
+import { useEffect, useMemo, useState } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
+import Checkbox from "@douyinfe/semi-ui/lib/es/checkbox";
 import Modal from "@douyinfe/semi-ui/lib/es/modal";
 import Spin from "@douyinfe/semi-ui/lib/es/spin";
 import Tag from "@douyinfe/semi-ui/lib/es/tag";
@@ -98,6 +100,7 @@ export function FullSyncApprovalModal({
   busy,
   onClose,
   onApprove,
+  onExclude,
   onReject,
 }: {
   approval: FullSyncApproval;
@@ -105,17 +108,46 @@ export function FullSyncApprovalModal({
   loading?: boolean;
   busy: boolean;
   onClose: () => void;
-  onApprove: () => Promise<unknown>;
+  onApprove: (selectedPaths?: string[]) => Promise<unknown>;
+  onExclude?: (selectedPaths: string[]) => Promise<unknown>;
   onReject: () => Promise<unknown>;
 }) {
   const visiblePaths = approval.paths || [];
   const remaining = Math.max(0, approval.pathCount - visiblePaths.length);
   const executing = approval.status === "executing";
   const taskId = approval.taskId;
+
+  const allPathKeys = useMemo(
+    () => visiblePaths.map((p) => p.path),
+    [visiblePaths],
+  );
+  const [selectedPaths, setSelectedPaths] = useState<string[]>(allPathKeys);
+  useEffect(() => {
+    setSelectedPaths(allPathKeys);
+  }, [allPathKeys]);
+
+  const selectedSet = useMemo(() => new Set(selectedPaths), [selectedPaths]);
+  const allSelected =
+    allPathKeys.length > 0 && selectedPaths.length === allPathKeys.length;
+  const partialSelection =
+    allPathKeys.length > 0 &&
+    selectedPaths.length > 0 &&
+    selectedPaths.length < allPathKeys.length;
+
+  const handleApproveClick = () => {
+    if (allPathKeys.length > 0 && !allSelected && remaining === 0) {
+      void onApprove(selectedPaths);
+    } else if (allPathKeys.length > 0 && !allSelected) {
+      void onApprove(selectedPaths);
+    } else {
+      void onApprove();
+    }
+  };
+
   return (
     <Modal
       visible
-      width={540}
+      width={600}
       className="fnos-confirm full-sync-approval-modal"
       centered
       closable={!busy}
@@ -124,7 +156,7 @@ export function FullSyncApprovalModal({
       onCancel={onClose}
       title={jobName ? `确认删除目标端文件 · ${jobName}` : "确认删除目标端多余文件"}
       footer={
-        <div className="editor-actions">
+        <div className="editor-actions" style={{ flexWrap: "wrap", gap: 8 }}>
           <Button
             type="tertiary"
             className="editor-actions-start"
@@ -140,14 +172,27 @@ export function FullSyncApprovalModal({
           >
             跳过本次删除
           </Button>
+          {onExclude && selectedPaths.length > 0 && (
+            <Button
+              type="tertiary"
+              disabled={busy || executing || loading}
+              onClick={() => void onExclude(selectedPaths)}
+            >
+              加入排除规则 ({selectedPaths.length})
+            </Button>
+          )}
           <Button
             type="danger"
             theme="solid"
             loading={busy || executing}
-            disabled={loading}
-            onClick={() => void onApprove()}
+            disabled={loading || (allPathKeys.length > 0 && selectedPaths.length === 0)}
+            onClick={handleApproveClick}
           >
-            {executing ? "正在删除…" : "确认删除"}
+            {executing
+              ? "正在删除…"
+              : partialSelection
+                ? `确认删除已选 (${selectedPaths.length})`
+                : "确认删除"}
           </Button>
         </div>
       }
@@ -172,7 +217,7 @@ export function FullSyncApprovalModal({
           </div>
         )}
         <p className="field-hint">
-          确认后将在后台再次核对源端与目标端状态再执行清理，不影响后续同步任务；若源端已恢复对应文件将自动跳过，若开启回收站将移入回收站。
+          支持勾选仅删除部分路径，或将需长期保留的路径「加入排除规则」以避免后续全量同步再次提示。确认后将在后台再次核对状态再执行清理。
         </p>
         {loading && visiblePaths.length === 0 ? (
           <div className="full-sync-approval-loading">
@@ -180,29 +225,63 @@ export function FullSyncApprovalModal({
             <span className="muted">正在加载待删除路径清单…</span>
           </div>
         ) : (
-          <div className="full-sync-approval-list" role="list">
-            {visiblePaths.map((item) => (
-              <div
-                className="full-sync-approval-item"
-                role="listitem"
-                key={`${item.action}:${item.path}`}
-              >
-                <Tag
-                  size="small"
-                  type="light"
-                  color={item.action === "删除" ? "red" : "blue"}
+          <>
+            {visiblePaths.length > 1 && (
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                <Checkbox
+                  checked={allSelected}
+                  indeterminate={partialSelection}
+                  disabled={busy || executing}
+                  onChange={(e) =>
+                    setSelectedPaths(e.target.checked ? allPathKeys : [])
+                  }
                 >
-                  {item.action}
-                </Tag>
-                <span className="full-sync-approval-path">{item.path}</span>
-                <span className="muted">
-                  {item.isPath
-                    ? `${item.count} 项${item.size > 0 ? ` · ${formatSize(item.size)}` : ""}`
-                    : formatSize(item.size)}
-                </span>
+                  全选当前清单 ({selectedPaths.length} / {visiblePaths.length})
+                </Checkbox>
               </div>
-            ))}
-          </div>
+            )}
+            <div className="full-sync-approval-list" role="list">
+              {visiblePaths.map((item) => {
+                const checked = selectedSet.has(item.path);
+                return (
+                  <div
+                    className="full-sync-approval-item"
+                    role="listitem"
+                    key={`${item.action}:${item.path}`}
+                  >
+                    <Checkbox
+                      checked={checked}
+                      disabled={busy || executing}
+                      aria-label={`选择 ${item.path}`}
+                      onChange={(e) => {
+                        const on = Boolean(e.target.checked);
+                        setSelectedPaths((prev) =>
+                          on
+                            ? prev.includes(item.path)
+                              ? prev
+                              : [...prev, item.path]
+                            : prev.filter((p) => p !== item.path),
+                        );
+                      }}
+                    />
+                    <Tag
+                      size="small"
+                      type="light"
+                      color={item.action === "删除" ? "red" : "blue"}
+                    >
+                      {item.action}
+                    </Tag>
+                    <span className="full-sync-approval-path">{item.path}</span>
+                    <span className="muted">
+                      {item.isPath
+                        ? `${item.count} 项${item.size > 0 ? ` · ${formatSize(item.size)}` : ""}`
+                        : formatSize(item.size)}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </>
         )}
         {remaining > 0 && (
           <div className="field-hint">还有 {remaining} 个路径未展开。</div>

@@ -543,6 +543,12 @@ func AddJobTask(jobID int64, runTime int64) (int64, error) {
 	return ExecuteInsert("INSERT INTO job_task (jobId, runTime) VALUES (?, ?)", jobID, runTime)
 }
 
+// ListRunningJobTasks returns task/job pairs currently marked waiting or running
+// (used on startup to optionally resume tasks interrupted by an unclean shutdown).
+func ListRunningJobTasks() ([]map[string]interface{}, error) {
+	return FetchAllToTable("SELECT id, jobId FROM job_task WHERE status IN (0, 1) ORDER BY id ASC")
+}
+
 // UpdateJobTaskStatusByStatus updates incomplete tasks to aborted (for restart)
 func UpdateJobTaskStatusByStatus() error {
 	return ExecuteUpdate("UPDATE job_task SET status=4 WHERE status IN (0, 1)")
@@ -1542,4 +1548,70 @@ func ListPendingDeleteApprovals() ([]map[string]interface{}, error) {
 		return nil, err
 	}
 	return FetchAllToTable("SELECT jobId, taskId, payload, createdAt, expiresAt FROM pending_delete_approval ORDER BY createdAt DESC, jobId ASC")
+}
+
+// ForEachRecentTaskWithTime streams recent tasks since unix timestamp including
+// each task's effective timestamp (runTime fallback createTime), status, and taskNum.
+func ForEachRecentTaskWithTime(since int64, fn func(ts int64, status int, taskNum string) error) error {
+	rows, err := GetDB().Query(
+		`SELECT COALESCE(NULLIF(runTime, 0), createTime), status, COALESCE(taskNum, '')
+		 FROM job_task
+		 WHERE COALESCE(NULLIF(runTime, 0), createTime) >= ?`,
+		since,
+	)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ts int64
+		var status int
+		var taskNum string
+		if err := rows.Scan(&ts, &status, &taskNum); err != nil {
+			return err
+		}
+		if err := fn(ts, status, taskNum); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+// GetTaskErrorGroups returns top grouped failure messages for a historical task.
+func GetTaskErrorGroups(taskID int64, limit int) ([]map[string]interface{}, error) {
+	if taskID <= 0 {
+		return nil, nil
+	}
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+	rows, err := GetDB().Query(
+		`SELECT TRIM(errMsg) AS reason, COUNT(id) AS cnt
+		 FROM job_task_item
+		 WHERE taskId=? AND errMsg IS NOT NULL AND TRIM(errMsg) <> ''
+		 GROUP BY TRIM(errMsg)
+		 ORDER BY cnt DESC
+		 LIMIT ?`,
+		taskID, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]map[string]interface{}, 0)
+	for rows.Next() {
+		var reason string
+		var cnt int64
+		if err := rows.Scan(&reason, &cnt); err != nil {
+			return nil, err
+		}
+		out = append(out, map[string]interface{}{
+			"reason": reason,
+			"count":  cnt,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }

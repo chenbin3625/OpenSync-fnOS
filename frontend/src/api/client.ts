@@ -12,6 +12,7 @@ import type {
   JobCheckResult,
   JobItem,
   NativeAboutInfo,
+  NativeAuthStepSnapshot,
   NativeBrowseResult,
   NativeCopyURLResult,
   NativeDedupeResult,
@@ -23,12 +24,15 @@ import type {
   NativeSizeInfo,
   NativeStorageState,
   NativeStorageTestResult,
+  NativeTransferTask,
+  NativeTrashItem,
   NotifyItem,
   PageData,
   SystemBackupPayload,
   SystemImportSummary,
   SystemSettings,
   TaskItem,
+  TaskItemPageData,
   TaskRecord,
 } from "../types";
 
@@ -276,14 +280,18 @@ export const api = {
       signal,
       cache: "no-store",
     }),
-  saveNativeEngine: (data: { remark?: string; maxConcurrentJobs?: number }) =>
-    request<NativeStorageState>("/native/engine", { method: "PUT", data }),
+  saveNativeEngine: (data: {
+    remark?: string;
+    maxConcurrentJobs?: number;
+    localMaxConcurrentJobs?: number;
+  }) => request<NativeStorageState>("/native/engine", { method: "PUT", data }),
   saveNativeStorage: (data: unknown) =>
     request("/native/storage", { method: "POST", data }),
   updateNativeStorage: (data: {
     name: string;
     options: Record<string, string>;
     clearSecrets?: string[];
+    authSessionId?: string;
   }) => request("/native/storage", { method: "PUT", data }),
   deleteNativeStorage: (name: string) =>
     request("/native/storage", { method: "DELETE", params: { name } }),
@@ -292,10 +300,50 @@ export const api = {
     options?: Record<string, string>;
     editing?: boolean;
     clearSecrets?: string[];
+    authSessionId?: string;
   }) =>
     request<NativeStorageTestResult>("/native/storage/test", {
       method: "POST",
       data,
+    }),
+  startNativeStorageAuth: (data: {
+    type: string;
+    name?: string;
+    editing?: boolean;
+    options?: Record<string, string>;
+    clearSecrets?: string[];
+  }) =>
+    request<NativeAuthStepSnapshot>("/native/storage/auth/start", {
+      method: "POST",
+      data,
+    }),
+  getNativeStorageAuth: (sessionId: string, signal?: AbortSignal) =>
+    request<NativeAuthStepSnapshot>("/native/storage/auth/status", {
+      params: { sessionId },
+      signal,
+      cache: "no-store",
+    }),
+  submitNativeStorageAuthCallback: (data: {
+    sessionId: string;
+    callbackUrl: string;
+  }) =>
+    request<NativeAuthStepSnapshot>("/native/storage/auth/callback", {
+      method: "POST",
+      data,
+    }),
+  continueNativeStorageAuth: (data: {
+    sessionId: string;
+    state: string;
+    answer: string;
+  }) =>
+    request<NativeAuthStepSnapshot>("/native/storage/auth/continue", {
+      method: "POST",
+      data,
+    }),
+  cancelNativeStorageAuth: (sessionId: string) =>
+    request("/native/storage/auth", {
+      method: "DELETE",
+      params: { sessionId },
     }),
   renameNativeStorage: (data: { oldName: string; newName: string }) =>
     request<NativeRenameResult>("/native/storage/rename", {
@@ -398,6 +446,95 @@ export const api = {
       data,
       timeoutMs: 5 * 60 * 1000,
     }),
+  listNativeTransfers: (signal?: AbortSignal) =>
+    request<NativeTransferTask[]>("/native/storage/transfers", {
+      signal,
+      cache: "no-store",
+    }),
+  startAsyncRestoreNativeFile: (data: {
+    srcPath: string;
+    dstLocalDir: string;
+    isDir: boolean;
+    overwrite: boolean;
+  }) =>
+    request<NativeTransferTask>("/native/storage/transfers/restore", {
+      method: "POST",
+      data,
+    }),
+  startAsyncCopyUrlNativeStorage: (data: {
+    url: string;
+    dstDir: string;
+    fileName?: string;
+    autoFilename?: boolean;
+    noClobber?: boolean;
+  }) =>
+    request<NativeTransferTask>("/native/storage/transfers/copyurl", {
+      method: "POST",
+      data,
+    }),
+  startBatchNativeStorageAction: (data: {
+    action: "delete" | "restore" | "move";
+    items: Array<{ path: string; isDir: boolean }>;
+    dstLocalDir?: string;
+    dstDir?: string;
+    overwrite?: boolean;
+  }) =>
+    request<NativeTransferTask>("/native/storage/batch", {
+      method: "POST",
+      data,
+    }),
+  cancelNativeTransfer: (id: string) =>
+    request("/native/storage/transfers", { method: "DELETE", params: { id } }),
+  clearCompletedNativeTransfers: () =>
+    request("/native/storage/transfers", {
+      method: "DELETE",
+      params: { completed: 1 },
+    }),
+  browseNativeTrash: (dstRoot: string, trashDir?: string, signal?: AbortSignal) =>
+    request<NativeTrashItem[]>("/native/storage/trash", {
+      method: "POST",
+      data: { dstRoot, ...(trashDir ? { trashDir } : {}) },
+      signal,
+    }),
+  restoreNativeTrashItem: (data: {
+    trashPath: string;
+    originalPath: string;
+    isDir: boolean;
+    overwrite?: boolean;
+  }) =>
+    request("/native/storage/trash/restore", {
+      method: "POST",
+      data,
+      timeoutMs: 10 * 60 * 1000,
+    }),
+  downloadNativeStorageUrl: (path: string) =>
+    buildApiUrl("/native/storage/download", { path }),
+  uploadNativeStorageFile: async (
+    dir: string,
+    file: File,
+    signal?: AbortSignal,
+  ): Promise<{ fileName: string; size: number }> => {
+    const query = serializeParams({ dir, fileName: file.name });
+    const response = await fetch(`${apiBase}/native/storage/upload?${query}`, {
+      method: "POST",
+      credentials: "same-origin",
+      signal,
+      headers: { "Content-Type": "application/octet-stream" },
+      body: file,
+    });
+    if (response.status === 401) {
+      window.dispatchEvent(new CustomEvent(sessionExpiredEvent));
+      throw new Error(sessionExpiredMessage);
+    }
+    const result = (await response.json().catch(() => null)) as ApiResponse<{
+      fileName: string;
+      size: number;
+    }> | null;
+    if (!result || !response.ok || result.code !== 200) {
+      throw new Error(result?.msg || `上传失败（HTTP ${response.status}）`);
+    }
+    return result.data;
+  },
   previewNativeImport: (data: { config: string; configPassword?: string }) =>
     request<NativeImportPreview>("/native/storage/import/preview", {
       method: "POST",
@@ -480,7 +617,7 @@ export const api = {
     params: Record<string, unknown>,
     signal?: AbortSignal,
   ) =>
-    request<PageData<TaskItem>>("/job", {
+    request<TaskItemPageData>("/job", {
       params: { taskId, ...params },
       signal,
     }),
@@ -491,8 +628,9 @@ export const api = {
   ) => buildApiUrl("/job/items/export", { taskId, format, ...params }),
   taskAction: (
     taskId: number,
-    action: "stop" | "retry" | "approve" | "reject",
+    action: "stop" | "retry" | "approve" | "reject" | "pause" | "resume" | "bwlimit",
     itemIds?: number[],
+    extra?: { bwLimit?: string; paths?: string[] },
   ) =>
     request("/job", {
       method: "PUT",
@@ -500,11 +638,27 @@ export const api = {
         taskId: String(taskId),
         action,
         ...(itemIds && itemIds.length > 0 ? { itemIds } : {}),
+        ...(extra?.bwLimit !== undefined ? { bwLimit: extra.bwLimit } : {}),
+        ...(extra?.paths && extra.paths.length > 0 ? { paths: extra.paths } : {}),
       },
     }).then((result) => {
-      if (action === "approve" || action === "reject") {
+      if (
+        action === "approve" ||
+        action === "reject" ||
+        action === "pause" ||
+        action === "resume" ||
+        action === "stop"
+      ) {
         invalidateJobsCache();
       }
+      return result;
+    }),
+  excludeApprovalPaths: (taskId: number, paths: string[]) =>
+    request<{ excludedCount: number }>("/job/approval/exclude", {
+      method: "POST",
+      data: { taskId: String(taskId), paths },
+    }).then((result) => {
+      invalidateJobsCache();
       return result;
     }),
   deleteTask: (taskId: number) =>
@@ -547,6 +701,15 @@ export const api = {
     }),
   cancelJobCheck: (id: number) =>
     request("/job/check", { method: "DELETE", params: { id } }),
+  exportJobCheckUrl: (id: number, format: "csv" | "txt") =>
+    buildApiUrl("/job/check/export", { id, format }),
+  repairJobCheck: (id: number) =>
+    request<{ repairCount: number }>("/job/check/repair", {
+      method: "POST",
+      data: { id },
+    }),
+  sendDigestNow: (period: "daily" | "weekly" = "daily") =>
+    request("/notify/digest", { method: "POST", data: { period } }),
   testJobFilter: (data: Record<string, unknown>) =>
     request<FilterTestResult>("/job/filter/test", { method: "POST", data }),
   notifications: (signal?: AbortSignal) =>

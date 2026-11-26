@@ -5,6 +5,7 @@ import Input from "@douyinfe/semi-ui/lib/es/input";
 import Modal from "@douyinfe/semi-ui/lib/es/modal";
 import Select from "@douyinfe/semi-ui/lib/es/select";
 import Switch from "@douyinfe/semi-ui/lib/es/switch";
+import Tag from "@douyinfe/semi-ui/lib/es/tag";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import {
   IconDownload,
@@ -13,15 +14,21 @@ import {
   IconUpload,
 } from "@douyinfe/semi-icons";
 import { api } from "../api/client";
+import { BwLimitEditor } from "../components/BwLimitEditor";
 import { VersionLink } from "../components/VersionLink";
 import {
   confirmAction,
   errorToast,
   Header,
+  HelpTip,
   LoadState,
   SectionCard,
   SettingRow,
 } from "../components/common";
+import {
+  formatBwLimitSummary,
+  validateBwLimitExpression,
+} from "../lib/bwLimit";
 import { useAction, useResource } from "../lib/hooks";
 import { getHost } from "../lib/host";
 import { formatSize, normalizeSettingFieldValue } from "./Home/homeUtils";
@@ -101,10 +108,10 @@ const fields = [
   },
   {
     key: "defaultBwLimit",
-    label: "默认带宽限制",
+    label: "全局默认带宽限制",
     kind: "text",
     placeholder: "如 10M 或 08:00,5M 23:00,off（留空不限速）",
-    tip: "内置 rclone 引擎默认带宽上限，任务未单独设置限速时生效；支持分时段格式如 08:00,5M 23:00,off",
+    tip: "对所有未单独设置限速的同步任务、双向同步、一致性校验、恢复与离线下载生效；修改保存后将立即同步至正在运行的跟随任务（并发多任务时按单任务分别限速）",
   },
   {
     key: "proxyUrl",
@@ -113,17 +120,97 @@ const fields = [
     placeholder: "如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080",
     tip: "内置 rclone 引擎访问远程存储时使用的全局 HTTP / HTTPS / SOCKS5 代理（本地授权目录自动直连）",
   },
+  {
+    key: "localMaxConcurrentJobs",
+    label: "本地磁盘最大并发任务",
+    min: 0,
+    max: 50,
+    unit: "个",
+    tip: "限制同时读写本地授权目录的任务数，防止多任务并发压满 NAS 硬盘 I/O（0 表示不限）",
+  },
+  {
+    key: "minFreeSpaceMB",
+    label: "目标磁盘最低预留空间",
+    min: 0,
+    max: 10485760,
+    unit: "MB",
+    tip: "任务启动前检查目标存储剩余空间，低于该值时自动中止以防写满系统盘（0 表示关闭检查）",
+  },
+  {
+    key: "autoResumeInterrupted",
+    label: "重启后自动续跑中断任务",
+    min: 0,
+    max: 1,
+    unit: "",
+    kind: "switch",
+    tip: "开启后，NAS 重启或应用更新恢复运行时，自动重新继续上次异常中断的任务未完成项",
+  },
+  {
+    key: "digestEnable",
+    label: "开启定时汇总摘要通知",
+    min: 0,
+    max: 1,
+    unit: "",
+    kind: "switch",
+    tip: "按日或按周汇总全部任务的执行次数、失败数与总传输量，推送到已启用的通知渠道",
+  },
+  {
+    key: "digestSchedule",
+    label: "摘要推送周期",
+    kind: "select",
+    options: [
+      { label: "每日汇总", value: "daily" },
+      { label: "每周汇总", value: "weekly" },
+    ],
+    tip: "选择每日汇总（统计过去 24 小时）或每周汇总（统计过去 7 天）",
+  },
+  {
+    key: "digestHour",
+    label: "摘要推送时间（小时）",
+    min: 0,
+    max: 23,
+    unit: "时",
+    tip: "每日/每周摘要推送的整点小时（0–23）",
+  },
+  {
+    key: "digestWeekday",
+    label: "每周摘要推送日",
+    kind: "select",
+    options: [
+      { label: "周日", value: "0" },
+      { label: "周一", value: "1" },
+      { label: "周二", value: "2" },
+      { label: "周三", value: "3" },
+      { label: "周四", value: "4" },
+      { label: "周五", value: "5" },
+      { label: "周六", value: "6" },
+    ],
+    tip: "仅当推送周期为「每周汇总」时生效",
+  },
+  {
+    key: "locale",
+    label: "后端提示语言（Locale）",
+    kind: "select",
+    options: [
+      { label: "简体中文 (zh-CN)", value: "zh-CN" },
+      { label: "English (en-US)", value: "en-US" },
+    ],
+    tip: "切换服务端错误提示与系统通知消息的语言",
+  },
 ] as const;
 type SettingsForm = Record<(typeof fields)[number]["key"], string>;
 
 const cardGroups = [
   {
-    title: "任务执行",
+    title: "任务执行与安全保护",
     keys: [
       "copyConcurrency",
       "scanConcurrency",
       "maxRetries",
       "taskTimeout",
+      "localMaxConcurrentJobs",
+      "minFreeSpaceMB",
+      "autoResumeInterrupted",
       "scheduledFullSyncConfirm",
       "fullSyncApprovalTimeout",
     ] as const,
@@ -133,8 +220,17 @@ const cardGroups = [
     keys: ["defaultBwLimit", "proxyUrl"] as const,
   },
   {
-    title: "监控与历史",
-    keys: ["engineHealthCheckInterval", "taskSave"] as const,
+    title: "定时汇总摘要通知",
+    keys: [
+      "digestEnable",
+      "digestSchedule",
+      "digestHour",
+      "digestWeekday",
+    ] as const,
+  },
+  {
+    title: "监控、历史与语言",
+    keys: ["engineHealthCheckInterval", "taskSave", "locale"] as const,
   },
 ];
 
@@ -145,6 +241,25 @@ function formatSettingFieldValue(
   field: (typeof fields)[number],
   value: unknown,
 ): string {
+  if ("kind" in field && field.kind === "select") {
+    if (field.key === "digestSchedule") {
+      return typeof value === "string" && value.trim() ? value.trim() : "daily";
+    }
+    if (field.key === "digestWeekday") {
+      return value === undefined || value === null || value === ""
+        ? "1"
+        : String(value);
+    }
+    if (field.key === "locale") {
+      return typeof value === "string" && value.trim() ? value.trim() : "zh-CN";
+    }
+  }
+  if (
+    !("kind" in field) &&
+    (value === undefined || value === null || value === "")
+  ) {
+    return "0";
+  }
   return normalizeSettingFieldValue(
     value,
     "kind" in field && field.kind === "switch",
@@ -174,6 +289,7 @@ export function isSettingsDirty(
 export default function Settings() {
   const resource = useResource((signal) => api.settings(signal));
   const [form, setForm] = useState<SettingsForm | null>(null);
+  const [bwLimitError, setBwLimitError] = useState<string | null>(null);
   const action = useAction();
 
   // Backup / Restore state
@@ -287,10 +403,21 @@ export default function Settings() {
 
   const save = () => {
     if (!form || !resource.data) return;
+    if (bwLimitError) {
+      Toast.warning(bwLimitError);
+      return;
+    }
     const values: SystemSettings = { ...resource.data };
     for (const field of fields) {
       const input = form[field.key].trim();
       if ("kind" in field && field.kind === "text") {
+        if (field.key === "defaultBwLimit") {
+          const bwErr = validateBwLimitExpression(input);
+          if (bwErr) {
+            Toast.warning(bwErr);
+            return;
+          }
+        }
         if (field.key === "proxyUrl" && input) {
           try {
             const parsed = new URL(input);
@@ -313,6 +440,16 @@ export default function Settings() {
         values[field.key] = input;
         continue;
       }
+      if ("kind" in field && field.kind === "select") {
+        if (field.key === "digestWeekday") {
+          values.digestWeekday = Number(input) || 0;
+        } else if (field.key === "digestSchedule") {
+          values.digestSchedule = input || "daily";
+        } else if (field.key === "locale") {
+          values.locale = input || "zh-CN";
+        }
+        continue;
+      }
       const value = Number(input);
       if (
         !/^\d+$/.test(input) ||
@@ -332,6 +469,23 @@ export default function Settings() {
         await resource.refresh(true);
       } catch (err) {
         errorToast(err, "保存失败");
+      }
+    });
+  };
+
+  const sendDigestNow = () => {
+    const period =
+      form?.digestSchedule === "weekly" ? "weekly" : ("daily" as const);
+    void action.run(async () => {
+      try {
+        await api.sendDigestNow(period);
+        Toast.success(
+          period === "weekly"
+            ? "已推送一次每周备份摘要通知"
+            : "已推送一次每日备份摘要通知",
+        );
+      } catch (err) {
+        errorToast(err, "推送摘要失败");
       }
     });
   };
@@ -385,51 +539,101 @@ export default function Settings() {
     link.remove();
   };
 
-  const input = (field: (typeof fields)[number]) => (
-    <SettingRow
-      key={field.key}
-      label={field.label}
-      variant="compact"
-      tip={field.tip}
-    >
-      {"kind" in field && field.kind === "switch" ? (
-        <Switch
-          aria-label={field.label}
-          checked={form![field.key] === "1"}
-          disabled={action.busy}
-          onChange={(checked) => {
-            setForm((f) => f && { ...f, [field.key]: checked ? "1" : "0" });
-          }}
-        />
-      ) : "kind" in field && field.kind === "text" ? (
-        <div className="text-setting">
-          <Input
-            aria-label={field.label}
-            value={form![field.key]}
-            placeholder={field.placeholder}
-            showClear
+  const input = (field: (typeof fields)[number]) => {
+    if (field.key === "defaultBwLimit") {
+      const currentVal = form![field.key];
+      const summary = formatBwLimitSummary(currentVal, { allowInherit: false });
+      const isLimited = Boolean(currentVal.trim());
+      return (
+        <div key={field.key} className="settings-bw-block">
+          <div className="settings-bw-head">
+            <div className="settings-bw-title">
+              <span className="setting-row-label">
+                {field.label}
+                {field.tip && (
+                  <HelpTip content={field.tip} label={`${field.label}说明`} />
+                )}
+              </span>
+              <Tag
+                size="small"
+                color={isLimited ? "blue" : "green"}
+                type="light"
+              >
+                {summary}
+              </Tag>
+            </div>
+            <p className="settings-bw-desc muted">
+              作为系统全局默认规则，对所有未单独配置限速的同步任务、双向同步、一致性校验、文件恢复与离线下载生效；保存后将实时推送至正在运行的跟随任务（同时运行多个任务时按单任务分别限速）。
+            </p>
+          </div>
+          <BwLimitEditor
+            value={currentVal}
             disabled={action.busy}
             onChange={(value) => {
-              setForm((f) => f && { ...f, [field.key]: value });
+              setForm((f) => f && { ...f, defaultBwLimit: value });
             }}
+            onValidityChange={setBwLimitError}
           />
         </div>
-      ) : (
-        <div className="numeric-setting">
-          <Input
+      );
+    }
+    return (
+      <SettingRow
+        key={field.key}
+        label={field.label}
+        variant="compact"
+        tip={field.tip}
+      >
+        {"kind" in field && field.kind === "switch" ? (
+          <Switch
             aria-label={field.label}
-            inputMode="numeric"
+            checked={form![field.key] === "1"}
+            disabled={action.busy}
+            onChange={(checked) => {
+              setForm((f) => f && { ...f, [field.key]: checked ? "1" : "0" });
+            }}
+          />
+        ) : "kind" in field && field.kind === "select" ? (
+          <Select
+            aria-label={field.label}
             value={form![field.key]}
             disabled={action.busy}
+            style={{ width: 180 }}
+            optionList={[...field.options]}
             onChange={(value) => {
-              setForm((f) => f && { ...f, [field.key]: value });
+              setForm((f) => f && { ...f, [field.key]: String(value ?? "") });
             }}
           />
-          <span>{field.unit}</span>
-        </div>
-      )}
-    </SettingRow>
-  );
+        ) : "kind" in field && field.kind === "text" ? (
+          <div className="text-setting">
+            <Input
+              aria-label={field.label}
+              value={form![field.key]}
+              placeholder={field.placeholder}
+              showClear
+              disabled={action.busy}
+              onChange={(value) => {
+                setForm((f) => f && { ...f, [field.key]: value });
+              }}
+            />
+          </div>
+        ) : (
+          <div className="numeric-setting">
+            <Input
+              aria-label={field.label}
+              inputMode="numeric"
+              value={form![field.key]}
+              disabled={action.busy}
+              onChange={(value) => {
+                setForm((f) => f && { ...f, [field.key]: value });
+              }}
+            />
+            <span>{field.unit}</span>
+          </div>
+        )}
+      </SettingRow>
+    );
+  };
 
   return (
     <div className="page settings-page">
@@ -440,7 +644,7 @@ export default function Settings() {
             theme="solid"
             icon={<IconSaveStroked aria-hidden="true" />}
             loading={action.busy}
-            disabled={!dirty || resource.loading || Boolean(resource.error)}
+            disabled={(!dirty && !bwLimitError) || resource.loading || Boolean(resource.error)}
             onClick={save}
           >
             保存
@@ -460,6 +664,18 @@ export default function Settings() {
               headClassName="settings-card-head"
               bodyClassName="settings-card-body"
               title={group.title}
+              extra={
+                group.title === "定时汇总摘要通知" ? (
+                  <Button
+                    size="small"
+                    type="tertiary"
+                    disabled={action.busy}
+                    onClick={sendDigestNow}
+                  >
+                    立即发送一次摘要
+                  </Button>
+                ) : undefined
+              }
             >
               {group.keys.map((key) => (
                 <div key={key}>{input(fieldOf(key))}</div>

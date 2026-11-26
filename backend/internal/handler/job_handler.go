@@ -172,6 +172,8 @@ func pathHasParentSegment(value string) bool {
 
 // AddJob handles POST /svr/job
 var stopTaskService = service.StopTask
+var pauseTaskService = service.PauseTaskTransfer
+var resumeTaskService = service.ResumeTaskTransfer
 var createJobService = service.CreateJobClient
 
 func AddJob(c *gin.Context) {
@@ -223,6 +225,8 @@ func UpdateJob(c *gin.Context) {
 		Pause   *bool        `json:"pause"`
 		Abort   *bool        `json:"abort"`
 		ItemIDs []flexibleID `json:"itemIds"`
+		BwLimit *string      `json:"bwLimit"`
+		Paths   []string     `json:"paths"`
 	}
 	if !bindJSONStrict(c, &req) {
 		return
@@ -237,6 +241,14 @@ func UpdateJob(c *gin.Context) {
 			respondError(c, msg.T(msg.LostPart))
 			return
 		}
+		if req.BwLimit != nil && *req.Action != "bwlimit" {
+			respondError(c, msg.T(msg.LostPart))
+			return
+		}
+		if len(req.Paths) > 0 && *req.Action != "approve" {
+			respondError(c, msg.T(msg.LostPart))
+			return
+		}
 		taskID, err := req.TaskID.parse()
 		if err != nil {
 			respondError(c, err.Error())
@@ -245,6 +257,16 @@ func UpdateJob(c *gin.Context) {
 		switch *req.Action {
 		case "stop":
 			handleServiceVoid(c, func() error { return stopTaskService(taskID) })
+		case "pause":
+			handleServiceVoid(c, func() error { return pauseTaskService(taskID) })
+		case "resume":
+			handleServiceVoid(c, func() error { return resumeTaskService(taskID) })
+		case "bwlimit":
+			rate := ""
+			if req.BwLimit != nil {
+				rate = *req.BwLimit
+			}
+			handleServiceVoid(c, func() error { return service.SetTaskLiveBwLimit(c.Request.Context(), taskID, rate) })
 		case "retry":
 			var itemIDs []int64
 			if len(req.ItemIDs) > 0 {
@@ -260,7 +282,11 @@ func UpdateJob(c *gin.Context) {
 			}
 			handleServiceVoid(c, func() error { return service.RetryFailedTaskItems(taskID, itemIDs) })
 		case "approve":
-			handleServiceVoid(c, func() error { return service.ApproveFullSyncTask(taskID) })
+			if len(req.Paths) > 0 {
+				handleServiceVoid(c, func() error { return service.ApproveFullSyncTaskPaths(taskID, req.Paths) })
+			} else {
+				handleServiceVoid(c, func() error { return service.ApproveFullSyncTask(taskID) })
+			}
 		case "reject":
 			handleServiceVoid(c, func() error { return service.RejectFullSyncTask(taskID) })
 		default:
@@ -269,7 +295,7 @@ func UpdateJob(c *gin.Context) {
 		return
 	}
 
-	if req.Action != nil || len(req.ItemIDs) > 0 {
+	if req.Action != nil || len(req.ItemIDs) > 0 || req.BwLimit != nil || len(req.Paths) > 0 {
 		respondError(c, msg.T(msg.LostPart))
 		return
 	}
@@ -574,6 +600,76 @@ func CancelJobCheck(c *gin.Context) {
 	}
 	handleServiceVoid(c, func() error {
 		return service.CancelJobCheck(id)
+	})
+}
+
+// ExportJobCheck handles GET /svr/job/check/export
+func ExportJobCheck(c *gin.Context) {
+	id, err := parseRequiredID(c.Query("id"))
+	if err != nil {
+		respondError(c, err.Error())
+		return
+	}
+	filename, contentType, data, err := service.ExportJobCheckReport(id, c.Query("format"))
+	if err != nil {
+		respondServiceError(c, err)
+		return
+	}
+	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+	c.Header("Cache-Control", "no-store")
+	c.Data(http.StatusOK, contentType, data)
+}
+
+// RepairJobCheck handles POST /svr/job/check/repair
+func RepairJobCheck(c *gin.Context) {
+	var req struct {
+		ID *flexibleID `json:"id"`
+	}
+	if !bindJSONStrict(c, &req) {
+		return
+	}
+	if req.ID == nil {
+		respondError(c, msg.T(msg.LostPart))
+		return
+	}
+	jobID, err := req.ID.parse()
+	if err != nil {
+		respondError(c, err.Error())
+		return
+	}
+	handleService(c, func() (interface{}, error) {
+		count, repairErr := service.RepairJobCheckResult(jobID)
+		if repairErr != nil {
+			return nil, repairErr
+		}
+		return gin.H{"repairCount": count}, nil
+	})
+}
+
+// ExcludePendingApproval handles POST /svr/job/approval/exclude
+func ExcludePendingApproval(c *gin.Context) {
+	var req struct {
+		TaskID *flexibleID `json:"taskId"`
+		Paths  []string    `json:"paths"`
+	}
+	if !bindJSONStrict(c, &req) {
+		return
+	}
+	if req.TaskID == nil || len(req.Paths) == 0 {
+		respondError(c, msg.T(msg.LostPart))
+		return
+	}
+	taskID, err := req.TaskID.parse()
+	if err != nil {
+		respondError(c, err.Error())
+		return
+	}
+	handleService(c, func() (interface{}, error) {
+		added, exErr := service.ExcludeFullSyncApprovalPaths(taskID, req.Paths)
+		if exErr != nil {
+			return nil, exErr
+		}
+		return gin.H{"excludedCount": added}, nil
 	})
 }
 

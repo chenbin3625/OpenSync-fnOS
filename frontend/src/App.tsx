@@ -85,6 +85,7 @@ export const SessionContext = createContext<{ development: boolean }>({
 function jobStatusDotClass(job: JobItem): string {
   if (job.legacyOpenList) return "job-dot job-dot--error";
   if (job.pendingApproval) return "job-dot job-dot--approval";
+  if (job.running && job.paused) return "job-dot job-dot--paused";
   if (job.running) return "job-dot job-dot--running";
   if (job.queued) return "job-dot job-dot--queued";
   if (job.lastStatus && [3, 5, 6, 7].includes(job.lastStatus))

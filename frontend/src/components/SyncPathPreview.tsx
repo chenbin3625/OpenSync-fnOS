@@ -87,6 +87,7 @@ export function SyncPathPreview({
   existingJobs,
   currentJobId,
   engineId,
+  onKeepFirstSrc,
   onKeepFirstDst,
 }: {
   srcPaths: readonly string[];
@@ -96,6 +97,7 @@ export function SyncPathPreview({
   existingJobs?: readonly ExistingJobPathSummary[];
   currentJobId?: number;
   engineId?: number;
+  onKeepFirstSrc?: () => void;
   onKeepFirstDst?: () => void;
 }) {
   const preview = useMemo(
@@ -115,6 +117,8 @@ export function SyncPathPreview({
   const multipleDestinations = preview.groups.length > 1;
   const singleDirectRoot =
     preview.rule === "single-src" && preview.items.length > 0;
+  const showKeepFirstSrcAction =
+    method === 3 && srcPaths.length > 1 && Boolean(onKeepFirstSrc);
   const showKeepFirstDstAction =
     (method === 2 || method === 3) && dstPaths.length > 1 && Boolean(onKeepFirstDst);
 
@@ -157,16 +161,28 @@ export function SyncPathPreview({
                   {preview.conflicts.map((message) => (
                     <div key={message}>{message}</div>
                   ))}
-                  {showKeepFirstDstAction && (
+                  {(showKeepFirstSrcAction || showKeepFirstDstAction) && (
                     <div className="sync-path-preview-alert-action">
-                      <Button
-                        size="small"
-                        type="danger"
-                        theme="borderless"
-                        onClick={onKeepFirstDst}
-                      >
-                        仅保留首个目标目录
-                      </Button>
+                      {showKeepFirstSrcAction && (
+                        <Button
+                          size="small"
+                          type="danger"
+                          theme="borderless"
+                          onClick={onKeepFirstSrc}
+                        >
+                          仅保留首个源目录
+                        </Button>
+                      )}
+                      {showKeepFirstDstAction && (
+                        <Button
+                          size="small"
+                          type="danger"
+                          theme="borderless"
+                          onClick={onKeepFirstDst}
+                        >
+                          仅保留首个目标目录
+                        </Button>
+                      )}
                     </div>
                   )}
                 </div>

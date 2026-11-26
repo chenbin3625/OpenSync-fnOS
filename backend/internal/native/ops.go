@@ -12,9 +12,11 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -34,6 +36,7 @@ type TreeOptions struct {
 	FollowSymlinks bool
 	IncludeHash    bool
 	ProxyURL       string
+	Controller     *RCController
 }
 
 // DirEntry represents one immediate child of a browsed directory.
@@ -97,6 +100,12 @@ func (c Config) ListTree(ctx context.Context, virtualPath string, opt TreeOption
 	if err := cmd.Start(); err != nil {
 		return nil, false, err
 	}
+	if opt.Controller != nil && cmd.Process != nil {
+		detachTree := opt.Controller.Attach(cmd.Process.Pid, "", "", "")
+		defer detachTree()
+		stopTreeWake := context.AfterFunc(ctx, func() { opt.Controller.ResumeAllProcesses() })
+		defer stopTreeWake()
+	}
 
 	dec := json.NewDecoder(bufio.NewReaderSize(stdout, 64<<10))
 	var entries []TreeEntry
@@ -110,6 +119,10 @@ func (c Config) ListTree(ctx context.Context, virtualPath string, opt TreeOption
 		for dec.More() {
 			if ctx.Err() != nil {
 				parseErr = ctx.Err()
+				break
+			}
+			if err := opt.Controller.WaitIfPaused(ctx); err != nil {
+				parseErr = err
 				break
 			}
 			var r struct {
@@ -154,6 +167,7 @@ func (c Config) ListTree(ctx context.Context, virtualPath string, opt TreeOption
 	}
 	if parseErr != nil && !errors.Is(parseErr, io.EOF) {
 		if cmd.Process != nil {
+			_ = resumeProcess(cmd.Process.Pid)
 			_ = cmd.Process.Kill()
 			killed = true
 		}
@@ -224,6 +238,9 @@ func listLocalTree(ctx context.Context, sub string, opt TreeOptions) ([]TreeEntr
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if err := opt.Controller.WaitIfPaused(ctx); err != nil {
+			return err
+		}
 		dirFile, openErr := source.Open(relDir)
 		if openErr != nil {
 			return openErr
@@ -234,6 +251,9 @@ func listLocalTree(ctx context.Context, sub string, opt TreeOptions) ([]TreeEntr
 			return readErr
 		}
 		for _, item := range items {
+			if isInternalPartialEntry(item.Name()) {
+				continue
+			}
 			childRel := item.Name()
 			if relDir != "." {
 				childRel = relDir + "/" + item.Name()
@@ -281,19 +301,12 @@ func listLocalTree(ctx context.Context, sub string, opt TreeOptions) ([]TreeEntr
 			if !st.Mode().IsRegular() {
 				continue
 			}
-			md5Sum := ""
-			if opt.IncludeHash {
-				if sum, sumErr := md5FileInRoot(source, childRel); sumErr == nil {
-					md5Sum = sum
-				}
-			}
 			entries = append(entries, TreeEntry{
 				RelPath: childRel,
 				Name:    item.Name(),
 				IsDir:   false,
 				Size:    st.Size(),
 				ModTime: st.ModTime().Unix(),
-				MD5:     md5Sum,
 			})
 		}
 		return nil
@@ -301,11 +314,64 @@ func listLocalTree(ctx context.Context, sub string, opt TreeOptions) ([]TreeEntr
 	if err := walk("."); err != nil {
 		return nil, false, err
 	}
+	if opt.IncludeHash {
+		hashIndices := make([]int, 0, len(entries))
+		for i := range entries {
+			if !entries[i].IsDir {
+				hashIndices = append(hashIndices, i)
+			}
+		}
+		if len(hashIndices) > 0 {
+			workers := runtime.NumCPU()
+			if workers < 2 {
+				workers = 2
+			}
+			if workers > 4 {
+				workers = 4
+			}
+			if workers > len(hashIndices) {
+				workers = len(hashIndices)
+			}
+			jobs := make(chan int, len(hashIndices))
+			for _, idx := range hashIndices {
+				jobs <- idx
+			}
+			close(jobs)
+			var wg sync.WaitGroup
+			for w := 0; w < workers; w++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for idx := range jobs {
+						if ctx.Err() != nil {
+							return
+						}
+						if err := opt.Controller.WaitIfPaused(ctx); err != nil {
+							return
+						}
+						if sum, sumErr := md5FileInRoot(source, entries[idx].RelPath); sumErr == nil {
+							entries[idx].MD5 = sum
+						}
+					}
+				}()
+			}
+			wg.Wait()
+			if err := ctx.Err(); err != nil {
+				return nil, false, err
+			}
+		}
+	}
 	return entries, true, nil
 }
 
 // ListDirEntries lists immediate files and subdirectories of virtualPath.
 func (c Config) ListDirEntries(ctx context.Context, virtualPath string, opts SessionOptions) ([]DirEntry, bool, error) {
+	return c.ListDirEntriesWithHash(ctx, virtualPath, false, opts)
+}
+
+// ListDirEntriesWithHash lists immediate files and subdirectories of virtualPath,
+// optionally computing/requesting MD5 hashes for regular files.
+func (c Config) ListDirEntriesWithHash(ctx context.Context, virtualPath string, includeHash bool, opts SessionOptions) ([]DirEntry, bool, error) {
 	v := strings.TrimSuffix(strings.TrimSpace(virtualPath), "/")
 	if v == "" || v == "/" {
 		dirs, err := c.ListWithOptions(ctx, "/", opts)
@@ -361,28 +427,45 @@ func (c Config) ListDirEntries(ctx context.Context, virtualPath string, opts Ses
 			if !st.IsDir() && !st.Mode().IsRegular() {
 				continue
 			}
+			md5Sum := ""
+			if includeHash && !st.IsDir() {
+				childRel := entry.Name()
+				if rel != "." && rel != "" {
+					childRel = path.Join(rel, entry.Name())
+				}
+				if sum, sumErr := md5FileInRoot(root, childRel); sumErr == nil {
+					md5Sum = sum
+				}
+			}
 			out = append(out, DirEntry{
 				Name:    entry.Name(),
 				Path:    path.Join(v, entry.Name()),
 				IsDir:   st.IsDir(),
 				Size:    st.Size(),
 				ModTime: st.ModTime().Unix(),
+				MD5:     md5Sum,
 			})
 		}
 		sortDirEntries(out)
 		return out, true, nil
 	}
 
-	if c[n] == nil || !cleanRelative(sub) {
+	canonical, ok := c.FindKey(n)
+	if !ok || !cleanRelative(sub) {
 		return nil, false, errors.New("远端路径无效")
 	}
-	s, err := c.SessionFor([]SessionSpec{{Name: n, Mode: diskReadOnly}}, opts)
+	s, err := c.SessionFor([]SessionSpec{{Name: canonical, Mode: diskReadOnly, Checksum: includeHash}}, opts)
 	if err != nil {
 		return nil, false, err
 	}
 	defer s.Close()
 
-	cmd, err := s.Cmd(ctx, "lsjson", "--no-mimetype", "--", n+":"+sub)
+	lsArgs := []string{"lsjson", "--no-mimetype"}
+	if includeHash {
+		lsArgs = append(lsArgs, "--hash")
+	}
+	lsArgs = append(lsArgs, "--", canonical+":"+sub)
+	cmd, err := s.Cmd(ctx, lsArgs...)
 	if err != nil {
 		return nil, false, err
 	}
@@ -391,7 +474,7 @@ func (c Config) ListDirEntries(ctx context.Context, virtualPath string, opts Ses
 		if isRcloneNotFound(stderr) {
 			return nil, false, nil
 		}
-		return nil, false, classifyRcloneError(c[n]["type"], stderr)
+		return nil, false, classifyRcloneError(c[canonical]["type"], stderr)
 	}
 	var rows []struct {
 		Name    string            `json:"Name"`
@@ -411,6 +494,9 @@ func (c Config) ListDirEntries(ctx context.Context, virtualPath string, opts Ses
 		md5Sum := ""
 		if r.Hashes != nil {
 			md5Sum = strings.ToLower(strings.TrimSpace(r.Hashes["md5"]))
+			if md5Sum == "" {
+				md5Sum = strings.ToLower(strings.TrimSpace(r.Hashes["MD5"]))
+			}
 		}
 		out = append(out, DirEntry{
 			Name:    r.Name,
@@ -1012,12 +1098,24 @@ func (c Config) Restore(ctx context.Context, srcVirtual, dstLocalDir string, isD
 		if !overwrite {
 			args = append(args, "--ignore-existing")
 		}
+		if bw := strings.TrimSpace(opts.BwLimit); bw != "" {
+			if err := ValidateBwLimit(bw); err != nil {
+				return err
+			}
+			args = append(args, "--bwlimit", bw)
+		}
 		args = append(args, "--", srcArg, targetDir)
 	} else {
 		targetFile := joinRcloneRemotePath(dstArg, baseName)
 		args = []string{"copyto"}
 		if !overwrite {
 			args = append(args, "--ignore-existing")
+		}
+		if bw := strings.TrimSpace(opts.BwLimit); bw != "" {
+			if err := ValidateBwLimit(bw); err != nil {
+				return err
+			}
+			args = append(args, "--bwlimit", bw)
 		}
 		args = append(args, "--", srcArg, targetFile)
 	}
@@ -1054,10 +1152,12 @@ type CheckOptions struct {
 	FastList       bool
 	FollowSymlinks bool
 	UserAgent      string
-	IOTimeout     string
-	ConTimeout    string
-	ProxyURL      string
-	MaxItems      int // cap preview items per category (default 500)
+	IOTimeout      string
+	ConTimeout     string
+	LowLevelRetries int
+	RetriesSleep    string
+	ProxyURL       string
+	MaxItems       int // cap preview items per category (default 500)
 }
 
 type CheckResult struct {
@@ -1116,7 +1216,8 @@ func (c Config) Check(ctx context.Context, src, dst string, opt CheckOptions, em
 		swappedForCrypt = true
 	}
 
-	useChecksum := !opt.Download && !useCryptCheck && opt.Compare != 1 && endpointSupportsNativeMD5(srcEp) && endpointSupportsNativeMD5(dstEp)
+	effectiveCompare := EffectiveCompareMode(srcEp, dstEp, opt.Compare)
+	useChecksum := !opt.Download && !useCryptCheck && effectiveCompare != 1 && endpointSupportsNativeMD5(srcEp) && endpointSupportsNativeMD5(dstEp)
 
 	srcName, srcSub := parts(src)
 	dstName, dstSub := parts(dst)
@@ -1163,20 +1264,31 @@ func (c Config) Check(ctx context.Context, src, dst string, opt CheckOptions, em
 		modeLabel = "cryptcheck"
 	}
 
+	lowLevelRetries := opt.LowLevelRetries
+	if lowLevelRetries <= 0 {
+		lowLevelRetries = 10
+	}
 	args := []string{
 		subCmd,
 		"--use-json-log", "--log-level", "INFO", "--stats", "1s",
 		"--checkers", strconv.Itoa(max(1, opt.Checkers)),
 		"--retries", strconv.Itoa(max(1, opt.Retries+1)),
+		"--low-level-retries", strconv.Itoa(lowLevelRetries),
 		"--match", matchFile,
 		"--differ", differFile,
 		"--missing-on-src", missSrcFile,
 		"--missing-on-dst", missDstFile,
 		"--error", errFile,
 	}
+	if rs := strings.TrimSpace(opt.RetriesSleep); rs != "" {
+		if err := ValidateDurationSpec(rs, time.Hour, "重试间隔格式无效，如 5s、30s、1m（最大 1h）"); err != nil {
+			return nil, err
+		}
+		args = append(args, "--retries-sleep", rs)
+	}
 	if opt.Download {
 		args = append(args, "--download")
-	} else if !useCryptCheck && opt.Compare == 1 {
+	} else if !useCryptCheck && effectiveCompare == 1 {
 		args = append(args, "--size-only")
 	}
 	if opt.OneWay {
@@ -1358,6 +1470,8 @@ type BisyncOptions struct {
 	UserAgent            string
 	IOTimeout            string
 	ConTimeout           string
+	LowLevelRetries      int
+	RetriesSleep         string
 	IgnoreSize           bool
 	CreateEmptySrcDirs   bool
 	FollowSymlinks       bool
@@ -1366,6 +1480,7 @@ type BisyncOptions struct {
 	CheckFirst           bool
 	S3NoHead             bool
 	ProxyURL             string
+	Controller           *RCController
 }
 
 type BisyncResult struct {
@@ -1391,7 +1506,8 @@ func (c Config) Bisync(ctx context.Context, path1, path2 string, opt BisyncOptio
 		return nil, err
 	}
 
-	useChecksum := opt.Compare == 2 && endpointSupportsNativeMD5(ep1) && endpointSupportsNativeMD5(ep2)
+	effectiveCompare := EffectiveCompareMode(ep1, ep2, opt.Compare)
+	useChecksum := effectiveCompare == 2 && endpointSupportsNativeMD5(ep1) && endpointSupportsNativeMD5(ep2)
 	mode := diskFullWrite
 	if opt.DryRun {
 		mode = diskReadOnly
@@ -1428,6 +1544,10 @@ func (c Config) Bisync(ctx context.Context, path1, path2 string, opt BisyncOptio
 
 	needResync := opt.ForceResync || bisyncHasPendingResyncMarker(opt.WorkDir) || !bisyncHasListingState(opt.WorkDir)
 
+	lowLevelRetries := opt.LowLevelRetries
+	if lowLevelRetries <= 0 {
+		lowLevelRetries = 10
+	}
 	args := []string{
 		"bisync",
 		"--workdir", opt.WorkDir,
@@ -1435,16 +1555,23 @@ func (c Config) Bisync(ctx context.Context, path1, path2 string, opt BisyncOptio
 		"--transfers", strconv.Itoa(max(1, opt.Transfers)),
 		"--checkers", strconv.Itoa(max(1, opt.Checkers)),
 		"--retries", strconv.Itoa(max(1, opt.Retries+1)),
+		"--low-level-retries", strconv.Itoa(lowLevelRetries),
 		"--recover", "--resilient",
 	}
-	switch opt.Compare {
+	if rs := strings.TrimSpace(opt.RetriesSleep); rs != "" {
+		if err := ValidateDurationSpec(rs, time.Hour, "重试间隔格式无效，如 5s、30s、1m（最大 1h）"); err != nil {
+			return nil, err
+		}
+		args = append(args, "--retries-sleep", rs)
+	}
+	switch effectiveCompare {
 	case 1:
 		args = append(args, "--compare", "size")
 	case 2:
 		if useChecksum {
-			args = append(args, "--compare", "size,modtime,checksum")
+			args = append(args, "--compare", "size,checksum")
 		} else {
-			args = append(args, "--compare", "size,modtime")
+			args = append(args, "--compare", "size,checksum", "--download-hash")
 		}
 	default:
 		args = append(args, "--compare", "size,modtime")
@@ -1478,7 +1605,7 @@ func (c Config) Bisync(ctx context.Context, path1, path2 string, opt BisyncOptio
 	if opt.TrackRenames {
 		args = append(args, "--track-renames")
 	}
-	if opt.IgnoreSize && opt.Compare != 1 {
+	if opt.IgnoreSize && effectiveCompare != 1 {
 		args = append(args, "--ignore-size")
 	}
 	if opt.DryRun {
@@ -1529,11 +1656,23 @@ func (c Config) Bisync(ctx context.Context, path1, path2 string, opt BisyncOptio
 	if err != nil {
 		return nil, err
 	}
+	var rcAddr, rcUser, rcPass string
+	var rcEnv []string
+	if opt.Controller != nil && !opt.DryRun {
+		var rcArgs []string
+		var ok bool
+		if rcAddr, rcUser, rcPass, rcArgs, rcEnv, ok = prepareRCArgsAndEnv(); ok {
+			args = append(args, rcArgs...)
+		}
+	}
 	args = append(args, "--", arg1, arg2)
 
 	cmd, err := s.Cmd(ctx, args...)
 	if err != nil {
 		return nil, err
+	}
+	if len(rcEnv) > 0 {
+		cmd.Env = append(cmd.Env, rcEnv...)
 	}
 	logs, err := cmd.StderrPipe()
 	if err != nil {
@@ -1541,6 +1680,12 @@ func (c Config) Bisync(ctx context.Context, path1, path2 string, opt BisyncOptio
 	}
 	if err := cmd.Start(); err != nil {
 		return nil, err
+	}
+	if opt.Controller != nil && cmd.Process != nil {
+		detachRC := opt.Controller.Attach(cmd.Process.Pid, rcAddr, rcUser, rcPass)
+		defer detachRC()
+		stopWake := context.AfterFunc(ctx, func() { opt.Controller.ResumeAllProcesses() })
+		defer stopWake()
 	}
 	scan := bufio.NewScanner(logs)
 	scan.Buffer(make([]byte, 4096), 4<<20)
@@ -1956,6 +2101,10 @@ func (c Config) copyURL(ctx context.Context, rawURL, dstDirVirtual string, opt C
 	}
 
 	dstName, dstSub := parts(dstDirVirtual)
+	if dstEp.IsLocal {
+		// Use direct HTTP Range-resumable download into local os.Root (preserving SSRF transport).
+		return copyURLToLocalResumable(ctx, strings.TrimSpace(rawURL), dstSub, opt, opts, transport, nil)
+	}
 	var specs []SessionSpec
 	if !dstEp.IsLocal {
 		specs = append(specs, SessionSpec{Name: dstName, Mode: diskAppendWrite})
@@ -1985,6 +2134,12 @@ func (c Config) copyURL(ctx context.Context, rawURL, dstDirVirtual string, opt C
 	args := []string{"copyurl"}
 	if opt.NoClobber {
 		args = append(args, "--no-clobber")
+	}
+	if bw := strings.TrimSpace(opts.BwLimit); bw != "" {
+		if err := ValidateBwLimit(bw); err != nil {
+			return "", err
+		}
+		args = append(args, "--bwlimit", bw)
 	}
 	if fileName != "" {
 		args = append(args, "--", source.URL, joinRcloneRemotePath(dstArg, fileName))

@@ -50,6 +50,7 @@ var retryableTaskStatuses = []taskStatus{
 	taskStatusWaiting,
 	taskStatusRunning,
 	taskStatusStopped,
+	taskStatusTimeout,
 	taskStatusFailed,
 	taskStatusRetrying,
 }

@@ -1,6 +1,7 @@
 package mapper
 
 import (
+	"fmt"
 	"opensync/internal/msg"
 	"opensync/pkg/util"
 )
@@ -115,6 +116,70 @@ func UpdateAlistWithConcurrency(id int64, remark, url string, token *string, max
 	if affected == 0 {
 		return notFound(ErrAlistNotFound, msg.AlistNotFound)
 	}
+	return nil
+}
+
+// UpdateAlistAndJobPathsTx atomically updates an alist entry's config token and
+// the rewritten srcPath/dstPath/dstMap of all affected jobs in one transaction.
+func UpdateAlistAndJobPathsTx(alistID int64, remark, url, token string, jobs []map[string]interface{}) error {
+	encryptedToken, err := encryptCredential(token)
+	if err != nil {
+		return err
+	}
+	tx, err := GetDB().Begin()
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	res, err := tx.Exec("UPDATE alist_list SET remark=?, url=?, token=? WHERE id=?", remark, url, encryptedToken, alistID)
+	if isUniqueConstraintError(err) {
+		return alistExistsError()
+	}
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return notFound(ErrAlistNotFound, msg.AlistNotFound)
+	}
+
+	for _, job := range jobs {
+		jobID := util.ToInt64(job["id"])
+		if jobID <= 0 {
+			return fmt.Errorf("update job: missing or invalid id")
+		}
+		jRes, err := tx.Exec(
+			"UPDATE job SET srcPath=?, dstPath=?, dstMap=? WHERE id=?",
+			job["srcPath"], job["dstPath"], job["dstMap"], jobID,
+		)
+		if isUniqueConstraintError(err) {
+			return jobExistsError()
+		}
+		if err != nil {
+			return err
+		}
+		jAffected, err := jRes.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if jAffected == 0 {
+			return notFound(ErrJobNotFound, msg.JobNotFound)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
 	return nil
 }
 

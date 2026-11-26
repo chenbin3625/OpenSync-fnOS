@@ -1,4 +1,4 @@
-import type { JobItem, NativeExtraFlags } from "../types";
+import type { JobItem, NativeExtraFlags, NativeRemoteItem } from "../types";
 import {
   defaultCronFields,
   defaultExclude,
@@ -21,6 +21,7 @@ import {
   validateSyncPathSelection,
   type ExistingJobPathSummary,
 } from "./syncPathPreview";
+import { validateBwLimitExpression } from "./bwLimit";
 
 function parseNotifyIdList(value: unknown): number[] {
   if (Array.isArray(value)) {
@@ -70,6 +71,18 @@ function emptyNativeExtraFlags(): Required<NativeExtraFlags> {
     userAgent: "",
     ioTimeout: "",
     conTimeout: "",
+    lowLevelRetries: 0,
+    retriesSleep: "",
+    resumeEnable: false,
+    resumeMinSizeMB: 0,
+    watchEnable: false,
+    watchDebounceSec: 0,
+    autoRetryMax: 0,
+    autoRetryDelayMin: 0,
+    postSyncJobId: 0,
+    checkSchedule: "",
+    missedCatchUp: false,
+    directStream: false,
     bisyncResyncMode: "",
     bisyncMaxDelete: 0,
     bisyncForce: false,
@@ -120,6 +133,18 @@ function parseNativeExtraFlags(value: unknown): Required<NativeExtraFlags> {
     userAgent: str("userAgent"),
     ioTimeout: str("ioTimeout"),
     conTimeout: str("conTimeout"),
+    lowLevelRetries: Math.min(50, num("lowLevelRetries")),
+    retriesSleep: str("retriesSleep"),
+    resumeEnable: Boolean(obj.resumeEnable),
+    resumeMinSizeMB: Math.min(10240, num("resumeMinSizeMB")),
+    watchEnable: Boolean(obj.watchEnable),
+    watchDebounceSec: Math.min(3600, num("watchDebounceSec")),
+    autoRetryMax: Math.min(10, num("autoRetryMax")),
+    autoRetryDelayMin: Math.min(1440, num("autoRetryDelayMin")),
+    postSyncJobId: num("postSyncJobId"),
+    checkSchedule: str("checkSchedule"),
+    missedCatchUp: Boolean(obj.missedCatchUp),
+    directStream: Boolean(obj.directStream),
     bisyncResyncMode: str("bisyncResyncMode"),
     bisyncMaxDelete: Math.min(100, num("bisyncMaxDelete")),
     bisyncForce: Boolean(obj.bisyncForce),
@@ -150,12 +175,125 @@ function serializeNativeExtraFlags(flags: NativeExtraFlags | undefined): string 
   if (flags.userAgent?.trim()) out.userAgent = flags.userAgent.trim();
   if (flags.ioTimeout?.trim()) out.ioTimeout = flags.ioTimeout.trim();
   if (flags.conTimeout?.trim()) out.conTimeout = flags.conTimeout.trim();
+  if (Number(flags.lowLevelRetries || 0) > 0)
+    out.lowLevelRetries = Math.min(50, Math.trunc(Number(flags.lowLevelRetries)));
+  if (flags.retriesSleep?.trim()) out.retriesSleep = flags.retriesSleep.trim();
+  if (flags.resumeEnable) out.resumeEnable = true;
+  if (Number(flags.resumeMinSizeMB || 0) > 0)
+    out.resumeMinSizeMB = Math.min(10240, Math.trunc(Number(flags.resumeMinSizeMB)));
+  if (flags.watchEnable) out.watchEnable = true;
+  if (Number(flags.watchDebounceSec || 0) > 0)
+    out.watchDebounceSec = Math.min(3600, Math.trunc(Number(flags.watchDebounceSec)));
+  if (Number(flags.autoRetryMax || 0) > 0)
+    out.autoRetryMax = Math.min(10, Math.trunc(Number(flags.autoRetryMax)));
+  if (Number(flags.autoRetryDelayMin || 0) > 0)
+    out.autoRetryDelayMin = Math.min(1440, Math.trunc(Number(flags.autoRetryDelayMin)));
+  if (Number(flags.postSyncJobId || 0) > 0)
+    out.postSyncJobId = Math.trunc(Number(flags.postSyncJobId));
+  if (flags.checkSchedule?.trim())
+    out.checkSchedule = flags.checkSchedule.trim();
+  if (flags.missedCatchUp) out.missedCatchUp = true;
+  if (flags.directStream) out.directStream = true;
   if (flags.bisyncResyncMode?.trim())
     out.bisyncResyncMode = flags.bisyncResyncMode.trim();
   if (Number(flags.bisyncMaxDelete || 0) > 0)
     out.bisyncMaxDelete = Math.min(100, Math.trunc(Number(flags.bisyncMaxDelete)));
   if (flags.bisyncForce) out.bisyncForce = true;
   return Object.keys(out).length > 0 ? JSON.stringify(out) : "";
+}
+
+export type TaskScenarioPresetKey =
+  | "media"
+  | "small_files"
+  | "cloud_drive"
+  | "cold_archive";
+
+export const taskScenarioPresets: Array<{
+  key: TaskScenarioPresetKey;
+  label: string;
+  desc: string;
+}> = [
+  {
+    key: "media",
+    label: "相册 / 影音大文件",
+    desc: "开启断点续传、多线程分片、大文件优先",
+  },
+  {
+    key: "small_files",
+    label: "海量小文件",
+    desc: "Fast-List + 直接流式传输 + 提高并发",
+  },
+  {
+    key: "cloud_drive",
+    label: "国内网盘防限流",
+    desc: "限制 API 频率、开启弱网重试与失败自动重试",
+  },
+  {
+    key: "cold_archive",
+    label: "冷备归档",
+    desc: "MD5 校验 + 目标回收站 + 每周自动校验 + 漏跑补跑",
+  },
+];
+
+export function applyTaskScenarioPreset(
+  form: JobForm,
+  preset: TaskScenarioPresetKey,
+): JobForm {
+  const baseFlags = { ...form.extraFlags };
+  switch (preset) {
+    case "media":
+      return {
+        ...form,
+        multiThreadStreams: 8,
+        extraFlags: {
+          ...baseFlags,
+          resumeEnable: true,
+          resumeMinSizeMB: 32,
+          orderBy: "size,descending",
+          lowLevelRetries: 15,
+        },
+      };
+    case "small_files":
+      return {
+        ...form,
+        fastList: true,
+        copyConcurrency: 16,
+        scanConcurrency: 16,
+        extraFlags: {
+          ...baseFlags,
+          directStream: true,
+          orderBy: "size,ascending",
+        },
+      };
+    case "cloud_drive":
+      return {
+        ...form,
+        copyConcurrency: 3,
+        tpsLimit: 4,
+        tpsLimitBurst: 6,
+        extraFlags: {
+          ...baseFlags,
+          resumeEnable: true,
+          lowLevelRetries: 15,
+          retriesSleep: "10s",
+          autoRetryMax: 3,
+          autoRetryDelayMin: 5,
+        },
+      };
+    case "cold_archive":
+      return {
+        ...form,
+        compareMode: 2,
+        trashEnable: true,
+        trashRetentionDays: 30,
+        extraFlags: {
+          ...baseFlags,
+          resumeEnable: true,
+          checkSchedule: "weekly",
+          missedCatchUp: true,
+        },
+      };
+  }
 }
 
 export function defaultJobForm(alistId?: number) {
@@ -378,15 +516,21 @@ export function buildJobPayload(form: JobForm) {
   const runtimeStripped = { ...data } as typeof data & {
     legacyOpenList?: unknown;
     running?: unknown;
+    paused?: unknown;
     queued?: unknown;
     pendingApproval?: unknown;
+    watching?: unknown;
+    checkRunning?: unknown;
     lastStatus?: unknown;
     nextRunTime?: unknown;
   };
   delete runtimeStripped.legacyOpenList;
   delete runtimeStripped.running;
+  delete runtimeStripped.paused;
   delete runtimeStripped.queued;
   delete runtimeStripped.pendingApproval;
+  delete runtimeStripped.watching;
+  delete runtimeStripped.checkRunning;
   delete runtimeStripped.lastStatus;
   delete runtimeStripped.nextRunTime;
   return {
@@ -403,8 +547,11 @@ export function buildJobPayload(form: JobForm) {
     maxFileSize: fileSizeToBytes(form.maxFileSize, maxFileSizeUnit),
     compareMode: Number(form.compareMode) || 0,
     conflictPolicy: Number(form.conflictPolicy) || 0,
-    trashEnable: Number(Boolean(form.trashEnable)),
-    trashDir: form.trashDir.trim() || ".opensync-trash",
+    trashEnable: form.method === 2 ? 0 : Number(Boolean(form.trashEnable)),
+    trashDir:
+      (form.method === 2 || !form.trashEnable) && validateTrashDir(form.trashDir)
+        ? ".opensync-trash"
+        : form.trashDir.trim() || ".opensync-trash",
     trashRetentionDays: Math.max(0, Math.trunc(Number(form.trashRetentionDays) || 0)),
     deleteEmptySrcDirs: Number(Boolean(form.deleteEmptySrcDirs)),
     filterMode: Number(form.filterMode) || 0,
@@ -435,6 +582,351 @@ export interface JobValidationOptions {
   storedDstMap?: string | null;
   existingJobs?: readonly ExistingJobPathSummary[];
   sizeEnabled?: { min?: boolean; max?: boolean };
+  remotes?: readonly NativeRemoteItem[];
+}
+
+const containerRequiredBackends = new Set([
+  "s3",
+  "smb",
+  "b2",
+  "azureblob",
+  "googlecloudstorage",
+  "swift",
+  "oracleobjectstorage",
+  "qingstor",
+  "storj",
+]);
+
+const wrapperRemoteTypes = new Set([
+  "crypt",
+  "chunker",
+  "compress",
+  "hasher",
+  "alias",
+  "archive",
+]);
+
+function splitCompositeUpstreams(raw: string): string[] {
+  const tokens: string[] = [];
+  const regex = /"([^"]*)"|(\S+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(raw)) !== null) {
+    const tok = (match[1] ?? match[2] ?? "").trim();
+    if (tok) tokens.push(tok);
+  }
+  return tokens;
+}
+
+const reliableWebDAVVendors = new Set([
+  "owncloud",
+  "nextcloud",
+  "rclone",
+  "fastmail",
+  "sharepoint",
+]);
+
+export type CompareModeSource = "default" | "auto" | "manual";
+
+export interface ResolvedRemoteChain {
+  found: boolean;
+  canonicalName: string;
+  leafBackend: string;
+  leafVendor: string;
+  hasCrypt: boolean;
+  readOnly: boolean;
+  accumulatedPrefix: string;
+  isStandardWebDAV: boolean;
+}
+
+export function resolveRemoteChain(
+  remoteName: string,
+  remotes: readonly NativeRemoteItem[],
+  visited = new Set<string>(),
+  subPath = "",
+): ResolvedRemoteChain {
+  const byLower = new Map<string, NativeRemoteItem>();
+  for (const r of remotes) {
+    byLower.set(r.name.toLowerCase(), r);
+  }
+  const start = byLower.get(remoteName.trim().toLowerCase());
+  if (!start) {
+    return {
+      found: false,
+      canonicalName: remoteName,
+      leafBackend: "",
+      leafVendor: "",
+      hasCrypt: false,
+      readOnly: false,
+      accumulatedPrefix: "",
+      isStandardWebDAV: false,
+    };
+  }
+
+  let cur: NativeRemoteItem | undefined = start;
+  let hasCrypt = false;
+  let readOnly = false;
+  let accumulatedPrefix = "";
+  let restPath = subPath.replace(/^\/+|\/+$/g, "");
+  let leafBackend = start.type;
+  let leafVendor = "";
+  let isStandardWebDAV = false;
+
+  while (cur) {
+    const lower = cur.name.toLowerCase();
+    if (visited.has(lower)) break;
+    visited.add(lower);
+
+    leafBackend = cur.type;
+    if (cur.type === "crypt") hasCrypt = true;
+    if (cur.type === "archive" || cur.type === "http") readOnly = true;
+
+    if (wrapperRemoteTypes.has(cur.type)) {
+      const target = (cur.options?.remote || "").trim();
+      const colonIdx = target.indexOf(":");
+      if (colonIdx <= 0) break;
+      const nextRef = target.slice(0, colonIdx).trim();
+      const prefix = target.slice(colonIdx + 1).replace(/^\/+|\/+$/g, "");
+      if (prefix) {
+        accumulatedPrefix = accumulatedPrefix
+          ? `${prefix}/${accumulatedPrefix}`
+          : prefix;
+        restPath = restPath ? `${prefix}/${restPath}` : prefix;
+      }
+      if (nextRef === "本地") {
+        leafBackend = "local";
+        break;
+      }
+      cur = byLower.get(nextRef.toLowerCase());
+      continue;
+    }
+
+    if (cur.type === "webdav") {
+      leafVendor = (cur.options?.vendor || "").trim().toLowerCase();
+      isStandardWebDAV = !reliableWebDAVVendors.has(leafVendor);
+      break;
+    }
+
+    if (cur.type === "union" || cur.type === "combine") {
+      const tokens = splitCompositeUpstreams(cur.options?.upstreams || "");
+      const restSegs = restPath ? restPath.split("/").filter(Boolean) : [];
+      const mountName = cur.type === "combine" ? (restSegs[0] ?? "") : "";
+      const mountSub = cur.type === "combine" ? restSegs.slice(1).join("/") : restPath;
+      for (const tok of tokens) {
+        let target = tok;
+        if (cur.type === "combine") {
+          const eqIdx = target.indexOf("=");
+          if (eqIdx <= 0) continue;
+          const dirName = target.slice(0, eqIdx).trim();
+          if (mountName && dirName !== mountName) continue;
+          target = target.slice(eqIdx + 1).trim();
+        } else {
+          target = target.replace(/:(ro|nc)$/, "");
+        }
+        const colonIdx = target.indexOf(":");
+        if (colonIdx <= 0) continue;
+        const ref = target.slice(0, colonIdx).trim();
+        const upPrefix = target.slice(colonIdx + 1).replace(/^\/+|\/+$/g, "");
+        if (!ref || ref === "本地") continue;
+        const childSub = [upPrefix, mountSub].filter(Boolean).join("/");
+        const child = resolveRemoteChain(ref, remotes, new Set(visited), childSub);
+        if (child.hasCrypt) hasCrypt = true;
+        if (child.isStandardWebDAV) isStandardWebDAV = true;
+      }
+      break;
+    }
+    break;
+  }
+
+  return {
+    found: true,
+    canonicalName: start.name,
+    leafBackend,
+    leafVendor,
+    hasCrypt,
+    readOnly,
+    accumulatedPrefix,
+    isStandardWebDAV,
+  };
+}
+
+export function findStandardWebDAVRemotesForPaths(
+  paths: readonly string[],
+  remotes?: readonly NativeRemoteItem[],
+): string[] {
+  if (!remotes?.length) return [];
+  const hits = new Set<string>();
+  for (const raw of paths) {
+    const segs = raw.replace(/^\/+/, "").split("/").filter(Boolean);
+    const seg = segs[0]?.trim();
+    if (!seg || seg === "本地") continue;
+    const subPath = segs.slice(1).join("/");
+    const info = resolveRemoteChain(seg, remotes, new Set(), subPath);
+    if (info.found && info.isStandardWebDAV) {
+      hits.add(info.canonicalName);
+    }
+  }
+  return Array.from(hits);
+}
+
+/**
+ * Resolves the automatic comparison mode when destination paths change.
+ * When any destination resolves to standard WebDAV (such as OpenList / AList),
+ * the default comparison mode switches to size-only (1) to avoid downloading
+ * large amounts of remote data locally for comparison. Manual choices are always
+ * respected, and auto-applied size-only reverts to 0 if the destination is
+ * switched back to a non-WebDAV storage.
+ */
+export function resolveAutoCompareModeForDst(params: {
+  dstPaths: readonly string[];
+  remotes?: readonly NativeRemoteItem[];
+  currentCompareMode: number;
+  source: CompareModeSource;
+}): {
+  compareMode: number;
+  source: CompareModeSource;
+  matchedDstRemotes: string[];
+} {
+  const matchedDstRemotes = findStandardWebDAVRemotesForPaths(
+    params.dstPaths,
+    params.remotes,
+  );
+  if (params.source === "manual") {
+    return {
+      compareMode: params.currentCompareMode,
+      source: "manual",
+      matchedDstRemotes,
+    };
+  }
+  if (matchedDstRemotes.length > 0) {
+    return {
+      compareMode: 1,
+      source: "auto",
+      matchedDstRemotes,
+    };
+  }
+  if (params.source === "auto") {
+    return {
+      compareMode: 0,
+      source: "default",
+      matchedDstRemotes,
+    };
+  }
+  return {
+    compareMode: params.currentCompareMode,
+    source: params.source,
+    matchedDstRemotes,
+  };
+}
+
+export function isPathDisabledInPicker(
+  rawPath: string,
+  remotes?: readonly NativeRemoteItem[],
+): boolean {
+  const clean = rawPath.trim().replace(/\/+$/, "");
+  if (!clean || clean === "/" || clean === "/本地") {
+    return true;
+  }
+  const segs = clean.replace(/^\/+/, "").split("/").filter(Boolean);
+  if (segs.length === 1 && remotes?.length) {
+    const info = resolveRemoteChain(segs[0], remotes);
+    if (
+      info.found &&
+      containerRequiredBackends.has(info.leafBackend) &&
+      !info.accumulatedPrefix
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function validateManualSyncPath(
+  rawPath: string,
+  remotes?: readonly NativeRemoteItem[],
+  options?: { role?: "src" | "dst"; method?: number },
+): { error: string; normalized: string } {
+  const trimmed = rawPath.trim();
+  if (!trimmed || !trimmed.startsWith("/")) {
+    return { error: "路径必须以 / 开头，例如 /本地/目录 或 /存储名称/目录", normalized: "" };
+  }
+  if (trimmed.includes("\\") || /[\u0000-\u001f\u007f]/.test(trimmed)) {
+    return { error: "路径不能包含反斜杠或控制字符", normalized: "" };
+  }
+  const rawSegs = trimmed.split("/").filter((s) => s !== "");
+  if (rawSegs.length === 0) {
+    return { error: "不能直接选择根目录 /，请选择具体授权目录或远端路径", normalized: "" };
+  }
+  if (rawSegs.some((s) => s === "." || s === "..")) {
+    return { error: "路径不能包含 . 或 .. 目录段", normalized: "" };
+  }
+
+  let canonicalFirst = rawSegs[0];
+  if (canonicalFirst === "本地") {
+    if (rawSegs.length < 2) {
+      return { error: "请选择「/本地」下的具体飞牛授权目录", normalized: "" };
+    }
+  } else if (remotes !== undefined) {
+    const info = resolveRemoteChain(canonicalFirst, remotes);
+    if (!info.found) {
+      return {
+        error: `存储「${canonicalFirst}」不存在；本地目录请使用 /本地/...，远端目录请先在存储管理中添加`,
+        normalized: "",
+      };
+    }
+    canonicalFirst = info.canonicalName;
+    if (
+      containerRequiredBackends.has(info.leafBackend) &&
+      !info.accumulatedPrefix &&
+      rawSegs.length < 2
+    ) {
+      return {
+        error: `存储「${info.canonicalName}」需指定存储桶、容器或共享目录（如 /${info.canonicalName}/目录名）`,
+        normalized: "",
+      };
+    }
+    if (options?.role === "dst" && info.readOnly) {
+      return {
+        error: `只读存储「${info.canonicalName}」不能作为同步目标`,
+        normalized: "",
+      };
+    }
+    if (
+      options?.role === "src" &&
+      info.readOnly &&
+      (options.method === 2 || options.method === 3)
+    ) {
+      return {
+        error: `只读存储「${info.canonicalName}」不支持移动或双向同步`,
+        normalized: "",
+      };
+    }
+  }
+
+  const normalized = "/" + [canonicalFirst, ...rawSegs.slice(1)].join("/");
+  return { error: "", normalized };
+}
+
+export function validateTrashDir(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return "";
+  if (
+    trimmed.startsWith("/") ||
+    trimmed.includes("//") ||
+    /[\\*?[\]{}!]/.test(trimmed) ||
+    /[\u0000-\u001f\u007f]/.test(trimmed)
+  ) {
+    return "回收站目录名须为相对路径，不能以 / 开头或包含 \\ * ? [ ] { } ! 等特殊字符";
+  }
+  const clean = trimmed.replace(/\/+$/, "");
+  if (!clean) {
+    return "回收站目录名无效";
+  }
+  for (const seg of clean.split("/")) {
+    if (!seg || seg === "." || seg === "..") {
+      return "回收站目录名不能包含 . 或 .. 路径段";
+    }
+  }
+  return "";
 }
 
 export type JobFieldErrorKey =
@@ -446,6 +938,7 @@ export type JobFieldErrorKey =
   | "interval"
   | "window"
   | "notifyIds"
+  | "bwLimit"
   | CronFieldKey
   | "minFileSize"
   | "maxFileSize"
@@ -528,10 +1021,36 @@ export function validateJobFormFields(
     fields.dstPath = "双向同步模式只允许一个目标目录";
     step0Errors.push(fields.dstPath);
   }
+  for (const p of form.srcPath) {
+    const check = validateManualSyncPath(p, options.remotes, {
+      role: "src",
+      method: form.method,
+    });
+    if (check.error) {
+      fields.srcPath = fields.srcPath || check.error;
+      step0Errors.push(check.error);
+      break;
+    }
+  }
+  for (const p of form.dstPath) {
+    const check = validateManualSyncPath(p, options.remotes, {
+      role: "dst",
+      method: form.method,
+    });
+    if (check.error) {
+      fields.dstPath = fields.dstPath || check.error;
+      step0Errors.push(check.error);
+      break;
+    }
+  }
   if (form.srcPath.length > 0 && form.dstPath.length > 0) {
     const pathError = validateJobPaths(form, options);
     if (pathError) {
-      if (pathError.includes("多个源目录")) {
+      if (
+        pathError.includes("多个源目录") ||
+        pathError.startsWith("双向同步源目录") ||
+        pathError.startsWith("移动模式源目录")
+      ) {
         fields.srcPath = fields.srcPath || pathError;
       } else {
         fields.dstPath = fields.dstPath || pathError;
@@ -540,9 +1059,9 @@ export function validateJobFormFields(
     }
   }
   if (form.trashEnable && form.method !== 2) {
-    const trimmedTrash = form.trashDir.trim().replace(/^\/+|\/+$/g, "");
-    if (!trimmedTrash || trimmedTrash.includes("..") || trimmedTrash.includes("\\")) {
-      fields.trashDir = "回收站目录名不能包含 .. 或反斜杠";
+    const trashErr = validateTrashDir(form.trashDir);
+    if (trashErr) {
+      fields.trashDir = trashErr;
       step0Errors.push(fields.trashDir);
     }
   }
@@ -581,6 +1100,11 @@ export function validateJobFormFields(
   if (form.notifyMode === 1 && form.notifyIds.length === 0) {
     fields.notifyIds = "已选择指定通知渠道，请至少选择一个渠道";
     step1Errors.push(fields.notifyIds);
+  }
+  const bwLimitError = validateBwLimitExpression(form.bwLimit);
+  if (bwLimitError) {
+    fields.bwLimit = bwLimitError;
+    step1Errors.push(bwLimitError);
   }
 
   // Step 2: 过滤规则（文件大小上下限）

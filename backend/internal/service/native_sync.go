@@ -42,6 +42,18 @@ type nativeExtraFlags struct {
 	UserAgent            string `json:"userAgent,omitempty"`
 	IOTimeout            string `json:"ioTimeout,omitempty"`
 	ConTimeout           string `json:"conTimeout,omitempty"`
+	LowLevelRetries      int    `json:"lowLevelRetries,omitempty"`
+	RetriesSleep         string `json:"retriesSleep,omitempty"`
+	ResumeEnable         bool   `json:"resumeEnable,omitempty"`
+	ResumeMinSizeMB      int    `json:"resumeMinSizeMB,omitempty"`
+	WatchEnable          bool   `json:"watchEnable,omitempty"`
+	WatchDebounceSec     int    `json:"watchDebounceSec,omitempty"`
+	AutoRetryMax         int    `json:"autoRetryMax,omitempty"`
+	AutoRetryDelayMin    int    `json:"autoRetryDelayMin,omitempty"`
+	PostSyncJobID        int64  `json:"postSyncJobId,omitempty"`
+	CheckSchedule        string `json:"checkSchedule,omitempty"`
+	MissedCatchUp        bool   `json:"missedCatchUp,omitempty"`
+	DirectStream         bool   `json:"directStream,omitempty"`
 	BisyncResyncMode     string `json:"bisyncResyncMode,omitempty"`
 	BisyncMaxDelete      int    `json:"bisyncMaxDelete,omitempty"`
 	BisyncForce          bool   `json:"bisyncForce,omitempty"`
@@ -106,7 +118,7 @@ func parseNativeExtraFlags(raw interface{}) (nativeExtraFlags, string, error) {
 	var out nativeExtraFlags
 	for k, val := range rawMap {
 		switch k {
-		case "noUpdateModtime", "inplace", "checkFirst", "s3NoHead", "ignoreSize", "trackRenames", "useMmap", "bisyncForce":
+		case "noUpdateModtime", "inplace", "checkFirst", "s3NoHead", "ignoreSize", "trackRenames", "useMmap", "bisyncForce", "resumeEnable", "watchEnable", "missedCatchUp", "directStream":
 			b, ok := extraFlagBool(val)
 			if !ok {
 				return nativeExtraFlags{}, "", publicError(msg.T(msg.ExtraFlagsInvalid))
@@ -128,6 +140,14 @@ func parseNativeExtraFlags(raw interface{}) (nativeExtraFlags, string, error) {
 				out.UseMmap = b
 			case "bisyncForce":
 				out.BisyncForce = b
+			case "resumeEnable":
+				out.ResumeEnable = b
+			case "watchEnable":
+				out.WatchEnable = b
+			case "missedCatchUp":
+				out.MissedCatchUp = b
+			case "directStream":
+				out.DirectStream = b
 			}
 		case "maxTransfer":
 			s, ok := extraFlagString(val)
@@ -198,6 +218,77 @@ func parseNativeExtraFlags(raw interface{}) (nativeExtraFlags, string, error) {
 				return nativeExtraFlags{}, "", publicError("连接超时（--contimeout）格式无效，如 1m、15s")
 			}
 			out.ConTimeout = s
+		case "lowLevelRetries":
+			if val == nil || val == "" {
+				continue
+			}
+			n, ok := strictJobInt(val)
+			if !ok || n < 0 || n > 50 {
+				return nativeExtraFlags{}, "", publicError("底层分片重试次数（--low-level-retries）需为 0–50 的整数")
+			}
+			out.LowLevelRetries = n
+		case "retriesSleep":
+			s, ok := extraFlagString(val)
+			if !ok || native.ValidateDurationSpec(s, time.Hour, "invalid") != nil {
+				return nativeExtraFlags{}, "", publicError("重试间隔（--retries-sleep）格式无效，如 5s、30s、1m（最大 1h）")
+			}
+			out.RetriesSleep = s
+		case "resumeMinSizeMB":
+			if val == nil || val == "" {
+				continue
+			}
+			n, ok := strictJobInt(val)
+			if !ok || n < 0 || n > 10240 {
+				return nativeExtraFlags{}, "", publicError("断点续传阈值需为 0–10240 MB 的整数")
+			}
+			out.ResumeMinSizeMB = n
+		case "watchDebounceSec":
+			if val == nil || val == "" {
+				continue
+			}
+			n, ok := strictJobInt(val)
+			if !ok || n < 0 || n > 3600 {
+				return nativeExtraFlags{}, "", publicError("文件变动防抖等待时间需为 0–3600 秒")
+			}
+			out.WatchDebounceSec = n
+		case "autoRetryMax":
+			if val == nil || val == "" {
+				continue
+			}
+			n, ok := strictJobInt(val)
+			if !ok || n < 0 || n > 10 {
+				return nativeExtraFlags{}, "", publicError("失败自动重试次数需为 0–10 的整数")
+			}
+			out.AutoRetryMax = n
+		case "autoRetryDelayMin":
+			if val == nil || val == "" {
+				continue
+			}
+			n, ok := strictJobInt(val)
+			if !ok || n < 0 || n > 1440 {
+				return nativeExtraFlags{}, "", publicError("失败自动重试间隔需为 0–1440 分钟")
+			}
+			out.AutoRetryDelayMin = n
+		case "postSyncJobId":
+			if val == nil || val == "" {
+				continue
+			}
+			n, ok := strictJobInt(val)
+			if !ok || n < 0 {
+				return nativeExtraFlags{}, "", publicError("后置串联任务 ID 无效")
+			}
+			out.PostSyncJobID = int64(n)
+		case "checkSchedule":
+			s, ok := extraFlagString(val)
+			if !ok {
+				return nativeExtraFlags{}, "", publicError("定时一致性校验周期格式无效")
+			}
+			switch strings.ToLower(s) {
+			case "", "daily", "weekly", "monthly":
+				out.CheckSchedule = strings.ToLower(s)
+			default:
+				return nativeExtraFlags{}, "", publicError("定时一致性校验周期仅支持 daily、weekly 或 monthly")
+			}
 		case "bisyncResyncMode":
 			s, ok := extraFlagString(val)
 			if !ok || native.ValidateBisyncResyncMode(s) != nil {
@@ -231,13 +322,17 @@ func globalNativeProxyURL() string {
 	return strings.TrimSpace(config.GetSystemSettings().ProxyURL)
 }
 
+func globalDefaultBwLimit() string {
+	return strings.TrimSpace(config.GetSystemSettings().DefaultBwLimit)
+}
+
 func effectiveJobBwLimit(job map[string]interface{}) string {
 	if job != nil {
 		if bw := strings.TrimSpace(util.StringValue(job["bwLimit"])); bw != "" {
 			return bw
 		}
 	}
-	return strings.TrimSpace(config.GetSystemSettings().DefaultBwLimit)
+	return globalDefaultBwLimit()
 }
 
 func jobFloat64(val interface{}) float64 {
@@ -290,6 +385,8 @@ func buildNativeCopyOptions(job map[string]interface{}, dry bool, backupDir stri
 		UserAgent:            extra.UserAgent,
 		IOTimeout:            extra.IOTimeout,
 		ConTimeout:           extra.ConTimeout,
+		LowLevelRetries:      extra.LowLevelRetries,
+		RetriesSleep:         extra.RetriesSleep,
 		IgnoreSize:           extra.IgnoreSize,
 		CreateEmptySrcDirs:   util.ToInt(job["createEmptySrcDirs"]) == 1,
 		FollowSymlinks:       util.ToInt(job["followSymlinks"]) == 1,
@@ -298,6 +395,16 @@ func buildNativeCopyOptions(job map[string]interface{}, dry bool, backupDir stri
 		CheckFirst:           extra.CheckFirst,
 		S3NoHead:             extra.S3NoHead,
 		ProxyURL:             globalNativeProxyURL(),
+		ResumeEnable:         extra.ResumeEnable,
+		ResumeMinSizeMB:      extra.ResumeMinSizeMB,
+		ResumeStateDir:       filepath.Join(config.DataDir(), "resume"),
+		DirectStream:         extra.DirectStream,
+		FilterLines:          buildNativeRcloneFilterLines(job),
+		MinSize:              util.ToInt64(job["minFileSize"]),
+		MaxSize:              util.ToInt64(job["maxFileSize"]),
+		MinAgeMinutes:        util.ToInt(job["minFileAgeMinutes"]),
+		OlderThanDays:        util.ToInt(job["olderThanDays"]),
+		NewerThanDays:        util.ToInt(job["newerThanDays"]),
 		Include: func(p string, info os.FileInfo) bool {
 			if exclude != nil && exclude.matchesListed(p, info.IsDir()) {
 				return false
@@ -488,6 +595,7 @@ func buildNativeFullSyncSnapshot(
 	includeM *includeMatcher,
 	isSrc bool,
 	now time.Time,
+	ctrl *native.RCController,
 	onDirs func(int64),
 ) (*fullSyncSnapshot, bool, error) {
 	root := normalizeDirPath(rootPath)
@@ -501,11 +609,13 @@ func buildNativeFullSyncSnapshot(
 	}
 	snap.dirs[""] = make(FileListResult)
 
+	extraFlags, _, _ := parseNativeExtraFlags(job["extraFlags"])
 	treeOpt := native.TreeOptions{
 		FastList:       util.ToInt(job["fastList"]) == 1,
 		FollowSymlinks: isSrc && util.ToInt(job["followSymlinks"]) == 1,
-		IncludeHash:    util.ToInt(job["compareMode"]) == 2,
+		IncludeHash:    util.ToInt(job["compareMode"]) == 2 || extraFlags.TrackRenames,
 		ProxyURL:       globalNativeProxyURL(),
+		Controller:     ctrl,
 	}
 	entries, exists, err := cfg.ListTree(ctx, strings.TrimRight(root, "/"), treeOpt)
 	if err != nil {
@@ -687,6 +797,64 @@ func buildNativePendingDeleteTargets(plan *fullSyncPlan, items []fullSyncDelete)
 	return targets
 }
 
+func nativePairEffectiveCompareMode(cfg native.Config, src, dst string, compareMode int) int {
+	if compareMode != 0 {
+		return compareMode
+	}
+	srcEp, dstEp, err := cfg.Pair(src, dst)
+	if err != nil {
+		return compareMode
+	}
+	return native.EffectiveCompareMode(srcEp, dstEp, compareMode)
+}
+
+func nativePairNeedsDeepCompare(cfg native.Config, src, dst string, compareMode int) bool {
+	effective := nativePairEffectiveCompareMode(cfg, src, dst, compareMode)
+	if effective != 2 {
+		return false
+	}
+	srcEp, dstEp, err := cfg.Pair(src, dst)
+	if err != nil {
+		return false
+	}
+	return !srcEp.SupportsNativeMD5() || !dstEp.SupportsNativeMD5()
+}
+
+// moveExistingFileIsIdentical decides conservatively whether an already-existing
+// destination file can be treated as identical to the source so move mode may
+// safely remove the source file without re-copying.
+func moveExistingFileIsIdentical(srcMeta, dstMeta FileMetadata, compareMode int, srcEp, dstEp native.Endpoint) (bool, string) {
+	if srcMeta.Size != dstMeta.Size {
+		return false, "目标文件已存在且大小不一致，已保留源文件"
+	}
+	if compareMode == 1 {
+		return true, ""
+	}
+	if isMD5Digest(srcMeta.MD5) && isMD5Digest(dstMeta.MD5) {
+		if strings.EqualFold(srcMeta.MD5, dstMeta.MD5) {
+			return true, ""
+		}
+		return false, "目标文件已存在且内容不一致，已保留源文件"
+	}
+	if compareMode == 2 {
+		return false, "目标文件已存在但当前存储不支持双端 MD5 校验，无法确认内容一致，已保留源文件"
+	}
+	if !srcEp.HasReliableModTime() || !dstEp.HasReliableModTime() {
+		return false, "目标文件已存在但当前存储不支持可靠修改时间校验，无法确认内容一致，已保留源文件"
+	}
+	if srcMeta.Modified <= 0 || dstMeta.Modified <= 0 {
+		return false, "目标文件已存在且缺少修改时间，无法确认内容一致，已保留源文件"
+	}
+	diff := srcMeta.Modified - dstMeta.Modified
+	if diff < 0 {
+		diff = -diff
+	}
+	if diff <= fileModifiedTolerance {
+		return true, ""
+	}
+	return false, "目标文件已存在且修改时间不一致，已保留源文件"
+}
+
 // runNativeFullSync executes full mirror sync (method=1) using native rclone
 // while reusing OpenSync's fullSyncPlan safety guards, same-side relocations,
 // trash soft-delete, conflict backup, and pending deletion approval queue.
@@ -710,8 +878,11 @@ func (jt *JobTask) runNativeFullSync(selected *nativeRetryFilter) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+			if err := jt.controller().WaitIfPaused(ctx); err != nil {
+				return err
+			}
 			dst := jobDstForSrc(job, src, base)
-			srcSnap, _, err := buildNativeFullSyncSnapshot(ctx, cfg, src, job, spec, includeM, true, now, func(d int64) {
+			srcSnap, _, err := buildNativeFullSyncSnapshot(ctx, cfg, src, job, spec, includeM, true, now, jt.controller(), func(d int64) {
 				totalScannedDirs += d
 				jt.ScanTotalDirs.Store(totalScannedDirs)
 				jt.ScanDoneDirs.Store(totalScannedDirs)
@@ -721,7 +892,7 @@ func (jt *JobTask) runNativeFullSync(selected *nativeRetryFilter) error {
 				errs = append(errs, fmt.Errorf("扫描源目录 %s 失败: %w", src, err))
 				continue
 			}
-			dstSnap, _, err := buildNativeFullSyncSnapshot(ctx, cfg, dst, job, spec, includeM, false, now, func(d int64) {
+			dstSnap, _, err := buildNativeFullSyncSnapshot(ctx, cfg, dst, job, spec, includeM, false, now, jt.controller(), func(d int64) {
 				totalScannedDirs += d
 				jt.ScanTotalDirs.Store(totalScannedDirs)
 				jt.ScanDoneDirs.Store(totalScannedDirs)
@@ -732,7 +903,12 @@ func (jt *JobTask) runNativeFullSync(selected *nativeRetryFilter) error {
 				continue
 			}
 
+			effectiveCompare := nativePairEffectiveCompareMode(cfg, src, dst, util.ToInt(job["compareMode"]))
+			deepCheckSameSize := nativePairNeedsDeepCompare(cfg, src, dst, effectiveCompare)
 			plan := newFullSyncPlan(srcSnap, dstSnap, nil)
+			plan.compareMode = effectiveCompare
+			plan.hasCompareMode = true
+			plan.deepCheckSameSize = deepCheckSameSize
 			plan.build(job)
 
 			var relocations []fullSyncRelocation
@@ -751,6 +927,9 @@ func (jt *JobTask) runNativeFullSync(selected *nativeRetryFilter) error {
 
 			// Phase 1: Type-conflict blockers
 			for _, key := range sortedDeleteKeys(plan.blockers, false) {
+				if err := jt.controller().WaitIfPaused(ctx); err != nil {
+					return err
+				}
 				item := plan.blockers[key]
 				if item.protected || repairOnly {
 					reason := fmt.Sprintf("destination type conflict at %q requires a normal full sync", item.object)
@@ -788,6 +967,9 @@ func (jt *JobTask) runNativeFullSync(selected *nativeRetryFilter) error {
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
+				if err := jt.controller().WaitIfPaused(ctx); err != nil {
+					return err
+				}
 				item := plan.newDirs[key]
 				if fullSyncPathBlocked(item.dstDir, blocked) {
 					continue
@@ -809,6 +991,9 @@ func (jt *JobTask) runNativeFullSync(selected *nativeRetryFilter) error {
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
+				if err := jt.controller().WaitIfPaused(ctx); err != nil {
+					return err
+				}
 				if fullSyncPathBlocked(rel.target.target, blocked) {
 					protectedDeletes[rel.source.deleteRoot] = struct{}{}
 					continue
@@ -822,7 +1007,11 @@ func (jt *JobTask) runNativeFullSync(selected *nativeRetryFilter) error {
 					continue
 				}
 				jt.FirstSync.CompareAndSwap(0, time.Now().Unix())
-				jt.CopyHook(rel.source.dir, rel.target.dstDir, rel.source.name, rel.source.metadata.Size, "", taskStatusSuccess, nil, taskItemFile, taskItemTypeMove, time.Now().Unix())
+				movedName := rel.target.name
+				if rel.source.name != rel.target.name {
+					movedName = rel.source.name + " → " + rel.target.name
+				}
+				jt.CopyHook(rel.source.dir, rel.target.dstDir, movedName, rel.source.metadata.Size, "", taskStatusSuccess, nil, taskItemFile, taskItemTypeMove, time.Now().Unix())
 				movedTargets[rel.target.target] = struct{}{}
 				if rel.source.deleteRoot == rel.source.object {
 					consumedFileDeletes[rel.source.deleteRoot] = struct{}{}
@@ -861,11 +1050,13 @@ func (jt *JobTask) runNativeFullSync(selected *nativeRetryFilter) error {
 				jt.populateNativeWaiting(src, dst, onlyFiles)
 				backupDir := nativeTrashBackupSubdir(jt, job)
 				copyOpts := buildNativeCopyOptions(job, false, backupDir)
+				copyOpts.Compare = effectiveCompare
 				copyOpts.OnlyFiles = onlyFiles
+				copyOpts.Controller = jt.controller()
 				// In full sync we already evaluated change decisions; force overwrite of changed files
-				// unless conflictPolicy == 1 (skip) or compareMode == 2 (which may still need deep check
-				// on hashless backends).
-				if util.ToInt(job["conflictPolicy"]) != 1 && util.ToInt(job["compareMode"]) != 2 {
+				// unless conflictPolicy == 1 (skip) or the pair requires deep content check on
+				// same-size files (explicit compareMode=2 on a hashless backend).
+				if util.ToInt(job["conflictPolicy"]) != 1 && !deepCheckSameSize {
 					copyOpts.ForceOverwrite = true
 				}
 				var completedBytes int64
@@ -902,12 +1093,13 @@ func (jt *JobTask) runNativeFullSync(selected *nativeRetryFilter) error {
 					}
 					jt.appendFinish(NewCopyJobTaskItem(jt.TaskID, srcDir, dstDir, base, v.Size, "", status, itemErr, taskItemFile, taskItemTypeCopy, time.Now().Unix()))
 				})
-				jt.Waiting.reset()
-				jt.nativeStats.Store(nil)
 				if copyErr != nil {
+					jt.recordInterruptedPendingItems([][2]string{{src, dst}})
 					writesFailed = true
 					errs = append(errs, copyErr)
 				}
+				jt.Waiting.reset()
+				jt.nativeStats.Store(nil)
 				_ = completedBytes
 			}
 
@@ -976,6 +1168,9 @@ func (jt *JobTask) runNativeFullSync(selected *nativeRetryFilter) error {
 			}
 
 			if len(batchFileItems) > 0 {
+				if err := jt.controller().WaitIfPaused(ctx); err != nil {
+					return err
+				}
 				delErrs, batchErr := cfg.DeleteFilesBatch(ctx, plan.dst.root, batchFileRels, sessOpts)
 				for i, item := range batchFileItems {
 					rel := batchFileRels[i]
@@ -995,6 +1190,9 @@ func (jt *JobTask) runNativeFullSync(selected *nativeRetryFilter) error {
 			for _, item := range dirOrTrashItems {
 				if ctx.Err() != nil {
 					return ctx.Err()
+				}
+				if err := jt.controller().WaitIfPaused(ctx); err != nil {
+					return err
 				}
 				delErr := nativeDeleteOrTrash(ctx, cfg, jt, job, plan.dst.root, item.dir, item.name, item.subtree != "")
 				if delErr != nil {
@@ -1060,10 +1258,19 @@ func (jt *JobTask) runNativeMove(selected *nativeRetryFilter) error {
 			return ctx.Err()
 		}
 		dst := jobDstForSrc(job, src, baseDst)
+		srcEp, dstEp, pairErr := cfg.Pair(src, dst)
+		if pairErr != nil {
+			hadAnyFailure = true
+			errs = append(errs, pairErr)
+			continue
+		}
 		if selected != nil {
 			selected.markPairMatch(src, dst)
 		}
-		srcSnap, _, err := buildNativeFullSyncSnapshot(ctx, cfg, src, job, spec, includeM, true, now, func(d int64) {
+		if err := jt.controller().WaitIfPaused(ctx); err != nil {
+			return err
+		}
+		srcSnap, _, err := buildNativeFullSyncSnapshot(ctx, cfg, src, job, spec, includeM, true, now, jt.controller(), func(d int64) {
 			totalDirs += d
 			jt.ScanTotalDirs.Store(totalDirs)
 			jt.ScanDoneDirs.Store(totalDirs)
@@ -1074,7 +1281,7 @@ func (jt *JobTask) runNativeMove(selected *nativeRetryFilter) error {
 			errs = append(errs, fmt.Errorf("扫描源目录 %s 失败: %w", src, err))
 			continue
 		}
-		dstSnap, _, err := buildNativeFullSyncSnapshot(ctx, cfg, dst, job, spec, includeM, false, now, nil)
+		dstSnap, _, err := buildNativeFullSyncSnapshot(ctx, cfg, dst, job, spec, includeM, false, now, jt.controller(), nil)
 		if err != nil {
 			hadAnyFailure = true
 			errs = append(errs, fmt.Errorf("扫描目标目录 %s 失败: %w", dst, err))
@@ -1103,24 +1310,26 @@ func (jt *JobTask) runNativeMove(selected *nativeRetryFilter) error {
 				cand := nativeMoveCandidate{rel: rel, srcDir: srcDir, dstDir: dstDir, name: name, srcMeta: srcMeta}
 				if dstItems, ok := dstSnap.dirs[relDir]; ok {
 					if dstMeta, exists := dstItems[name]; exists {
-						if !fileChangedWithMode(srcMeta, dstMeta, compareMode) {
+						if identical, conflictReason := moveExistingFileIsIdentical(srcMeta, dstMeta, compareMode, srcEp, dstEp); identical {
 							alreadyIdentical = append(alreadyIdentical, cand)
 							continue
+						} else {
+							// Refuse overwriting or deleting a conflicting/unverified destination file during move; retain source.
+							hadAnyFailure = true
+							reason := conflictReason
+							jt.CopyHook(srcDir, dstDir, name, srcMeta.Size, "", taskStatusFailed, &reason, taskItemFile, taskItemTypeTransfer, time.Now().Unix())
+							continue
 						}
-						// Refuse overwriting a different destination file during move; retain source.
-						hadAnyFailure = true
-						reason := "目标文件已存在且内容不一致，已保留源文件"
-						jt.CopyHook(srcDir, dstDir, name, srcMeta.Size, "", taskStatusFailed, &reason, taskItemFile, taskItemTypeTransfer, time.Now().Unix())
-						continue
 					}
 				}
 				toCopy = append(toCopy, cand)
 			}
 		}
 
+		verifyWithHash := compareMode == 2 && srcEp.SupportsNativeMD5() && dstEp.SupportsNativeMD5()
 		// Delete sources that are already verified identical on destination (cached dir listings + single batch delete).
 		if len(alreadyIdentical) > 0 {
-			failed, verifyErr := verifyAndBatchDeleteMovedSources(ctx, cfg, jt, srcSnap.root, alreadyIdentical, sessOpts)
+			failed, verifyErr := verifyAndBatchDeleteMovedSources(ctx, cfg, jt, srcSnap.root, alreadyIdentical, verifyWithHash, sessOpts)
 			if verifyErr != nil {
 				return verifyErr
 			}
@@ -1140,6 +1349,7 @@ func (jt *JobTask) runNativeMove(selected *nativeRetryFilter) error {
 			jt.populateNativeWaiting(src, dst, pendingFiles)
 			copyOpts := buildNativeCopyOptions(job, false, "")
 			copyOpts.OnlyFiles = pendingFiles
+			copyOpts.Controller = jt.controller()
 			copyOpts.ConflictPolicy = 0
 			copyOpts.SkipExisting = false
 			copyOpts.ForceOverwrite = true
@@ -1181,12 +1391,13 @@ func (jt *JobTask) runNativeMove(selected *nativeRetryFilter) error {
 					copiedRels = append(copiedRels, rel)
 				}
 			})
-			jt.Waiting.reset()
-			jt.nativeStats.Store(nil)
 			if copyErr != nil {
+				jt.recordInterruptedPendingItems([][2]string{{src, dst}})
 				hadAnyFailure = true
 				errs = append(errs, copyErr)
 			}
+			jt.Waiting.reset()
+			jt.nativeStats.Store(nil)
 
 			copiedCands := make([]nativeMoveCandidate, 0, len(copiedRels))
 			for _, rel := range copiedRels {
@@ -1195,7 +1406,7 @@ func (jt *JobTask) runNativeMove(selected *nativeRetryFilter) error {
 				}
 			}
 			if len(copiedCands) > 0 {
-				failed, verifyErr := verifyAndBatchDeleteMovedSources(ctx, cfg, jt, srcSnap.root, copiedCands, sessOpts)
+				failed, verifyErr := verifyAndBatchDeleteMovedSources(ctx, cfg, jt, srcSnap.root, copiedCands, verifyWithHash, sessOpts)
 				if verifyErr != nil {
 					return verifyErr
 				}
@@ -1220,6 +1431,9 @@ func (jt *JobTask) runNativeMove(selected *nativeRetryFilter) error {
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
+				if err := jt.controller().WaitIfPaused(ctx); err != nil {
+					return err
+				}
 				if dir == srcRootTrim || !strings.HasPrefix(dir, srcRootTrim+"/") {
 					continue
 				}
@@ -1242,6 +1456,7 @@ func verifyAndBatchDeleteMovedSources(
 	jt *JobTask,
 	srcRoot string,
 	candidates []nativeMoveCandidate,
+	verifyHash bool,
 	opts native.SessionOptions,
 ) (hadFailure bool, fatalErr error) {
 	type cachedDirList struct {
@@ -1251,11 +1466,11 @@ func verifyAndBatchDeleteMovedSources(
 	}
 	dstCache := make(map[string]cachedDirList)
 	srcCache := make(map[string]cachedDirList)
-	loadDir := func(cache map[string]cachedDirList, dir string) cachedDirList {
+	loadDir := func(cache map[string]cachedDirList, dir string, includeHash bool) cachedDirList {
 		if c, ok := cache[dir]; ok {
 			return c
 		}
-		entries, exists, err := cfg.ListDirEntries(ctx, dir, opts)
+		entries, exists, err := cfg.ListDirEntriesWithHash(ctx, dir, includeHash, opts)
 		res := cachedDirList{exists: exists, err: err}
 		if err == nil && exists {
 			res.byName = make(map[string]native.DirEntry, len(entries))
@@ -1276,7 +1491,10 @@ func verifyAndBatchDeleteMovedSources(
 		if ctx.Err() != nil {
 			return hadFailure, ctx.Err()
 		}
-		dstList := loadDir(dstCache, cand.dstDir)
+		if err := jt.controller().WaitIfPaused(ctx); err != nil {
+			return hadFailure, err
+		}
+		dstList := loadDir(dstCache, cand.dstDir, verifyHash)
 		if dstList.err != nil {
 			hadFailure = true
 			s := fmt.Sprintf("校验目标文件失败，已保留源文件：%v", dstList.err)
@@ -1302,14 +1520,27 @@ func verifyAndBatchDeleteMovedSources(
 			jt.CopyHook(cand.srcDir, cand.dstDir, cand.name, cand.srcMeta.Size, "", taskStatusFailed, &s, taskItemFile, taskItemTypeTransfer, time.Now().Unix())
 			continue
 		}
-		if cand.srcMeta.MD5 != "" && dstEntry.MD5 != "" && !strings.EqualFold(cand.srcMeta.MD5, dstEntry.MD5) {
+		if verifyHash {
+			if !isMD5Digest(cand.srcMeta.MD5) || !isMD5Digest(dstEntry.MD5) {
+				hadFailure = true
+				s := "目标文件缺少 MD5 校验和，无法完成内容核验，已保留源文件"
+				jt.CopyHook(cand.srcDir, cand.dstDir, cand.name, cand.srcMeta.Size, "", taskStatusFailed, &s, taskItemFile, taskItemTypeTransfer, time.Now().Unix())
+				continue
+			}
+			if !strings.EqualFold(cand.srcMeta.MD5, dstEntry.MD5) {
+				hadFailure = true
+				s := "目标文件校验和不匹配，已保留源文件"
+				jt.CopyHook(cand.srcDir, cand.dstDir, cand.name, cand.srcMeta.Size, "", taskStatusFailed, &s, taskItemFile, taskItemTypeTransfer, time.Now().Unix())
+				continue
+			}
+		} else if cand.srcMeta.MD5 != "" && dstEntry.MD5 != "" && !strings.EqualFold(cand.srcMeta.MD5, dstEntry.MD5) {
 			hadFailure = true
 			s := "目标文件校验和不匹配，已保留源文件"
 			jt.CopyHook(cand.srcDir, cand.dstDir, cand.name, cand.srcMeta.Size, "", taskStatusFailed, &s, taskItemFile, taskItemTypeTransfer, time.Now().Unix())
 			continue
 		}
 
-		srcList := loadDir(srcCache, cand.srcDir)
+		srcList := loadDir(srcCache, cand.srcDir, false)
 		if srcList.err != nil {
 			hadFailure = true
 			s := fmt.Sprintf("复核源文件状态失败，已保留源文件：%v", srcList.err)
@@ -1410,6 +1641,8 @@ func buildNativeBisyncOptions(job map[string]interface{}, jt *JobTask, dry bool)
 		UserAgent:            extra.UserAgent,
 		IOTimeout:            extra.IOTimeout,
 		ConTimeout:           extra.ConTimeout,
+		LowLevelRetries:      extra.LowLevelRetries,
+		RetriesSleep:         extra.RetriesSleep,
 		IgnoreSize:           extra.IgnoreSize,
 		CreateEmptySrcDirs:   util.ToInt(job["createEmptySrcDirs"]) == 1,
 		FollowSymlinks:       util.ToInt(job["followSymlinks"]) == 1,
@@ -1418,6 +1651,7 @@ func buildNativeBisyncOptions(job map[string]interface{}, jt *JobTask, dry bool)
 		CheckFirst:           extra.CheckFirst,
 		S3NoHead:             extra.S3NoHead,
 		ProxyURL:             globalNativeProxyURL(),
+		Controller:           jt.controller(),
 	}
 }
 
@@ -1480,6 +1714,9 @@ func (jt *JobTask) runNativeBisync() error {
 func (jt *JobTask) populateNativeWaiting(src, dst string, files []native.PendingFile) {
 	if jt == nil || jt.Waiting == nil || len(files) == 0 {
 		return
+	}
+	if len(files) > defaultCopyQueueCapacity {
+		jt.nativePendingOverflow.Store(true)
 	}
 	limit := min(len(files), defaultCopyQueueCapacity)
 	for i := 0; i < limit; i++ {
@@ -1605,20 +1842,25 @@ func dryRunNativeFullSync(ctx context.Context, sess *dryRunSession, cfg native.C
 				return ctx.Err()
 			}
 			dst := jobDstForSrc(job, src, base)
-			srcSnap, _, err := buildNativeFullSyncSnapshot(ctx, cfg, src, job, spec, includeM, true, now, func(d int64) {
+			srcSnap, _, err := buildNativeFullSyncSnapshot(ctx, cfg, src, job, spec, includeM, true, now, nil, func(d int64) {
 				sess.scannedDirs.Add(d)
 			})
 			if err != nil {
 				return fmt.Errorf("扫描源目录 %s 失败: %w", src, err)
 			}
-			dstSnap, _, err := buildNativeFullSyncSnapshot(ctx, cfg, dst, job, spec, includeM, false, now, func(d int64) {
+			dstSnap, _, err := buildNativeFullSyncSnapshot(ctx, cfg, dst, job, spec, includeM, false, now, nil, func(d int64) {
 				sess.scannedDirs.Add(d)
 			})
 			if err != nil {
 				return fmt.Errorf("扫描目标目录 %s 失败: %w", dst, err)
 			}
 
+			effectiveCompare := nativePairEffectiveCompareMode(cfg, src, dst, util.ToInt(job["compareMode"]))
+			deepCheckSameSize := nativePairNeedsDeepCompare(cfg, src, dst, effectiveCompare)
 			plan := newFullSyncPlan(srcSnap, dstSnap, nil)
+			plan.compareMode = effectiveCompare
+			plan.hasCompareMode = true
+			plan.deepCheckSameSize = deepCheckSameSize
 			plan.build(job)
 
 			relocations := plan.relocations()
@@ -1673,13 +1915,19 @@ func dryRunNativeFullSync(ctx context.Context, sess *dryRunSession, cfg native.C
 				if rel.source.deleteRoot == rel.source.object {
 					consumedDeletes[rel.source.deleteRoot] = struct{}{}
 				}
+				moveName := rel.source.name
+				moveReason := "目标端同内容移动复用"
+				if rel.source.name != rel.target.name {
+					moveName = rel.source.name + " → " + rel.target.name
+					moveReason = "目标端同内容重命名复用"
+				}
 				sess.addItem(DryRunItem{
 					Action:   "move",
 					SrcPath:  rel.source.dir,
 					DstPath:  rel.target.dstDir,
-					FileName: rel.source.name,
+					FileName: moveName,
 					FileSize: rel.source.metadata.Size,
-					Reason:   "目标端同内容重命名/移动复用",
+					Reason:   moveReason,
 				})
 			}
 			dstRootNorm := normalizeDirPath(dst)
@@ -1717,7 +1965,9 @@ func dryRunNativeFullSync(ctx context.Context, sess *dryRunSession, cfg native.C
 					continue
 				}
 				reason := "内容/元数据变化"
-				if util.ToInt(job["conflictPolicy"]) == 2 {
+				if deepCheckSameSize {
+					reason = "目标端不支持元数据/MD5 校验，执行时将内容比对确认是否更新"
+				} else if util.ToInt(job["conflictPolicy"]) == 2 {
 					reason = "冲突保留两者（目标旧文件将重命名备份）"
 				} else if trashEnabled(job) {
 					reason = "覆盖前将旧文件移入回收站"
@@ -1790,13 +2040,17 @@ func dryRunNativeMove(ctx context.Context, sess *dryRunSession, cfg native.Confi
 			return ctx.Err()
 		}
 		dst := jobDstForSrc(job, src, baseDst)
-		srcSnap, _, err := buildNativeFullSyncSnapshot(ctx, cfg, src, job, spec, includeM, true, now, func(d int64) {
+		srcEp, dstEp, pairErr := cfg.Pair(src, dst)
+		if pairErr != nil {
+			return pairErr
+		}
+		srcSnap, _, err := buildNativeFullSyncSnapshot(ctx, cfg, src, job, spec, includeM, true, now, nil, func(d int64) {
 			sess.scannedDirs.Add(d)
 		})
 		if err != nil {
 			return fmt.Errorf("扫描源目录 %s 失败: %w", src, err)
 		}
-		dstSnap, _, err := buildNativeFullSyncSnapshot(ctx, cfg, dst, job, spec, includeM, false, now, nil)
+		dstSnap, _, err := buildNativeFullSyncSnapshot(ctx, cfg, dst, job, spec, includeM, false, now, nil, nil)
 		if err != nil {
 			return fmt.Errorf("扫描目标目录 %s 失败: %w", dst, err)
 		}
@@ -1809,16 +2063,18 @@ func dryRunNativeMove(ctx context.Context, sess *dryRunSession, cfg native.Confi
 				srcDir := strings.TrimRight(srcSnap.root+relDir, "/")
 				dstDir := strings.TrimRight(dstSnap.root+relDir, "/")
 				if dstItems, ok := dstSnap.dirs[relDir]; ok {
-					if dstMeta, exists := dstItems[name]; exists && fileChangedWithMode(srcMeta, dstMeta, compareMode) {
-						sess.addItem(DryRunItem{
-							Action:   "skip",
-							SrcPath:  srcDir,
-							DstPath:  dstDir,
-							FileName: name,
-							FileSize: srcMeta.Size,
-							Reason:   "目标文件已存在且内容不一致，移动时将跳过并保留源文件",
-						})
-						continue
+					if dstMeta, exists := dstItems[name]; exists {
+						if identical, conflictReason := moveExistingFileIsIdentical(srcMeta, dstMeta, compareMode, srcEp, dstEp); !identical {
+							sess.addItem(DryRunItem{
+								Action:   "skip",
+								SrcPath:  srcDir,
+								DstPath:  dstDir,
+								FileName: name,
+								FileSize: srcMeta.Size,
+								Reason:   conflictReason,
+							})
+							continue
+						}
 					}
 				}
 				sess.addItem(DryRunItem{

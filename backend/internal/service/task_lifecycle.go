@@ -41,8 +41,12 @@ func (jt *JobTask) cancelTaskRuntime() {
 	jt.runtimeMu.Lock()
 	cancel := jt.cancel
 	releaseSlot := jt.releaseEngineSlot
+	rc := jt.rcController
 	jt.releaseEngineSlot = nil
 	jt.runtimeMu.Unlock()
+	if rc != nil {
+		rc.Close()
+	}
 	if cancel != nil {
 		cancel()
 	}
@@ -74,6 +78,35 @@ func (jt *JobTask) finishSuccessfulTask() {
 	// Queued rather than sent here: delivery costs one HTTP timeout per
 	// unreachable destination, and the task is already finished.
 	enqueue(jt.TaskID, status.Int(), taskNum, duration, jt.CreateTime)
+
+	// Post-completion orchestration: auto-retry on failure/timeout, or trigger chained downstream job on success.
+	if jt.JobClient != nil {
+		switch status {
+		case taskStatusSuccess, taskStatusNoSync:
+			jt.JobClient.resetAutoRetry()
+			if extra, _, extraErr := parseNativeExtraFlags(jt.Job["extraFlags"]); extraErr == nil && extra.PostSyncJobID > 0 {
+				nextID := extra.PostSyncJobID
+				if nextID != jt.jobIDSnapshot() && jt.ChainDepth < maxPostSyncChainDepth {
+					go triggerPostSyncChain(nextID, jt.ChainDepth+1)
+				}
+			}
+		case taskStatusFailed, taskStatusPartialFail, taskStatusTimeout:
+			jt.JobClient.scheduleAutoRetry(jt.TaskID)
+		}
+	}
+}
+
+func triggerPostSyncChain(jobID int64, depth int) {
+	client, err := GetJobClientByID(jobID)
+	if err != nil {
+		log.Printf("Post-sync chain: failed to load job %d: %v", jobID, err)
+		return
+	}
+	if err := client.DoChainedRun(depth); err != nil {
+		log.Printf("Post-sync chain: skipped job %d (depth %d): %v", jobID, depth, err)
+	} else {
+		log.Printf("Post-sync chain: triggered job %d (depth %d)", jobID, depth)
+	}
 }
 
 func taskPersistenceErrorMessage(err error) string {
@@ -107,6 +140,9 @@ func (jt *JobTask) finishFailedTask(errMsg string) {
 		jt.notifyProgressNow()
 	}
 	enqueue(jt.TaskID, taskStatusSystemFailed.Int(), taskNum, duration, jt.CreateTime)
+	if jt.JobClient != nil && !jt.isBreak() {
+		jt.JobClient.scheduleAutoRetry(jt.TaskID)
+	}
 }
 
 // queueTaskNotification is swapped in tests to observe completion notifications.

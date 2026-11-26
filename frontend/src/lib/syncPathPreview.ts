@@ -481,7 +481,7 @@ export function resolveJobWritablePaths(
   job: Pick<ExistingJobPathSummary, "srcPath" | "dstPath" | "dstMap" | "method">,
 ): string[] {
   const paths = resolveJobDestinationPaths(job);
-  if (job.method === 3) {
+  if (job.method === 2 || job.method === 3) {
     for (const src of cleanPathList(parseJobPathInput(job.srcPath))) {
       paths.push(normalizeDirPath(src));
     }
@@ -712,7 +712,7 @@ export function buildSyncPathPreview({
       const otherWritable = resolveJobWritablePaths(other);
       for (const otherPath of otherWritable) {
         let hitDst = false;
-        let hitBisyncSrc = false;
+        let hitMutatingSrc = false;
         for (const item of items) {
           if (
             syncPathContains(item.resolvedDst, otherPath) ||
@@ -722,12 +722,12 @@ export function buildSyncPathPreview({
             hitDst = true;
           }
           if (
-            method === 3 &&
+            (method === 2 || method === 3) &&
             (syncPathContains(item.srcDir, otherPath) ||
               syncPathContains(otherPath, item.srcDir))
           ) {
             item.hasConflict = true;
-            hitBisyncSrc = true;
+            hitMutatingSrc = true;
           }
         }
         if (hitDst) {
@@ -739,12 +739,14 @@ export function buildSyncPathPreview({
             );
           }
         }
-        if (hitBisyncSrc) {
+        if (hitMutatingSrc) {
           const msgKey = `src:${other.id}:${otherPath}`;
           if (!reported.has(msgKey)) {
             reported.add(msgKey);
             conflicts.push(
-              `双向同步源目录与任务「${otherName}」的目标位置冲突（${formatDisplayPath(otherPath)}）`,
+              method === 2
+                ? `移动模式源目录与任务「${otherName}」的写入/移动目录冲突（${formatDisplayPath(otherPath)}）`
+                : `双向同步源目录与任务「${otherName}」的目标位置冲突（${formatDisplayPath(otherPath)}）`,
             );
           }
         }

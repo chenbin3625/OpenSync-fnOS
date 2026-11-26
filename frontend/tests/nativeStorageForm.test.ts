@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@douyinfe/semi-icons", () => ({}));
@@ -113,5 +114,35 @@ describe("原生存储认证表单", () => {
       options: { storage_url: "https://swift.example.com/v1/acc", auth_token: "tok" },
     };
     expect(validateRemoteDraft(storageTokenMode, true)).toEqual({});
+  });
+
+  it("网盘 OAuth/向导类型在完成图形化授权会话后无需手动粘贴 Token 即可通过校验", () => {
+    for (const type of [
+      "onedrive",
+      "drive",
+      "dropbox",
+      "jottacloud",
+      "googlecloudstorage",
+    ] as const) {
+      const missingAuth = { ...emptyDraft(type), name: `disk_${type}` };
+      const errs = validateRemoteDraft(missingAuth, true);
+      expect(Object.keys(errs).length).toBeGreaterThan(0);
+
+      const withSession = {
+        ...missingAuth,
+        authSessionId: "auth-session-1",
+        authConfiguredSecrets: ["token"],
+      };
+      expect(validateRemoteDraft(withSession, true)).toEqual({});
+    }
+  });
+
+  it("远程存储配置表单不包含要求用户手动执行 rclone authorize 或 rclone config 命令的提示", () => {
+    const src = readFileSync(
+      new URL("../src/components/NativeStorageEditor.tsx", import.meta.url),
+      "utf8",
+    );
+    expect(src).not.toContain("rclone authorize");
+    expect(src).not.toContain("rclone config");
   });
 });

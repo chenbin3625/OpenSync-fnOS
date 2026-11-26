@@ -28,6 +28,7 @@ import {
   IconRefresh,
   IconServerStroked,
   IconSettingStroked,
+  IconStop,
   IconTickCircle,
 } from "@douyinfe/semi-icons";
 import { api } from "../api/client";
@@ -54,6 +55,7 @@ import {
   PendingApprovalBanner,
 } from "../components/FullSyncApprovalModal";
 import { useAction, useResource } from "../lib/hooks";
+import { formatBwLimitSummary } from "../lib/bwLimit";
 import {
   buildSyncPathPreview,
   formatDisplayPath,
@@ -143,15 +145,24 @@ export default function Tasks() {
     if (!selected || !engines.data) return false;
     const eng = engines.data.find((e) => e.id === selected.alistId) ?? engines.data[0];
     if (!eng) return false;
+    const detailsByLower = new Map<string, { type?: string; hasCrypt?: string }>();
+    for (const [k, v] of Object.entries(eng.remoteDetails || {})) {
+      detailsByLower.set(k.toLowerCase(), v);
+    }
+    const typesByLower = new Map<string, string>();
+    for (const [k, v] of Object.entries(eng.remotes || {})) {
+      typesByLower.set(k.toLowerCase(), v);
+    }
     const paths = [
       ...parseJobPathList(selected.srcPath),
       ...parseJobPathList(selected.dstPath),
     ];
     return paths.some((p) => {
-      const seg = p.replace(/^\/+/, "").split("/")[0];
+      const seg = p.replace(/^\/+/, "").split("/")[0]?.toLowerCase();
       if (!seg) return false;
-      const typ = eng.remoteDetails?.[seg]?.type || eng.remotes?.[seg];
-      return typ === "crypt";
+      const detail = detailsByLower.get(seg);
+      if (detail?.hasCrypt === "true" || detail?.type === "crypt") return true;
+      return typesByLower.get(seg) === "crypt";
     });
   }, [selected, engines.data]);
   const [snapshotState, setSnapshotState] = useState<{
@@ -391,13 +402,39 @@ export default function Tasks() {
         新建同步任务
       </Button>
     ) : undefined;
-  const approvePendingDelete = () =>
+  const approvePendingDelete = (selectedPaths?: string[]) =>
     actions.run(async () => {
       if (!activeApproval?.taskId) return;
       try {
-        await api.taskAction(activeApproval.taskId, "approve");
+        await api.taskAction(
+          activeApproval.taskId,
+          "approve",
+          undefined,
+          selectedPaths && selectedPaths.length > 0
+            ? { paths: selectedPaths }
+            : undefined,
+        );
         setApprovalModalOpen(false);
-        Toast.success("已提交后台校验并执行删除");
+        Toast.success(
+          selectedPaths && selectedPaths.length > 0
+            ? `已提交后台校验并删除选中的 ${selectedPaths.length} 项`
+            : "已提交后台校验并执行删除",
+        );
+        await refreshJobs();
+      } catch (err) {
+        errorToast(err);
+      }
+    });
+  const excludePendingDelete = (selectedPaths: string[]) =>
+    actions.run(async () => {
+      if (!activeApproval?.taskId || !selectedPaths.length) return;
+      try {
+        const res = await api.excludeApprovalPaths(
+          activeApproval.taskId,
+          selectedPaths,
+        );
+        setApprovalModalOpen(false);
+        Toast.success(`已将 ${res.excludedCount} 项加入任务排除规则`);
         await refreshJobs();
       } catch (err) {
         errorToast(err);
@@ -424,6 +461,7 @@ export default function Tasks() {
           busy={actions.busy}
           onClose={() => setApprovalModalOpen(false)}
           onApprove={approvePendingDelete}
+          onExclude={excludePendingDelete}
           onReject={rejectPendingDelete}
         />
       )}
@@ -554,6 +592,7 @@ export default function Tasks() {
                     engines={engines.data || []}
                     busy={actions.busy}
                     running={!!currentTask.data}
+                    paused={Boolean(currentTask.data?.paused ?? selected.paused)}
                     runKey={String(currentTask.data?.taskId ?? "idle")}
                     onRun={() => triggerRunJob(selected.id, selected.method)}
                     onDryRun={() => setDryRunOpen(true)}
@@ -584,6 +623,15 @@ export default function Tasks() {
                         initialDraft: cloneJobToForm(selected),
                       })
                     }
+                    onTogglePause={() => {
+                      if (!currentTask.data) return;
+                      const { taskId } = currentTask.data;
+                      const resuming = Boolean(currentTask.data.paused);
+                      action(
+                        () => api.taskAction(taskId, resuming ? "resume" : "pause"),
+                        resuming ? "已继续传输" : "已暂停传输",
+                      );
+                    }}
                     onStop={() => {
                       if (!currentTask.data) return;
                       const { taskId } = currentTask.data;
@@ -751,12 +799,14 @@ function Overview({
   engines,
   busy,
   running,
+  paused,
   runKey,
   onRun,
   onDryRun,
   onCheck,
   onResyncBisync,
   onClone,
+  onTogglePause,
   onStop,
   onToggle,
   onEdit,
@@ -766,12 +816,14 @@ function Overview({
   engines: AlistItem[];
   busy: boolean;
   running: boolean;
+  paused: boolean;
   runKey: string;
   onRun: () => void;
   onDryRun: () => void;
   onCheck: () => void;
   onResyncBisync: () => void;
   onClone: () => void;
+  onTogglePause: () => void;
   onStop: () => void;
   onToggle: () => void;
   onEdit: () => void;
@@ -819,6 +871,24 @@ function Overview({
     if (obj.ignoreSize) list.push("忽略大小差异");
     if (obj.trackRenames) list.push("追踪重命名");
     if (obj.useMmap) list.push("mmap 缓冲");
+    if (obj.resumeEnable) list.push("断点续传");
+    if (obj.watchEnable) list.push("实时监听");
+    if (obj.directStream) list.push("直接流式同步");
+    if (obj.missedCatchUp) list.push("漏跑补跑");
+    if (Number(obj.autoRetryMax || 0) > 0) {
+      list.push(`自动重试 ${obj.autoRetryMax} 次`);
+    }
+    if (Number(obj.postSyncJobId || 0) > 0) {
+      list.push(`串联任务 #${obj.postSyncJobId}`);
+    }
+    if (typeof obj.checkSchedule === "string" && obj.checkSchedule.trim()) {
+      const m: Record<string, string> = {
+        daily: "每日校验",
+        weekly: "每周校验",
+        monthly: "每月校验",
+      };
+      list.push(m[obj.checkSchedule.trim()] || obj.checkSchedule.trim());
+    }
     if (typeof obj.maxTransfer === "string" && obj.maxTransfer.trim()) {
       list.push(`上限 ${obj.maxTransfer.trim()}`);
     }
@@ -865,7 +935,11 @@ function Overview({
     job.maxRetries !== undefined && Number(job.maxRetries) >= 0
       ? `重试 ${job.maxRetries} 次`
       : "",
-    job.bwLimit?.trim() ? `限速 ${job.bwLimit.trim()}` : "",
+    job.bwLimit?.trim()
+      ? /^(?:off|0)$/i.test(job.bwLimit.trim())
+        ? "不限速（覆盖全局）"
+        : `限速 ${formatBwLimitSummary(job.bwLimit, { allowInherit: true })}`
+      : "",
     Number(job.tpsLimit || 0) > 0 ? `TPS ${job.tpsLimit}/s` : "",
     Number(job.tpsLimitBurst || 0) > 0 ? `突发 ${job.tpsLimitBurst}` : "",
     job.modifyWindow?.trim() ? `时间容差 ${job.modifyWindow.trim()}` : "",
@@ -977,6 +1051,11 @@ function Overview({
                 旧版已停用
               </Tag>
             )}
+            {!legacy && running && paused && (
+              <Tag size="small" type="light" color="orange">
+                已暂停
+              </Tag>
+            )}
             {!legacy && job.queued && (
               <Tag size="small" type="light" color="cyan">
                 排队等待中
@@ -1019,12 +1098,26 @@ function Overview({
                   disabled={busy}
                   onClick={onCheck}
                 />
+                {running && (
+                  <IconButton
+                    label={paused ? "继续传输" : "暂停传输"}
+                    icon={
+                      paused ? (
+                        <IconPlay aria-hidden="true" />
+                      ) : (
+                        <IconPause aria-hidden="true" />
+                      )
+                    }
+                    disabled={busy}
+                    onClick={onTogglePause}
+                  />
+                )}
                 <Tooltip content={runActionLabel} position="top">
                   <Button
                     aria-label={runActionLabel}
                     icon={
                       running ? (
-                        <IconPause aria-hidden="true" />
+                        <IconStop aria-hidden="true" />
                       ) : (
                         <IconPlay aria-hidden="true" />
                       )

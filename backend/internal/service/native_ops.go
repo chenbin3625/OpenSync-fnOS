@@ -1,10 +1,14 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"log"
 	"path"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -118,149 +122,259 @@ func RenameNativeStorage(ctx context.Context, in NativeRenameInput) (*NativeRena
 		return nil, publicError("请提供原存储名称和新存储名称")
 	}
 
-	alistRefMu.Lock()
-	defer alistRefMu.Unlock()
-	alistMutationMu.Lock()
-	defer alistMutationMu.Unlock()
-
-	id, remark, _, c, err := loadExistingNativeRowFull()
-	if err != nil {
-		return nil, err
-	}
-	if id == 0 {
-		return nil, publicError("未找到内置存储引擎")
-	}
-	actualOld, ok := c.FindKey(oldName)
-	if !ok {
-		return nil, publicError(fmt.Sprintf("存储 %q 不存在", oldName))
-	}
-	renamedCfg, err := c.Rename(actualOld, newName)
-	if err != nil {
-		return nil, publicError(err.Error())
-	}
-
-	// Find & rewrite all jobs belonging to the native engine that reference actualOld.
-	jobs, err := mapper.GetJobListAll()
-	if err != nil {
-		return nil, err
-	}
-	rewriteVirtualPath := func(p string) (string, bool) {
-		trimmed := strings.TrimPrefix(p, "/")
-		seg, rest, hasRest := strings.Cut(trimmed, "/")
-		if !strings.EqualFold(seg, actualOld) {
-			return p, false
-		}
-		if hasRest {
-			return "/" + newName + "/" + rest, true
-		}
-		return "/" + newName, true
-	}
-	rewriteList := func(raw interface{}) ([]string, bool) {
-		paths := parsePathList(raw)
-		changed := false
-		for i, p := range paths {
-			if nextP, ok := rewriteVirtualPath(p); ok {
-				paths[i] = nextP
-				changed = true
-			}
-		}
-		return paths, changed
-	}
-
-	type jobUpdate struct {
-		id  int64
-		job map[string]interface{}
-	}
-	var updatedJobs []jobUpdate
-	for _, job := range jobs {
-		if util.ToInt64(job["alistId"]) != id {
-			continue
-		}
-		newSrc, srcChanged := rewriteList(job["srcPath"])
-		newDst, dstChanged := rewriteList(job["dstPath"])
-		if !srcChanged && !dstChanged {
-			continue
-		}
-		// Reject rename while an affected job is actively executing.
-		jobID := util.ToInt64(job["id"])
-		jobClientListMu.RLock()
-		jc := jobClientList[jobID]
-		jobClientListMu.RUnlock()
-		if jc != nil && jc.isBusy() {
-			return nil, publicError(fmt.Sprintf("关联任务「%s」正在执行中，请待任务结束后再重命名存储", jobDisplayName(job)))
-		}
-
-		cloned := cloneJobConfig(job)
-		if srcChanged {
-			enc, _ := json.Marshal(newSrc)
-			cloned["srcPath"] = string(enc)
-		}
-		if dstChanged {
-			enc, _ := json.Marshal(newDst)
-			cloned["dstPath"] = string(enc)
-		}
-		// Update persisted dstMap (base, keys, and resolved values) whenever srcPath or dstPath
-		// changed so derived destination subdirs stay stable across storage renames.
-		rewriteDirPath := func(p string) string {
-			trimmed := strings.TrimRight(p, "/")
-			if nextP, ok := rewriteVirtualPath(trimmed); ok {
-				return normalizeDirPath(nextP)
-			}
-			return p
-		}
-		if stored := parseStoredJobDstMap(cloned["dstMap"]); stored != nil {
-			nextBase := make([]string, len(stored.Base))
-			for i, b := range stored.Base {
-				nextBase[i] = rewriteDirPath(b)
-			}
-			nextMap := make(map[string]string, len(stored.Map))
-			for k, v := range stored.Map {
-				srcPart, dstPart, hasSep := strings.Cut(k, "\x00")
-				nextKey := k
-				if hasSep {
-					nextKey = jobDstMapKey(rewriteDirPath(srcPart), rewriteDirPath(dstPart))
-				}
-				nextMap[nextKey] = rewriteDirPath(v)
-			}
-			if enc, encErr := json.Marshal(jobDstMap{Version: stored.Version, Base: nextBase, Map: nextMap}); encErr == nil {
-				cloned["dstMap"] = string(enc)
-			}
-		}
-		updatedJobs = append(updatedJobs, jobUpdate{id: jobID, job: cloned})
-	}
-
-	// Commit engine config first, then update affected jobs and refresh in-memory JobClients.
-	data, err := json.Marshal(renamedCfg)
-	if err != nil {
-		return nil, err
-	}
-	secret := string(data)
-	if err := mapper.UpdateAlist(id, remark, native.EngineURL, &secret); err != nil {
-		return nil, err
-	}
-	for _, u := range updatedJobs {
-		if err := mapper.UpdateJob(u.job); err != nil {
+	// Retry up to 3 times if a concurrent job creation adds a new loaded
+	// JobClient referencing oldName between snapshot and acquiring alistRefMu.
+	for attempt := 0; attempt < 3; attempt++ {
+		// 1. Snapshot candidate affected job IDs outside alistRefMu so we can
+		// acquire JobClient.opMu in ascending jobID order BEFORE alistRefMu
+		// (matching EditJobClient's lock order and preventing AB-BA deadlocks).
+		snapID, _, _, snapCfg, err := loadExistingNativeRowFull()
+		if err != nil {
 			return nil, err
 		}
-		jobClientListMu.RLock()
-		jc := jobClientList[u.id]
-		jobClientListMu.RUnlock()
-		if jc != nil {
+		if snapID == 0 {
+			return nil, publicError("未找到内置存储引擎")
+		}
+		snapOld, ok := snapCfg.FindKey(oldName)
+		if !ok {
+			return nil, publicError(fmt.Sprintf("存储 %q 不存在", oldName))
+		}
+		snapJobs, err := mapper.GetJobListAll()
+		if err != nil {
+			return nil, err
+		}
+		var candIDs []int64
+		for _, job := range snapJobs {
+			if util.ToInt64(job["alistId"]) != snapID {
+				continue
+			}
+			for _, p := range append(parsePathList(job["srcPath"]), parsePathList(job["dstPath"])...) {
+				seg, _, _ := strings.Cut(strings.TrimPrefix(p, "/"), "/")
+				if strings.EqualFold(seg, snapOld) {
+					candIDs = append(candIDs, util.ToInt64(job["id"]))
+					break
+				}
+			}
+		}
+		slices.Sort(candIDs)
+
+		// Lock existing loaded JobClients in ascending ID order and reserve
+		// JobDoing so neither edits nor manual/scheduled runs can race rename.
+		type lockedClient struct {
+			id      int64
+			jc      *JobClient
+			claimed bool
+		}
+		var locked []lockedClient
+		lockedMap := make(map[int64]*JobClient, len(candIDs))
+		releaseLocked := func() {
+			for i := len(locked) - 1; i >= 0; i-- {
+				if locked[i].claimed {
+					locked[i].jc.markDone()
+				}
+				locked[i].jc.opMu.Unlock()
+			}
+		}
+
+		var busyJobLabel string
+		for _, jid := range candIDs {
+			jobClientListMu.RLock()
+			jc := jobClientList[jid]
+			jobClientListMu.RUnlock()
+			if jc == nil {
+				continue
+			}
+			if !jc.lockOp() {
+				jc.opMu.Unlock()
+				continue
+			}
 			jc.mu.Lock()
-			jc.Job = cloneJobConfig(u.job)
+			busy := jc.JobDoing || jc.CurrentJobTask != nil
+			if !busy {
+				jc.JobDoing = true
+				jc.signalStateChangeLocked()
+			}
+			snap := jc.Job
 			jc.mu.Unlock()
+			if busy {
+				busyJobLabel = jobDisplayName(snap)
+				jc.opMu.Unlock()
+				releaseLocked()
+				return nil, publicError(fmt.Sprintf("关联任务「%s」正在执行中，请待任务结束后再重命名存储", busyJobLabel))
+			}
+			locked = append(locked, lockedClient{id: jid, jc: jc, claimed: true})
+			lockedMap[jid] = jc
 		}
-		pendingDeleteApprovals.ClearForJob(u.id)
-		if util.ToInt(u.job["method"]) == 3 {
-			cleanupBisyncWorkDir(u.id)
+
+		alistRefMu.Lock()
+		alistMutationMu.Lock()
+
+		id, remark, _, c, err := loadExistingNativeRowFull()
+		if err != nil {
+			alistMutationMu.Unlock()
+			alistRefMu.Unlock()
+			releaseLocked()
+			return nil, err
 		}
+		if id == 0 {
+			alistMutationMu.Unlock()
+			alistRefMu.Unlock()
+			releaseLocked()
+			return nil, publicError("未找到内置存储引擎")
+		}
+		actualOld, ok := c.FindKey(oldName)
+		if !ok {
+			alistMutationMu.Unlock()
+			alistRefMu.Unlock()
+			releaseLocked()
+			return nil, publicError(fmt.Sprintf("存储 %q 不存在", oldName))
+		}
+		renamedCfg, err := c.Rename(actualOld, newName)
+		if err != nil {
+			alistMutationMu.Unlock()
+			alistRefMu.Unlock()
+			releaseLocked()
+			return nil, publicError(err.Error())
+		}
+
+		jobs, err := mapper.GetJobListAll()
+		if err != nil {
+			alistMutationMu.Unlock()
+			alistRefMu.Unlock()
+			releaseLocked()
+			return nil, err
+		}
+		rewriteVirtualPath := func(p string) (string, bool) {
+			trimmed := strings.TrimPrefix(p, "/")
+			seg, rest, hasRest := strings.Cut(trimmed, "/")
+			if !strings.EqualFold(seg, actualOld) {
+				return p, false
+			}
+			if hasRest {
+				return "/" + newName + "/" + rest, true
+			}
+			return "/" + newName, true
+		}
+		rewriteList := func(raw interface{}) ([]string, bool) {
+			paths := parsePathList(raw)
+			changed := false
+			for i, p := range paths {
+				if nextP, ok := rewriteVirtualPath(p); ok {
+					paths[i] = nextP
+					changed = true
+				}
+			}
+			return paths, changed
+		}
+
+		type jobUpdate struct {
+			id  int64
+			job map[string]interface{}
+		}
+		var updatedJobs []jobUpdate
+		needRetry := false
+		for _, job := range jobs {
+			if util.ToInt64(job["alistId"]) != id {
+				continue
+			}
+			newSrc, srcChanged := rewriteList(job["srcPath"])
+			newDst, dstChanged := rewriteList(job["dstPath"])
+			if !srcChanged && !dstChanged {
+				continue
+			}
+			jobID := util.ToInt64(job["id"])
+			jobClientListMu.RLock()
+			liveJC := jobClientList[jobID]
+			jobClientListMu.RUnlock()
+			if liveJC != nil && lockedMap[jobID] != liveJC {
+				// A new JobClient was loaded/created after our snapshot; retry locking.
+				needRetry = true
+				break
+			}
+
+			cloned := cloneJobConfig(job)
+			if srcChanged {
+				enc, _ := json.Marshal(newSrc)
+				cloned["srcPath"] = string(enc)
+			}
+			if dstChanged {
+				enc, _ := json.Marshal(newDst)
+				cloned["dstPath"] = string(enc)
+			}
+			rewriteDirPath := func(p string) string {
+				trimmed := strings.TrimRight(p, "/")
+				if nextP, ok := rewriteVirtualPath(trimmed); ok {
+					return normalizeDirPath(nextP)
+				}
+				return p
+			}
+			if stored := parseStoredJobDstMap(cloned["dstMap"]); stored != nil {
+				nextBase := make([]string, len(stored.Base))
+				for i, b := range stored.Base {
+					nextBase[i] = rewriteDirPath(b)
+				}
+				nextMap := make(map[string]string, len(stored.Map))
+				for k, v := range stored.Map {
+					srcPart, dstPart, hasSep := strings.Cut(k, "\x00")
+					nextKey := k
+					if hasSep {
+						nextKey = jobDstMapKey(rewriteDirPath(srcPart), rewriteDirPath(dstPart))
+					}
+					nextMap[nextKey] = rewriteDirPath(v)
+				}
+				if enc, encErr := json.Marshal(jobDstMap{Version: stored.Version, Base: nextBase, Map: nextMap}); encErr == nil {
+					cloned["dstMap"] = string(enc)
+				}
+			}
+			updatedJobs = append(updatedJobs, jobUpdate{id: jobID, job: cloned})
+		}
+		if needRetry {
+			alistMutationMu.Unlock()
+			alistRefMu.Unlock()
+			releaseLocked()
+			continue
+		}
+
+		// Commit engine config and all affected jobs atomically in one transaction.
+		data, err := json.Marshal(renamedCfg)
+		if err != nil {
+			alistMutationMu.Unlock()
+			alistRefMu.Unlock()
+			releaseLocked()
+			return nil, err
+		}
+		jobPayloads := make([]map[string]interface{}, len(updatedJobs))
+		for i, u := range updatedJobs {
+			jobPayloads[i] = u.job
+		}
+		if err := mapper.UpdateAlistAndJobPathsTx(id, remark, native.EngineURL, string(data), jobPayloads); err != nil {
+			alistMutationMu.Unlock()
+			alistRefMu.Unlock()
+			releaseLocked()
+			return nil, err
+		}
+		for _, u := range updatedJobs {
+			if jc := lockedMap[u.id]; jc != nil {
+				jc.mu.Lock()
+				jc.Job = cloneJobConfig(u.job)
+				jc.mu.Unlock()
+			}
+			pendingDeleteApprovals.ClearForJob(u.id)
+			if util.ToInt(u.job["method"]) == 3 {
+				cleanupBisyncWorkDir(u.id)
+			}
+		}
+		RemoveEngineHealth(id)
+		alistMutationMu.Unlock()
+		alistRefMu.Unlock()
+		releaseLocked()
+		return &NativeRenameResult{
+			OldName:     actualOld,
+			NewName:     newName,
+			UpdatedJobs: len(updatedJobs),
+		}, nil
 	}
-	RemoveEngineHealth(id)
-	return &NativeRenameResult{
-		OldName:     actualOld,
-		NewName:     newName,
-		UpdatedJobs: len(updatedJobs),
-	}, nil
+	return nil, publicError("关联任务正在变更，请稍后重试重命名")
 }
 
 // ExportNativeConfig exports stored rclone remotes to plain or encrypted rclone.conf format.
@@ -350,7 +464,10 @@ func RestoreNativeFile(ctx context.Context, in NativeRestoreInput) error {
 	}
 	restoreCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
-	if err := c.Restore(restoreCtx, src, dst, in.IsDir, in.Overwrite, native.SessionOptions{ProxyURL: globalNativeProxyURL()}); err != nil {
+	if err := c.Restore(restoreCtx, src, dst, in.IsDir, in.Overwrite, native.SessionOptions{
+		ProxyURL: globalNativeProxyURL(),
+		BwLimit:  globalDefaultBwLimit(),
+	}); err != nil {
 		return publicError(err.Error())
 	}
 	return nil
@@ -535,7 +652,10 @@ func CopyURLNativeStorage(ctx context.Context, in NativeCopyURLInput) (*NativeCo
 		FileName:     in.FileName,
 		AutoFilename: in.AutoFilename,
 		NoClobber:    in.NoClobber,
-	}, native.SessionOptions{ProxyURL: globalNativeProxyURL()})
+	}, native.SessionOptions{
+		ProxyURL: globalNativeProxyURL(),
+		BwLimit:  globalDefaultBwLimit(),
+	})
 	if err != nil {
 		return nil, publicError(err.Error())
 	}
@@ -788,10 +908,12 @@ func StartJobCheck(jobID int64, download, cryptCheck bool) (*JobCheckResult, err
 					ModifyWindow:   strings.TrimSpace(util.StringValue(job["modifyWindow"])),
 					FastList:       util.ToInt(job["fastList"]) == 1,
 					FollowSymlinks: util.ToInt(job["followSymlinks"]) == 1,
-					UserAgent:      extra.UserAgent,
-					IOTimeout:     extra.IOTimeout,
-					ConTimeout:    extra.ConTimeout,
-					ProxyURL:      globalNativeProxyURL(),
+					UserAgent:       extra.UserAgent,
+					IOTimeout:       extra.IOTimeout,
+					ConTimeout:      extra.ConTimeout,
+					LowLevelRetries: extra.LowLevelRetries,
+					RetriesSleep:    extra.RetriesSleep,
+					ProxyURL:        globalNativeProxyURL(),
 					MaxItems:      capLimit,
 				}, func(st *native.Stats) {
 					if st == nil {
@@ -874,4 +996,246 @@ func CancelJobCheck(jobID int64) error {
 	}
 	sess.finish("cancelled", "")
 	return nil
+}
+
+// IsJobCheckRunning reports whether an asynchronous consistency check is active for jobID.
+func IsJobCheckRunning(jobID int64) bool {
+	jobCheckMu.Lock()
+	sess, ok := jobCheckSessions[jobID]
+	jobCheckMu.Unlock()
+	if !ok || sess == nil {
+		return false
+	}
+	return sess.snapshot().Status == "running"
+}
+
+// ExportJobCheckReport formats the latest consistency check result for jobID as CSV or TXT.
+func ExportJobCheckReport(jobID int64, format string) (string, string, []byte, error) {
+	res, err := GetJobCheck(jobID)
+	if err != nil {
+		return "", "", nil, err
+	}
+	if res == nil {
+		return "", "", nil, publicError("暂无可导出的一致性校验报告")
+	}
+	format = strings.ToLower(strings.TrimSpace(format))
+	if format != "txt" {
+		format = "csv"
+	}
+	ts := time.Now().Format("20060102-150405")
+	if format == "txt" {
+		var b strings.Builder
+		fmt.Fprintf(&b, "OpenSync 一致性校验报告 (任务 #%d, 模式: %s, 状态: %s)\n", res.JobID, res.Mode, res.Status)
+		fmt.Fprintf(&b, "一致: %d | 差异: %d | 目标缺失: %d | 源端缺失: %d | 错误: %d\n\n",
+			res.MatchedCount, res.DifferCount, res.MissingOnDstCount, res.MissingOnSrcCount, res.ErrorCount)
+		writeSection := func(title string, items []string) {
+			if len(items) == 0 {
+				return
+			}
+			fmt.Fprintf(&b, "=== %s (%d) ===\n", title, len(items))
+			for _, item := range items {
+				b.WriteString(item)
+				b.WriteByte('\n')
+			}
+			b.WriteByte('\n')
+		}
+		writeSection("内容差异", res.Differ)
+		writeSection("目标缺失（源有目标无）", res.MissingOnDst)
+		writeSection("源端缺失（目标多余）", res.MissingOnSrc)
+		writeSection("校验错误", res.Errors)
+		return fmt.Sprintf("check-report-job-%d-%s.txt", jobID, ts), "text/plain; charset=utf-8", []byte(b.String()), nil
+	}
+
+	var buf bytes.Buffer
+	buf.WriteString("\xEF\xBB\xBF") // UTF-8 BOM for Excel compatibility
+	w := csv.NewWriter(&buf)
+	_ = w.Write([]string{"分类", "路径/详情"})
+	writeRows := func(cat string, items []string) {
+		for _, item := range items {
+			_ = w.Write([]string{cat, csvSafeCell(item)})
+		}
+	}
+	writeRows("内容差异", res.Differ)
+	writeRows("目标缺失", res.MissingOnDst)
+	writeRows("源端缺失", res.MissingOnSrc)
+	writeRows("校验错误", res.Errors)
+	w.Flush()
+	return fmt.Sprintf("check-report-job-%d-%s.csv", jobID, ts), "text/csv; charset=utf-8", buf.Bytes(), nil
+}
+
+// RepairJobCheckResult triggers a targeted force-overwrite sync for all differing
+// and destination-missing files reported by the latest completed consistency check.
+func RepairJobCheckResult(jobID int64) (int, error) {
+	res, err := GetJobCheck(jobID)
+	if err != nil {
+		return 0, err
+	}
+	if res == nil {
+		return 0, publicError("请先执行一致性校验后再修复差异")
+	}
+	if res.Status == "running" {
+		return 0, publicError("一致性校验仍在进行中，请待校验完成后再修复")
+	}
+	job, err := mapper.GetJobByID(jobID)
+	if err != nil {
+		return 0, publicErrorIf(err, msg.T(msg.JobNotFound))
+	}
+	if util.ToInt(job["method"]) == 3 {
+		return 0, publicError("双向同步暂不支持局部差异修复，请直接执行任务同步")
+	}
+	srcPaths := parsePathList(job["srcPath"])
+	dstPaths := parsePathList(job["dstPath"])
+	multiPair := len(srcPaths)*len(dstPaths) > 1
+
+	seen := make(map[string]struct{})
+	targets := make([]string, 0, len(res.Differ)+len(res.MissingOnDst))
+	addPath := func(raw string) {
+		p := strings.TrimPrefix(path.Clean("/"+strings.TrimSpace(raw)), "/")
+		if p == "" || p == "." || strings.HasPrefix(p, "../") {
+			return
+		}
+		if multiPair {
+			// Multi-pair check results prefix items with the source base folder name;
+			// strip the first segment if it matches a source root basename.
+			seg, rest, hasRest := strings.Cut(p, "/")
+			if hasRest {
+				for _, s := range srcPaths {
+					if path.Base(strings.TrimRight(s, "/")) == seg {
+						p = rest
+						break
+					}
+				}
+			}
+		}
+		if _, dup := seen[p]; dup {
+			return
+		}
+		seen[p] = struct{}{}
+		targets = append(targets, p)
+	}
+	for _, p := range res.Differ {
+		addPath(p)
+	}
+	for _, p := range res.MissingOnDst {
+		addPath(p)
+	}
+	if len(targets) == 0 {
+		return 0, publicError("当前校验结果中没有需要修复的差异或目标缺失文件")
+	}
+	client, err := GetJobClientByID(jobID)
+	if err != nil {
+		return 0, err
+	}
+	if err := client.DoRepairFiles(targets); err != nil {
+		return 0, err
+	}
+	return len(targets), nil
+}
+
+// StartPeriodicCheckScheduler periodically launches consistency checks for jobs
+// configured with extraFlags.checkSchedule (daily / weekly / monthly) and alerts
+// when mismatches or missing files are detected.
+func StartPeriodicCheckScheduler() func() {
+	ctx, cancel := context.WithCancel(context.Background())
+	var (
+		mu      sync.Mutex
+		lastRun = make(map[int64]time.Time)
+	)
+	checkInterval := func(schedule string) time.Duration {
+		switch schedule {
+		case "daily":
+			return 24 * time.Hour
+		case "weekly":
+			return 7 * 24 * time.Hour
+		case "monthly":
+			return 30 * 24 * time.Hour
+		default:
+			return 0
+		}
+	}
+	go func() {
+		ticker := time.NewTicker(15 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-ticker.C:
+				jobs, err := mapper.GetJobListAll()
+				if err != nil {
+					continue
+				}
+				for _, job := range jobs {
+					if ctx.Err() != nil {
+						return
+					}
+					if util.ToInt(job["enable"]) != 1 {
+						continue
+					}
+					extra, _, parseErr := parseNativeExtraFlags(job["extraFlags"])
+					if parseErr != nil || extra.CheckSchedule == "" {
+						continue
+					}
+					interval := checkInterval(extra.CheckSchedule)
+					if interval <= 0 {
+						continue
+					}
+					jobID := util.ToInt64(job["id"])
+					if jobID <= 0 || IsJobCheckRunning(jobID) {
+						continue
+					}
+					mu.Lock()
+					prev := lastRun[jobID]
+					due := prev.IsZero() || now.Sub(prev) >= interval
+					if due {
+						lastRun[jobID] = now
+					}
+					mu.Unlock()
+					if !due {
+						continue
+					}
+					if _, startErr := StartJobCheck(jobID, false, false); startErr != nil {
+						continue
+					}
+					go watchPeriodicCheckAlert(ctx, jobID, jobDisplayName(job))
+				}
+			}
+		}
+	}()
+	return cancel
+}
+
+func watchPeriodicCheckAlert(ctx context.Context, jobID int64, jobName string) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	timeout := time.NewTimer(jobCheckTimeout + time.Minute)
+	defer timeout.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timeout.C:
+			return
+		case <-ticker.C:
+			res, err := GetJobCheck(jobID)
+			if err != nil || res == nil {
+				return
+			}
+			if res.Status == "running" {
+				continue
+			}
+			if res.Status == "completed" && (res.DifferCount > 0 || res.MissingOnDstCount > 0 || res.ErrorCount > 0) {
+				title := fmt.Sprintf("[OpenSync] 定时一致性校验发现差异：%s", jobName)
+				content := fmt.Sprintf("任务「%s」(#%d) 一致性校验完成：\n一致：%d\n内容差异：%d\n目标缺失：%d\n源端缺失：%d\n错误：%d\n请前往任务管理查看校验报告或一键修复。",
+					jobName, jobID, res.MatchedCount, res.DifferCount, res.MissingOnDstCount, res.MissingOnSrcCount, res.ErrorCount)
+				QueueSystemAlertNotification("check_alert", title, content, map[string]string{
+					"jobName": jobName,
+					"jobId":   fmt.Sprintf("%d", jobID),
+				})
+			} else if res.Status == "failed" {
+				log.Printf("Periodic consistency check failed for job %d: %s", jobID, res.Error)
+			}
+			return
+		}
+	}
 }

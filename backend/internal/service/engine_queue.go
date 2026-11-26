@@ -9,11 +9,12 @@ import (
 )
 
 type engineQueueWaiter struct {
-	jobID        int64
-	limit        int
-	storages     []string
-	storageLimit int
-	ch           chan struct{}
+	jobID         int64
+	limit         int
+	storages      []string
+	storageLimit  int
+	storageLimits map[string]int
+	ch            chan struct{}
 }
 
 type engineQueueBucket struct {
@@ -77,12 +78,18 @@ func normalizeQueueStorages(storages []string) []string {
 	return out
 }
 
-func (m *EngineQueueManager) storagesAvailableLocked(storages []string, storageLimit int) bool {
-	if storageLimit <= 0 || len(storages) == 0 {
+func (m *EngineQueueManager) storagesAvailableLocked(storages []string, defaultLimit int, perStorage map[string]int) bool {
+	if len(storages) == 0 {
 		return true
 	}
 	for _, st := range storages {
-		if len(m.storageActive[st]) >= storageLimit {
+		capLimit := defaultLimit
+		if perStorage != nil {
+			if v, ok := perStorage[st]; ok && v > 0 {
+				capLimit = v
+			}
+		}
+		if capLimit > 0 && len(m.storageActive[st]) >= capLimit {
 			return false
 		}
 	}
@@ -144,6 +151,25 @@ func (m *EngineQueueManager) Acquire(ctx context.Context, alistID, jobID int64, 
 // referenced storage buckets (deadlock-free single lock). When storageLimit > 0,
 // each referenced storage is independently capped at storageLimit concurrent jobs.
 func (m *EngineQueueManager) AcquireWithStorages(ctx context.Context, alistID, jobID int64, limit int, storages []string, storageLimit int) (func(), error) {
+	return m.acquireInternal(ctx, alistID, jobID, limit, storages, storageLimit, nil)
+}
+
+// AcquireWithStorageLimits atomically claims an execution slot on alistID and
+// enforces per-storage concurrency caps defined in storageLimits (name -> max).
+func (m *EngineQueueManager) AcquireWithStorageLimits(ctx context.Context, alistID, jobID int64, limit int, storages []string, storageLimits map[string]int) (func(), error) {
+	var copied map[string]int
+	if len(storageLimits) > 0 {
+		copied = make(map[string]int, len(storageLimits))
+		for k, v := range storageLimits {
+			if v > 0 {
+				copied[k] = v
+			}
+		}
+	}
+	return m.acquireInternal(ctx, alistID, jobID, limit, storages, 0, copied)
+}
+
+func (m *EngineQueueManager) acquireInternal(ctx context.Context, alistID, jobID int64, limit int, storages []string, storageLimit int, storageLimits map[string]int) (func(), error) {
 	normStorages := normalizeQueueStorages(storages)
 	if alistID <= 0 && len(normStorages) == 0 {
 		return func() {}, nil
@@ -155,7 +181,7 @@ func (m *EngineQueueManager) AcquireWithStorages(ctx context.Context, alistID, j
 	m.mu.Lock()
 	b := m.bucketLocked(alistID)
 	engineOK := limit <= 0 || len(b.active) < limit
-	storageOK := m.storagesAvailableLocked(normStorages, storageLimit)
+	storageOK := m.storagesAvailableLocked(normStorages, storageLimit, storageLimits)
 	if engineOK && storageOK {
 		b.active[jobID] = struct{}{}
 		m.addStorageActiveLocked(jobID, normStorages)
@@ -164,11 +190,12 @@ func (m *EngineQueueManager) AcquireWithStorages(ctx context.Context, alistID, j
 	}
 
 	waiter := &engineQueueWaiter{
-		jobID:        jobID,
-		limit:        limit,
-		storages:     normStorages,
-		storageLimit: storageLimit,
-		ch:           make(chan struct{}),
+		jobID:         jobID,
+		limit:         limit,
+		storages:      normStorages,
+		storageLimit:  storageLimit,
+		storageLimits: storageLimits,
+		ch:            make(chan struct{}),
 	}
 	b.waiters = append(b.waiters, waiter)
 	m.queuedJobs[jobID] = alistID
@@ -233,7 +260,7 @@ func (m *EngineQueueManager) promoteWaitersLocked(alistID int64, b *engineQueueB
 			// Engine itself is at capacity; no further waiter on this engine can start.
 			return
 		}
-		if !m.storagesAvailableLocked(next.storages, next.storageLimit) {
+		if !m.storagesAvailableLocked(next.storages, next.storageLimit, next.storageLimits) {
 			// This waiter's remote storage is busy; allow independent jobs on other storages to proceed.
 			i++
 			continue
@@ -280,6 +307,29 @@ func (m *EngineQueueManager) RefreshLimit(alistID int64, newLimit int) {
 		w.limit = newLimit
 	}
 	m.promoteWaitersLocked(alistID, b, newLimit)
+}
+
+// RefreshStorageLimits updates per-storage concurrency caps for all queued
+// waiters and promotes any waiters whose storages now have capacity.
+func (m *EngineQueueManager) RefreshStorageLimits(limits map[string]int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for alistID, b := range m.buckets {
+		for _, w := range b.waiters {
+			if len(limits) == 0 {
+				w.storageLimits = nil
+			} else {
+				cp := make(map[string]int, len(limits))
+				for k, v := range limits {
+					if v > 0 {
+						cp[k] = v
+					}
+				}
+				w.storageLimits = cp
+			}
+		}
+		m.promoteWaitersLocked(alistID, b, -1)
+	}
 }
 
 // IsJobQueued reports whether jobID is currently waiting in an engine queue.

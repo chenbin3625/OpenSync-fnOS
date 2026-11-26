@@ -24,6 +24,7 @@ type davRequestCounter struct {
 	prop0    atomic.Int64
 	prop1    atomic.Int64
 	puts     atomic.Int64
+	gets     atomic.Int64
 	reqPaths []string
 }
 
@@ -64,7 +65,10 @@ func newTestWebDAVServer(t *testing.T, rootDir string) (*httptest.Server, *davRe
 				return
 			}
 			w.WriteHeader(http.StatusCreated)
-		case "GET", "HEAD":
+		case "GET":
+			counter.gets.Add(1)
+			http.ServeFile(w, r, full)
+		case "HEAD":
 			http.ServeFile(w, r, full)
 		case "PROPFIND":
 			depth := strings.TrimSpace(r.Header.Get("Depth"))
@@ -302,6 +306,128 @@ func TestSmallCopyUsesNoTraverse(t *testing.T) {
 	}
 	if counter.prop0.Load() == 0 {
 		t.Fatalf("expected Depth:0 probe for small list, got prop0=0")
+	}
+}
+
+func TestStandardWebDAVDefaultCompareUsesSizeOnlyWithoutDownload(t *testing.T) {
+	if os.Getenv("OPENSYNC_RCLONE_BIN") == "" {
+		t.Skip("real rclone required")
+	}
+	base := t.TempDir()
+	src := filepath.Join(base, "src")
+	dst := filepath.Join(base, "dst")
+	if err := os.MkdirAll(src, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dst, 0755); err != nil {
+		t.Fatal(err)
+	}
+	fileA := filepath.Join(src, "movie.bin")
+	fileB := filepath.Join(src, "photo.jpg")
+	stamp := time.Now().Add(-time.Hour)
+	for _, f := range []struct {
+		p    string
+		data string
+	}{
+		{fileA, "aaaaaaaa"},
+		{fileB, "bbbbbbbb"},
+	} {
+		if err := os.WriteFile(f.p, []byte(f.data), 0644); err != nil {
+			t.Fatal(err)
+		}
+		_ = os.Chtimes(f.p, stamp, stamp)
+	}
+
+	srv, counter := newTestWebDAVServer(t, dst)
+	t.Setenv("TRIM_DATA_ACCESSIBLE_PATHS", src)
+	t.Setenv("TRIM_PKGTMP", "")
+	sv, err := virtualLocal(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{
+		"openlist": {
+			"type":   "webdav",
+			"vendor": "other",
+			"url":    srv.URL,
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// 1. Initial sync under default Compare=0 uploads both files with 0 GETs.
+	copied := 0
+	if err := cfg.Copy(ctx, sv, "/openlist/backup", CopyOptions{Transfers: 2, Checkers: 2, Compare: 0}, func(v Event) {
+		if v.File != "" && !v.Failed {
+			copied++
+		}
+	}); err != nil {
+		t.Fatalf("initial openlist copy failed: %v", err)
+	}
+	if copied != 2 || counter.gets.Load() != 0 {
+		t.Fatalf("expected 2 initial copies and 0 GETs, got copied=%d gets=%d", copied, counter.gets.Load())
+	}
+
+	// 2. Repeat sync + dry-run with same-size content edit and newer mtime:
+	// Compare=0 on OpenList (standard WebDAV) must use --size-only and NEVER GET remote files.
+	if err := os.WriteFile(fileA, []byte("cccccccc"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chtimes(fileA, stamp.Add(5*time.Minute), stamp.Add(5*time.Minute))
+	counter.puts.Store(0)
+	counter.gets.Store(0)
+
+	dryCount := 0
+	if err := cfg.Copy(ctx, sv, "/openlist/backup", CopyOptions{DryRun: true, Transfers: 2, Checkers: 2, Compare: 0}, func(v Event) {
+		if v.File != "" {
+			dryCount++
+		}
+	}); err != nil {
+		t.Fatalf("openlist dry-run failed: %v", err)
+	}
+	if dryCount != 0 || counter.gets.Load() != 0 {
+		t.Fatalf("expected 0 dry-run updates and 0 GETs under Compare=0, got dryCount=%d gets=%d", dryCount, counter.gets.Load())
+	}
+
+	repeatCopied := 0
+	if err := cfg.Copy(ctx, sv, "/openlist/backup", CopyOptions{Transfers: 2, Checkers: 2, Compare: 0}, func(v Event) {
+		if v.File != "" && !v.Failed {
+			repeatCopied++
+		}
+	}); err != nil {
+		t.Fatalf("repeat openlist copy failed: %v", err)
+	}
+	if repeatCopied != 0 || counter.puts.Load() != 0 || counter.gets.Load() != 0 {
+		t.Fatalf("expected 0 repeat copies/PUTs/GETs under Compare=0, got copied=%d puts=%d gets=%d", repeatCopied, counter.puts.Load(), counter.gets.Load())
+	}
+
+	// 3. Size-changed file IS uploaded with 0 GETs.
+	if err := os.WriteFile(fileB, []byte("bbbbbbbb-larger"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	sizeChangedCopied := 0
+	if err := cfg.Copy(ctx, sv, "/openlist/backup", CopyOptions{Transfers: 2, Checkers: 2, Compare: 0}, func(v Event) {
+		if v.File != "" && !v.Failed {
+			sizeChangedCopied++
+		}
+	}); err != nil {
+		t.Fatalf("size-changed openlist copy failed: %v", err)
+	}
+	if sizeChangedCopied != 1 || counter.puts.Load() != 1 || counter.gets.Load() != 0 {
+		t.Fatalf("expected 1 size-changed copy with 0 GETs, got copied=%d puts=%d gets=%d", sizeChangedCopied, counter.puts.Load(), counter.gets.Load())
+	}
+
+	// 4. Explicit Compare=2 still performs read-back content verification and updates fileA.
+	explicitCopied := 0
+	if err := cfg.Copy(ctx, sv, "/openlist/backup", CopyOptions{Transfers: 2, Checkers: 2, Compare: 2}, func(v Event) {
+		if v.File != "" && !v.Failed {
+			explicitCopied++
+		}
+	}); err != nil {
+		t.Fatalf("explicit Compare=2 openlist copy failed: %v", err)
+	}
+	if explicitCopied != 1 || counter.gets.Load() == 0 {
+		t.Fatalf("expected Compare=2 to verify via GET and update 1 file, got copied=%d gets=%d", explicitCopied, counter.gets.Load())
 	}
 }
 

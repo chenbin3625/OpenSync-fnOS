@@ -29,6 +29,14 @@ export interface SystemSettings {
   engineHealthCheckInterval: number;
   defaultBwLimit?: string;
   proxyUrl?: string;
+  localMaxConcurrentJobs?: number;
+  minFreeSpaceMB?: number;
+  autoResumeInterrupted?: number;
+  digestEnable?: number;
+  digestSchedule?: string;
+  digestHour?: number;
+  digestWeekday?: number;
+  locale?: string;
 }
 
 export interface EngineStorageStatus {
@@ -51,6 +59,7 @@ export interface EngineHealth {
 export interface NativeRemoteDetail {
   type: string;
   summary?: string;
+  hasCrypt?: string;
 }
 
 export interface NativeLocalRoot {
@@ -66,6 +75,7 @@ export interface NativeRemoteItem {
   configuredSecrets: string[];
   usedByJobs: string[];
   usedByCrypts: string[];
+  maxConcurrentJobs?: number;
   activeJobs?: number;
   queuedJobs?: number;
 }
@@ -75,6 +85,7 @@ export interface NativeStorageState {
   enabled: boolean;
   remark: string;
   maxConcurrentJobs: number;
+  localMaxConcurrentJobs?: number;
   localActiveJobs?: number;
   localQueuedJobs?: number;
   rcloneAvailable: boolean;
@@ -83,6 +94,34 @@ export interface NativeStorageState {
   supportedTypes?: string[];
   localRoots: NativeLocalRoot[];
   remotes: NativeRemoteItem[];
+}
+
+export interface NativeTransferTask {
+  id: string;
+  kind: string;
+  label: string;
+  status: "running" | "completed" | "failed" | "cancelled" | string;
+  doneBytes: number;
+  totalBytes: number;
+  speed: number;
+  percent: number;
+  completedItems: number;
+  totalItems: number;
+  startedAt: number;
+  finishedAt: number;
+  error?: string;
+  detail?: string;
+}
+
+export interface NativeTrashItem {
+  trashPath: string;
+  originalPath: string;
+  bucketDate: string;
+  version: string;
+  name: string;
+  isDir: boolean;
+  size: number;
+  modTime: number;
 }
 
 export interface NativeRenameResult {
@@ -161,6 +200,18 @@ export interface NativeExtraFlags {
   userAgent?: string;
   ioTimeout?: string;
   conTimeout?: string;
+  lowLevelRetries?: number;
+  retriesSleep?: string;
+  resumeEnable?: boolean;
+  resumeMinSizeMB?: number;
+  watchEnable?: boolean;
+  watchDebounceSec?: number;
+  autoRetryMax?: number;
+  autoRetryDelayMin?: number;
+  postSyncJobId?: number;
+  checkSchedule?: string;
+  missedCatchUp?: boolean;
+  directStream?: boolean;
   bisyncResyncMode?: string;
   bisyncMaxDelete?: number;
   bisyncForce?: boolean;
@@ -219,6 +270,37 @@ export interface NativeStorageTestResult {
   message: string;
   warning?: string;
   dirsCount?: number;
+}
+
+export interface NativeAuthQuestionExample {
+  value: string;
+  help: string;
+}
+
+export interface NativeAuthQuestion {
+  state: string;
+  name: string;
+  help: string;
+  default?: string;
+  examples?: NativeAuthQuestionExample[];
+  required?: boolean;
+  isPassword?: boolean;
+  exclusive?: boolean;
+  type?: string;
+  error?: string;
+}
+
+export interface NativeAuthStepSnapshot {
+  sessionId: string;
+  type: string;
+  status: "oauth" | "question" | "completed" | "failed" | "cancelled" | string;
+  authUrl?: string;
+  redirectUri?: string;
+  question?: NativeAuthQuestion;
+  publicOptions?: Record<string, string>;
+  configuredSecrets?: string[];
+  error?: string;
+  expiresAt: number;
 }
 
 export interface AlistItem {
@@ -294,8 +376,11 @@ export interface JobItem {
   // Runtime decorations returned by GET /svr/job
   legacyOpenList?: boolean;
   running?: boolean;
+  paused?: boolean;
   queued?: boolean;
   pendingApproval?: boolean;
+  watching?: boolean;
+  checkRunning?: boolean;
   lastStatus?: number;
   createTime?: number;
   /** Next scheduled run (unix seconds); 0 or absent when not scheduled. */
@@ -334,8 +419,19 @@ export interface TaskItem {
   alistTaskId?: string | null;
   status: number;
   progress?: number | string;
+  doneBytes?: number;
+  speed?: number;
   errMsg?: string | null;
   createTime?: number;
+}
+
+export interface TaskErrorGroup {
+  reason: string;
+  count: number;
+}
+
+export interface TaskItemPageData extends PageData<TaskItem> {
+  errorGroups?: TaskErrorGroup[];
 }
 
 export type TaskNumKey = "wait" | "running" | "success" | "fail" | "other";
@@ -388,6 +484,8 @@ export interface CurrentTaskData {
   speed?: number;
   speedAvg?: number;
   remainTime?: number;
+  paused?: boolean;
+  liveBwLimit?: string;
 }
 
 export interface CurrentTaskView extends CurrentTaskData {
@@ -458,7 +556,10 @@ export interface DashboardJobItem {
   srcPath: string;
   dstPath: string;
   running: boolean;
+  paused?: boolean;
   queued: boolean;
+  watching?: boolean;
+  checkRunning?: boolean;
   currentTaskId: number;
   pendingApproval?: FullSyncApproval | null;
   liveNum?: Record<TaskNumKey, number> | null;
@@ -481,11 +582,32 @@ export interface DashboardJobItem {
   } | null;
 }
 
+export interface DashboardDailyTrend {
+  date: string;
+  runs: number;
+  successRuns: number;
+  failRuns: number;
+  files: number;
+  bytes: number;
+}
+
+export interface DashboardQuotaItem {
+  name: string;
+  type: string;
+  supported: boolean;
+  total?: number;
+  used?: number;
+  free?: number;
+  message?: string;
+}
+
 export interface DashboardOverview {
   kpi: DashboardKPI;
   recent7d: DashboardRecent7d;
   pendingApprovals: DashboardPendingApproval[];
   jobs: DashboardJobItem[];
+  dailyTrend?: DashboardDailyTrend[];
+  storageQuotas?: DashboardQuotaItem[];
 }
 
 export interface BatchJobActionResult {

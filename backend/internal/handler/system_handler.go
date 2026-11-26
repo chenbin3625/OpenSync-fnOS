@@ -16,9 +16,21 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+type systemSettingsResponse struct {
+	config.SystemSettings
+	Locale string `json:"locale"`
+}
+
+func currentSystemSettingsResponse() systemSettingsResponse {
+	return systemSettingsResponse{
+		SystemSettings: config.GetSystemSettings(),
+		Locale:         config.GetEffectiveLocale(),
+	}
+}
+
 // GetSystemConfig handles GET /svr/system/config
 func GetSystemConfig(c *gin.Context) {
-	respondOK(c, config.GetSystemSettings())
+	respondOK(c, currentSystemSettingsResponse())
 }
 
 // systemSettingsPatch mirrors config.SystemSettings with pointer fields so an
@@ -37,6 +49,14 @@ type systemSettingsPatch struct {
 	EngineHealthCheckInterval *int    `json:"engineHealthCheckInterval"`
 	DefaultBwLimit            *string `json:"defaultBwLimit"`
 	ProxyURL                  *string `json:"proxyUrl"`
+	LocalMaxConcurrentJobs    *int    `json:"localMaxConcurrentJobs"`
+	MinFreeSpaceMB            *int    `json:"minFreeSpaceMB"`
+	AutoResumeInterrupted     *int    `json:"autoResumeInterrupted"`
+	DigestEnable              *int    `json:"digestEnable"`
+	DigestSchedule            *string `json:"digestSchedule"`
+	DigestHour                *int    `json:"digestHour"`
+	DigestWeekday             *int    `json:"digestWeekday"`
+	Locale                    *string `json:"locale"`
 }
 
 // applyTo overlays the provided fields on the current settings.
@@ -54,6 +74,12 @@ func (p systemSettingsPatch) applyTo(current config.SystemSettings) config.Syste
 		{p.ScheduledFullSyncConfirm, &next.ScheduledFullSyncConfirm},
 		{p.FullSyncApprovalTimeout, &next.FullSyncApprovalTimeout},
 		{p.EngineHealthCheckInterval, &next.EngineHealthCheckInterval},
+		{p.LocalMaxConcurrentJobs, &next.LocalMaxConcurrentJobs},
+		{p.MinFreeSpaceMB, &next.MinFreeSpaceMB},
+		{p.AutoResumeInterrupted, &next.AutoResumeInterrupted},
+		{p.DigestEnable, &next.DigestEnable},
+		{p.DigestHour, &next.DigestHour},
+		{p.DigestWeekday, &next.DigestWeekday},
 	} {
 		if field.src != nil {
 			*field.dst = *field.src
@@ -64,6 +90,9 @@ func (p systemSettingsPatch) applyTo(current config.SystemSettings) config.Syste
 	}
 	if p.ProxyURL != nil {
 		next.ProxyURL = *p.ProxyURL
+	}
+	if p.DigestSchedule != nil {
+		next.DigestSchedule = *p.DigestSchedule
 	}
 	return next
 }
@@ -94,11 +123,25 @@ func UpdateSystemConfig(c *gin.Context) {
 		respondError(c, err.Error())
 		return
 	}
+	if patch.Locale != nil {
+		if err := config.UpdateLocale(*patch.Locale); err != nil {
+			if errors.Is(err, config.ErrConfigWrite) {
+				log.Printf("save system locale failed: %v", err)
+				c.JSON(500, model.Error(msg.T(msg.ConfigSaveFail)))
+				return
+			}
+			respondError(c, err.Error())
+			return
+		}
+	}
 	// Applying the new retention window can delete a large backlog and VACUUM
 	// the database. That must not hold the config response open, and nothing in
 	// the response depends on it.
 	service.StartTaskRetentionCleanupAsync()
-	respondOK(c, config.GetSystemSettings())
+	if patch.DefaultBwLimit != nil {
+		service.ApplyGlobalDefaultBwLimitAsync(config.GetSystemSettings().DefaultBwLimit)
+	}
+	respondOK(c, currentSystemSettingsResponse())
 }
 
 // GetDashboard handles GET /svr/dashboard

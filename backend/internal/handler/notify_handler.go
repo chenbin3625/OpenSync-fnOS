@@ -227,3 +227,16 @@ func DeleteNotify(c *gin.Context) {
 		return service.DeleteNotify(notifyID)
 	})
 }
+
+// SendDigestNow handles POST /svr/notify/digest
+func SendDigestNow(c *gin.Context) {
+	var req struct {
+		Period string `json:"period"`
+	}
+	if !bindJSONStrict(c, &req) {
+		return
+	}
+	handleServiceVoid(c, func() error {
+		return service.SendDigestNow(req.Period)
+	})
+}

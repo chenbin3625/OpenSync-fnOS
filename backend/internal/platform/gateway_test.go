@@ -494,3 +494,27 @@ func TestGatewayDevelopmentModeLogsWarning(t *testing.T) {
 		t.Fatalf("logs = %q, want development-mode warning", logs)
 	}
 }
+
+func TestGatewayAllowsOctetStreamOnlyForStorageUpload(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(GatewayRequired(false, nil))
+	r.POST("/app/opensync/svr/native/storage/upload", func(c *gin.Context) { c.Status(200) })
+	r.POST("/app/opensync/svr/job", func(c *gin.Context) { c.Status(200) })
+
+	if code := serveGatewayRequest(t, r, http.MethodPost, "http://app.sock/app/opensync/svr/native/storage/upload", map[string]string{
+		"Content-Type": "application/octet-stream",
+	}, true); code != 200 {
+		t.Fatalf("expected octet-stream upload to return 200, got %d", code)
+	}
+	if code := serveGatewayRequest(t, r, http.MethodPost, "http://app.sock/app/opensync/svr/native/storage/upload", map[string]string{
+		"Content-Type": "text/plain",
+	}, true); code != 403 {
+		t.Fatalf("expected text/plain upload to be rejected with 403, got %d", code)
+	}
+	if code := serveGatewayRequest(t, r, http.MethodPost, "http://app.sock/app/opensync/svr/job", map[string]string{
+		"Content-Type": "application/octet-stream",
+	}, true); code != 403 {
+		t.Fatalf("expected octet-stream on non-upload route to be rejected with 403, got %d", code)
+	}
+}

@@ -35,6 +35,8 @@ export const notifyEventOptions = [
   { value: "timeout", label: "任务超时" },
   { value: "approval", label: "全量删除待审批" },
   { value: "engine_alert", label: "存储引擎健康告警" },
+  { value: "check_alert", label: "定时一致性校验差异告警" },
+  { value: "digest", label: "定时汇总摘要（日报/周报）" },
 ] as const;
 
 export const notifyTemplateVariables = [

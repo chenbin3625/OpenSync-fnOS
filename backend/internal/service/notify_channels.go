@@ -35,6 +35,8 @@ var validNotifyEvents = map[string]struct{}{
 	"timeout":      {},
 	"approval":     {},
 	"engine_alert": {},
+	"check_alert":  {},
+	"digest":       {},
 }
 
 // errorNotifyEvents are the events matched by eventMode="errors_only".
@@ -44,6 +46,7 @@ var errorNotifyEvents = map[string]struct{}{
 	"timeout":      {},
 	"approval":     {},
 	"engine_alert": {},
+	"check_alert":  {},
 }
 
 func validateNotifyEventFilter(params map[string]interface{}) error {

@@ -3,6 +3,7 @@ import Button from "@douyinfe/semi-ui/lib/es/button";
 import Checkbox from "@douyinfe/semi-ui/lib/es/checkbox";
 import Input from "@douyinfe/semi-ui/lib/es/input";
 import Modal from "@douyinfe/semi-ui/lib/es/modal";
+import Progress from "@douyinfe/semi-ui/lib/es/progress";
 import Select from "@douyinfe/semi-ui/lib/es/select";
 import Spin from "@douyinfe/semi-ui/lib/es/spin";
 import Tag from "@douyinfe/semi-ui/lib/es/tag";
@@ -36,13 +37,16 @@ import {
   errorToast,
 } from "./common";
 import { api } from "../api/client";
+import {
+  NativeStorageAuthWizard,
+  type CompletedAuthSession,
+} from "./NativeStorageAuthWizard";
 import { formatSize } from "../pages/Home/homeUtils";
 import { formatTimestamp } from "../utils/date";
 import type {
   AlistItem,
   NativeAboutInfo,
   NativeBrowseResult,
-  NativeCopyURLResult,
   NativeDedupeResult,
   NativeDirEntry,
   NativeImportPreview,
@@ -51,6 +55,8 @@ import type {
   NativeSizeInfo,
   NativeStorageState,
   NativeStorageTestResult,
+  NativeTransferTask,
+  NativeTrashItem,
 } from "../types";
 
 type RemoteFormType =
@@ -372,6 +378,9 @@ interface RemoteFormDraft {
   options: Record<string, string>;
   configuredSecrets: string[];
   clearSecrets: string[];
+  authSessionId?: string;
+  authPublicOptions?: Record<string, string>;
+  authConfiguredSecrets?: string[];
 }
 
 export function emptyDraft(type: RemoteFormType = "s3"): RemoteFormDraft {
@@ -387,6 +396,9 @@ export function emptyDraft(type: RemoteFormType = "s3"): RemoteFormDraft {
     options: {},
     configuredSecrets: [],
     clearSecrets: [],
+    authSessionId: undefined,
+    authPublicOptions: undefined,
+    authConfiguredSecrets: undefined,
   };
 }
 
@@ -395,7 +407,7 @@ export function draftFromRemote(item: NativeRemoteItem): RemoteFormDraft {
     formTypes.includes(item.type as RemoteFormType) ? item.type : "s3"
   ) as RemoteFormType;
   const opts = { ...(item.options || {}) };
-  const provider = opts.provider || "Alibaba";
+  const provider = opts.provider || "Other";
   const vendor = opts.vendor || "other";
   const forcePathStyle = opts.force_path_style === "true";
   const noCheckBucket = opts.no_check_bucket === "true";
@@ -436,6 +448,7 @@ function snapshotDraft(d: RemoteFormDraft): string {
     authMode: d.authMode,
     options: sortedOpts,
     clearSecrets: [...d.clearSecrets].sort(),
+    authSessionId: d.authSessionId || "",
   });
 }
 
@@ -486,7 +499,65 @@ export function buildRemoteOptions(draft: RemoteFormDraft): Record<string, strin
   if (draft.type === "webdav" && draft.vendor) {
     settings.vendor = draft.vendor;
   }
+  if (draft.type === "sftp") {
+    // Backend enforces shell_type exclusively from allow_hashcheck (unix vs none).
+    delete settings.shell_type;
+  }
   return settings;
+}
+
+const remoteNamePattern = /^[\p{L}\p{N}_][\p{L}\p{N}_. -]{0,63}$/u;
+
+export function validateRemoteName(raw: string): string {
+  const name = raw.trim();
+  if (!name) {
+    return "请输入存储名称";
+  }
+  if (
+    name === "本地" ||
+    name.toLowerCase() === "rclone_config" ||
+    name.toLowerCase().startsWith("_opensync_")
+  ) {
+    return "不能使用系统保留名称";
+  }
+  if (!remoteNamePattern.test(name)) {
+    return "存储名称需以字母、数字、中文或下划线开头（1–64 个字符），不能包含 / : \\ 等特殊字符";
+  }
+  return "";
+}
+
+export function appendCombineUpstream(
+  current: string,
+  src: { value: string; kind: "remote" | "local" },
+): string {
+  const rawBase =
+    src.kind === "local"
+      ? src.value.split("/").filter(Boolean).pop() || "local"
+      : src.value.replace(/:$/, "");
+  const baseName = rawBase.replace(/[^\p{L}\p{N}_-]/gu, "") || "dir";
+
+  const existingNames = new Set<string>();
+  const trimmedCur = current.trim();
+  if (trimmedCur) {
+    const tokenRegex = /"([^"]*)"|(\S+)/g;
+    let match: RegExpExecArray | null;
+    while ((match = tokenRegex.exec(trimmedCur)) !== null) {
+      const tok = match[1] ?? match[2] ?? "";
+      const eqIdx = tok.indexOf("=");
+      if (eqIdx > 0) {
+        existingNames.add(tok.slice(0, eqIdx).trim().toLowerCase());
+      }
+    }
+  }
+
+  let dirName = baseName;
+  let seq = 2;
+  while (existingNames.has(dirName.toLowerCase())) {
+    dirName = `${baseName}_${seq++}`;
+  }
+  const rawEntry = `${dirName}=${src.value}`;
+  const entry = /\s/.test(rawEntry) ? `"${rawEntry}"` : rawEntry;
+  return trimmedCur ? `${trimmedCur} ${entry}` : entry;
 }
 
 function isBoolTrue(opts: Record<string, string>, key: string): boolean {
@@ -498,21 +569,16 @@ export function validateRemoteDraft(
   requireName: boolean,
 ): Record<string, string> {
   const errs: Record<string, string> = {};
-  const name = draft.name.trim();
   if (requireName) {
-    if (!name) {
-      errs.name = "请输入存储名称";
-    } else if (
-      name === "本地" ||
-      name.toLowerCase() === "rclone_config" ||
-      name.toLowerCase().startsWith("_opensync_")
-    ) {
-      errs.name = "不能使用系统保留名称";
+    const nameErr = validateRemoteName(draft.name);
+    if (nameErr) {
+      errs.name = nameErr;
     }
   }
 
   const hasSecret = (key: string) =>
     Boolean(draft.options[key]) ||
+    Boolean(draft.authSessionId && draft.authConfiguredSecrets?.includes(key)) ||
     (draft.editing &&
       draft.configuredSecrets.includes(key) &&
       !draft.clearSecrets.includes(key));
@@ -584,14 +650,18 @@ export function validateRemoteDraft(
   } else if (oauthTypes.has(draft.type)) {
     if (draft.type === "drive") {
       if (!hasSecret("token") && !hasSecret("service_account_credentials")) {
-        errs.token = "请填写 OAuth Token JSON 或 Service Account 凭据 JSON";
+        errs.token = "请先完成 Google Drive 网页授权登录，或填写 Service Account 凭据 JSON";
       }
     } else if (draft.type === "pcloud") {
       if (!hasSecret("token") && (!(draft.options.username || "").trim() || !hasSecret("password"))) {
-        errs.token = "请填写 OAuth Token JSON（或用户名与密码）";
+        errs.token = "请先完成 pCloud 网页授权登录，或填写账号邮箱与密码";
+      }
+    } else if (draft.type === "jottacloud") {
+      if (!hasSecret("token")) {
+        errs.token = "请先完成 Jottacloud 授权配置";
       }
     } else if (!hasSecret("token")) {
-      errs.token = "请填写有效的 OAuth Token JSON";
+      errs.token = "请先完成网页授权登录";
     }
   } else if (draft.type === "mega") {
     if (!(draft.options.user || "").trim()) {
@@ -627,7 +697,7 @@ export function validateRemoteDraft(
       !isBoolTrue(draft.options, "anonymous")
     ) {
       errs.service_account_credentials =
-        "请填写 Service Account JSON 凭据、OAuth Token 或开启匿名访问";
+        "请先完成 Google 网页授权、填写 Service Account JSON 凭据或开启匿名访问";
     }
   } else if (draft.type === "swift") {
     const hasAppCred =
@@ -790,6 +860,7 @@ export function NativeStorageEditor({
   const [maxConcurrentJobs, setMaxConcurrentJobs] = useState(
     String(engine?.maxConcurrentJobs ?? 0),
   );
+  const [localMaxConcurrentJobs, setLocalMaxConcurrentJobs] = useState("0");
   const [savingEngine, setSavingEngine] = useState(false);
   const [deletingName, setDeletingName] = useState<string | null>(null);
   const [testingRemoteName, setTestingRemoteName] = useState<string | null>(null);
@@ -832,6 +903,23 @@ export function NativeStorageEditor({
         initialDraftValue.options.description,
     ),
   );
+  const [oauthAdvancedOpen, setOauthAdvancedOpen] = useState(() =>
+    Boolean(
+      initialDraftValue.options.client_id ||
+        initialDraftValue.configuredSecrets.includes("client_secret"),
+    ),
+  );
+  const completedAuthRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    completedAuthRef.current = draft.authSessionId;
+  }, [draft.authSessionId]);
+  useEffect(() => {
+    return () => {
+      if (completedAuthRef.current) {
+        void api.cancelNativeStorageAuth(completedAuthRef.current).catch(() => undefined);
+      }
+    };
+  }, []);
 
   // Import rclone.conf view
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -892,6 +980,22 @@ export function NativeStorageEditor({
   const [setTierValue, setSetTierValue] = useState("");
   const [setTierBusy, setSetTierBusy] = useState(false);
   const [deletingEntryPath, setDeletingEntryPath] = useState<string | null>(null);
+  const [browseSearch, setBrowseSearch] = useState("");
+  const [browseSort, setBrowseSort] = useState<
+    "name_asc" | "name_desc" | "size_desc" | "mtime_desc"
+  >("name_asc");
+  const [selectedBrowsePaths, setSelectedBrowsePaths] = useState<string[]>([]);
+  const [batchRestoreOpen, setBatchRestoreOpen] = useState(false);
+  const [batchMoveOpen, setBatchMoveOpen] = useState(false);
+  const [batchMoveDstDir, setBatchMoveDstDir] = useState("");
+  const [uploadingFile, setUploadingFile] = useState(false);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
+  const [transfers, setTransfers] = useState<NativeTransferTask[]>([]);
+  const [transfersOpen, setTransfersOpen] = useState(false);
+  const [trashOpen, setTrashOpen] = useState(false);
+  const [trashLoading, setTrashLoading] = useState(false);
+  const [trashItems, setTrashItems] = useState<NativeTrashItem[]>([]);
+  const [restoringTrashPath, setRestoringTrashPath] = useState<string | null>(null);
 
   const notifyParent = useCallback(() => {
     onChanged?.();
@@ -906,6 +1010,7 @@ export function NativeStorageEditor({
       setState(next);
       setRemark(next.remark || "内置存储");
       setMaxConcurrentJobs(String(next.maxConcurrentJobs ?? 0));
+      setLocalMaxConcurrentJobs(String(next.localMaxConcurrentJobs ?? 0));
       if (mode === "export") {
         setSelectedExports(
           (next.remotes || [])
@@ -934,9 +1039,11 @@ export function NativeStorageEditor({
     if (!state) return false;
     return (
       remark.trim() !== (state.remark || "内置存储") ||
-      (maxConcurrentJobs.trim() || "0") !== String(state.maxConcurrentJobs ?? 0)
+      (maxConcurrentJobs.trim() || "0") !== String(state.maxConcurrentJobs ?? 0) ||
+      (localMaxConcurrentJobs.trim() || "0") !==
+        String(state.localMaxConcurrentJobs ?? 0)
     );
-  }, [state, remark, maxConcurrentJobs]);
+  }, [state, remark, maxConcurrentJobs, localMaxConcurrentJobs]);
 
   const formDirty = useMemo(
     () => view === "form" && snapshotDraft(draft) !== initialDraftSnap,
@@ -998,15 +1105,28 @@ export function NativeStorageEditor({
       Toast.warning("最大并发任务数请输入 0–50 的整数");
       return;
     }
+    const rawLocalMc = localMaxConcurrentJobs.trim() || "0";
+    const parsedLocalMc = Number(rawLocalMc);
+    if (
+      !/^\d+$/.test(rawLocalMc) ||
+      !Number.isInteger(parsedLocalMc) ||
+      parsedLocalMc < 0 ||
+      parsedLocalMc > 50
+    ) {
+      Toast.warning("本地存储最大并发任务数请输入 0–50 的整数");
+      return;
+    }
     setSavingEngine(true);
     try {
       const updated = await api.saveNativeEngine({
         remark: trimmedRemark,
         maxConcurrentJobs: parsedMc,
+        localMaxConcurrentJobs: parsedLocalMc,
       });
       setState(updated);
       setRemark(updated.remark || "内置存储");
       setMaxConcurrentJobs(String(updated.maxConcurrentJobs ?? 0));
+      setLocalMaxConcurrentJobs(String(updated.localMaxConcurrentJobs ?? 0));
       Toast.success("本地目录与引擎设置已保存");
       notifyParent();
       if (focusedMode) {
@@ -1021,16 +1141,23 @@ export function NativeStorageEditor({
 
   // --- Overview remote actions ---
   const openAddForm = (type: RemoteFormType = "s3") => {
+    if (draft.authSessionId) {
+      void api.cancelNativeStorageAuth(draft.authSessionId).catch(() => undefined);
+    }
     const next = emptyDraft(type);
     setDraft(next);
     setInitialDraftSnap(snapshotDraft(next));
     setFieldErrors({});
     setFormTestResult(null);
     setAdvancedOpen(false);
+    setOauthAdvancedOpen(false);
     setView("form");
   };
 
   const openEditForm = (item: NativeRemoteItem) => {
+    if (draft.authSessionId) {
+      void api.cancelNativeStorageAuth(draft.authSessionId).catch(() => undefined);
+    }
     const next = draftFromRemote(item);
     setDraft(next);
     setInitialDraftSnap(snapshotDraft(next));
@@ -1045,6 +1172,12 @@ export function NativeStorageEditor({
           next.options.allow_hashcheck ||
           next.options.filename_encryption ||
           next.options.description,
+      ),
+    );
+    setOauthAdvancedOpen(
+      Boolean(
+        next.options.client_id ||
+          next.configuredSecrets.includes("client_secret"),
       ),
     );
     setView("form");
@@ -1107,6 +1240,15 @@ export function NativeStorageEditor({
 
   const backToOverview = () => {
     const leave = () => {
+      if (draft.authSessionId) {
+        void api.cancelNativeStorageAuth(draft.authSessionId).catch(() => undefined);
+        setDraft((prev) => ({
+          ...prev,
+          authSessionId: undefined,
+          authPublicOptions: undefined,
+          authConfiguredSecrets: undefined,
+        }));
+      }
       setFieldErrors({});
       setFormTestResult(null);
       setRestoreEntry(null);
@@ -1161,8 +1303,9 @@ export function NativeStorageEditor({
   const handleExecuteRename = async () => {
     if (!renameTarget) return;
     const trimmed = renameNewName.trim();
-    if (!trimmed) {
-      Toast.warning("请输入新的存储名称");
+    const nameErr = validateRemoteName(trimmed);
+    if (nameErr) {
+      Toast.warning(nameErr);
       return;
     }
     setRenaming(true);
@@ -1222,6 +1365,191 @@ export function NativeStorageEditor({
     }
   };
 
+  const refreshTransfers = useCallback(async () => {
+    try {
+      const list = await api.listNativeTransfers();
+      setTransfers(list || []);
+    } catch {
+      /* transient transfer list refresh error ignored */
+    }
+  }, []);
+
+  useEffect(() => {
+    if (view !== "browse") return;
+    void refreshTransfers();
+    const timer = window.setInterval(() => {
+      void refreshTransfers();
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [view, refreshTransfers]);
+
+  useEffect(() => {
+    setSelectedBrowsePaths([]);
+    setTrashOpen(false);
+    setTrashItems([]);
+  }, [browsePath]);
+
+  const filteredBrowseEntries = useMemo(() => {
+    const entries = browseData?.entries || [];
+    const kw = browseSearch.trim().toLowerCase();
+    const filtered = kw
+      ? entries.filter((e) => e.name.toLowerCase().includes(kw))
+      : entries.slice();
+    filtered.sort((a, b) => {
+      if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+      switch (browseSort) {
+        case "name_desc":
+          return b.name.localeCompare(a.name);
+        case "size_desc":
+          return (b.size || 0) - (a.size || 0);
+        case "mtime_desc":
+          return (b.modTime || 0) - (a.modTime || 0);
+        default:
+          return a.name.localeCompare(b.name);
+      }
+    });
+    return filtered;
+  }, [browseData?.entries, browseSearch, browseSort]);
+
+  const activeTransferCount = useMemo(
+    () => transfers.filter((t) => t.status === "running").length,
+    [transfers],
+  );
+
+  const handleUploadFileChange = async (file?: File) => {
+    if (!file || browsePath === "/") return;
+    setUploadingFile(true);
+    try {
+      const res = await api.uploadNativeStorageFile(browsePath, file);
+      Toast.success(`已上传「${res.fileName}」（${formatSize(res.size)}）`);
+      await loadBrowse(browsePath);
+    } catch (err) {
+      errorToast(err);
+    } finally {
+      setUploadingFile(false);
+      if (uploadInputRef.current) uploadInputRef.current.value = "";
+    }
+  };
+
+  const handleLoadTrash = async () => {
+    if (browsePath === "/") return;
+    setTrashOpen(true);
+    setTrashLoading(true);
+    try {
+      const items = await api.browseNativeTrash(browsePath);
+      setTrashItems(items || []);
+    } catch (err) {
+      errorToast(err);
+    } finally {
+      setTrashLoading(false);
+    }
+  };
+
+  const handleRestoreTrashItem = async (item: NativeTrashItem) => {
+    setRestoringTrashPath(item.trashPath);
+    try {
+      await api.restoreNativeTrashItem({
+        trashPath: item.trashPath,
+        originalPath: item.originalPath,
+        isDir: item.isDir,
+        overwrite: true,
+      });
+      Toast.success(`已将「${item.name}」还原至 ${item.originalPath}`);
+      setTrashItems((prev) => prev.filter((x) => x.trashPath !== item.trashPath));
+      await loadBrowse(browsePath);
+    } catch (err) {
+      errorToast(err);
+    } finally {
+      setRestoringTrashPath(null);
+    }
+  };
+
+  const selectedBrowseEntries = useMemo(() => {
+    const set = new Set(selectedBrowsePaths);
+    return (browseData?.entries || []).filter((e) => set.has(e.path));
+  }, [browseData?.entries, selectedBrowsePaths]);
+
+  const handleBatchDeleteSelected = () => {
+    if (!selectedBrowseEntries.length) return;
+    confirmDelete(
+      `批量删除选中的 ${selectedBrowseEntries.length} 项？`,
+      async () => {
+        try {
+          await api.startBatchNativeStorageAction({
+            action: "delete",
+            items: selectedBrowseEntries.map((e) => ({
+              path: e.path,
+              isDir: e.isDir,
+            })),
+          });
+          setSelectedBrowsePaths([]);
+          setTransfersOpen(true);
+          Toast.success("已提交后台批量删除任务");
+          await refreshTransfers();
+        } catch (err) {
+          errorToast(err);
+        }
+      },
+      "删除任务将在后台异步队列中执行，操作不可撤销。",
+    );
+  };
+
+  const handleBatchRestoreSelected = async () => {
+    if (!selectedBrowseEntries.length) return;
+    const baseRoot = restoreLocalRoot.trim();
+    if (!baseRoot) {
+      Toast.warning("请先选择本地授权目录");
+      return;
+    }
+    const sub = restoreSubPath.trim().replace(/^\/+|\/+$/g, "");
+    const dstDir = sub ? `${baseRoot.replace(/\/+$/, "")}/${sub}` : baseRoot;
+    try {
+      await api.startBatchNativeStorageAction({
+        action: "restore",
+        items: selectedBrowseEntries.map((e) => ({
+          path: e.path,
+          isDir: e.isDir,
+        })),
+        dstLocalDir: dstDir,
+        overwrite: restoreOverwrite,
+      });
+      setBatchRestoreOpen(false);
+      setSelectedBrowsePaths([]);
+      setTransfersOpen(true);
+      Toast.success(`已提交后台批量恢复（${selectedBrowseEntries.length} 项）`);
+      await refreshTransfers();
+    } catch (err) {
+      errorToast(err);
+    }
+  };
+
+  const handleBatchMoveSelected = async () => {
+    if (!selectedBrowseEntries.length) return;
+    const dstDir = batchMoveDstDir.trim();
+    if (!dstDir) {
+      Toast.warning("请输入目标目录路径");
+      return;
+    }
+    try {
+      await api.startBatchNativeStorageAction({
+        action: "move",
+        items: selectedBrowseEntries.map((e) => ({
+          path: e.path,
+          isDir: e.isDir,
+        })),
+        dstDir,
+      });
+      setBatchMoveOpen(false);
+      setBatchMoveDstDir("");
+      setSelectedBrowsePaths([]);
+      setTransfersOpen(true);
+      Toast.success(`已提交后台批量移动（${selectedBrowseEntries.length} 项）`);
+      await refreshTransfers();
+    } catch (err) {
+      errorToast(err);
+    }
+  };
+
   const handleExecuteRestore = async () => {
     if (!restoreEntry) return;
     const baseRoot = restoreLocalRoot.trim();
@@ -1233,14 +1561,16 @@ export function NativeStorageEditor({
     const dstDir = sub ? `${baseRoot.replace(/\/+$/, "")}/${sub}` : baseRoot;
     setRestoring(true);
     try {
-      await api.restoreNativeFile({
+      await api.startAsyncRestoreNativeFile({
         srcPath: restoreEntry.path,
         dstLocalDir: dstDir,
         isDir: restoreEntry.isDir,
         overwrite: restoreOverwrite,
       });
-      Toast.success(`已恢复「${restoreEntry.name}」到 ${dstDir}`);
+      Toast.success(`已加入后台恢复队列：「${restoreEntry.name}」→ ${dstDir}`);
       setRestoreEntry(null);
+      setTransfersOpen(true);
+      await refreshTransfers();
     } catch (err) {
       errorToast(err);
     } finally {
@@ -1359,18 +1689,19 @@ export function NativeStorageEditor({
     }
     setCopyUrlBusy(true);
     try {
-      const res: NativeCopyURLResult = await api.copyUrlNativeStorage({
+      await api.startAsyncCopyUrlNativeStorage({
         url: targetUrl,
         dstDir: browsePath,
         fileName: copyUrlAutoName ? undefined : copyUrlName.trim(),
         autoFilename: copyUrlAutoName,
         noClobber: copyUrlNoClobber,
       });
-      Toast.success(`已拉取文件${res.fileName ? `：${res.fileName}` : ""}`);
+      Toast.success("已加入后台离线下载队列（支持断点续传与实时进度）");
       setCopyUrlOpen(false);
       setCopyUrlTarget("");
       setCopyUrlName("");
-      await loadBrowse(browsePath);
+      setTransfersOpen(true);
+      await refreshTransfers();
     } catch (err) {
       errorToast(err);
     } finally {
@@ -1519,13 +1850,50 @@ export function NativeStorageEditor({
   };
 
   const handleFormTypeChange = (nextType: RemoteFormType) => {
+    if (draft.authSessionId) {
+      void api.cancelNativeStorageAuth(draft.authSessionId).catch(() => undefined);
+    }
     setDraft((prev) => ({
       ...emptyDraft(nextType),
       name: prev.name,
     }));
+    setOauthAdvancedOpen(false);
     setFieldErrors({});
     setFormTestResult(null);
   };
+
+  const handleAuthCompleted = useCallback((result: CompletedAuthSession) => {
+    setDraft((prev) => {
+      if (prev.authSessionId && prev.authSessionId !== result.sessionId) {
+        void api.cancelNativeStorageAuth(prev.authSessionId).catch(() => undefined);
+      }
+      const nextOptions = { ...prev.options };
+      for (const [k, v] of Object.entries(result.publicOptions || {})) {
+        if (v !== "") {
+          nextOptions[k] = v;
+        }
+      }
+      const nextClear = prev.clearSecrets.filter(
+        (k) => !result.configuredSecrets.includes(k),
+      );
+      return {
+        ...prev,
+        options: nextOptions,
+        clearSecrets: nextClear,
+        authSessionId: result.sessionId,
+        authPublicOptions: result.publicOptions,
+        authConfiguredSecrets: result.configuredSecrets,
+      };
+    });
+    setFieldErrors((prev) => {
+      const next = { ...prev };
+      delete next.token;
+      delete next.service_account_credentials;
+      delete next.pass;
+      return next;
+    });
+    setFormTestResult(null);
+  }, []);
 
   const handleProviderChange = (nextProvider: string) => {
     setDraft((prev) => ({
@@ -1557,6 +1925,7 @@ export function NativeStorageEditor({
         options: buildRemoteOptions(draft),
         editing: draft.editing,
         clearSecrets: draft.clearSecrets.length > 0 ? draft.clearSecrets : undefined,
+        authSessionId: draft.authSessionId || undefined,
       });
       setFormTestResult(res);
     } catch (err) {
@@ -1583,13 +1952,17 @@ export function NativeStorageEditor({
           options,
           clearSecrets:
             draft.clearSecrets.length > 0 ? draft.clearSecrets : undefined,
+          authSessionId: draft.authSessionId || undefined,
         });
+        completedAuthRef.current = undefined;
         Toast.success(`存储「${trimmedName}」已更新`);
       } else {
         await api.saveNativeStorage({
           name: trimmedName,
           options,
+          authSessionId: draft.authSessionId || undefined,
         });
+        completedAuthRef.current = undefined;
         Toast.success(`存储「${trimmedName}」已添加`);
       }
       setRemoteTestResults((prev) => {
@@ -2034,7 +2407,7 @@ export function NativeStorageEditor({
                   <h3>内置引擎设置</h3>
                 </div>
               </div>
-              <div className="form-grid form-grid--two">
+              <div className="form-grid form-grid--three">
                 <Field label="显示名称" required>
                   <Input
                     value={remark}
@@ -2044,13 +2417,24 @@ export function NativeStorageEditor({
                   />
                 </Field>
                 <Field
-                  label="最大并发任务数"
+                  label="全局最大并发任务数"
                   hint="0 表示不限制；1 表示全局串行排队（0–50）"
                 >
                   <Input
                     inputMode="numeric"
                     value={maxConcurrentJobs}
                     onChange={setMaxConcurrentJobs}
+                    placeholder="0"
+                  />
+                </Field>
+                <Field
+                  label="本地磁盘并发上限"
+                  hint="限制同时读写本地磁盘的任务数，防硬盘过载（0–50）"
+                >
+                  <Input
+                    inputMode="numeric"
+                    value={localMaxConcurrentJobs}
+                    onChange={setLocalMaxConcurrentJobs}
                     placeholder="0"
                   />
                 </Field>
@@ -2447,6 +2831,14 @@ export function NativeStorageEditor({
                       label: "SFTP",
                       apply: () => handleFormTypeChange("sftp"),
                     },
+                    {
+                      label: "OneDrive",
+                      apply: () => handleFormTypeChange("onedrive"),
+                    },
+                    {
+                      label: "Google Drive",
+                      apply: () => handleFormTypeChange("drive"),
+                    },
                   ] as const
                 ).map((preset) => (
                   <button
@@ -2656,7 +3048,7 @@ export function NativeStorageEditor({
                   <div className="sync-method-banner">
                     <IconInfoCircle aria-hidden="true" size="small" />
                     <span>
-                      接入 OpenList / AList（夸克、阿里云盘、百度网盘、115 等）或其他标准 WebDAV 时，创建同步任务建议将「文件比对方式」设为 <strong>仅大小</strong>，可避免每次增量同步触发读回校验并节省流量。
+                      接入 OpenList / AList（夸克、阿里云盘、百度网盘、115 等）或其他标准 WebDAV 时，作为目标存储创建同步任务会自动默认使用「<strong>仅按文件大小</strong>」比对，避免每次同步拉取大量远端资源到本地校验。
                     </span>
                   </div>
                 )}
@@ -2992,47 +3384,98 @@ export function NativeStorageEditor({
 
             {oauthTypes.has(draft.type) && (
               <>
-                <Field
-                  label="OAuth Token JSON"
-                  required={draft.type !== "drive" && draft.type !== "pcloud" && !draft.editing}
-                  error={fieldErrors.token}
-                  hint={`可在本地运行 rclone authorize "${draft.type}" 获取完整 JSON 令牌后粘贴`}
-                >
-                  <TextArea
-                    aria-label="OAuth Token JSON"
-                    autosize={{ minRows: 2, maxRows: 5 }}
-                    value={draft.options.token || ""}
-                    onChange={(v) => updateDraftOption("token", v)}
-                    placeholder={secretPlaceholder(
-                      "token",
-                      '{"access_token":"...","refresh_token":"...","expiry":"..."}',
-                    )}
-                  />
-                </Field>
-                <div className="form-grid form-grid--two">
-                  <Field label="Client ID（可选）">
-                    <Input
-                      value={draft.options.client_id || ""}
-                      onChange={(v) => updateDraftOption("client_id", v)}
-                      placeholder="留空使用 rclone 内置应用"
+                {draft.type === "onedrive" && (
+                  <Field
+                    label="OneDrive 区域（region）"
+                    hint="请在发起网页授权前确认账号所属区域（中国世纪互联版请选择 cn）"
+                  >
+                    <Select
+                      aria-label="OneDrive 区域（region）"
+                      value={draft.options.region || "global"}
+                      optionList={[
+                        { value: "global", label: "国际版 (global)" },
+                        { value: "cn", label: "世纪互联 (cn)" },
+                        { value: "us", label: "US Gov (us)" },
+                        { value: "de", label: "德国 (de)" },
+                      ]}
+                      onChange={(v) => updateDraftOption("region", String(v))}
                     />
                   </Field>
-                  <Field label="Client Secret（可选）">
-                    <Input
-                      mode="password"
-                      value={draft.options.client_secret || ""}
-                      onChange={(v) => updateDraftOption("client_secret", v)}
-                      placeholder={secretPlaceholder("client_secret", "可选")}
+                )}
+
+                {draft.type === "drive" && (
+                  <Field
+                    label="访问权限范围（scope）"
+                    hint="发起网页授权前可按需限定只读或仅应用文件权限"
+                  >
+                    <Select
+                      aria-label="访问权限范围（scope）"
+                      value={draft.options.scope || ""}
+                      optionList={[
+                        { value: "", label: "完整读写权限（drive，默认）" },
+                        { value: "drive.readonly", label: "仅只读（drive.readonly）" },
+                        { value: "drive.file", label: "仅应用创建的文件（drive.file）" },
+                        { value: "drive.appfolder", label: "仅应用专属目录（drive.appfolder）" },
+                      ]}
+                      onChange={(v) => updateDraftOption("scope", String(v || ""))}
                     />
                   </Field>
-                </div>
+                )}
+
+                {draft.type === "hidrive" && (
+                  <Field label="访问权限（scope_access）">
+                    <Select
+                      aria-label="访问权限（scope_access）"
+                      value={draft.options.scope_access || "rw"}
+                      optionList={[
+                        { value: "rw", label: "读写权限（rw，默认）" },
+                        { value: "ro", label: "仅只读（ro）" },
+                      ]}
+                      onChange={(v) => updateDraftOption("scope_access", String(v))}
+                    />
+                  </Field>
+                )}
+
+                <NativeStorageAuthWizard
+                  remoteType={draft.type}
+                  remoteLabel={remoteTypeLabels[draft.type] || draft.type}
+                  remoteName={draft.name.trim()}
+                  editing={draft.editing}
+                  draftOptions={buildRemoteOptions(draft)}
+                  clearSecrets={draft.clearSecrets}
+                  hasExistingAuth={
+                    Boolean(draft.options.token) ||
+                    (draft.editing &&
+                      draft.configuredSecrets.includes("token") &&
+                      !draft.clearSecrets.includes("token"))
+                  }
+                  completedSession={
+                    draft.authSessionId
+                      ? {
+                          sessionId: draft.authSessionId,
+                          publicOptions: draft.authPublicOptions || {},
+                          configuredSecrets: draft.authConfiguredSecrets || [],
+                        }
+                      : null
+                  }
+                  variant={draft.type === "jottacloud" ? "jottacloud" : "oauth"}
+                  disabled={savingForm || testingForm}
+                  onCompleted={handleAuthCompleted}
+                />
+
+                {fieldErrors.token && (
+                  <div className="inline-error" role="alert">
+                    {fieldErrors.token}
+                  </div>
+                )}
+
                 {draft.type === "onedrive" && (
                   <div className="form-grid form-grid--two">
-                    <Field label="Drive ID（可选）">
+                    <Field label="Drive ID（授权后自动填入）">
                       <Input
                         value={draft.options.drive_id || ""}
                         onChange={(v) => updateDraftOption("drive_id", v)}
-                        placeholder="rclone config 生成的 drive_id"
+                        placeholder="完成上方网页授权后自动获取，也可手动填写"
                       />
                     </Field>
                     <Field label="Drive 类型">
@@ -3053,29 +3496,22 @@ export function NativeStorageEditor({
                 {draft.type === "drive" && (
                   <>
                     <div className="form-grid form-grid--two">
-                      <Field label="权限范围（scope）">
-                        <Input
-                          value={draft.options.scope || ""}
-                          onChange={(v) => updateDraftOption("scope", v)}
-                          placeholder="如 drive 或 drive.readonly"
-                        />
-                      </Field>
-                      <Field label="根目录 / 团队盘 ID">
+                      <Field label="根目录 ID（root_folder_id，可选）">
                         <Input
                           value={draft.options.root_folder_id || ""}
                           onChange={(v) => updateDraftOption("root_folder_id", v)}
-                          placeholder="可选 root_folder_id"
+                          placeholder="留空从云端硬盘根目录开始"
+                        />
+                      </Field>
+                      <Field label="共享云端硬盘 ID（team_drive，可选）">
+                        <Input
+                          value={draft.options.team_drive || ""}
+                          onChange={(v) => updateDraftOption("team_drive", v)}
+                          placeholder="完成上方授权向导选择团队盘时自动填入"
                         />
                       </Field>
                     </div>
-                    <Field label="Team Drive ID（可选）">
-                      <Input
-                        value={draft.options.team_drive || ""}
-                        onChange={(v) => updateDraftOption("team_drive", v)}
-                        placeholder="共享云端硬盘 ID"
-                      />
-                    </Field>
-                    <Field label="Service Account JSON 凭据（可选，替代 OAuth）">
+                    <Field label="Service Account JSON 凭据（可选，替代网页授权）">
                       <TextArea
                         autosize={{ minRows: 2, maxRows: 4 }}
                         value={draft.options.service_account_credentials || ""}
@@ -3112,7 +3548,7 @@ export function NativeStorageEditor({
                       </Field>
                     </div>
                     <div className="form-grid form-grid--two">
-                      <Field label="账号邮箱（username，可选，替代 OAuth）">
+                      <Field label="账号邮箱（username，可选，替代网页授权）">
                         <Input
                           value={draft.options.username || ""}
                           onChange={(v) => updateDraftOption("username", v)}
@@ -3245,6 +3681,60 @@ export function NativeStorageEditor({
                     </Field>
                   </div>
                 )}
+
+                <div className="advanced-options">
+                  <button
+                    type="button"
+                    className={`advanced-options-toggle${oauthAdvancedOpen ? " is-open" : ""}`}
+                    aria-expanded={oauthAdvancedOpen}
+                    onClick={() => setOauthAdvancedOpen((o) => !o)}
+                  >
+                    <IconChevronRight
+                      className="advanced-options-chevron"
+                      aria-hidden="true"
+                    />
+                    <span>高级凭据设置（自定义 Client ID / 手动填入 Token，可选）</span>
+                  </button>
+                  {oauthAdvancedOpen && (
+                    <div className="advanced-options-body">
+                      <div className="form-grid form-grid--two">
+                        <Field
+                          label="自定义 Client ID（可选）"
+                          hint="填写自建应用凭据后，点击上方授权按钮将使用您的专属应用"
+                        >
+                          <Input
+                            value={draft.options.client_id || ""}
+                            onChange={(v) => updateDraftOption("client_id", v)}
+                            placeholder="留空使用内置应用"
+                          />
+                        </Field>
+                        <Field label="自定义 Client Secret（可选）">
+                          <Input
+                            mode="password"
+                            value={draft.options.client_secret || ""}
+                            onChange={(v) => updateDraftOption("client_secret", v)}
+                            placeholder={secretPlaceholder("client_secret", "可选")}
+                          />
+                        </Field>
+                      </div>
+                      <Field
+                        label="手动填写 OAuth Token JSON（可选）"
+                        hint="通常无需手动填写，直接使用上方图形化授权即可；如已有现成 JSON 令牌，也可直接粘贴"
+                      >
+                        <TextArea
+                          aria-label="OAuth Token JSON"
+                          autosize={{ minRows: 2, maxRows: 5 }}
+                          value={draft.options.token || ""}
+                          onChange={(v) => updateDraftOption("token", v)}
+                          placeholder={secretPlaceholder(
+                            "token",
+                            '{"access_token":"...","refresh_token":"...","expiry":"..."}',
+                          )}
+                        />
+                      </Field>
+                    </div>
+                  )}
+                </div>
               </>
             )}
 
@@ -3402,8 +3892,34 @@ export function NativeStorageEditor({
 
             {draft.type === "googlecloudstorage" && (
               <>
+                <NativeStorageAuthWizard
+                  remoteType={draft.type}
+                  remoteLabel={remoteTypeLabels[draft.type] || draft.type}
+                  remoteName={draft.name.trim()}
+                  editing={draft.editing}
+                  draftOptions={buildRemoteOptions(draft)}
+                  clearSecrets={draft.clearSecrets}
+                  hasExistingAuth={
+                    Boolean(draft.options.token) ||
+                    (draft.editing &&
+                      draft.configuredSecrets.includes("token") &&
+                      !draft.clearSecrets.includes("token"))
+                  }
+                  completedSession={
+                    draft.authSessionId
+                      ? {
+                          sessionId: draft.authSessionId,
+                          publicOptions: draft.authPublicOptions || {},
+                          configuredSecrets: draft.authConfiguredSecrets || [],
+                        }
+                      : null
+                  }
+                  variant="oauth"
+                  disabled={savingForm || testingForm}
+                  onCompleted={handleAuthCompleted}
+                />
                 <Field
-                  label="Service Account JSON 凭据"
+                  label="Service Account JSON 凭据（可选，替代网页授权）"
                   error={fieldErrors.service_account_credentials}
                 >
                   <TextArea
@@ -3853,10 +4369,36 @@ export function NativeStorageEditor({
                       mode="password"
                       value={draft.options.pass || ""}
                       onChange={(v) => updateDraftOption("pass", v)}
-                      placeholder={secretPlaceholder("pass", "密码（或改填下方 Auth Token）")}
+                      placeholder={secretPlaceholder("pass", "密码（或使用下方 2FA 获取 Auth Token）")}
                     />
                   </Field>
                 </div>
+                <NativeStorageAuthWizard
+                  remoteType={draft.type}
+                  remoteLabel={remoteTypeLabels[draft.type] || draft.type}
+                  remoteName={draft.name.trim()}
+                  editing={draft.editing}
+                  draftOptions={buildRemoteOptions(draft)}
+                  clearSecrets={draft.clearSecrets}
+                  hasExistingAuth={
+                    Boolean(draft.options.auth_token) ||
+                    (draft.editing &&
+                      draft.configuredSecrets.includes("auth_token") &&
+                      !draft.clearSecrets.includes("auth_token"))
+                  }
+                  completedSession={
+                    draft.authSessionId
+                      ? {
+                          sessionId: draft.authSessionId,
+                          publicOptions: draft.authPublicOptions || {},
+                          configuredSecrets: draft.authConfiguredSecrets || [],
+                        }
+                      : null
+                  }
+                  variant="seafile"
+                  disabled={savingForm || testingForm}
+                  onCompleted={handleAuthCompleted}
+                />
                 <div className="form-grid form-grid--three">
                   <Field label="Auth Token（可选，开启 2FA 时使用）">
                     <Input
@@ -3990,21 +4532,47 @@ export function NativeStorageEditor({
                     />
                   </Field>
                 </div>
+                <NativeStorageAuthWizard
+                  remoteType={draft.type}
+                  remoteLabel={remoteTypeLabels[draft.type] || draft.type}
+                  remoteName={draft.name.trim()}
+                  editing={draft.editing}
+                  draftOptions={buildRemoteOptions(draft)}
+                  clearSecrets={draft.clearSecrets}
+                  hasExistingAuth={
+                    Boolean(draft.options.trust_token || draft.options.cookies) ||
+                    (draft.editing &&
+                      (draft.configuredSecrets.includes("trust_token") ||
+                        draft.configuredSecrets.includes("cookies")))
+                  }
+                  completedSession={
+                    draft.authSessionId
+                      ? {
+                          sessionId: draft.authSessionId,
+                          publicOptions: draft.authPublicOptions || {},
+                          configuredSecrets: draft.authConfiguredSecrets || [],
+                        }
+                      : null
+                  }
+                  variant="icloud"
+                  disabled={savingForm || testingForm}
+                  onCompleted={handleAuthCompleted}
+                />
                 <div className="form-grid form-grid--two">
-                  <Field label="Trust Token（可选）">
+                  <Field label="Trust Token（验证后自动获取，可选）">
                     <Input
                       mode="password"
                       value={draft.options.trust_token || ""}
                       onChange={(v) => updateDraftOption("trust_token", v)}
-                      placeholder={secretPlaceholder("trust_token", "由 rclone config 生成")}
+                      placeholder={secretPlaceholder("trust_token", "完成上方登录验证后自动获取")}
                     />
                   </Field>
-                  <Field label="Cookies（可选）">
+                  <Field label="Cookies（验证后自动获取，可选）">
                     <Input
                       mode="password"
                       value={draft.options.cookies || ""}
                       onChange={(v) => updateDraftOption("cookies", v)}
-                      placeholder={secretPlaceholder("cookies", "由 rclone config 生成")}
+                      placeholder={secretPlaceholder("cookies", "完成上方登录验证后自动获取")}
                     />
                   </Field>
                 </div>
@@ -4358,16 +4926,21 @@ export function NativeStorageEditor({
                   <div className="native-quick-picks">
                     <span className="muted">快捷追加映射：</span>
                     {quickBackingSources.map((src) => {
-                      const cleanDir = src.value.replace(/:$/, "").replace(/[^A-Za-z0-9_-]/g, "") || "dir";
+                      const rawBase =
+                        src.kind === "local"
+                          ? src.value.split("/").filter(Boolean).pop() || "local"
+                          : src.value.replace(/:$/, "");
+                      const cleanDir = rawBase.replace(/[^\p{L}\p{N}_-]/gu, "") || "dir";
                       return (
                         <button
                           key={`combine-${src.kind}-${src.value}`}
                           type="button"
                           className="native-quick-chip"
                           onClick={() => {
-                            const cur = (draft.options.upstreams || "").trim();
-                            const entry = `${cleanDir}=${src.value}`;
-                            updateDraftOption("upstreams", cur ? `${cur} ${entry}` : entry);
+                            updateDraftOption(
+                              "upstreams",
+                              appendCombineUpstream(draft.options.upstreams || "", src),
+                            );
                           }}
                         >
                           + {cleanDir}={src.label}
@@ -4600,7 +5173,7 @@ export function NativeStorageEditor({
                             )
                           }
                         >
-                          出错时保留分片以便断点续传（leave_parts_on_error）
+                          失败时保留未完成分片（leave_parts_on_error，仅诊断用；跨进程断点续传请开启任务中的「断点续传」开关，此选项可能产生对象存储残留碎片）
                         </Checkbox>
                         <Checkbox
                           checked={isBoolTrue(draft.options, "no_head")}
@@ -4687,19 +5260,6 @@ export function NativeStorageEditor({
                           />
                         </Field>
                       </div>
-                      <Field label="远端 Shell 类型（shell_type）">
-                        <Select
-                          value={draft.options.shell_type || ""}
-                          optionList={[
-                            { value: "", label: "自动探测" },
-                            { value: "unix", label: "unix" },
-                            { value: "powershell", label: "powershell" },
-                            { value: "cmd", label: "cmd" },
-                            { value: "none", label: "none（禁用远端命令）" },
-                          ]}
-                          onChange={(v) => updateDraftOption("shell_type", String(v || ""))}
-                        />
-                      </Field>
                       <div className="native-checkbox-group">
                         <Checkbox
                           checked={isBoolTrue(draft.options, "allow_hashcheck")}
@@ -4889,16 +5449,11 @@ export function NativeStorageEditor({
                   {draft.type === "onedrive" && (
                     <>
                       <div className="form-grid form-grid--three">
-                        <Field label="OneDrive 区域（region）">
-                          <Select
-                            value={draft.options.region || "global"}
-                            optionList={[
-                              { value: "global", label: "国际版 (global)" },
-                              { value: "cn", label: "世纪互联 (cn)" },
-                              { value: "us", label: "US Gov (us)" },
-                              { value: "de", label: "德国 (de)" },
-                            ]}
-                            onChange={(v) => updateDraftOption("region", String(v))}
+                        <Field label="组织租户 ID（tenant，可选）">
+                          <Input
+                            value={draft.options.tenant || ""}
+                            onChange={(v) => updateDraftOption("tenant", v)}
+                            placeholder="企业版多租户可选填写"
                           />
                         </Field>
                         <Field label="分片上传大小（chunk_size）">
@@ -5384,6 +5939,18 @@ export function NativeStorageEditor({
                     </Checkbox>
                   )}
 
+                  <Field
+                    label="单存储最大并发任务数（max_concurrent_jobs，可选）"
+                    hint="0 或留空表示不单独限制（1–50）；用于防止网盘 429 限流或单源过载，加密/分片包装存储自动继承底层配额"
+                  >
+                    <Input
+                      inputMode="numeric"
+                      value={draft.options.max_concurrent_jobs || ""}
+                      onChange={(v) => updateDraftOption("max_concurrent_jobs", v)}
+                      placeholder="0（不限制）"
+                    />
+                  </Field>
+
                   <Field label="备注说明（description，可选）">
                     <Input
                       value={draft.options.description || ""}
@@ -5530,6 +6097,24 @@ export function NativeStorageEditor({
                   >
                     新建目录
                   </Button>
+                  <input
+                    ref={uploadInputRef}
+                    type="file"
+                    style={{ display: "none" }}
+                    onChange={(e) =>
+                      void handleUploadFileChange(e.target.files?.[0])
+                    }
+                  />
+                  <Button
+                    size="small"
+                    type="tertiary"
+                    icon={<IconUpload aria-hidden="true" />}
+                    loading={uploadingFile}
+                    disabled={browsing || anyBusy}
+                    onClick={() => uploadInputRef.current?.click()}
+                  >
+                    上传文件
+                  </Button>
                   <Button
                     size="small"
                     type="tertiary"
@@ -5542,6 +6127,16 @@ export function NativeStorageEditor({
                     }}
                   >
                     URL 拉取
+                  </Button>
+                  <Button
+                    size="small"
+                    type="tertiary"
+                    disabled={browsing || anyBusy}
+                    onClick={() =>
+                      trashOpen ? setTrashOpen(false) : void handleLoadTrash()
+                    }
+                  >
+                    {trashOpen ? "返回目录" : "回收站"}
                   </Button>
                   <Button
                     size="small"
@@ -5568,6 +6163,14 @@ export function NativeStorageEditor({
               )}
               <Button
                 size="small"
+                type={activeTransferCount > 0 ? "primary" : "tertiary"}
+                theme={activeTransferCount > 0 ? "light" : undefined}
+                onClick={() => setTransfersOpen((v) => !v)}
+              >
+                传输队列{activeTransferCount > 0 ? ` (${activeTransferCount})` : transfers.length > 0 ? ` (${transfers.length})` : ""}
+              </Button>
+              <Button
+                size="small"
                 type="tertiary"
                 icon={<IconRefresh aria-hidden="true" />}
                 loading={browsing}
@@ -5577,6 +6180,194 @@ export function NativeStorageEditor({
                 刷新
               </Button>
             </div>
+
+            {browsePath !== "/" && !trashOpen && (
+              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+                <Input
+                  size="small"
+                  style={{ flex: "1 1 180px" }}
+                  placeholder="搜索当前目录文件/文件夹…"
+                  value={browseSearch}
+                  showClear
+                  onChange={setBrowseSearch}
+                />
+                <Select
+                  size="small"
+                  style={{ width: 150 }}
+                  value={browseSort}
+                  optionList={[
+                    { label: "名称 A→Z", value: "name_asc" },
+                    { label: "名称 Z→A", value: "name_desc" },
+                    { label: "体积从大到小", value: "size_desc" },
+                    { label: "修改时间最新", value: "mtime_desc" },
+                  ]}
+                  onChange={(v) =>
+                    setBrowseSort(
+                      String(v) as "name_asc" | "name_desc" | "size_desc" | "mtime_desc",
+                    )
+                  }
+                />
+                {selectedBrowsePaths.length > 0 && (
+                  <>
+                    <Button
+                      size="small"
+                      type="primary"
+                      theme="light"
+                      disabled={!state?.localRoots.length}
+                      onClick={() => {
+                        if (!restoreLocalRoot && state?.localRoots.length) {
+                          setRestoreLocalRoot(state.localRoots[0].path);
+                        }
+                        setBatchRestoreOpen(true);
+                      }}
+                    >
+                      批量恢复 ({selectedBrowsePaths.length})
+                    </Button>
+                    <Button
+                      size="small"
+                      type="tertiary"
+                      onClick={() => {
+                        setBatchMoveDstDir(browsePath);
+                        setBatchMoveOpen(true);
+                      }}
+                    >
+                      批量移动 ({selectedBrowsePaths.length})
+                    </Button>
+                    <Button
+                      size="small"
+                      type="danger"
+                      theme="light"
+                      onClick={handleBatchDeleteSelected}
+                    >
+                      批量删除 ({selectedBrowsePaths.length})
+                    </Button>
+                  </>
+                )}
+              </div>
+            )}
+
+            {transfersOpen && (
+              <div className="native-panel-section">
+                <div className="native-section-head">
+                  <div className="native-section-title">
+                    <h3>后台文件传输队列</h3>
+                    <Tag size="small" type="light" color="blue">
+                      共 {transfers.length} 项
+                    </Tag>
+                  </div>
+                  <div className="native-section-actions">
+                    <Button
+                      size="small"
+                      type="tertiary"
+                      theme="borderless"
+                      onClick={async () => {
+                        await api.clearCompletedNativeTransfers();
+                        await refreshTransfers();
+                      }}
+                    >
+                      清理已完成
+                    </Button>
+                    <Button
+                      size="small"
+                      type="tertiary"
+                      theme="borderless"
+                      onClick={() => setTransfersOpen(false)}
+                    >
+                      收起
+                    </Button>
+                  </div>
+                </div>
+                {transfers.length === 0 ? (
+                  <div className="muted" style={{ fontSize: 12 }}>
+                    暂无后台传输任务；恢复、URL 离线下载或批量操作均会自动在此展示实时进度。
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 200, overflowY: "auto" }}>
+                    {transfers.map((t) => (
+                      <div
+                        key={t.id}
+                        style={{
+                          padding: "8px 10px",
+                          borderRadius: 6,
+                          background: "var(--semi-color-fill-0)",
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: 4,
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                          <span style={{ fontSize: 12, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {t.label}
+                          </span>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                            <Tag
+                              size="small"
+                              type="light"
+                              color={
+                                t.status === "completed"
+                                  ? "green"
+                                  : t.status === "failed"
+                                    ? "red"
+                                    : t.status === "cancelled"
+                                      ? "grey"
+                                      : "blue"
+                              }
+                            >
+                              {t.status === "running"
+                                ? `${Math.round(t.percent || 0)}%`
+                                : t.status === "completed"
+                                  ? "已完成"
+                                  : t.status === "cancelled"
+                                    ? "已取消"
+                                    : "失败"}
+                            </Tag>
+                            {t.status === "running" && (
+                              <Button
+                                size="small"
+                                type="danger"
+                                theme="borderless"
+                                onClick={async () => {
+                                  try {
+                                    await api.cancelNativeTransfer(t.id);
+                                    await refreshTransfers();
+                                  } catch (err) {
+                                    errorToast(err);
+                                  }
+                                }}
+                              >
+                                取消
+                              </Button>
+                            )}
+                          </div>
+                        </div>
+                        {t.status === "running" && (
+                          <Progress
+                            percent={Math.round(t.percent || 0)}
+                            showInfo={false}
+                            stroke="var(--semi-color-primary)"
+                          />
+                        )}
+                        <div className="muted" style={{ fontSize: 11, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                          {t.totalBytes > 0 && (
+                            <span>
+                              {formatSize(t.doneBytes)} / {formatSize(t.totalBytes)}
+                            </span>
+                          )}
+                          {t.speed > 0 && <span>{formatSize(t.speed)}/s</span>}
+                          {t.totalItems > 1 && (
+                            <span>
+                              {t.completedItems} / {t.totalItems} 项
+                            </span>
+                          )}
+                          {t.detail && <span>{t.detail}</span>}
+                          {t.error && <span className="inline-error">{t.error}</span>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             {sizeInfo && (
               <InlineNotice
@@ -5604,19 +6395,80 @@ export function NativeStorageEditor({
               />
             )}
 
-            {browsing ? (
+            {trashOpen ? (
+              trashLoading ? (
+                <div className="native-loading-panel">
+                  <Spin />
+                </div>
+              ) : trashItems.length === 0 ? (
+                <div className="sync-method-banner">
+                  <IconInfoCircle aria-hidden="true" size="small" />
+                  <span>当前目录下未发现 .opensync-trash 回收站历史文件</span>
+                </div>
+              ) : (
+                <div className="native-remote-list native-browse-list">
+                  {trashItems.map((item) => (
+                    <div key={item.trashPath} className="native-remote-row">
+                      <div className="native-remote-info">
+                        <span className="native-remote-head">
+                          <IconFile aria-hidden="true" size="small" />
+                          <span>{item.name}</span>
+                          {item.bucketDate && (
+                            <Tag size="small" type="light" color="orange">
+                              {item.bucketDate}
+                            </Tag>
+                          )}
+                        </span>
+                        <span className="muted native-remote-summary" title={item.originalPath}>
+                          原路径：{item.originalPath} · {formatSize(item.size)}
+                        </span>
+                      </div>
+                      <div className="native-remote-actions">
+                        <Button
+                          size="small"
+                          type="primary"
+                          theme="light"
+                          loading={restoringTrashPath === item.trashPath}
+                          onClick={() => void handleRestoreTrashItem(item)}
+                        >
+                          还原到原路径
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )
+            ) : browsing ? (
               <div className="native-loading-panel">
                 <Spin />
               </div>
-            ) : browseData && browseData.entries.length === 0 ? (
+            ) : browseData && filteredBrowseEntries.length === 0 ? (
               <div className="sync-method-banner">
                 <IconInfoCircle aria-hidden="true" size="small" />
-                <span>当前目录为空</span>
+                <span>{browseSearch.trim() ? "没有匹配的文件或目录" : "当前目录为空"}</span>
               </div>
             ) : browseData ? (
               <div className="native-remote-list native-browse-list">
-                {browseData.entries.map((entry) => (
+                {filteredBrowseEntries.map((entry) => {
+                  const checked = selectedBrowsePaths.includes(entry.path);
+                  return (
                   <div key={entry.path} className="native-remote-row">
+                    {browsePath !== "/" && (
+                      <Checkbox
+                        checked={checked}
+                        aria-label={`选择 ${entry.name}`}
+                        onChange={(e) => {
+                          const on = Boolean(e.target.checked);
+                          setSelectedBrowsePaths((prev) =>
+                            on
+                              ? prev.includes(entry.path)
+                                ? prev
+                                : [...prev, entry.path]
+                              : prev.filter((p) => p !== entry.path),
+                          );
+                        }}
+                      />
+                    )}
                     <div className="native-remote-info">
                       <span className="native-remote-head">
                         {entry.isDir ? (
@@ -5644,6 +6496,23 @@ export function NativeStorageEditor({
                     </div>
                     {browsePath !== "/" && (
                       <div className="native-remote-actions">
+                        {!entry.isDir && (
+                          <Button
+                            size="small"
+                            type="tertiary"
+                            icon={<IconDownload aria-hidden="true" />}
+                            onClick={() => {
+                              const link = document.createElement("a");
+                              link.href = api.downloadNativeStorageUrl(entry.path);
+                              link.download = entry.name;
+                              document.body.appendChild(link);
+                              link.click();
+                              link.remove();
+                            }}
+                          >
+                            下载
+                          </Button>
+                        )}
                         <Button
                           size="small"
                           type="tertiary"
@@ -5700,9 +6569,70 @@ export function NativeStorageEditor({
                       </div>
                     )}
                   </div>
-                ))}
+                  );
+                })}
               </div>
             ) : null}
+
+            {batchRestoreOpen && (
+              <Modal
+                visible
+                centered
+                width={480}
+                title={`批量恢复到飞牛本地（${selectedBrowsePaths.length} 项）`}
+                onCancel={() => setBatchRestoreOpen(false)}
+                okText="加入恢复队列"
+                onOk={() => void handleBatchRestoreSelected()}
+              >
+                <div className="editor-form">
+                  <Field label="目标本地授权目录" required>
+                    <Select
+                      value={restoreLocalRoot}
+                      optionList={(state?.localRoots || []).map((r) => ({
+                        value: r.path,
+                        label: r.path,
+                      }))}
+                      onChange={(v) => setRestoreLocalRoot(String(v))}
+                    />
+                  </Field>
+                  <Field label="子目录（可选）">
+                    <Input
+                      value={restoreSubPath}
+                      onChange={setRestoreSubPath}
+                      placeholder="例如 restored/batch"
+                    />
+                  </Field>
+                  <Checkbox
+                    checked={restoreOverwrite}
+                    onChange={(e) => setRestoreOverwrite(Boolean(e.target.checked))}
+                  >
+                    覆盖本地已存在的同名文件
+                  </Checkbox>
+                </div>
+              </Modal>
+            )}
+
+            {batchMoveOpen && (
+              <Modal
+                visible
+                centered
+                width={460}
+                title={`批量移动（${selectedBrowsePaths.length} 项）`}
+                onCancel={() => setBatchMoveOpen(false)}
+                okText="加入移动队列"
+                onOk={() => void handleBatchMoveSelected()}
+              >
+                <div className="editor-form">
+                  <Field label="目标目录路径" required hint="所选项将移动到该目录下">
+                    <Input
+                      value={batchMoveDstDir}
+                      onChange={setBatchMoveDstDir}
+                      placeholder="/remote/archive"
+                    />
+                  </Field>
+                </div>
+              </Modal>
+            )}
 
             {restoreEntry && (
               <div className="native-panel-section">

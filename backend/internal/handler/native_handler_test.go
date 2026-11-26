@@ -35,6 +35,9 @@ func TestNativeStorageHandlersRejectMalformedOrUnknownFields(t *testing.T) {
 		{"LinkNativeStorage unknown field", http.MethodPost, "/svr/native/storage/link", LinkNativeStorage, `{"path":"/a","bogus":1}`},
 		{"CopyURLNativeStorage unknown field", http.MethodPost, "/svr/native/storage/copyurl", CopyURLNativeStorage, `{"url":"https://example.com/a","dstDir":"/a","bogus":1}`},
 		{"SetTierNativeStorage unknown field", http.MethodPost, "/svr/native/storage/settier", SetTierNativeStorage, `{"path":"/a","tier":"Cool","bogus":1}`},
+		{"StartNativeStorageAuth unknown field", http.MethodPost, "/svr/native/storage/auth/start", StartNativeStorageAuth, `{"type":"onedrive","bogus":1}`},
+		{"SubmitNativeStorageAuthCallback unknown field", http.MethodPost, "/svr/native/storage/auth/callback", SubmitNativeStorageAuthCallback, `{"sessionId":"s1","callbackUrl":"http://localhost:53682/?code=a","bogus":1}`},
+		{"ContinueNativeStorageAuth unknown field", http.MethodPost, "/svr/native/storage/auth/continue", ContinueNativeStorageAuth, `{"sessionId":"s1","state":"st","answer":"ok","bogus":1}`},
 		{"StartJobCheck unknown field", http.MethodPost, "/svr/job/check", StartJobCheck, `{"id":1,"download":true,"bogus":1}`},
 		{"ResetBisyncJob unknown field", http.MethodPost, "/svr/job/bisync/resync", ResetBisyncJob, `{"id":1,"bogus":1}`},
 		{"SaveNativeEngine trailing json", http.MethodPut, "/svr/native/engine", SaveNativeEngine, `{"remark":"a"}{}`},
@@ -53,6 +56,22 @@ func TestDeleteNativeStorageRequiresQueryName(t *testing.T) {
 	status, code, message := serveJSON(t, http.MethodDelete, "/svr/native/storage", DeleteNativeStorage, "")
 	if status != http.StatusBadRequest || code != 500 || message != msg.T(msg.LostPart) {
 		t.Fatalf("DELETE /svr/native/storage without name = %d/%d %q, want 400/500 LostPart", status, code, message)
+	}
+}
+
+func TestNativeStorageAuthQueryRequiresSessionID(t *testing.T) {
+	for _, tc := range []struct {
+		method  string
+		path    string
+		handler gin.HandlerFunc
+	}{
+		{http.MethodGet, "/svr/native/storage/auth/status", GetNativeStorageAuth},
+		{http.MethodDelete, "/svr/native/storage/auth", CancelNativeStorageAuth},
+	} {
+		status, code, message := serveJSON(t, tc.method, tc.path, tc.handler, "")
+		if status != http.StatusBadRequest || code != 500 || message != msg.T(msg.LostPart) {
+			t.Fatalf("%s %s without sessionId = %d/%d %q, want 400/500 LostPart", tc.method, tc.path, status, code, message)
+		}
 	}
 }
 
@@ -76,6 +95,8 @@ func TestJobCheckRequiresID(t *testing.T) {
 func TestUpdateSystemConfigValidatesBwLimitAndProxyURL(t *testing.T) {
 	for _, body := range []string{
 		`{"defaultBwLimit":"not-a-speed"}`,
+		`{"defaultBwLimit":"10MB"}`,
+		`{"defaultBwLimit":"08:00,5MB 23:00,off"}`,
 		`{"proxyUrl":"ftp://127.0.0.1:21"}`,
 		`{"proxyUrl":"not a url"}`,
 	} {

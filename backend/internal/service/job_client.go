@@ -45,6 +45,84 @@ type JobClient struct {
 	// queueCancel cancels an in-flight wait on engineQueue.Acquire so stop,
 	// pause, delete, and shutdown abort queued jobs immediately.
 	queueCancel context.CancelFunc
+	// autoRetryTimer schedules delayed automatic retries after a failed run.
+	autoRetryMu    sync.Mutex
+	autoRetryCount int
+	autoRetryTimer *time.Timer
+}
+
+const maxPostSyncChainDepth = 5
+
+func (jc *JobClient) cancelAutoRetry() {
+	jc.autoRetryMu.Lock()
+	if jc.autoRetryTimer != nil {
+		jc.autoRetryTimer.Stop()
+		jc.autoRetryTimer = nil
+	}
+	jc.autoRetryMu.Unlock()
+}
+
+func (jc *JobClient) resetAutoRetry() {
+	jc.autoRetryMu.Lock()
+	if jc.autoRetryTimer != nil {
+		jc.autoRetryTimer.Stop()
+		jc.autoRetryTimer = nil
+	}
+	jc.autoRetryCount = 0
+	jc.autoRetryMu.Unlock()
+}
+
+func (jc *JobClient) scheduleAutoRetry(failedTaskID int64) {
+	if jc == nil || jc.isClosing() || !jc.enabled() {
+		return
+	}
+	job := jc.jobSnapshot()
+	if job == nil {
+		return
+	}
+	extra, _, err := parseNativeExtraFlags(job["extraFlags"])
+	if err != nil || extra.AutoRetryMax <= 0 {
+		return
+	}
+	delayMin := extra.AutoRetryDelayMin
+	if delayMin <= 0 {
+		delayMin = 5
+	}
+	jc.autoRetryMu.Lock()
+	if jc.autoRetryCount >= extra.AutoRetryMax {
+		jc.autoRetryMu.Unlock()
+		return
+	}
+	jc.autoRetryCount++
+	attempt := jc.autoRetryCount
+	if jc.autoRetryTimer != nil {
+		jc.autoRetryTimer.Stop()
+	}
+	jobID := jc.idSnapshot()
+	jc.autoRetryTimer = time.AfterFunc(time.Duration(delayMin)*time.Minute, func() {
+		jc.autoRetryMu.Lock()
+		jc.autoRetryTimer = nil
+		jc.autoRetryMu.Unlock()
+		if jc.isClosing() || !jc.enabled() {
+			return
+		}
+		if !JobInTimeWindow(jc.jobSnapshot(), time.Now()) {
+			log.Printf("Auto-retry #%d for job %d skipped: outside run window", attempt, jobID)
+			return
+		}
+		if failedTaskID > 0 && util.ToInt(jc.jobSnapshot()["method"]) != 3 {
+			if retryErr := jc.DoRetryFailedTaskItems(failedTaskID); retryErr == nil {
+				log.Printf("Auto-retry #%d/%d started for job %d (replaying failed items of task %d)", attempt, extra.AutoRetryMax, jobID, failedTaskID)
+				return
+			}
+		}
+		if jc.tryMarkDoing() {
+			log.Printf("Auto-retry #%d/%d started full rerun for job %d", attempt, extra.AutoRetryMax, jobID)
+			go jc.runMarkedJob()
+		}
+	})
+	jc.autoRetryMu.Unlock()
+	log.Printf("Scheduled auto-retry #%d/%d for job %d in %d minute(s)", attempt, extra.AutoRetryMax, jobID, delayMin)
 }
 
 func (jc *JobClient) setQueueCancel(cancel context.CancelFunc) {
@@ -443,18 +521,41 @@ func NewJobClient(job map[string]interface{}, isInit bool) (*JobClient, error) {
 	return jc, nil
 }
 
+type markedJobRunOptions struct {
+	sourceTaskID   int64
+	statuses       []taskStatus
+	itemIDs        []int64
+	manual         bool
+	onlyFiles      []string
+	forceOverwrite bool
+	chainDepth     int
+}
+
 func (jc *JobClient) runMarkedJob() {
-	jc.runMarkedJobConfig(0, nil, nil, false)
+	jc.runMarkedJobWithOptions(markedJobRunOptions{})
 }
 
 func (jc *JobClient) runMarkedManualJob() {
-	jc.runMarkedJobConfig(0, nil, nil, true)
+	jc.runMarkedJobWithOptions(markedJobRunOptions{manual: true})
 }
 
 // runMarkedJobConfig starts a task. With sourceTaskID > 0 it replays the source
 // task's items whose status is in statuses (or matching itemIDs when provided);
 // otherwise it runs a fresh full scan.
 func (jc *JobClient) runMarkedJobConfig(sourceTaskID int64, statuses []taskStatus, itemIDs []int64, manual bool) {
+	jc.runMarkedJobWithOptions(markedJobRunOptions{
+		sourceTaskID: sourceTaskID,
+		statuses:     statuses,
+		itemIDs:      itemIDs,
+		manual:       manual,
+	})
+}
+
+func (jc *JobClient) runMarkedJobWithOptions(opts markedJobRunOptions) {
+	sourceTaskID := opts.sourceTaskID
+	statuses := opts.statuses
+	itemIDs := opts.itemIDs
+	manual := opts.manual
 	taskID := int64(0)
 	var releaseSlot func()
 	defer func() {
@@ -482,18 +583,29 @@ func (jc *JobClient) runMarkedJobConfig(sourceTaskID int64, statuses []taskStatu
 		return
 	}
 
-	// Enforce per-engine maxConcurrentJobs queue before creating the task row.
+	// Enforce per-engine and per-storage maxConcurrentJobs queues before creating the task row.
 	jobSnap := jc.jobSnapshot()
 	alistID := util.ToInt64(jobSnap["alistId"])
 	maxConcurrent := 0
+	var storageLimits map[string]int
+	storages := extractJobStorageNames(jobSnap)
 	if alistID > 0 && alistDeps != nil && alistDeps.GetAlistByID != nil {
 		if alistRow, err := alistDeps.GetAlistByID(alistID); err == nil && alistRow != nil {
 			maxConcurrent = util.ToInt(alistRow["maxConcurrentJobs"])
+			if cfg, cfgErr := nativeConfig(alistRow); cfgErr == nil && cfg != nil {
+				storages = extractJobStorageNamesWithDeps(jobSnap, cfg)
+				storageLimits = nativeStorageConcurrencyLimits(cfg)
+			}
+		}
+	}
+	if storageLimits == nil {
+		if localCap := config.GetSystemSettings().LocalMaxConcurrentJobs; localCap > 0 {
+			storageLimits = map[string]int{"本地": localCap}
 		}
 	}
 	queueCtx, queueCancel := context.WithCancel(context.Background())
 	jc.setQueueCancel(queueCancel)
-	slotRelease, acquireErr := engineQueue.AcquireWithStorages(queueCtx, alistID, jc.idSnapshot(), maxConcurrent, extractJobStorageNames(jobSnap), 0)
+	slotRelease, acquireErr := engineQueue.AcquireWithStorageLimits(queueCtx, alistID, jc.idSnapshot(), maxConcurrent, storages, storageLimits)
 	jc.setQueueCancel(nil)
 	queueCancel()
 	if acquireErr != nil {
@@ -544,6 +656,11 @@ func (jc *JobClient) runMarkedJobConfig(sourceTaskID int64, statuses []taskStatu
 			task.RetryItemIDs = append([]int64(nil), itemIDs...)
 		}
 	}
+	if len(opts.onlyFiles) > 0 {
+		task.OnlyFiles = append([]string(nil), opts.onlyFiles...)
+	}
+	task.ForceOverwrite = opts.forceOverwrite
+	task.ChainDepth = opts.chainDepth
 	task.RequireFullSyncApproval = manual ||
 		(sourceTaskID == 0 && config.GetConfig().Server.ScheduledFullSyncConfirm == 1)
 	if !jc.trySetCurrentTaskIfActive(task) {
@@ -578,6 +695,29 @@ func extractJobStorageNames(job map[string]interface{}) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+func extractJobStorageNamesWithDeps(job map[string]interface{}, cfg interface {
+	ExpandRemoteDependencies(string) []string
+}) []string {
+	base := extractJobStorageNames(job)
+	if cfg == nil || len(base) == 0 {
+		return base
+	}
+	seen := make(map[string]struct{}, len(base))
+	for _, name := range base {
+		for _, dep := range cfg.ExpandRemoteDependencies(name) {
+			if dep != "" {
+				seen[dep] = struct{}{}
+			}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for name := range seen {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func watchTaskTimeWindow(task *JobTask) {
@@ -637,6 +777,7 @@ func (jc *JobClient) DoManual() error {
 	if jc.isClosing() {
 		return publicError(msg.T(msg.JobNotFound))
 	}
+	jc.resetAutoRetry()
 	if !jc.tryMarkDoing() {
 		return publicError(msg.T(msg.JobRunning))
 	}
@@ -645,6 +786,74 @@ func (jc *JobClient) DoManual() error {
 		return publicError(msg.T(msg.JobNotFound))
 	}
 	go jc.runMarkedManualJob()
+	return nil
+}
+
+// DoWatchSync triggers an incremental sync from the filesystem watcher.
+// Returns false when the job is already busy so the watcher can requeue changes.
+func (jc *JobClient) DoWatchSync(changedPaths []string) bool {
+	if jc.isClosing() || !jc.enabled() {
+		return true
+	}
+	if !jc.tryMarkDoing() {
+		return false
+	}
+	if jc.isClosing() || !jc.enabled() {
+		jc.markDone()
+		return true
+	}
+	go jc.runMarkedJobWithOptions(markedJobRunOptions{
+		onlyFiles: changedPaths,
+	})
+	return true
+}
+
+// DoRepairFiles launches a targeted force-overwrite copy for specific relative
+// paths identified by a consistency check.
+func (jc *JobClient) DoRepairFiles(relPaths []string) error {
+	if jc.isClosing() {
+		return publicError(msg.T(msg.JobNotFound))
+	}
+	if len(relPaths) == 0 {
+		return publicError("没有需要修复的差异或缺失文件")
+	}
+	if !jc.enabled() {
+		return publicError(msg.T(msg.DisabledJobCannotRun))
+	}
+	jc.resetAutoRetry()
+	if !jc.tryMarkDoing() {
+		return publicError(msg.T(msg.JobRunning))
+	}
+	if jc.isClosing() {
+		jc.markDone()
+		return publicError(msg.T(msg.JobNotFound))
+	}
+	go jc.runMarkedJobWithOptions(markedJobRunOptions{
+		manual:         true,
+		onlyFiles:      relPaths,
+		forceOverwrite: true,
+	})
+	return nil
+}
+
+// DoChainedRun triggers a downstream job chained via extraFlags.postSyncJobId.
+func (jc *JobClient) DoChainedRun(chainDepth int) error {
+	if chainDepth > maxPostSyncChainDepth {
+		return nil
+	}
+	if jc.isClosing() || !jc.enabled() {
+		return nil
+	}
+	if !jc.tryMarkDoing() {
+		return publicError(msg.T(msg.JobRunning))
+	}
+	if jc.isClosing() {
+		jc.markDone()
+		return nil
+	}
+	go jc.runMarkedJobWithOptions(markedJobRunOptions{
+		chainDepth: chainDepth,
+	})
 	return nil
 }
 
@@ -775,6 +984,7 @@ func (jc *JobClient) StopJob(remove bool) error {
 
 // stopJobLocked is StopJob's body; the caller holds opMu.
 func (jc *JobClient) stopJobLocked(remove bool) error {
+	jc.cancelAutoRetry()
 	jobID := jc.idSnapshot()
 	scheduler := jc.schedulerSnapshot()
 	if remove {

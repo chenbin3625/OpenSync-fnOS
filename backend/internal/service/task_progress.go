@@ -80,6 +80,8 @@ type streamDoingItem struct {
 	SrcPath     string  `json:"srcPath"`
 	DstPath     string  `json:"dstPath"`
 	FileSize    int64   `json:"fileSize"`
+	DoneBytes   int64   `json:"doneBytes,omitempty"`
+	Speed       float64 `json:"speed,omitempty"`
 	Type        int     `json:"type"`
 	Status      int     `json:"status"`
 	Progress    float64 `json:"progress"`
@@ -91,6 +93,8 @@ type streamDoingPatch struct {
 	AlistTaskID string  `json:"alistTaskId,omitempty"`
 	Status      int     `json:"status"`
 	Progress    float64 `json:"progress"`
+	DoneBytes   int64   `json:"doneBytes,omitempty"`
+	Speed       float64 `json:"speed,omitempty"`
 	FileName    string  `json:"fileName,omitempty"`
 	SrcPath     string  `json:"srcPath,omitempty"`
 	DstPath     string  `json:"dstPath,omitempty"`
@@ -100,25 +104,27 @@ type streamDoingPatch struct {
 // and the SSE stream. Typed fields avoid boxing every doing file into
 // map[string]interface{} on the 610ms poller / 400ms SSE debounce path.
 type jobCurrentPayload struct {
-	TaskID     int64                `json:"taskId"`
-	ScanFinish bool                 `json:"scanFinish"`
-	Approval   *FullSyncApproval    `json:"approval"`
-	Scan       *scanProgressPayload `json:"scan,omitempty"`
+	TaskID      int64                `json:"taskId"`
+	ScanFinish  bool                 `json:"scanFinish"`
+	Approval    *FullSyncApproval    `json:"approval"`
+	Scan        *scanProgressPayload `json:"scan,omitempty"`
 	// Full snapshots must retain an empty slice in JSON. The frontend uses a
 	// missing doingTask only for patch frames; omitting an empty snapshot would
 	// make completed rows linger until the task itself disappears.
-	DoingTask  []streamDoingItem  `json:"doingTask"`
-	DoingPatch []streamDoingPatch `json:"doingPatch,omitempty"`
-	CreateTime int                `json:"createTime"`
-	Duration   int                `json:"duration"`
-	FirstSync  *int               `json:"firstSync"`
-	Num        taskNumStats       `json:"num"`
-	Size       taskSizeStats      `json:"size"`
-	DoneSize   int64              `json:"doneSize"`
-	RemainSize int64              `json:"remainSize"`
-	Speed      float64            `json:"speed,omitempty"`
-	SpeedAvg   float64            `json:"speedAvg,omitempty"`
-	RemainTime int                `json:"remainTime,omitempty"`
+	DoingTask   []streamDoingItem  `json:"doingTask"`
+	DoingPatch  []streamDoingPatch `json:"doingPatch,omitempty"`
+	CreateTime  int                `json:"createTime"`
+	Duration    int                `json:"duration"`
+	FirstSync   *int               `json:"firstSync"`
+	Num         taskNumStats       `json:"num"`
+	Size        taskSizeStats      `json:"size"`
+	DoneSize    int64              `json:"doneSize"`
+	RemainSize  int64              `json:"remainSize"`
+	Speed       float64            `json:"speed,omitempty"`
+	SpeedAvg    float64            `json:"speedAvg,omitempty"`
+	RemainTime  int                `json:"remainTime,omitempty"`
+	Paused      bool               `json:"paused,omitempty"`
+	LiveBwLimit string             `json:"liveBwLimit,omitempty"`
 }
 
 func (item streamDoingItem) countableSize() int64 {
@@ -156,10 +162,13 @@ func (jt *JobTask) getCurrentPayload() jobCurrentPayload {
 	}
 	doneSize := successSize + doingSize
 
+	paused := jt.isPaused()
 	var nativeSpeed float64
 	if snap := jt.nativeStats.Load(); snap != nil && snap.stats != nil {
 		stats := snap.stats
-		nativeSpeed = stats.Speed
+		if !paused {
+			nativeSpeed = stats.Speed
+		}
 		remainSize = max(0, stats.TotalBytes-stats.Bytes)
 		doneSize = max(doneSize, stats.Bytes)
 		if stats.TotalTransfers > 0 {
@@ -178,11 +187,17 @@ func (jt *JobTask) getCurrentPayload() jobCurrentPayload {
 				}
 				srcBase := item.srcBase
 				dstBase := item.dstBase
+				itemSpeed := item.Speed
+				if paused {
+					itemSpeed = 0
+				}
 				doing = append(doing, streamDoingItem{
 					FileName:   path.Base(rel),
 					SrcPath:    path.Join(srcBase, path.Dir(rel)),
 					DstPath:    path.Join(dstBase, path.Dir(rel)),
 					FileSize:   item.Size,
+					DoneBytes:  item.Bytes,
+					Speed:      itemSpeed,
 					Type:       taskItemTypeCopy.Int(),
 					Status:     taskStatusRunning.Int(),
 					Progress:   item.Percentage,
@@ -226,19 +241,23 @@ func (jt *JobTask) getCurrentPayload() jobCurrentPayload {
 	if firstSync := jt.FirstSync.Load(); firstSync > 0 {
 		value := int(firstSync)
 		payload.FirstSync = &value
-		syncDuration := duration - (value - int(jt.CreateTime))
+		syncDuration := duration - (value - int(jt.CreateTime)) - int(jt.pausedDuration().Seconds())
 		if syncDuration > 0 {
 			payload.SpeedAvg = float64(doneSize) / float64(syncDuration)
 		}
 	}
 
 	payload.Speed = nativeSpeed
+	payload.Paused = paused
+	payload.LiveBwLimit = jt.liveBwLimit()
 
 	rateForETA := payload.SpeedAvg
-	if rateForETA <= 0 && payload.Speed > 0 {
+	if payload.Speed > 0 && payload.SpeedAvg > 0 {
+		rateForETA = 0.6*payload.Speed + 0.4*payload.SpeedAvg
+	} else if payload.Speed > 0 {
 		rateForETA = payload.Speed
 	}
-	if rateForETA > 0 && remainSize > 0 {
+	if !payload.Paused && rateForETA > 0 && remainSize > 0 {
 		payload.RemainTime = int(math.Ceil(float64(remainSize) / rateForETA))
 	}
 	return payload
@@ -257,6 +276,7 @@ func (jt *JobTask) GetCurrent() map[string]interface{} {
 		"size":     map[string]int64{"wait": payload.Size.Wait, "running": payload.Size.Running, "success": payload.Size.Success, "fail": payload.Size.Fail, "other": payload.Size.Other},
 		"doneSize": payload.DoneSize, "remainSize": payload.RemainSize,
 		"speed": payload.Speed, "speedAvg": payload.SpeedAvg, "remainTime": payload.RemainTime,
+		"paused": payload.Paused, "liveBwLimit": payload.LiveBwLimit,
 	}
 	if payload.Scan != nil {
 		scanMap := map[string]int64{
@@ -437,18 +457,25 @@ func (jt *JobTask) doingStreamItems() []streamDoingItem {
 }
 
 func (jt *JobTask) doingTaskMaps() []map[string]interface{} {
+	paused := jt.isPaused()
 	if snap := jt.nativeStats.Load(); snap != nil {
 		if activeItems := snap.activeTransferring(); len(activeItems) > 0 {
 			now := time.Now().Unix()
 			dos := make([]map[string]interface{}, 0, len(activeItems))
 			for _, item := range activeItems {
 				rel := path.Clean(item.Name)
+				itemSpeed := item.Speed
+				if paused {
+					itemSpeed = 0
+				}
 				dos = append(dos, map[string]interface{}{
 					"taskId":     jt.TaskID,
 					"srcPath":    path.Join(item.srcBase, path.Dir(rel)),
 					"dstPath":    path.Join(item.dstBase, path.Dir(rel)),
 					"fileName":   path.Base(rel),
 					"fileSize":   item.Size,
+					"doneBytes":  item.Bytes,
+					"speed":      itemSpeed,
 					"type":       taskItemTypeCopy.Int(),
 					"status":     taskStatusRunning.Int(),
 					"progress":   item.Percentage,
