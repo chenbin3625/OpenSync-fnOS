@@ -525,6 +525,10 @@ func streamRcloneCatChunk(
 	if err := cmd.Start(); err != nil {
 		return startOffset, err
 	}
+	if opt.Controller != nil {
+		leaveGo := opt.Controller.EnterGoTransfer()
+		defer leaveGo()
+	}
 	if opt.Controller != nil && cmd.Process != nil {
 		detachCat := opt.Controller.Attach(cmd.Process.Pid, "", "", "")
 		defer detachCat()
@@ -557,7 +561,7 @@ func streamRcloneCatChunk(
 				}
 				written += int64(n)
 				windowBytes += int64(n)
-				if err := opt.Controller.ThrottleBytes(ctx, n); err != nil {
+				if err := opt.Controller.ThrottleDownloadBytes(ctx, n); err != nil {
 					ioErr = err
 					break
 				}

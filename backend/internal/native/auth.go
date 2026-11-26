@@ -1102,6 +1102,16 @@ func resolveExternalAuthURL(localAuthURL string) (authURL, redirectURI string, e
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
 		return "", "", errors.New("网盘返回的授权页面地址无效")
 	}
+	// Google OAuth2 only issues a refresh_token on re-authorization when
+	// prompt=consent is explicitly present alongside access_type=offline.
+	if strings.EqualFold(parsed.Hostname(), "accounts.google.com") {
+		q := parsed.Query()
+		if strings.EqualFold(q.Get("access_type"), "offline") && strings.TrimSpace(q.Get("prompt")) == "" {
+			q.Set("prompt", "consent")
+			parsed.RawQuery = q.Encode()
+			loc = parsed.String()
+		}
+	}
 	redirectURI = strings.TrimSpace(parsed.Query().Get("redirect_uri"))
 	if redirectURI == "" {
 		redirectURI = "http://localhost:53682/"

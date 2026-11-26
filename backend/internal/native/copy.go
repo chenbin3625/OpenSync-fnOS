@@ -245,7 +245,11 @@ func joinRcloneRemotePath(baseArg, rel string) string {
 }
 
 func appendTuningFlags(args []string, opt CopyOptions) ([]string, error) {
-	if bw := strings.TrimSpace(opt.BwLimit); bw != "" {
+	bw := strings.TrimSpace(opt.BwLimit)
+	if opt.Controller != nil {
+		bw = opt.Controller.EffectiveInitialRcloneBwLimit(bw)
+	}
+	if bw != "" {
 		if err := ValidateBwLimit(bw); err != nil {
 			return nil, err
 		}

@@ -43,7 +43,6 @@ describe("scenario presets and extended extraFlags", () => {
     expect(archive.compareMode).toBe(2);
     expect(archive.trashEnable).toBe(true);
     expect(archive.extraFlags.checkSchedule).toBe("weekly");
-    expect(archive.extraFlags.missedCatchUp).toBe(true);
   });
 
   it("round-trips all new extraFlags and strips runtime decoration fields on save", () => {
@@ -56,7 +55,6 @@ describe("scenario presets and extended extraFlags", () => {
         ...defaultJobForm(2).extraFlags,
         resumeEnable: true,
         resumeMinSizeMB: 64,
-        watchEnable: true,
         watchDebounceSec: 15,
         lowLevelRetries: 12,
         retriesSleep: "5s",
@@ -64,7 +62,6 @@ describe("scenario presets and extended extraFlags", () => {
         autoRetryDelayMin: 10,
         postSyncJobId: 9,
         checkSchedule: "daily",
-        missedCatchUp: true,
         directStream: true,
       },
     };
@@ -76,7 +73,6 @@ describe("scenario presets and extended extraFlags", () => {
     expect(parsedExtra).toMatchObject({
       resumeEnable: true,
       resumeMinSizeMB: 64,
-      watchEnable: true,
       watchDebounceSec: 15,
       lowLevelRetries: 12,
       retriesSleep: "5s",
@@ -84,7 +80,6 @@ describe("scenario presets and extended extraFlags", () => {
       autoRetryDelayMin: 10,
       postSyncJobId: 9,
       checkSchedule: "daily",
-      missedCatchUp: true,
       directStream: true,
     });
 
@@ -98,7 +93,6 @@ describe("scenario presets and extended extraFlags", () => {
     expect(roundTripped.extraFlags).toMatchObject({
       resumeEnable: true,
       resumeMinSizeMB: 64,
-      watchEnable: true,
       watchDebounceSec: 15,
       lowLevelRetries: 12,
       retriesSleep: "5s",
@@ -106,7 +100,6 @@ describe("scenario presets and extended extraFlags", () => {
       autoRetryDelayMin: 10,
       postSyncJobId: 9,
       checkSchedule: "daily",
-      missedCatchUp: true,
       directStream: true,
     });
     const rebuilt = buildJobPayload(roundTripped);

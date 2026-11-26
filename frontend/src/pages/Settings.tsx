@@ -26,6 +26,7 @@ import {
   SettingRow,
 } from "../components/common";
 import {
+  describeBwLimit,
   formatBwLimitSummary,
   validateBwLimitExpression,
 } from "../lib/bwLimit";
@@ -108,10 +109,10 @@ const fields = [
   },
   {
     key: "defaultBwLimit",
-    label: "全局默认带宽限制",
+    label: "全局总带宽限制",
     kind: "text",
     placeholder: "如 10M 或 08:00,5M 23:00,off（留空不限速）",
-    tip: "对所有未单独设置限速的同步任务、双向同步、一致性校验、恢复与离线下载生效；修改保存后将立即同步至正在运行的跟随任务（并发多任务时按单任务分别限速）",
+    tip: "对所有未单独设置限速的同步任务、双向同步、一致性校验、恢复与离线下载共享总带宽上限；多任务或多配对并发传输时自动按活跃传输流动态均分额度，修改保存后立即生效",
   },
   {
     key: "proxyUrl",
@@ -542,8 +543,8 @@ export default function Settings() {
   const input = (field: (typeof fields)[number]) => {
     if (field.key === "defaultBwLimit") {
       const currentVal = form![field.key];
+      const bwInfo = describeBwLimit(currentVal);
       const summary = formatBwLimitSummary(currentVal, { allowInherit: false });
-      const isLimited = Boolean(currentVal.trim());
       return (
         <div key={field.key} className="settings-bw-block">
           <div className="settings-bw-head">
@@ -556,7 +557,7 @@ export default function Settings() {
               </span>
               <Tag
                 size="small"
-                color={isLimited ? "blue" : "green"}
+                color={bwInfo.isCurrentlyLimited ? "blue" : "green"}
                 type="light"
               >
                 {summary}

@@ -10,8 +10,8 @@ import (
 )
 
 const (
-	md5CacheMaxEntries    = 50000
-	md5CacheFlushInterval = 5 * time.Second
+	md5CacheMaxEntries    = 300000
+	md5CacheFlushInterval = 15 * time.Second
 )
 
 type md5CacheKey struct {

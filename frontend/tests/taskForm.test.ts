@@ -54,7 +54,7 @@ describe("existing synchronization contracts", () => {
     }
   });
 
-  it("rejects multiple move targets while accepting a single target", () => {
+  it("rejects move mode in continuous sync while validating one-way and bidirectional targets", () => {
     const form = {
       ...defaultJobForm(7),
       remark: "移动",
@@ -63,7 +63,7 @@ describe("existing synchronization contracts", () => {
       dstPath: ["/Backup", "/Archive"],
     };
     expect(validateJobForm(form)).toContain("一个目标");
-    expect(validateJobForm({ ...form, dstPath: ["/Backup"] })).toBe("");
+    expect(validateJobForm({ ...form, dstPath: ["/Backup"] })).toContain("持续同步");
   });
 
   it("expands selected source roots by default for folder filtering", () => {
@@ -73,15 +73,15 @@ describe("existing synchronization contracts", () => {
     ]);
     expect(normalizeExcludeRootPath("///")).toBe("/");
   });
-  it("keeps manual-only jobs enabled and translates file size units", () => {
+  it("persists paused continuous sync state and translates file size units", () => {
     const payload = buildJobPayload({
       ...defaultJobForm(7),
-      isCron: 2,
       enable: false,
       minFileSize: 2,
       minFileSizeUnit: "GB",
     });
-    expect(payload.enable).toBe(1);
+    expect(payload.isCron).toBe(3);
+    expect(payload.enable).toBe(0);
     expect(payload.minFileSize).toBe(2 * 1024 ** 3);
   });
   it("excludes Synology recycle directories by default", () => {
@@ -266,7 +266,7 @@ describe("existing synchronization contracts", () => {
     expect(exclude).not.toContain("*.bak");
     expect(exclude).not.toContain(".git/");
   });
-  it("round trips existing job identifiers, cache settings and Cron expressions", () => {
+  it("round trips existing job identifiers and normalizes schedules to continuous sync", () => {
     const job = {
       id: 8,
       alistId: 7,
@@ -275,7 +275,7 @@ describe("existing synchronization contracts", () => {
       dstPath: '["/c"]',
       remark: "test",
       method: 1,
-      isCron: 1,
+      isCron: 3,
       interval: 33,
       useCacheS: 1,
       useCacheT: 0,
@@ -283,21 +283,16 @@ describe("existing synchronization contracts", () => {
       scanIntervalT: 88,
       minFileSize: 1024,
       maxFileSize: 4096,
-      second: "0",
-      minute: "*/5",
-      hour: "*",
-      day: "*",
-      month: "*",
-      day_of_week: "1-5",
       exclude: "*.tmp",
     };
     expect(buildJobPayload(jobToForm(job))).toMatchObject({
       ...job,
+      isCron: 3,
       srcPath: ["/a", "/b"],
       dstPath: ["/c"],
     });
   });
-  it("preserves the move method when editing stored jobs", () => {
+  it("normalizes legacy move methods to continuous one-way sync on edit", () => {
     const job = {
       id: 9,
       alistId: 7,
@@ -312,10 +307,9 @@ describe("existing synchronization contracts", () => {
     };
     const form = jobToForm(job);
 
-    // method 2 = move (copy + delete source) in backend/internal/service/
-    // task_scan.go; silently normalizing it to 0 turned a move job into a copy.
-    expect(form.method).toBe(2);
-    expect(buildJobPayload(form).method).toBe(2);
+    expect(form.method).toBe(0);
+    expect(form.isCron).toBe(3);
+    expect(buildJobPayload(form)).toMatchObject({ method: 0, isCron: 3 });
   });
 
   it("rejects sources and destinations that are equal or nested", () => {
@@ -358,14 +352,19 @@ describe("existing synchronization contracts", () => {
       "# 这是说明\n*.tmp\n*.log",
     );
   });
-  it("rejects missing paths, inverted sizes and invalid Cron ranges", () => {
+  it("rejects missing paths, inverted sizes and invalid continuous polling ranges", () => {
     const namedForm = { ...defaultJobForm(7), remark: "测试任务" };
     expect(validateJobForm(namedForm)).toContain("源目录");
     const form = { ...namedForm, srcPath: ["/a"], dstPath: ["/b"] };
     expect(
       validateJobForm({ ...form, minFileSize: 4, maxFileSize: 2 }),
     ).toContain("最大");
-    expect(validateJobForm({ ...form, hour: "25" })).toContain("时");
+    expect(
+      validateJobForm({
+        ...form,
+        extraFlags: { ...form.extraFlags, syncPollIntervalSec: 5 },
+      }),
+    ).toContain("10–86400");
     expect(validateJobForm(form)).toBe("");
   });
   it("does not substitute another task for an explicit unknown task id", () => {
@@ -415,98 +414,45 @@ describe("existing synchronization contracts", () => {
     expect(findBatchMoveJobs("stop_all", jobs)).toEqual([]);
   });
 
-  it("never renders the disabled realtime tab once the task check settles", () => {
+  it("keeps explicit realtime and history tabs stable without auto-jumping on short sync batches", () => {
     const idle = { settled: true, hasCurrentTask: false };
-    expect(resolveTaskTab("realtime", idle)).toBe("overview");
-    expect(resolveTaskTab("realtime", { settled: false, hasCurrentTask: false })).toBe(
-      "realtime",
-    );
-    expect(resolveTaskTab("realtime", { settled: true, hasCurrentTask: true })).toBe(
-      "realtime",
-    );
-    expect(resolveTaskTab("history", idle)).toBe("history");
-  });
-
-  it("prioritizes the realtime tab when no explicit tab is requested and a task is running", () => {
     expect(parseTaskTab(null)).toBeNull();
     expect(parseTaskTab("invalid")).toBeNull();
     expect(parseTaskTab("realtime")).toBe("realtime");
 
-    // Unspecified tab switches to realtime as soon as a running task is known
-    // (either from currentTask or from jobRunning before currentTask settles).
+    expect(resolveTaskTab("realtime", idle)).toBe("realtime");
+    expect(resolveTaskTab("realtime", { settled: true, hasCurrentTask: true })).toBe(
+      "realtime",
+    );
+    expect(resolveTaskTab("history", idle)).toBe("history");
     expect(
-      resolveTaskTab(null, { settled: true, hasCurrentTask: true }),
-    ).toBe("realtime");
-    expect(
-      resolveTaskTab(null, {
-        settled: false,
-        hasCurrentTask: false,
-        jobRunning: true,
-      }),
-    ).toBe("realtime");
-    // Falls back cleanly to overview if the snapshot settles with no running task.
-    expect(
-      resolveTaskTab(null, {
-        settled: true,
-        hasCurrentTask: false,
-        jobRunning: true,
-      }),
+      resolveTaskTab(null, { settled: true, hasCurrentTask: true, jobRunning: true }),
     ).toBe("overview");
     expect(
-      resolveTaskTab(null, { settled: true, hasCurrentTask: false }),
+      resolveTaskTab(null, { settled: false, hasCurrentTask: false, jobRunning: true }),
     ).toBe("overview");
-    // Explicit overview/history tabs are never overridden even when running.
-    expect(
-      resolveTaskTab("overview", {
-        settled: true,
-        hasCurrentTask: true,
-        jobRunning: true,
-      }),
-    ).toBe("overview");
-    expect(
-      resolveTaskTab("history", {
-        settled: true,
-        hasCurrentTask: true,
-        jobRunning: true,
-      }),
-    ).toBe("history");
+    expect(resolveTaskTab("overview", { settled: true, hasCurrentTask: true })).toBe(
+      "overview",
+    );
   });
 
-  it("builds task navigation params that prioritize realtime for running jobs", () => {
-    // Entering from another page
+  it("builds task navigation params that open Cloud Sync overview and preserve history", () => {
     expect(
       buildTaskSearchParams({ id: 2, running: true }, { onTasksPage: false }).toString(),
-    ).toBe("jobId=2&tab=realtime");
+    ).toBe("jobId=2");
     expect(
       buildTaskSearchParams({ id: 2, running: false }, { onTasksPage: false }).toString(),
     ).toBe("jobId=2");
 
-    // Switching from an idle job on overview to a running job prioritizes realtime
+    // Switching from history to another job keeps history
     expect(
       buildTaskSearchParams(
         { id: 2, running: true },
-        { onTasksPage: true, currentSearch: "jobId=1&tab=overview", activeJobId: 1 },
-      ).toString(),
-    ).toBe("jobId=2&tab=realtime");
-
-    // Switching from history to a running job still prioritizes realtime
-    expect(
-      buildTaskSearchParams(
-        { id: 2, running: true },
-        { onTasksPage: true, currentSearch: "jobId=1&tab=history", activeJobId: 1 },
-      ).toString(),
-    ).toBe("jobId=2&tab=realtime");
-
-    // Switching from history to another idle job keeps history
-    expect(
-      buildTaskSearchParams(
-        { id: 2, running: false },
         { onTasksPage: true, currentSearch: "jobId=1&tab=history", activeJobId: 1 },
       ).toString(),
     ).toBe("jobId=2&tab=history");
 
-    // Switching from overview or realtime to another idle job clears stale tab
-    // so Tasks can auto-switch if the target job just started running
+    // Switching from overview or realtime to another job lands cleanly on overview
     expect(
       buildTaskSearchParams(
         { id: 2, running: false },

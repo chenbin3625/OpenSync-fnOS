@@ -11,11 +11,7 @@ import {
   parseFileSizeInput,
   splitBytesToFileSize,
 } from "../pages/Home/fileSizeUnits";
-import {
-  maxJobIntervalMinutes,
-  validateCronFields,
-  type CronFieldKey,
-} from "./schedule";
+import type { CronFieldKey } from "./schedule";
 import {
   cleanPathList,
   validateSyncPathSelection,
@@ -299,7 +295,6 @@ export function applyTaskScenarioPreset(
           ...baseFlags,
           resumeEnable: true,
           checkSchedule: "weekly",
-          missedCatchUp: true,
         },
       };
   }
@@ -313,7 +308,7 @@ export function defaultJobForm(alistId?: number) {
     srcPath: [] as string[],
     dstPath: [] as string[],
     method: 0,
-    isCron: 1,
+    isCron: 3,
     interval: 1440,
     enable: true,
     useCacheS: false,
@@ -358,8 +353,8 @@ export function defaultJobForm(alistId?: number) {
   };
 }
 export type JobForm = ReturnType<typeof defaultJobForm>;
-// Preserve all supported modes when editing stored jobs.
-const supportedJobMethods = new Set([0, 1, 2, 3]);
+// Continuous sync supports one-way (0/1) and bidirectional (3).
+const supportedJobMethods = new Set([0, 1, 3]);
 
 export function normalizeJobMethod(method: unknown) {
   const parsed = Number(method);
@@ -433,45 +428,28 @@ export function parseTaskTab(raw: string | null | undefined): TaskTab | null {
 }
 
 /**
- * The tab actually rendered for a task.
+ * The tab actually rendered for a continuous sync task.
  *
- * - An explicit `tab=realtime` falls back to `overview` once the current-task
- *   check settles without a running task (the realtime tab is disabled then).
- * - Explicit `tab=overview` or `tab=history` is respected so direct links and
- *   manual tab clicks are never overridden.
- * - When no explicit `tab` is requested, prioritize `realtime` whenever the
- *   task has a running realtime task.
+ * - Default (no explicit tab) always lands on `overview`, which embeds the
+ *   Cloud Sync status card and live transfer summary.
+ * - Explicit `overview`, `history`, and `realtime` are always respected so
+ *   short continuous sync batches never yank the user between tabs.
  */
 export function resolveTaskTab(
   tab: string | null | undefined,
-  {
-    settled,
-    hasCurrentTask,
-    jobRunning = false,
-  }: {
-    settled: boolean;
-    hasCurrentTask: boolean;
+  _options?: {
+    settled?: boolean;
+    hasCurrentTask?: boolean;
     jobRunning?: boolean;
   },
 ): TaskTab {
-  const explicit = parseTaskTab(tab);
-  if (explicit === "realtime") {
-    return settled && !hasCurrentTask ? "overview" : "realtime";
-  }
-  if (explicit) {
-    return explicit;
-  }
-  if (hasCurrentTask || (!settled && jobRunning)) {
-    return "realtime";
-  }
-  return "overview";
+  return parseTaskTab(tab) ?? "overview";
 }
 
 /**
  * Builds the query string for navigating to a task from the sidebar or mobile
- * job switcher. Switching to a running task prioritizes the realtime tab;
- * switching to a different idle task drops stale overview/realtime tabs so the
- * destination page can still auto-switch if a realtime task just started.
+ * job switcher. Keeps `history` when already browsing history; otherwise opens
+ * the Cloud Sync overview directly without auto-jumping into realtime.
  */
 export function buildTaskSearchParams(
   job: { id: number; running?: boolean },
@@ -497,9 +475,7 @@ export function buildTaskSearchParams(
 
   const next = new URLSearchParams();
   next.set("jobId", String(job.id));
-  if (job.running) {
-    next.set("tab", "realtime");
-  } else if (onTasksPage && parseTaskTab(current.get("tab")) === "history") {
+  if (onTasksPage && parseTaskTab(current.get("tab")) === "history") {
     next.set("tab", "history");
   }
   return next;
@@ -510,6 +486,7 @@ export function jobToForm(job: JobItem): JobForm {
   return {
     ...defaultJobForm(job.alistId),
     ...job,
+    isCron: 3,
     method: normalizeJobMethod(job.method),
     srcPath: parseJobPathList(job.srcPath),
     dstPath: parseJobPathList(job.dstPath),
@@ -613,12 +590,21 @@ export function buildJobPayload(form: JobForm) {
   delete runtimeStripped.lastStatus;
   delete runtimeStripped.nextRunTime;
   delete runtimeStripped.syncStatus;
+  const method = normalizeJobMethod(form.method);
+  const extraFlags: NativeExtraFlags = {
+    ...form.extraFlags,
+    watchEnable: false,
+    missedCatchUp: false,
+    syncDirection: method === 3 ? "" : form.extraFlags?.syncDirection || "",
+  };
   return {
     ...runtimeStripped,
+    method,
+    isCron: 3,
     remark: form.remark.trim() || null,
     exclude: form.exclude.trim() || null,
     include: form.include.trim() || null,
-    enable: form.isCron === 2 ? 1 : Number(form.enable),
+    enable: Number(Boolean(form.enable)),
     useCacheS: Number(form.useCacheS),
     useCacheT: Number(form.useCacheT),
     scanIntervalS: Math.max(0, Math.min(300, Math.trunc(Number(form.scanIntervalS) || 0))),
@@ -627,13 +613,13 @@ export function buildJobPayload(form: JobForm) {
     maxFileSize: fileSizeToBytes(form.maxFileSize, maxFileSizeUnit),
     compareMode: Number(form.compareMode) || 0,
     conflictPolicy: Number(form.conflictPolicy) || 0,
-    trashEnable: form.method === 2 ? 0 : Number(Boolean(form.trashEnable)),
+    trashEnable: Number(Boolean(form.trashEnable)),
     trashDir:
-      (form.method === 2 || !form.trashEnable) && validateTrashDir(form.trashDir)
+      !form.trashEnable && validateTrashDir(form.trashDir)
         ? ".opensync-trash"
         : form.trashDir.trim() || ".opensync-trash",
     trashRetentionDays: Math.max(0, Math.trunc(Number(form.trashRetentionDays) || 0)),
-    deleteEmptySrcDirs: Number(Boolean(form.deleteEmptySrcDirs)),
+    deleteEmptySrcDirs: 0,
     filterMode: Number(form.filterMode) || 0,
     minFileAgeMinutes: Math.max(0, Math.trunc(Number(form.minFileAgeMinutes) || 0)),
     olderThanDays: Math.max(0, Math.trunc(Number(form.olderThanDays) || 0)),
@@ -655,7 +641,7 @@ export function buildJobPayload(form: JobForm) {
     multiThreadStreams: Math.max(0, Math.min(64, Math.trunc(Number(form.multiThreadStreams) || 0))),
     createEmptySrcDirs: Number(Boolean(form.createEmptySrcDirs)),
     followSymlinks: Number(Boolean(form.followSymlinks)),
-    extraFlags: serializeNativeExtraFlags(form.extraFlags),
+    extraFlags: serializeNativeExtraFlags(extraFlags),
   };
 }
 export interface JobValidationOptions {
@@ -1179,17 +1165,26 @@ export function validateJobFormFields(
     }
   }
 
-  // Step 1: 执行计划（固定间隔 / Cron / 仅手动 / 时间窗口 / 通知绑定）
+  // Step 1: 同步设置（持续同步轮询 / 完整核对 / 变动静默 / 时间窗口 / 通知绑定）
   const step1Errors: string[] = [];
-  if (form.isCron === 3 && form.method === 2) {
-    fields.interval = "移动任务请使用定时计划、固定间隔或手动执行";
+  if (form.method === 2) {
+    fields.interval = "当前仅支持持续同步模式，请使用单向同步或双向同步";
     step1Errors.push(fields.interval);
   }
-  const poll = Number(form.extraFlags?.syncPollIntervalSec || 0);
-  const audit = Number(form.extraFlags?.syncAuditIntervalMin || 0);
-  if ((poll !== 0 && (!Number.isInteger(poll) || poll < 10 || poll > 86400)) ||
-      (audit !== 0 && (!Number.isInteger(audit) || audit < 1 || audit > 10080))) {
+  const poll = Number(form.extraFlags?.syncPollIntervalSec ?? 0);
+  const audit = Number(form.extraFlags?.syncAuditIntervalMin ?? 0);
+  const debounce = Number(form.extraFlags?.watchDebounceSec ?? 0);
+  if (
+    (poll !== 0 && (!Number.isInteger(poll) || poll < 10 || poll > 86400)) ||
+    (audit !== 0 && (!Number.isInteger(audit) || audit < 1 || audit > 10080))
+  ) {
     fields.interval = "远端检测间隔需为 10–86400 秒，完整核对间隔需为 1–10080 分钟";
+    step1Errors.push(fields.interval);
+  } else if (
+    debounce !== 0 &&
+    (!Number.isInteger(debounce) || debounce < 2 || debounce > 3600)
+  ) {
+    fields.interval = "变动合并等待需为 2–3600 秒的整数";
     step1Errors.push(fields.interval);
   }
   if (form.method !== 3 && ["upload", "download"].includes(form.extraFlags?.syncDirection || "")) {
@@ -1198,23 +1193,6 @@ export function validateJobFormFields(
     if (form.srcPath.some((p) => local(p) !== upload) || form.dstPath.some((p) => local(p) === upload)) {
       fields.srcPath = "上传：本地目录 → 远端目录；下载：远端目录 → 本地目录";
       step0Errors.push(fields.srcPath);
-    }
-  }
-  if (form.isCron === 0) {
-    if (!Number.isInteger(form.interval) || form.interval < 1) {
-      fields.interval = "执行间隔必须是大于 0 的整数";
-      step1Errors.push(fields.interval);
-    } else if (form.interval > maxJobIntervalMinutes) {
-      fields.interval = `执行间隔不能超过 ${maxJobIntervalMinutes} 分钟`;
-      step1Errors.push(fields.interval);
-    }
-  } else if (form.isCron === 1) {
-    const cronErrors = validateCronFields(form);
-    for (const [key, message] of Object.entries(cronErrors) as Array<
-      [CronFieldKey, string]
-    >) {
-      fields[key] = message;
-      step1Errors.push(message);
     }
   }
   if (form.windowEnable) {

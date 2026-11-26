@@ -21,6 +21,14 @@ import (
 const (
 	pendingApprovalStatusPending   = "pending"
 	pendingApprovalStatusExecuting = "executing"
+
+	pendingExecPhaseVerifying = "verifying"
+	pendingExecPhaseDeleting  = "deleting"
+
+	pendingDeleteVerifyConcurrency = 6
+	pendingDeleteDirConcurrency    = 4
+	pendingDeleteBatchSize         = 100
+	pendingApprovalMaxPageLimit    = 500
 )
 
 // pendingDeleteTarget describes a single verified destination file or directory
@@ -61,6 +69,12 @@ type pendingDeleteRecord struct {
 	expiresAtTime time.Time          `json:"-"`
 	expiryTimer   *time.Timer        `json:"-"`
 	execCancel    context.CancelFunc `json:"-"`
+	execPhase     string             `json:"-"`
+	execDone      int                `json:"-"`
+	execTotal     int                `json:"-"`
+	execFailed    int                `json:"-"`
+	execCurrent   string             `json:"-"`
+	execStartedAt int64              `json:"-"`
 }
 
 func (r *pendingDeleteRecord) approvalSnapshot() *FullSyncApproval {
@@ -76,11 +90,27 @@ func (r *pendingDeleteRecord) approvalSnapshot() *FullSyncApproval {
 	cp.ExpiresAt = r.ExpiresAt
 	cp.PlanChanged = r.PlanChanged
 	cp.LastError = r.LastError
+	cp.ExecPhase = r.execPhase
+	cp.ExecDone = r.execDone
+	cp.ExecTotal = r.execTotal
+	cp.ExecFailed = r.execFailed
+	cp.ExecCurrent = r.execCurrent
+	cp.ExecStartedAt = r.execStartedAt
 	cp.Paths = append([]FullSyncApprovalPath(nil), r.Approval.Paths...)
 	if cp.Paths == nil {
 		cp.Paths = []FullSyncApprovalPath{}
 	}
+	cp.HasMore = cp.PathCount > len(cp.Paths)
 	return &cp
+}
+
+func (r *pendingDeleteRecord) resetExecProgressLocked() {
+	r.execPhase = ""
+	r.execDone = 0
+	r.execTotal = 0
+	r.execFailed = 0
+	r.execCurrent = ""
+	r.execStartedAt = 0
 }
 
 type pendingDeleteManager struct {
@@ -442,6 +472,92 @@ func (m *pendingDeleteManager) GetByJobID(jobID int64) *FullSyncApproval {
 	return m.byJob[jobID].approvalSnapshot()
 }
 
+// GetByJobIDFiltered returns a job's pending approval with filtered and
+// paginated paths sourced from the complete target list.
+func (m *pendingDeleteManager) GetByJobIDFiltered(jobID int64, offset, limit int, query, kind string) *FullSyncApproval {
+	now := time.Now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.purgeExpiredLocked(jobID, now)
+	rec := m.byJob[jobID]
+	if rec == nil {
+		return nil
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 {
+		limit = fullSyncApprovalPathLimit
+	}
+	if limit > pendingApprovalMaxPageLimit {
+		limit = pendingApprovalMaxPageLimit
+	}
+	qLower := strings.ToLower(strings.TrimSpace(query))
+	kind = strings.ToLower(strings.TrimSpace(kind))
+
+	snap := rec.approvalSnapshot()
+	matched := make([]pendingDeleteTarget, 0, len(rec.Targets))
+	for _, target := range rec.Targets {
+		switch kind {
+		case "dir":
+			if !target.IsDir {
+				continue
+			}
+		case "file":
+			if target.IsDir {
+				continue
+			}
+		}
+		if qLower != "" && !strings.Contains(strings.ToLower(target.objectPath()), qLower) {
+			continue
+		}
+		matched = append(matched, target)
+	}
+	snap.FilteredCount = len(matched)
+	if offset >= len(matched) {
+		snap.Paths = []FullSyncApprovalPath{}
+		snap.HasMore = false
+		return snap
+	}
+	end := min(len(matched), offset+limit)
+	slice := matched[offset:end]
+	paths := make([]FullSyncApprovalPath, 0, len(slice))
+	for _, target := range slice {
+		count := target.Count
+		if count < 1 {
+			count = 1
+		}
+		size := target.Size
+		if size < 0 {
+			size = 0
+		}
+		paths = append(paths, FullSyncApprovalPath{
+			Path:   target.objectPath(),
+			IsPath: target.IsDir,
+			Count:  count,
+			Size:   size,
+			Action: "删除",
+		})
+	}
+	snap.Paths = paths
+	snap.HasMore = end < len(matched)
+	return snap
+}
+
+func (m *pendingDeleteManager) setExecProgress(rec *pendingDeleteRecord, phase string, done, total, failed int, current string) {
+	m.mu.Lock()
+	if m.byJob[rec.JobID] == rec {
+		if phase != "" {
+			rec.execPhase = phase
+		}
+		rec.execDone = done
+		rec.execTotal = total
+		rec.execFailed = failed
+		rec.execCurrent = current
+	}
+	m.mu.Unlock()
+}
+
 func (m *pendingDeleteManager) GetByTaskID(taskID int64) *FullSyncApproval {
 	now := time.Now()
 	m.mu.Lock()
@@ -684,6 +800,12 @@ func (m *pendingDeleteManager) startExecution(lookup func(time.Time) (*pendingDe
 	rec.PlanChanged = false
 	rec.LastError = ""
 	rec.execCancel = cancel
+	rec.execPhase = pendingExecPhaseVerifying
+	rec.execDone = 0
+	rec.execTotal = len(rec.Targets)
+	rec.execFailed = 0
+	rec.execCurrent = ""
+	rec.execStartedAt = now.Unix()
 	m.wg.Add(1)
 	m.mu.Unlock()
 
@@ -857,11 +979,88 @@ func (m *pendingDeleteManager) liveJobConfig(rec *pendingDeleteRecord) map[strin
 	return cfg
 }
 
+func nativeSubtreeListToFileLists(ctx context.Context, cfg native.Config, dir string, fastList bool) (map[string]FileListResult, bool, error) {
+	dirPath := normalizeDirPath(dir)
+	entries, exists, err := cfg.ListTree(ctx, strings.TrimRight(dirPath, "/"), native.TreeOptions{
+		FastList: fastList,
+		ProxyURL: globalNativeProxyURL(),
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	if !exists {
+		return nil, true, nil
+	}
+	dirs := map[string]FileListResult{
+		dirPath: make(FileListResult),
+	}
+	ensureDir := func(d string) FileListResult {
+		m, ok := dirs[d]
+		if !ok {
+			m = make(FileListResult)
+			dirs[d] = m
+		}
+		return m
+	}
+	for _, e := range entries {
+		rel := strings.Trim(path.Clean("/"+e.RelPath), "/")
+		if rel == "" || rel == "." || strings.HasPrefix(rel, "../") {
+			continue
+		}
+		parent := path.Dir(rel)
+		relDir := ""
+		if parent != "." && parent != "/" {
+			relDir = parent + "/"
+		}
+		// Synthesize intermediate directory entries for flat object stores
+		// (S3/OSS/B2) that do not emit explicit directory markers.
+		if relDir != "" {
+			cur := dirPath
+			for _, seg := range strings.Split(strings.TrimSuffix(relDir, "/"), "/") {
+				parentMap := ensureDir(cur)
+				segKey := seg + "/"
+				if _, ok := parentMap[segKey]; !ok {
+					parentMap[segKey] = FileMetadata{}
+				}
+				cur += segKey
+				ensureDir(cur)
+			}
+		}
+		parentMap := ensureDir(dirPath + relDir)
+		meta := FileMetadata{
+			Size:     e.Size,
+			Modified: e.ModTime,
+			MD5:      e.MD5,
+		}
+		if e.IsDir {
+			key := e.Name + "/"
+			parentMap[key] = meta
+			ensureDir(dirPath + relDir + key)
+		} else {
+			parentMap[e.Name] = meta
+		}
+	}
+	return dirs, false, nil
+}
+
 func (m *pendingDeleteManager) executeNativeRecord(ctx context.Context, rec *pendingDeleteRecord, jobCfg map[string]interface{}, nativeCfg native.Config) {
+	fastList := util.ToInt(jobCfg["fastList"]) == 1
 	listNative := func(dir string) (FileListResult, bool, error) {
 		return nativeDirListToFileList(ctx, nativeCfg, dir)
 	}
-	toDelete, refreshedTargets, changed, verifyErr := verifyPendingDeleteTargetsWithLister(ctx, listNative, listNative, jobCfg, rec.Targets)
+	listSubtree := func(dir string) (map[string]FileListResult, bool, error) {
+		return nativeSubtreeListToFileLists(ctx, nativeCfg, dir, fastList)
+	}
+	m.setExecProgress(rec, pendingExecPhaseVerifying, 0, len(rec.Targets), 0, "")
+	toDelete, refreshedTargets, changed, verifyErr := verifyPendingDeleteTargetsWithOptions(ctx, jobCfg, rec.Targets, pendingDeleteVerifyOptions{
+		listSrc:        listNative,
+		listDst:        listNative,
+		listDstSubtree: listSubtree,
+		concurrency:    pendingDeleteVerifyConcurrency,
+		onProgress: func(done, total int, current string) {
+			m.setExecProgress(rec, pendingExecPhaseVerifying, done, total, 0, current)
+		},
+	})
 	if ctx.Err() != nil {
 		m.restorePendingAfterCancel(rec)
 		return
@@ -896,25 +1095,190 @@ func (m *pendingDeleteManager) executeNativeRecord(ctx context.Context, rec *pen
 	delRunner.initRuntime()
 	defer delRunner.cancelTaskRuntime()
 
-	consecutiveFails := 0
+	totalCount := len(toDelete)
+	m.setExecProgress(rec, pendingExecPhaseDeleting, 0, totalCount, 0, "")
+
+	type batchFileTarget struct {
+		target pendingDeleteTarget
+		rel    string
+	}
+	rootOrder := make([]string, 0, 2)
+	fileGroups := make(map[string][]batchFileTarget)
+	individualTargets := make([]pendingDeleteTarget, 0)
 	for _, target := range toDelete {
+		if !target.IsDir && isSafeDeleteTargetName(target.Name) {
+			dstRootNorm := normalizeDirPath(target.DstRoot)
+			itemPath := strings.TrimRight(normalizeDirPath(target.DstDir), "/") + "/" + strings.TrimSuffix(target.Name, "/")
+			if dstRootNorm != "" && strings.HasPrefix(itemPath, dstRootNorm) {
+				rel := strings.TrimPrefix(itemPath, dstRootNorm)
+				rel = strings.TrimPrefix(rel, "/")
+				if rel != "" && rel != "." {
+					if _, exists := fileGroups[dstRootNorm]; !exists {
+						rootOrder = append(rootOrder, dstRootNorm)
+					}
+					fileGroups[dstRootNorm] = append(fileGroups[dstRootNorm], batchFileTarget{
+						target: target,
+						rel:    rel,
+					})
+					continue
+				}
+			}
+		}
+		individualTargets = append(individualTargets, target)
+	}
+
+	sessOpts := native.SessionOptions{ProxyURL: globalNativeProxyURL()}
+	useTrash := trashEnabled(jobCfg)
+	trashDir := ""
+	trashDateBucket := ""
+	trashVersionBucket := ""
+	if useTrash {
+		trashDir = jobTrashDir(jobCfg)
+		nowLoc := time.Now().In(schedulerLocation())
+		trashDateBucket = nowLoc.Format("2006-01-02")
+		trashVersionBucket = delRunner.nextTrashVersionBucket(nowLoc, trashDateBucket, "", "pending-delete-batch")
+	}
+
+	var execMu sync.Mutex
+	consecutiveFails := 0
+	doneCount := 0
+	failedCount := 0
+	const failAbortMsg = "连续删除失败达到上限，已中止剩余删除操作"
+
+	// Phase 1: Batch-delete or batch-trash regular files in bounded chunks per root.
+	for _, dstRoot := range rootOrder {
 		if delCtx.Err() != nil {
 			break
 		}
-		if consecutiveFails >= 5 {
-			errMsg := "连续删除失败达到上限，已中止剩余删除操作"
-			delRunner.DelHook(target.DstDir, target.Name, nil, taskStatusFailed, &errMsg, boolToTaskItemObject(target.IsDir), time.Now().Unix())
-			continue
+		group := fileGroups[dstRoot]
+		dstRootTrim := strings.TrimRight(dstRoot, "/")
+		trashBucketVirtual := ""
+		if useTrash {
+			trashBucketVirtual = dstRootTrim + "/" + strings.TrimPrefix(path.Join(trashDir, trashDateBucket, trashVersionBucket), "/")
 		}
-		err := nativeDeleteOrTrash(delCtx, nativeCfg, delRunner, jobCfg, target.DstRoot, target.DstDir, target.Name, target.IsDir)
-		if err != nil {
-			consecutiveFails++
-			s := err.Error()
-			delRunner.DelHook(target.DstDir, target.Name, nil, taskStatusFailed, &s, boolToTaskItemObject(target.IsDir), time.Now().Unix())
-		} else {
-			consecutiveFails = 0
-			delRunner.DelHook(target.DstDir, target.Name, target.Size, taskStatusSuccess, nil, boolToTaskItemObject(target.IsDir), time.Now().Unix())
+		for start := 0; start < len(group); start += pendingDeleteBatchSize {
+			if delCtx.Err() != nil {
+				break
+			}
+			end := min(len(group), start+pendingDeleteBatchSize)
+			chunk := group[start:end]
+
+			if consecutiveFails >= 5 {
+				errMsg := failAbortMsg
+				for _, item := range chunk {
+					delRunner.DelHook(item.target.DstDir, item.target.Name, nil, taskStatusFailed, &errMsg, taskItemFile, time.Now().Unix())
+					doneCount++
+					failedCount++
+				}
+				m.setExecProgress(rec, pendingExecPhaseDeleting, doneCount, totalCount, failedCount, chunk[len(chunk)-1].target.objectPath())
+				continue
+			}
+
+			rels := make([]string, len(chunk))
+			for i, item := range chunk {
+				rels[i] = item.rel
+			}
+			m.setExecProgress(rec, pendingExecPhaseDeleting, doneCount, totalCount, failedCount, chunk[0].target.objectPath())
+
+			var (
+				errMap   map[string]error
+				batchErr error
+			)
+			if useTrash {
+				errMap, batchErr = nativeCfg.MoveFilesBatch(delCtx, dstRoot, trashBucketVirtual, rels, sessOpts)
+			} else {
+				errMap, batchErr = nativeCfg.DeleteFilesBatch(delCtx, dstRoot, rels, sessOpts)
+			}
+			if delCtx.Err() != nil {
+				break
+			}
+
+			nowUnix := time.Now().Unix()
+			for _, item := range chunk {
+				opErr := batchErr
+				if opErr == nil && errMap != nil {
+					opErr = errMap[item.rel]
+				}
+				if opErr != nil {
+					consecutiveFails++
+					failedCount++
+					s := opErr.Error()
+					delRunner.DelHook(item.target.DstDir, item.target.Name, nil, taskStatusFailed, &s, taskItemFile, nowUnix)
+				} else {
+					consecutiveFails = 0
+					delRunner.DelHook(item.target.DstDir, item.target.Name, item.target.Size, taskStatusSuccess, nil, taskItemFile, nowUnix)
+				}
+				doneCount++
+			}
+			m.setExecProgress(rec, pendingExecPhaseDeleting, doneCount, totalCount, failedCount, chunk[len(chunk)-1].target.objectPath())
 		}
+	}
+
+	// Phase 2: Delete or trash directory targets (and any fallback items) with
+	// bounded concurrency while honoring the consecutive failure circuit breaker.
+	if len(individualTargets) > 0 && delCtx.Err() == nil {
+		workers := min(pendingDeleteDirConcurrency, len(individualTargets))
+		jobsCh := make(chan pendingDeleteTarget, len(individualTargets))
+		for _, target := range individualTargets {
+			jobsCh <- target
+		}
+		close(jobsCh)
+
+		var wg sync.WaitGroup
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for target := range jobsCh {
+					if delCtx.Err() != nil {
+						return
+					}
+					execMu.Lock()
+					aborted := consecutiveFails >= 5
+					execMu.Unlock()
+					if aborted {
+						errMsg := failAbortMsg
+						delRunner.DelHook(target.DstDir, target.Name, nil, taskStatusFailed, &errMsg, boolToTaskItemObject(target.IsDir), time.Now().Unix())
+						execMu.Lock()
+						doneCount++
+						failedCount++
+						curDone, curFail := doneCount, failedCount
+						execMu.Unlock()
+						m.setExecProgress(rec, pendingExecPhaseDeleting, curDone, totalCount, curFail, target.objectPath())
+						continue
+					}
+
+					execMu.Lock()
+					curDone, curFail := doneCount, failedCount
+					execMu.Unlock()
+					m.setExecProgress(rec, pendingExecPhaseDeleting, curDone, totalCount, curFail, target.objectPath())
+
+					err := nativeDeleteOrTrash(delCtx, nativeCfg, delRunner, jobCfg, target.DstRoot, target.DstDir, target.Name, target.IsDir)
+					if delCtx.Err() != nil {
+						return
+					}
+					if err != nil {
+						s := err.Error()
+						delRunner.DelHook(target.DstDir, target.Name, nil, taskStatusFailed, &s, boolToTaskItemObject(target.IsDir), time.Now().Unix())
+						execMu.Lock()
+						consecutiveFails++
+						failedCount++
+						doneCount++
+						curDone, curFail = doneCount, failedCount
+						execMu.Unlock()
+					} else {
+						delRunner.DelHook(target.DstDir, target.Name, target.Size, taskStatusSuccess, nil, boolToTaskItemObject(target.IsDir), time.Now().Unix())
+						execMu.Lock()
+						consecutiveFails = 0
+						doneCount++
+						curDone, curFail = doneCount, failedCount
+						execMu.Unlock()
+					}
+					m.setExecProgress(rec, pendingExecPhaseDeleting, curDone, totalCount, curFail, target.objectPath())
+				}
+			}()
+		}
+		wg.Wait()
 	}
 
 	if delCtx.Err() != nil {
@@ -1008,6 +1372,7 @@ func (m *pendingDeleteManager) returnToPending(rec *pendingDeleteRecord, targets
 	rec.PlanChanged = planChanged
 	rec.LastError = lastErr
 	rec.execCancel = nil
+	rec.resetExecProgressLocked()
 	rec.CreatedAt = time.Now().Unix()
 	m.armExpiryTimerLocked(rec, effectiveFullSyncApprovalWait())
 	persistPendingDeleteRecord(rec)
@@ -1030,6 +1395,7 @@ func (m *pendingDeleteManager) restorePendingAfterCancel(rec *pendingDeleteRecor
 	if current == rec {
 		rec.Status = pendingApprovalStatusPending
 		rec.execCancel = nil
+		rec.resetExecProgressLocked()
 	}
 	m.mu.Unlock()
 }
@@ -1055,6 +1421,18 @@ func (m *pendingDeleteManager) completeRecord(rec *pendingDeleteRecord) {
 // pendingDeleteDirLister lists a directory during targeted pending-delete verification.
 type pendingDeleteDirLister func(dir string) (FileListResult, bool, error)
 
+// pendingDeleteTreeLister lists a full directory subtree in one recursive pass
+// and returns directory listings keyed by normalized directory path.
+type pendingDeleteTreeLister func(dir string) (map[string]FileListResult, bool, error)
+
+type pendingDeleteVerifyOptions struct {
+	listSrc        pendingDeleteDirLister
+	listDst        pendingDeleteDirLister
+	listDstSubtree pendingDeleteTreeLister
+	concurrency    int
+	onProgress     func(done, total int, current string)
+}
+
 func verifyPendingDeleteTargetsWithLister(
 	ctx context.Context,
 	listSrcRaw pendingDeleteDirLister,
@@ -1062,80 +1440,334 @@ func verifyPendingDeleteTargetsWithLister(
 	jobCfg map[string]interface{},
 	targets []pendingDeleteTarget,
 ) (toDelete []pendingDeleteTarget, refreshed []pendingDeleteTarget, changed bool, err error) {
+	return verifyPendingDeleteTargetsWithOptions(ctx, jobCfg, targets, pendingDeleteVerifyOptions{
+		listSrc:     listSrcRaw,
+		listDst:     listDstRaw,
+		concurrency: 1,
+	})
+}
+
+func verifyPendingDeleteTargetsWithOptions(
+	ctx context.Context,
+	jobCfg map[string]interface{},
+	targets []pendingDeleteTarget,
+	opt pendingDeleteVerifyOptions,
+) (toDelete []pendingDeleteTarget, refreshed []pendingDeleteTarget, changed bool, err error) {
 	spec := buildJobExcludeMatcher(jobCfg)
 	includeM := buildJobIncludeMatcher(jobCfg)
 	protectConflicts := util.ToInt(jobCfg["conflictPolicy"]) == 2
 	now := time.Now()
+	concurrency := opt.concurrency
+	if concurrency < 1 {
+		concurrency = 1
+	}
 
 	type cachedList struct {
 		items    FileListResult
 		notFound bool
 	}
+	var srcCacheMu sync.Mutex
+	var dstCacheMu sync.Mutex
 	srcCache := make(map[string]cachedList)
 	dstCache := make(map[string]cachedList)
 
 	listSrc := func(dir string) (FileListResult, bool, error) {
 		dir = normalizeDirPath(dir)
-		if c, ok := srcCache[dir]; ok {
+		srcCacheMu.Lock()
+		c, ok := srcCache[dir]
+		srcCacheMu.Unlock()
+		if ok {
 			return c.items, c.notFound, nil
 		}
-		items, notFound, listErr := listSrcRaw(dir)
+		items, notFound, listErr := opt.listSrc(dir)
 		if listErr != nil {
 			return nil, false, listErr
 		}
+		srcCacheMu.Lock()
 		srcCache[dir] = cachedList{items: items, notFound: notFound}
+		srcCacheMu.Unlock()
 		return items, notFound, nil
 	}
 
 	listDst := func(dir string) (FileListResult, bool, error) {
 		dir = normalizeDirPath(dir)
-		if c, ok := dstCache[dir]; ok {
+		dstCacheMu.Lock()
+		c, ok := dstCache[dir]
+		dstCacheMu.Unlock()
+		if ok {
 			return c.items, c.notFound, nil
 		}
-		items, notFound, listErr := listDstRaw(dir)
+		items, notFound, listErr := opt.listDst(dir)
 		if listErr != nil {
 			return nil, false, listErr
 		}
+		dstCacheMu.Lock()
 		dstCache[dir] = cachedList{items: items, notFound: notFound}
+		dstCacheMu.Unlock()
 		return items, notFound, nil
+	}
+
+	runParallelDirs := func(dirs []string, limit int, fn func(dir string) error) error {
+		if len(dirs) == 0 {
+			return nil
+		}
+		if limit <= 1 || len(dirs) == 1 {
+			for _, d := range dirs {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				if err := fn(d); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		pctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		var firstErr error
+		var errOnce sync.Once
+		ch := make(chan string, len(dirs))
+		for _, d := range dirs {
+			ch <- d
+		}
+		close(ch)
+		workers := min(limit, len(dirs))
+		var wg sync.WaitGroup
+		for i := 0; i < workers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for d := range ch {
+					if pctx.Err() != nil {
+						return
+					}
+					if err := fn(d); err != nil {
+						errOnce.Do(func() {
+							firstErr = err
+							cancel()
+						})
+						return
+					}
+				}
+			}()
+		}
+		wg.Wait()
+		if firstErr != nil {
+			return firstErr
+		}
+		return ctx.Err()
 	}
 
 	// Step 1: Verify every referenced source root is reachable and did not
 	// suddenly become empty (empty-root anomaly guard).
-	checkedRoots := make(map[string]struct{})
+	type rootReq struct {
+		srcRoot  string
+		nonEmpty bool
+	}
+	rootReqs := make([]rootReq, 0, 2)
+	rootIndex := make(map[string]int)
 	for _, target := range targets {
 		srcRoot := normalizeDirPath(target.SrcRoot)
 		if srcRoot == "" {
 			continue
 		}
-		if _, done := checkedRoots[srcRoot]; done {
+		if idx, exists := rootIndex[srcRoot]; exists {
+			if target.SrcRootNonEmpty {
+				rootReqs[idx].nonEmpty = true
+			}
 			continue
 		}
-		checkedRoots[srcRoot] = struct{}{}
-		rootItems, notFound, listErr := listSrc(srcRoot)
+		rootIndex[srcRoot] = len(rootReqs)
+		rootReqs = append(rootReqs, rootReq{srcRoot: srcRoot, nonEmpty: target.SrcRootNonEmpty})
+	}
+	rootDirs := make([]string, len(rootReqs))
+	for i, r := range rootReqs {
+		rootDirs[i] = r.srcRoot
+	}
+	if err := runParallelDirs(rootDirs, concurrency, func(srcRoot string) error {
+		_, _, listErr := listSrc(srcRoot)
 		if listErr != nil {
-			return nil, nil, false, fmt.Errorf("校验源根目录 %s 失败: %w", srcRoot, listErr)
+			return fmt.Errorf("校验源根目录 %s 失败: %w", srcRoot, listErr)
 		}
-		if notFound {
-			return nil, nil, false, errors.New(msg.MirrorDeleteGuard(fmt.Sprintf("source root %s is missing", srcRoot)))
+		return nil
+	}); err != nil {
+		return nil, nil, false, err
+	}
+	for _, r := range rootReqs {
+		c := srcCache[r.srcRoot]
+		if c.notFound {
+			return nil, nil, false, errors.New(msg.MirrorDeleteGuard(fmt.Sprintf("source root %s is missing", r.srcRoot)))
 		}
-		if target.SrcRootNonEmpty && len(rootItems) == 0 {
-			return nil, nil, false, errors.New(msg.MirrorDeleteGuard(fmt.Sprintf("source root %s listed empty during approval verification", srcRoot)))
+		if r.nonEmpty && len(c.items) == 0 {
+			return nil, nil, false, errors.New(msg.MirrorDeleteGuard(fmt.Sprintf("source root %s listed empty during approval verification", r.srcRoot)))
+		}
+	}
+
+	// Step 1b: Pre-fetch unique DstDir and SrcDir listings concurrently so
+	// remote verification runs in parallel waves instead of serial subprocesses.
+	if concurrency > 1 {
+		type prefetchReq struct {
+			isSrc bool
+			dir   string
+		}
+		seenDst := make(map[string]struct{})
+		seenSrc := make(map[string]struct{}, len(rootReqs))
+		for _, r := range rootReqs {
+			seenSrc[r.srcRoot] = struct{}{}
+		}
+		reqs := make([]prefetchReq, 0, len(targets))
+		for _, target := range targets {
+			if !isSafeDeleteTargetName(target.Name) {
+				continue
+			}
+			dstDir := normalizeDirPath(target.DstDir)
+			if dstDir != "" {
+				if _, ok := seenDst[dstDir]; !ok {
+					seenDst[dstDir] = struct{}{}
+					reqs = append(reqs, prefetchReq{isSrc: false, dir: dstDir})
+				}
+			}
+			srcDir := normalizeDirPath(target.SrcDir)
+			if srcDir != "" {
+				if _, ok := seenSrc[srcDir]; !ok {
+					seenSrc[srcDir] = struct{}{}
+					reqs = append(reqs, prefetchReq{isSrc: true, dir: srcDir})
+				}
+			}
+		}
+		if len(reqs) > 0 {
+			pctx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			var firstErr error
+			var errOnce sync.Once
+			var progMu sync.Mutex
+			prefetched := 0
+			totalReqs := len(reqs)
+			ch := make(chan prefetchReq, len(reqs))
+			for _, r := range reqs {
+				ch <- r
+			}
+			close(ch)
+			workers := min(concurrency, len(reqs))
+			var wg sync.WaitGroup
+			for i := 0; i < workers; i++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for r := range ch {
+						if pctx.Err() != nil {
+							return
+						}
+						var listErr error
+						if r.isSrc {
+							_, _, listErr = listSrc(r.dir)
+							if listErr != nil {
+								listErr = fmt.Errorf("校验源目录 %s 失败: %w", r.dir, listErr)
+							}
+						} else {
+							_, _, listErr = listDst(r.dir)
+							if listErr != nil {
+								listErr = fmt.Errorf("校验目标目录 %s 失败: %w", r.dir, listErr)
+							}
+						}
+						if listErr != nil {
+							errOnce.Do(func() {
+								firstErr = listErr
+								cancel()
+							})
+							return
+						}
+						if opt.onProgress != nil {
+							progMu.Lock()
+							prefetched++
+							done := (prefetched * len(targets)) / max(1, totalReqs*2)
+							progMu.Unlock()
+							opt.onProgress(done, len(targets), r.dir)
+						}
+					}
+				}()
+			}
+			wg.Wait()
+			if firstErr != nil {
+				return nil, nil, false, firstErr
+			}
+			if ctx.Err() != nil {
+				return nil, nil, false, ctx.Err()
+			}
+		}
+	}
+
+	// Step 1c: Pre-fetch directory target subtrees via recursive ListTree (1 call
+	// per directory target instead of 1 call per nested subdirectory).
+	if opt.listDstSubtree != nil {
+		seenSub := make(map[string]struct{})
+		subDirs := make([]string, 0)
+		for _, target := range targets {
+			if !target.IsDir || !isSafeDeleteTargetName(target.Name) {
+				continue
+			}
+			dstDir := normalizeDirPath(target.DstDir)
+			dstCacheMu.Lock()
+			parentCached, hasParent := dstCache[dstDir]
+			dstCacheMu.Unlock()
+			if hasParent {
+				if parentCached.notFound {
+					continue
+				}
+				if _, exists := parentCached.items[target.Name]; !exists {
+					continue
+				}
+			}
+			subPath := normalizeDirPath(target.DstDir + target.Name)
+			if _, ok := seenSub[subPath]; ok {
+				continue
+			}
+			seenSub[subPath] = struct{}{}
+			subDirs = append(subDirs, subPath)
+		}
+		if len(subDirs) > 0 {
+			if err := runParallelDirs(subDirs, min(pendingDeleteDirConcurrency, concurrency), func(subPath string) error {
+				treeDirs, notFound, treeErr := opt.listDstSubtree(subPath)
+				if treeErr != nil {
+					return fmt.Errorf("校验目标目录内容 %s 失败: %w", strings.TrimRight(subPath, "/"), treeErr)
+				}
+				dstCacheMu.Lock()
+				if notFound {
+					dstCache[subPath] = cachedList{notFound: true}
+				} else {
+					for d, items := range treeDirs {
+						dstCache[normalizeDirPath(d)] = cachedList{items: items, notFound: false}
+					}
+				}
+				dstCacheMu.Unlock()
+				return nil
+			}); err != nil {
+				return nil, nil, false, err
+			}
 		}
 	}
 
 	// Helper: confirm missing source directory is genuinely absent from its
-	// nearest existing ancestor up to srcRoot (not hidden by a listing error).
+	// nearest existing ancestor up to srcRoot (not hidden by a listing error),
+	// cached per (srcRoot, srcDir).
+	absentCache := make(map[string]error)
 	confirmSrcDirAbsent := func(srcRoot, srcDir string) error {
 		srcRoot = normalizeDirPath(srcRoot)
-		cur := strings.TrimRight(normalizeDirPath(srcDir), "/")
+		normSrcDir := normalizeDirPath(srcDir)
+		cacheKey := srcRoot + "\x00" + normSrcDir
+		if cachedErr, ok := absentCache[cacheKey]; ok {
+			return cachedErr
+		}
+		cur := strings.TrimRight(normSrcDir, "/")
 		rootTrim := strings.TrimRight(srcRoot, "/")
 		for cur != "" && cur != "/" && cur != rootTrim && strings.HasPrefix(cur+"/", srcRoot) {
 			parent := normalizeDirPath(path.Dir(cur))
 			childDirName := path.Base(cur) + "/"
 			parentItems, notFound, listErr := listSrc(parent)
 			if listErr != nil {
-				return fmt.Errorf("校验源上级目录 %s 失败: %w", parent, listErr)
+				retErr := fmt.Errorf("校验源上级目录 %s 失败: %w", parent, listErr)
+				absentCache[cacheKey] = retErr
+				return retErr
 			}
 			if !notFound {
 				// Parent exists: verify childDirName does not exist in parent
@@ -1143,20 +1775,40 @@ func verifyPendingDeleteTargetsWithLister(
 				childKey := foldedEntryName(canonicalFileName(childDirName))
 				for name := range parentItems {
 					if strings.HasSuffix(name, "/") && foldedEntryName(canonicalFileName(name)) == childKey {
-						return fmt.Errorf("source directory %s unexpectedly listed in parent %s", childDirName, parent)
+						retErr := fmt.Errorf("source directory %s unexpectedly listed in parent %s", childDirName, parent)
+						absentCache[cacheKey] = retErr
+						return retErr
 					}
 				}
+				absentCache[cacheKey] = nil
 				return nil
 			}
 			cur = strings.TrimRight(parent, "/")
 		}
+		absentCache[cacheKey] = nil
 		return nil
 	}
 
-	// Helper: filter source directory items the same way scanFullSyncTree does.
-	filterSrcItems := func(srcRoot, srcDir string, raw FileListResult) FileListResult {
+	// Cached O(1) lookup index of filtered source entries per (srcRoot, srcDir).
+	type srcDirIndex struct {
+		allFolded         map[string]struct{}
+		dirFolded         map[string]struct{}
+		fileFolded        map[string]struct{}
+		allowedFileFolded map[string]struct{}
+	}
+	srcIndexCache := make(map[string]*srcDirIndex)
+	getSrcDirIndex := func(srcRoot, srcDir string, raw FileListResult) *srcDirIndex {
+		key := normalizeDirPath(srcRoot) + "\x00" + normalizeDirPath(srcDir)
+		if idx, ok := srcIndexCache[key]; ok {
+			return idx
+		}
 		relDir := strings.TrimPrefix(normalizeDirPath(srcDir), normalizeDirPath(srcRoot))
-		filtered := make(FileListResult, len(raw))
+		idx := &srcDirIndex{
+			allFolded:         make(map[string]struct{}, len(raw)),
+			dirFolded:         make(map[string]struct{}),
+			fileFolded:        make(map[string]struct{}),
+			allowedFileFolded: make(map[string]struct{}),
+		}
 		for name, meta := range raw {
 			isDir := strings.HasSuffix(name, "/")
 			relPath := relDir + name
@@ -1166,13 +1818,23 @@ func verifyPendingDeleteTargetsWithLister(
 			if !isDir && includeM != nil && !includeM.matchesListed(relPath) {
 				continue
 			}
-			filtered[name] = meta
+			folded := foldedEntryName(canonicalFileName(name))
+			idx.allFolded[folded] = struct{}{}
+			if isDir {
+				idx.dirFolded[folded] = struct{}{}
+			} else {
+				idx.fileFolded[folded] = struct{}{}
+				if jobAllowsFileMeta(jobCfg, meta, now) {
+					idx.allowedFileFolded[folded] = struct{}{}
+				}
+			}
 		}
-		return filtered
+		srcIndexCache[key] = idx
+		return idx
 	}
 
 	// Helper: recursively inspect a destination directory subtree for digest &
-	// protected-entry detection.
+	// protected-entry detection (hits dstCache populated by ListTree when available).
 	var scanDstSubtree func(dstRoot, dirPath string) ([]subtreeDigestEntry, bool, error)
 	scanDstSubtree = func(dstRoot, dirPath string) ([]subtreeDigestEntry, bool, error) {
 		dirPath = normalizeDirPath(dirPath)
@@ -1224,9 +1886,12 @@ func verifyPendingDeleteTargetsWithLister(
 	}
 
 	// Step 2: Verify every individual target.
-	for _, target := range targets {
+	for i, target := range targets {
 		if ctx.Err() != nil {
 			return nil, nil, false, ctx.Err()
+		}
+		if opt.onProgress != nil && (i == 0 || (i+1)%25 == 0 || i+1 == len(targets)) {
+			opt.onProgress(i+1, len(targets), target.objectPath())
 		}
 		if !isSafeDeleteTargetName(target.Name) {
 			continue
@@ -1264,19 +1929,14 @@ func verifyPendingDeleteTargetsWithLister(
 			if srcNotFound {
 				continue
 			}
-			srcItems := filterSrcItems(target.SrcRoot, target.SrcDir, srcItemsRaw)
-			sameTypeExists := false
-			oppositeTypeExists := false
-			for srcName, srcMeta := range srcItems {
-				if foldedEntryName(canonicalFileName(srcName)) != targetFolded {
-					continue
-				}
-				srcIsDir := strings.HasSuffix(srcName, "/")
-				if srcIsDir == target.IsDir {
-					sameTypeExists = true
-				} else if srcIsDir || jobAllowsFileMeta(jobCfg, srcMeta, now) {
-					oppositeTypeExists = true
-				}
+			srcIdx := getSrcDirIndex(target.SrcRoot, target.SrcDir, srcItemsRaw)
+			var sameTypeExists, oppositeTypeExists bool
+			if target.IsDir {
+				_, sameTypeExists = srcIdx.dirFolded[targetFolded]
+				_, oppositeTypeExists = srcIdx.allowedFileFolded[targetFolded]
+			} else {
+				_, sameTypeExists = srcIdx.fileFolded[targetFolded]
+				_, oppositeTypeExists = srcIdx.dirFolded[targetFolded]
 			}
 			if sameTypeExists || !oppositeTypeExists {
 				continue
@@ -1287,21 +1947,14 @@ func verifyPendingDeleteTargetsWithLister(
 					return nil, nil, false, err
 				}
 			} else {
-				srcItems := filterSrcItems(target.SrcRoot, target.SrcDir, srcItemsRaw)
 				// Suspicious empty source subdirectory guard.
 				if normalizeDirPath(target.SrcDir) != normalizeDirPath(target.SrcRoot) && len(srcItemsRaw) == 0 && len(dstItems) >= mirrorDeleteFloor {
 					return nil, nil, false, errors.New(msg.MirrorDeleteGuard(fmt.Sprintf("source directory %s listed empty while destination holds %d entries", target.SrcDir, len(dstItems))))
 				}
 				// If source now has ANY matching entry (same or opposite type),
 				// do not delete the destination entry.
-				srcMatched := false
-				for srcName := range srcItems {
-					if foldedEntryName(canonicalFileName(srcName)) == targetFolded {
-						srcMatched = true
-						break
-					}
-				}
-				if srcMatched {
+				srcIdx := getSrcDirIndex(target.SrcRoot, target.SrcDir, srcItemsRaw)
+				if _, srcMatched := srcIdx.allFolded[targetFolded]; srcMatched {
 					continue
 				}
 			}

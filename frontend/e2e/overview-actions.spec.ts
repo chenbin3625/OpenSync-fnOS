@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-test("overview switches the run action to stop while a task is active", async ({
+test("overview embeds live sync progress and stops current batch without disabling continuous sync", async ({
   page,
 }) => {
   const activeTask = {
@@ -46,7 +46,7 @@ test("overview switches the run action to stop while a task is active", async ({
             useCacheS: 0,
             method: 0,
             interval: 0,
-            isCron: 2,
+            isCron: 3,
           },
         ],
         count: 1,
@@ -57,13 +57,14 @@ test("overview switches the run action to stop while a task is active", async ({
 
   await page.goto("/app/opensync/tasks?jobId=1&tab=overview");
   const overview = page.locator(".overview-card");
+  await expect(overview.locator(".continuous-live-progress")).toBeVisible();
   const stopButton = overview.getByRole("button", {
-    name: "停止任务",
+    name: "中止本次同步",
     exact: true,
   });
   await expect(stopButton).toBeVisible();
   await expect(
-    overview.getByRole("button", { name: "启动任务", exact: true }),
+    overview.getByRole("button", { name: "立即同步", exact: true }),
   ).toHaveCount(0);
 
   const stopRequest = page.waitForRequest(
@@ -73,10 +74,10 @@ test("overview switches the run action to stop while a task is active", async ({
   await stopButton.click();
   const dialog = page
     .getByRole("dialog")
-    .filter({ hasText: "停止当前任务？" });
+    .filter({ hasText: "中止本次同步批次？" });
   await expect(dialog).toBeVisible();
   await dialog
-    .getByRole("button", { name: "停止任务", exact: true })
+    .getByRole("button", { name: "中止本次同步", exact: true })
     .click();
   expect((await stopRequest).postDataJSON()).toEqual({
     taskId: "71",
@@ -84,7 +85,7 @@ test("overview switches the run action to stop while a task is active", async ({
   });
 });
 
-test("prioritizes the realtime tab when entering or switching to a running task", async ({
+test("continuous sync stays on overview and opens realtime details on demand", async ({
   page,
 }) => {
   await page.addInitScript(() => {
@@ -148,7 +149,7 @@ test("prioritizes the realtime tab when entering or switching to a running task"
             useCacheS: 0,
             method: 0,
             interval: 0,
-            isCron: 2,
+            isCron: 3,
             running: false,
           },
           {
@@ -162,7 +163,7 @@ test("prioritizes the realtime tab when entering or switching to a running task"
             useCacheS: 0,
             method: 0,
             interval: 0,
-            isCron: 2,
+            isCron: 3,
             running: true,
           },
         ],
@@ -172,41 +173,18 @@ test("prioritizes the realtime tab when entering or switching to a running task"
     return success(null);
   });
 
-  // 1. Direct entry to a running task without ?tab= defaults to realtime.
+  // 1. Direct entry to a syncing continuous job stays on Cloud Sync overview with embedded live progress.
   await page.goto("/app/opensync/tasks?jobId=2");
   const toolbar = page.locator(".page-toolbar");
   await expect(
-    toolbar.getByRole("tab", { name: "实时任务", exact: true }),
-  ).toHaveAttribute("aria-selected", "true");
-  await expect(page).toHaveURL(/jobId=2&tab=realtime$/);
-
-  // 2. Manual switch to overview stays on overview even while running.
-  await toolbar.getByRole("tab", { name: "总览", exact: true }).click();
-  await expect(
     toolbar.getByRole("tab", { name: "总览", exact: true }),
   ).toHaveAttribute("aria-selected", "true");
-  await expect(page).toHaveURL(/jobId=2&tab=overview$/);
+  await expect(page.locator(".continuous-live-progress")).toBeVisible();
 
-  // 3. Starting from idle job on overview, switching to running job prioritizes realtime.
-  await page.goto("/app/opensync/tasks?jobId=1&tab=overview");
+  // 2. Clicking "查看传输明细" navigates to realtime file transfer view.
+  await page.getByRole("button", { name: "查看传输明细" }).click();
   await expect(
-    toolbar.getByRole("tab", { name: "总览", exact: true }),
-  ).toHaveAttribute("aria-selected", "true");
-
-  const isMobile = (page.viewportSize()?.width || 0) <= 640;
-  if (isMobile) {
-    await page
-      .locator(".mobile-job-bar")
-      .getByRole("tab", { name: "运行中任务", exact: true })
-      .click();
-  } else {
-    await page
-      .locator(".app-sidebar")
-      .getByRole("link", { name: "运行中任务", exact: true })
-      .click();
-  }
-  await expect(
-    toolbar.getByRole("tab", { name: "实时任务", exact: true }),
+    toolbar.getByRole("tab", { name: /实时任务/ }),
   ).toHaveAttribute("aria-selected", "true");
   await expect(page).toHaveURL(/jobId=2&tab=realtime$/);
 });

@@ -107,12 +107,9 @@ describe("schedule display", () => {
     ).toBe("每周 周一至周五 的 09:30:00 执行");
   });
 
-  it("renders interval and manual schedules", () => {
-    expect(formatSchedule(job({ isCron: 0, interval: 15 }))).toBe("每 15 分钟");
-    expect(formatSchedule(job({ isCron: 2 }))).toBe("仅手动触发");
-    expect(formatSchedulePlan({ isCron: 2 })).toBe(
-      "不自动执行，只能手动触发",
-    );
+  it("renders continuous sync schedule labels", () => {
+    expect(formatSchedule(job({ isCron: 3 }))).toBe("持续同步");
+    expect(formatSchedulePlan({ isCron: 3 })).toContain("持续监控");
   });
 });
 

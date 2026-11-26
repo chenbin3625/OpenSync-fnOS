@@ -302,10 +302,17 @@ func (w *jobWatcher) scanSyncRoots(ctx context.Context, job map[string]interface
 		}
 		// Local inotify handles fast updates. Polling also reconciles missed events,
 		// stable-age filters and out-of-band changes after a process restart.
-		scanCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		// Local roots expose reliable mtime+size, so polling never hashes entire
+		// local disks; content MD5 comparison still runs during actual transfers.
+		includeHash := jobWantsHash && ep.SupportsNativeMD5() && !ep.IsLocal
+		scanTimeout := 5 * time.Minute
+		if ep.IsLocal {
+			scanTimeout = 15 * time.Minute
+		}
+		scanCtx, cancel := context.WithTimeout(ctx, scanTimeout)
 		entries, exists, err := cfg.ListTree(scanCtx, root, native.TreeOptions{
 			FastList: util.ToInt(job["fastList"]) == 1, FollowSymlinks: util.ToInt(job["followSymlinks"]) == 1,
-			IncludeHash: jobWantsHash && ep.SupportsNativeMD5(), ProxyURL: globalNativeProxyURL(),
+			IncludeHash: includeHash, ProxyURL: globalNativeProxyURL(),
 		})
 		cancel()
 		if ctx.Err() != nil {
@@ -405,7 +412,18 @@ func addSyncStatus(row map[string]interface{}, s mapper.SyncState, stateErr erro
 	if s.FullScan {
 		pending = -1
 	}
-	poll, _, _ := syncIntervals(extra)
-	row["syncStatus"] = map[string]interface{}{"state": status, "pendingChanges": pending, "lastSuccess": s.LastSuccess,
-		"lastPoll": s.LastPoll, "nextPoll": s.LastPoll + int64(poll/time.Second), "error": message, "failures": s.Failures}
+	poll, audit, debounce := syncIntervals(extra)
+	row["syncStatus"] = map[string]interface{}{
+		"state":            status,
+		"pendingChanges":   pending,
+		"lastSuccess":      s.LastSuccess,
+		"lastPoll":         s.LastPoll,
+		"nextPoll":         s.LastPoll + int64(poll/time.Second),
+		"error":            message,
+		"failures":         s.Failures,
+		"direction":        extra.SyncDirection,
+		"pollIntervalSec":  int(poll / time.Second),
+		"auditIntervalMin": int(audit / time.Minute),
+		"debounceSec":      int(debounce / time.Second),
+	}
 }

@@ -44,6 +44,10 @@ import { applyTheme, connectHost } from "./lib/host";
 import { useResource } from "./lib/hooks";
 import { createGuardedRefresh } from "./lib/sessionGuard";
 import { buildTaskSearchParams } from "./lib/taskForm";
+import {
+  resolveEffectiveSyncStatus,
+  syncStatusLabels,
+} from "./components/SyncStatus";
 import { getJobName } from "./pages/Home/homeUtils";
 import type { JobItem } from "./types";
 
@@ -85,14 +89,29 @@ export const SessionContext = createContext<{ development: boolean }>({
 
 function jobStatusDotClass(job: JobItem): string {
   if (job.legacyOpenList) return "job-dot job-dot--error";
-  if (job.pendingApproval) return "job-dot job-dot--approval";
-  if (job.running && job.paused) return "job-dot job-dot--paused";
-  if (job.running) return "job-dot job-dot--running";
-  if (job.queued) return "job-dot job-dot--queued";
-  if (job.lastStatus && [3, 5, 6, 7].includes(job.lastStatus))
+  if (job.pendingApproval || job.syncStatus?.state === "waiting_approval")
+    return "job-dot job-dot--approval";
+  if (
+    job.syncStatus?.state === "error" ||
+    job.syncStatus?.state === "needs_rebuild"
+  )
     return "job-dot job-dot--error";
-  if (job.enable !== 1 && job.isCron !== 2) return "job-dot job-dot--disabled";
-  return "";
+  if (job.running && job.paused) return "job-dot job-dot--paused";
+  if (
+    job.running ||
+    job.syncStatus?.state === "syncing" ||
+    job.syncStatus?.state === "scanning" ||
+    job.syncStatus?.state === "pending"
+  )
+    return "job-dot job-dot--running";
+  if (job.queued) return "job-dot job-dot--queued";
+  if (job.syncStatus?.state === "waiting_window")
+    return "job-dot job-dot--paused";
+  if (job.enable !== 1 || job.syncStatus?.state === "paused")
+    return "job-dot job-dot--disabled";
+  if (job.lastStatus && [3, 5, 6, 7].includes(job.lastStatus) && !job.syncStatus)
+    return "job-dot job-dot--error";
+  return "job-dot job-dot--synced";
 }
 
 function Shell({ children, version }: { children: ReactNode; version: string }) {
@@ -330,6 +349,9 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
               <div className="nav-submenu" id="task-menu">
                 {taskItems.map((job) => {
                   const dotClass = jobStatusDotClass(job);
+                  const statusLabel = job.legacyOpenList
+                    ? "旧版已停用"
+                    : syncStatusLabels[resolveEffectiveSyncStatus(job).state];
                   return (
                     // A plain Link: NavLink ignores the query string, so every
                     // /tasks?jobId=… entry was marked aria-current="page".
@@ -340,7 +362,7 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
                       aria-current={
                         activeTaskId === String(job.id) ? "page" : undefined
                       }
-                      title={getJobName(job)}
+                      title={`${getJobName(job)} · ${statusLabel}`}
                     >
                       <IconFolderStroked
                         className="task-sub-icon"

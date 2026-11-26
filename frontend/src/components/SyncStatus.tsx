@@ -1,31 +1,36 @@
 import Tag from "@douyinfe/semi-ui/lib/es/tag";
 import type { SyncStatus } from "../types";
+import { syncStatusLabels, syncStatusTone } from "../lib/continuousSync";
 
-export const syncStatusLabels: Record<SyncStatus["state"], string> = {
-  monitoring: "监控中",
-  pending: "等待同步",
-  scanning: "扫描中",
-  syncing: "同步中",
-  synced: "已同步",
-  waiting_window: "等待运行窗口",
-  waiting_approval: "等待删除确认",
-  paused: "同步已暂停",
-  error: "同步异常",
-  needs_rebuild: "待重建基线",
-};
+export {
+  formatContinuousSyncPlan,
+  formatMinutesShort,
+  formatRelativeSyncTime,
+  formatSecondsShort,
+  getContinuousSyncMeta,
+  isSyncStatusError,
+  parseJobExtraFlagsObject,
+  resolveEffectiveSyncStatus,
+  syncStatusLabels,
+  syncStatusTone,
+  type ContinuousSyncMeta,
+  type SyncDirectionKey,
+  type SyncStatusTone,
+} from "../lib/continuousSync";
 
-export function SyncStatusTag({ status }: { status?: SyncStatus }) {
+export function SyncStatusTag({ status }: { status?: SyncStatus | null }) {
   if (!status) return null;
+  const tone = syncStatusTone(status.state);
   const color =
-    status.state === "error" || status.state === "needs_rebuild"
+    tone === "danger"
       ? "red"
-      : status.state === "synced"
+      : tone === "success"
         ? "green"
-        : status.state === "paused" ||
-            status.state === "waiting_approval" ||
-            status.state === "waiting_window"
+        : tone === "warning"
           ? "orange"
-          : "blue";
+          : tone === "muted"
+            ? "grey"
+            : "blue";
   const title =
     status.error ||
     (status.lastSuccess > 0

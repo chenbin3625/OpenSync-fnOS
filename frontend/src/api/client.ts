@@ -608,12 +608,42 @@ export const api = {
     ),
   current: (id: number, signal?: AbortSignal) =>
     requestCurrentTask<CurrentTaskData | null>({ id }, signal),
-  pendingApproval: (jobId: number, signal?: AbortSignal) =>
-    request<FullSyncApproval | null>("/job/approval", {
-      params: { jobId },
-      signal,
+  pendingApproval: (
+    jobId: number,
+    signalOrOpts?:
+      | AbortSignal
+      | {
+          offset?: number;
+          limit?: number;
+          q?: string;
+          type?: "all" | "dir" | "file" | string;
+          signal?: AbortSignal;
+        },
+  ) => {
+    const isSignal =
+      Boolean(signalOrOpts) &&
+      typeof (signalOrOpts as AbortSignal).aborted === "boolean";
+    const opts = isSignal
+      ? { signal: signalOrOpts as AbortSignal }
+      : ((signalOrOpts as {
+          offset?: number;
+          limit?: number;
+          q?: string;
+          type?: string;
+          signal?: AbortSignal;
+        }) ?? {});
+    return request<FullSyncApproval | null>("/job/approval", {
+      params: {
+        jobId,
+        offset: opts.offset,
+        limit: opts.limit,
+        q: opts.q || undefined,
+        type: opts.type && opts.type !== "all" ? opts.type : undefined,
+      },
+      signal: opts.signal,
       cache: "no-store",
-    }),
+    });
+  },
   pendingApprovals: (signal?: AbortSignal) =>
     request<FullSyncApproval[]>("/job/approval", {
       signal,

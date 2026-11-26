@@ -1017,6 +1017,32 @@ function formatSingleAtomHuman(atom: string): string {
   return `${parsed.value} ${unitLabel}`;
 }
 
+export interface BwScheduleRuleSummary {
+  daysLabel: string;
+  timeRange: string;
+  crossMidnight: boolean;
+  rateLabel: string;
+  rateCompact: string;
+}
+
+export interface BwLimitDisplayInfo {
+  configured: boolean;
+  hasSchedule: boolean;
+  isCurrentlyLimited: boolean;
+  activeRate: string;
+  activeRateHuman: string;
+  activeRateCompact: string;
+  chipLabel: string;
+  kpiLabel: string;
+  liveOptionLabel: string;
+  tooltipSummary: string;
+  nextChangeLabel?: string;
+  rules: BwScheduleRuleSummary[];
+  defaultRateHuman?: string;
+  isRawFallback: boolean;
+  raw: string;
+}
+
 export function formatBwRateHuman(rate: string): string {
   const trimmed = (rate || "").trim();
   if (!trimmed || trimmed === "0" || /^off$/i.test(trimmed)) return "不限速";
@@ -1032,6 +1058,191 @@ export function formatBwRateHuman(rate: string): string {
     return `上传 ${upText} / 下载 ${downText}`;
   }
   return formatSingleAtomHuman(trimmed);
+}
+
+/**
+ * Concise human-readable rate string for badges, KPI footers, and chips.
+ * Omits the unlimited direction in asymmetric single-direction limits (e.g. "5.5M:off" -> "上传 5.5 MB/s").
+ */
+export function formatBwRateCompact(rate: string): string {
+  const trimmed = (rate || "").trim();
+  if (!trimmed || trimmed === "0" || /^off$/i.test(trimmed)) return "不限速";
+  const colonIdx = trimmed.indexOf(":");
+  if (colonIdx >= 0) {
+    const up = trimmed.slice(0, colonIdx).trim();
+    const down = trimmed.slice(colonIdx + 1).trim();
+    const upOff = !up || up === "0" || /^off$/i.test(up);
+    const downOff = !down || down === "0" || /^off$/i.test(down);
+    if (upOff && downOff) return "不限速";
+    if (!upOff && downOff) return `上传 ${formatSingleAtomHuman(up)}`;
+    if (upOff && !downOff) return `下载 ${formatSingleAtomHuman(down)}`;
+    return `↑${formatSingleAtomHuman(up)} ↓${formatSingleAtomHuman(down)}`;
+  }
+  return formatSingleAtomHuman(trimmed);
+}
+
+/**
+ * Ultra-short segment label for 24h timeline bar cells (e.g. "5.5M:off" -> "↑5.5M").
+ */
+export function formatBwTimelineSegLabel(rate: string): string {
+  const trimmed = (rate || "").trim();
+  if (!trimmed || trimmed === "0" || /^off$/i.test(trimmed)) return "不限";
+  const colonIdx = trimmed.indexOf(":");
+  if (colonIdx >= 0) {
+    const up = trimmed.slice(0, colonIdx).trim();
+    const down = trimmed.slice(colonIdx + 1).trim();
+    const upOff = !up || up === "0" || /^off$/i.test(up);
+    const downOff = !down || down === "0" || /^off$/i.test(down);
+    if (upOff && downOff) return "不限";
+    if (!upOff && downOff) return `↑${up}`;
+    if (upOff && !downOff) return `↓${down}`;
+    return `↑${up}/↓${down}`;
+  }
+  return trimmed;
+}
+
+/**
+ * Produces structured, human-readable display metadata for any rclone --bwlimit expression
+ * (unlimited, fixed symmetric/asymmetric, or weekly/daily timetable).
+ */
+export function describeBwLimit(
+  raw: string | null | undefined,
+  options: { now?: Date } = {},
+): BwLimitDisplayInfo {
+  const trimmed = (raw || "").trim();
+  const now = options.now ?? new Date();
+  if (!trimmed) {
+    return {
+      configured: false,
+      hasSchedule: false,
+      isCurrentlyLimited: false,
+      activeRate: "off",
+      activeRateHuman: "不限速",
+      activeRateCompact: "不限速",
+      chipLabel: "全局不限速",
+      kpiLabel: "",
+      liveOptionLabel: "不限速",
+      tooltipSummary: "全局不限速",
+      rules: [],
+      isRawFallback: false,
+      raw: "",
+    };
+  }
+
+  const resolved = resolveBwLimitAt(trimmed, now);
+  const activeRateHuman = formatBwRateHuman(resolved.activeRate);
+  const activeRateCompact = formatBwRateCompact(resolved.activeRate);
+  const isCurrentlyLimited = !resolved.isUnlimited;
+
+  if (!resolved.hasSchedule) {
+    if (!isCurrentlyLimited) {
+      return {
+        configured: false,
+        hasSchedule: false,
+        isCurrentlyLimited: false,
+        activeRate: "off",
+        activeRateHuman: "不限速",
+        activeRateCompact: "不限速",
+        chipLabel: "全局不限速",
+        kpiLabel: "",
+        liveOptionLabel: "不限速",
+        tooltipSummary: "全局不限速",
+        rules: [],
+        isRawFallback: false,
+        raw: trimmed,
+      };
+    }
+    const isDirectedSingle =
+      activeRateCompact.startsWith("上传 ") || activeRateCompact.startsWith("下载 ");
+    const chipLabel = isDirectedSingle
+      ? `全局限速 · ${activeRateCompact}`
+      : `全局限速 ${activeRateCompact}`;
+    const kpiLabel = isDirectedSingle
+      ? `${activeRateCompact.slice(0, 2)}限速 ${activeRateCompact.slice(3)}`
+      : `限速 ${activeRateCompact}`;
+    const liveOptionLabel =
+      isDirectedSingle || activeRateCompact.startsWith("↑")
+        ? activeRateCompact
+        : `限速 ${activeRateCompact}`;
+    return {
+      configured: true,
+      hasSchedule: false,
+      isCurrentlyLimited: true,
+      activeRate: resolved.activeRate,
+      activeRateHuman,
+      activeRateCompact,
+      chipLabel,
+      kpiLabel,
+      liveOptionLabel,
+      tooltipSummary: `全局限速：${activeRateHuman}`,
+      rules: [],
+      isRawFallback: false,
+      raw: trimmed,
+    };
+  }
+
+  const parsed = parseBwLimit(trimmed, { allowInherit: false });
+  const rules: BwScheduleRuleSummary[] = [];
+  let defaultRateHuman: string | undefined;
+  let isRawFallback = false;
+
+  if (parsed.mode === "schedule") {
+    for (const rule of parsed.rules) {
+      const rateToken = serializeRateValue(rule.rate) || "off";
+      const startMin = parseHHMM(rule.startTime) ?? 0;
+      const endMin = parseHHMM(rule.endTime) ?? 0;
+      rules.push({
+        daysLabel: formatDaysLabel(rule.days),
+        timeRange: `${rule.startTime}–${rule.endTime}`,
+        crossMidnight: endMin < startMin,
+        rateLabel: formatBwRateHuman(rateToken),
+        rateCompact: formatBwRateCompact(rateToken),
+      });
+    }
+    const defaultToken = serializeRateValue(parsed.defaultRate) || "off";
+    defaultRateHuman = formatBwRateHuman(defaultToken);
+  } else if (parsed.mode === "raw") {
+    isRawFallback = true;
+  }
+
+  const nextChangeLabel =
+    resolved.nextChangeAt && resolved.nextRate
+      ? `${formatNextChangeTime(resolved.nextChangeAt, now)} → ${formatBwRateCompact(resolved.nextRate)}`
+      : undefined;
+
+  const chipLabel = isCurrentlyLimited
+    ? `定时限速 · ${activeRateCompact}`
+    : "定时限速 · 当前不限速";
+  const kpiLabel = isCurrentlyLimited
+    ? `定时 · ${activeRateCompact}`
+    : "定时 · 当前不限";
+  const liveOptionLabel = isCurrentlyLimited
+    ? `定时 · ${activeRateCompact}`
+    : "定时 · 当前不限";
+  const tooltipParts = [
+    `定时限速：${isCurrentlyLimited ? `当前 ${activeRateHuman}` : "当前不限速"}`,
+  ];
+  if (nextChangeLabel) {
+    tooltipParts.push(`下次切换 ${nextChangeLabel}`);
+  }
+
+  return {
+    configured: true,
+    hasSchedule: true,
+    isCurrentlyLimited,
+    activeRate: resolved.activeRate,
+    activeRateHuman,
+    activeRateCompact,
+    chipLabel,
+    kpiLabel,
+    liveOptionLabel,
+    tooltipSummary: tooltipParts.join(" · "),
+    nextChangeLabel,
+    rules,
+    defaultRateHuman,
+    isRawFallback,
+    raw: trimmed,
+  };
 }
 
 /**

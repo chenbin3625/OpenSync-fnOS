@@ -20,17 +20,20 @@ import TextArea from "@douyinfe/semi-ui/lib/es/input/textarea";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import {
   IconAlertTriangle,
+  IconArrowRight,
   IconChevronRight,
+  IconDownload,
   IconInfoCircle,
   IconLockStroked,
+  IconRefresh,
   IconTick,
   IconTickCircle,
+  IconUpload,
 } from "@douyinfe/semi-icons";
 import { api } from "../api/client";
 import {
   Editor,
   Field,
-  HelpTip,
   InlineNotice,
   SettingRow,
   errorToast,
@@ -41,6 +44,10 @@ import { FileTypeFilter } from "../components/FileTypeFilter";
 import { QuickCryptModal } from "../components/QuickCryptModal";
 import { RemotePaths } from "../components/RemotePaths";
 import { SyncPathPreview } from "../components/SyncPathPreview";
+import {
+  formatContinuousSyncPlan,
+  type SyncDirectionKey,
+} from "../components/SyncStatus";
 import { useAction, useEditorForm, useResource } from "../lib/hooks";
 import { channelNames, getNotifyEndpointSummary } from "../lib/notifyForm";
 import {
@@ -52,26 +59,6 @@ import {
   RemoteDirCacheProvider,
   type RemoteDirCache,
 } from "../lib/remoteDirCache";
-import {
-  applyCronPresetMode,
-  computeNextCronRuns,
-  cronFieldRanges,
-  customCronPresets,
-  detectCronPresetMode,
-  formatCronRunTime,
-  formatIntervalHuman,
-  formatWeekdayCronExpression,
-  intervalInputToMinutes,
-  intervalPresets,
-  intervalUnitOptions,
-  parseWeekdaySelection,
-  splitIntervalMinutes,
-  validateCronFields,
-  weekdayOptions,
-  type CronFieldKey,
-  type IntervalUnit,
-  type SchedulePresetMode,
-} from "../lib/schedule";
 import {
   applyTaskScenarioPreset,
   buildJobPayload,
@@ -96,11 +83,7 @@ import {
 import {
   compareModeOptions,
   conflictPolicyOptions,
-  cronFields,
-  cronTypeNames,
   filterModeOptions,
-  formatSchedulePlan,
-  methodOptions,
   notifyModeOptions,
   parseIntervalInput,
 } from "./Home/homeUtils";
@@ -131,31 +114,24 @@ export interface TaskEditorSavedResult {
 
 const taskEditorTabs = [
   { key: "basic", label: "基础与路径", optional: false },
-  { key: "schedule", label: "执行计划", optional: false },
+  { key: "schedule", label: "同步设置", optional: false },
   { key: "filter", label: "过滤规则", optional: true },
 ] as const;
 
-const schedulePresetOptions: Array<{ value: SchedulePresetMode; label: string }> = [
-  { value: "daily", label: "每天" },
-  { value: "weekly", label: "每周" },
-  { value: "monthly", label: "每月" },
-  { value: "custom", label: "自定义 Cron" },
-];
+const pollIntervalPresets = [
+  { label: "30 秒", value: 30 },
+  { label: "1 分钟", value: 60 },
+  { label: "5 分钟", value: 300 },
+  { label: "15 分钟", value: 900 },
+  { label: "1 小时", value: 3600 },
+] as const;
 
-const hourOptions = Array.from({ length: 24 }, (_, i) => ({
-  value: String(i),
-  label: `${String(i).padStart(2, "0")} 时`,
-}));
-
-const minuteOptions = Array.from({ length: 60 }, (_, i) => ({
-  value: String(i),
-  label: `${String(i).padStart(2, "0")} 分`,
-}));
-
-const monthDayOptions = Array.from({ length: 31 }, (_, i) => ({
-  value: String(i + 1),
-  label: `每月 ${i + 1} 日`,
-}));
+const auditIntervalPresets = [
+  { label: "1 小时", value: 60 },
+  { label: "6 小时", value: 360 },
+  { label: "12 小时", value: 720 },
+  { label: "每天", value: 1440 },
+] as const;
 
 const fileSizeFilterDefaults = {
   min: { label: "排除小于", value: 10, unit: "KB" },
@@ -169,15 +145,69 @@ const fileSizeFilterDefaults = {
   }
 >;
 
-const syncMethodTip = (
-  <div className="sync-method-tip">
-    {methodOptions.map((method) => (
-      <div key={method.name}>
-        <strong>{method.name}</strong>：{method.description}
-      </div>
-    ))}
-  </div>
-);
+const directionCards: Array<{
+  key: SyncDirectionKey;
+  title: string;
+  route: string;
+  desc: string;
+  icon: "upload" | "download" | "bidirectional" | "custom";
+}> = [
+  {
+    key: "upload",
+    title: "仅上传本地更改",
+    route: "本地 → 远端",
+    desc: "本地目录变更实时上传至远端，适合 NAS 备份上云",
+    icon: "upload",
+  },
+  {
+    key: "download",
+    title: "仅下载远端更改",
+    route: "远端 → 本地",
+    desc: "远端目录变更按周期拉取到本地，适合云盘归档回本地",
+    icon: "download",
+  },
+  {
+    key: "bidirectional",
+    title: "双向同步",
+    route: "目录 A ⇄ 目录 B",
+    desc: "双端新增、修改与删除实时互相同步（rclone bisync）",
+    icon: "bidirectional",
+  },
+  {
+    key: "custom",
+    title: "自定义单向",
+    route: "源目录 → 目标目录",
+    desc: "任意存储单向持续同步（支持云盘到云盘、本地到本地）",
+    icon: "custom",
+  },
+];
+
+function DirectionCardIcon({ kind }: { kind: "upload" | "download" | "bidirectional" | "custom" }) {
+  switch (kind) {
+    case "upload":
+      return <IconUpload aria-hidden="true" />;
+    case "download":
+      return <IconDownload aria-hidden="true" />;
+    case "bidirectional":
+      return <IconRefresh aria-hidden="true" />;
+    case "custom":
+      return <IconArrowRight aria-hidden="true" />;
+  }
+}
+
+function activeDirectionFromForm(form: JobForm): SyncDirectionKey {
+  if (form.method === 3) return "bidirectional";
+  const dir = (form.extraFlags?.syncDirection || "").trim();
+  if (dir === "upload" || dir === "download") return dir;
+  return "custom";
+}
+
+function parsePositiveIntDraft(raw: string): number {
+  const trimmed = raw.trim();
+  if (!trimmed) return 0;
+  if (!/^\d+$/.test(trimmed)) return -1;
+  return Number(trimmed);
+}
 
 export default function TaskEditor({
   job,
@@ -206,10 +236,15 @@ export default function TaskEditor({
   const seedForm = useMemo(
     () =>
       initialDraft
-        ? { ...initialDraft, alistId: initialDraft.alistId || defaultEngineId }
+        ? {
+            ...initialDraft,
+            isCron: 3,
+            method: initialDraft.method === 2 ? 0 : initialDraft.method,
+            alistId: initialDraft.alistId || defaultEngineId,
+          }
         : job
           ? { ...jobToForm(job), alistId: job.alistId || defaultEngineId }
-          : { ...defaultJobForm(defaultEngineId), isCron: 3 },
+          : defaultJobForm(defaultEngineId),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
   );
@@ -240,29 +275,28 @@ export default function TaskEditor({
       max: (parseFileSizeInput(seedForm.maxFileSize) ?? 0) > 0,
     }),
   );
+
+  // Draft strings for continuous sync numeric inputs so users can clear & retype cleanly
+  const [pollDraft, setPollDraft] = useState<string>(() =>
+    String(seedForm.extraFlags?.syncPollIntervalSec || 60),
+  );
+  const [auditDraft, setAuditDraft] = useState<string>(() =>
+    String(seedForm.extraFlags?.syncAuditIntervalMin || 1440),
+  );
+  const [debounceDraft, setDebounceDraft] = useState<string>(() =>
+    String(seedForm.extraFlags?.watchDebounceSec || 30),
+  );
+
   const effectiveDirty =
     dirty ||
     Boolean(initialDraft) ||
     hasPendingFileSizeDraftChange(form, fileSizeDrafts);
-  const methodLabelId = useId();
-  const initialInterval = useMemo(
-    () => splitIntervalMinutes(seedForm.interval),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [],
-  );
-  const [intervalUnit, setIntervalUnit] = useState<IntervalUnit>(
-    initialInterval.unit,
-  );
-  const [intervalDraft, setIntervalDraft] = useState<string | null>(null);
-  const [cronPresetMode, setCronPresetMode] = useState<SchedulePresetMode>(() =>
-    detectCronPresetMode(seedForm),
-  );
+
   const [policyOpen, setPolicyOpen] = useState<boolean>(() =>
     Boolean(
       seedForm.compareMode ||
         seedForm.conflictPolicy ||
-        seedForm.trashEnable ||
-        seedForm.deleteEmptySrcDirs,
+        seedForm.trashEnable,
     ),
   );
   const [compareModeSource, setCompareModeSource] = useState<CompareModeSource>(
@@ -302,18 +336,15 @@ export default function TaskEditor({
         Number(seedForm.extraFlags?.lowLevelRetries || 0) > 0 ||
         seedForm.extraFlags?.retriesSleep ||
         seedForm.extraFlags?.resumeEnable ||
-        seedForm.extraFlags?.watchEnable ||
         Number(seedForm.extraFlags?.autoRetryMax || 0) > 0 ||
         Number(seedForm.extraFlags?.postSyncJobId || 0) > 0 ||
         seedForm.extraFlags?.checkSchedule ||
-        seedForm.extraFlags?.missedCatchUp ||
         seedForm.extraFlags?.directStream ||
         seedForm.extraFlags?.bisyncResyncMode ||
         Number(seedForm.extraFlags?.bisyncMaxDelete || 0) > 0 ||
         seedForm.extraFlags?.bisyncForce,
     ),
   );
-  const [runAfterCreate, setRunAfterCreate] = useState(false);
 
   // Filter interactive tester state
   const [testPath, setTestPath] = useState("2026/photo.jpg");
@@ -332,8 +363,7 @@ export default function TaskEditor({
   const action = useAction();
   const activePanel = isNew ? taskEditorTabs[step].key : activeTab;
 
-  // Panels stay mounted once visited: switching tabs used to unmount them, so
-  // every return to basic/filter re-fetched directory trees and dropped expansion state.
+  // Panels stay mounted once visited so switching tabs keeps directory trees & expansion state.
   const [visitedPanels, setVisitedPanels] = useState<string[]>([activePanel]);
   useEffect(() => {
     setVisitedPanels((previous) =>
@@ -345,7 +375,6 @@ export default function TaskEditor({
   const panelStyle = (panel: string) =>
     panel === activePanel ? undefined : { display: "none" };
 
-  // 标签栏/步骤条固定在顶部，只有下方内容区滚动。切换标签或步骤时回到内容顶部。
   const scrollRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = 0;
@@ -390,14 +419,9 @@ export default function TaskEditor({
   const showStepError = (stepIndex: number, key: JobFieldErrorKey): string => {
     const msg = validation.fields[key];
     if (!msg) return "";
-    // Range/size errors and cron errors in custom mode are helpful immediately once non-empty
     if (validatedSteps.has(stepIndex)) return msg;
     if (key === "fileSizeRange") return msg;
-    if (
-      key === "dstPath" &&
-      (form.method === 2 || form.method === 3) &&
-      form.dstPath.length > 1
-    ) {
+    if (key === "dstPath" && form.method === 3 && form.dstPath.length > 1) {
       return msg;
     }
     if (key === "srcPath" && form.method === 3 && form.srcPath.length > 1) {
@@ -474,15 +498,48 @@ export default function TaskEditor({
           isNew && result && typeof result.id === "number" && result.id > 0
             ? result.id
             : undefined;
-        Toast.success(job ? "编辑成功，下次任务生效" : "任务已创建");
+        Toast.success(
+          job
+            ? "保存成功，持续同步已按新配置生效"
+            : mergedForm.enable
+              ? "持续同步任务已创建并开始监控"
+              : "持续同步任务已创建（当前暂停）",
+        );
         onSaved({
           createdId,
-          runNow: isNew && runAfterCreate && (mergedForm.isCron === 2 || mergedForm.enable),
-          method: mergedForm.method,
+          runNow: false,
+          method: payload.method,
         });
       } catch (err) {
         errorToast(err);
       }
+    });
+  };
+
+  const handleDirectionSelect = (direction: SyncDirectionKey) => {
+    if (direction === "bidirectional") {
+      patch({
+        method: 3,
+        conflictPolicy: form.method !== 3 && form.conflictPolicy === 0 ? 2 : form.conflictPolicy,
+        extraFlags: { ...form.extraFlags, syncDirection: "" },
+      });
+      return;
+    }
+    const nextMethod = form.method === 3 ? 0 : form.method;
+    const sourceLocal = form.srcPath.some(
+      (p) => p.split("/").filter(Boolean)[0] === "本地",
+    );
+    const targetLocal = form.dstPath.some(
+      (p) => p.split("/").filter(Boolean)[0] === "本地",
+    );
+    const swap =
+      direction === "upload"
+        ? !sourceLocal && targetLocal
+        : direction === "download" && sourceLocal && !targetLocal;
+    patch({
+      method: nextMethod,
+      extraFlags: { ...form.extraFlags, syncDirection: direction },
+      ...(swap ? { srcPath: form.dstPath, dstPath: form.srcPath } : {}),
     });
   };
 
@@ -620,9 +677,6 @@ export default function TaskEditor({
     setForm,
   ]);
 
-  // Detect standard WebDAV (vendor=other / OpenList / AList) in selected paths
-  // (including through crypt/chunker/alias/union/combine wrappers) so we can
-  // default destination OpenList jobs to size-only and warn if MD5 is chosen.
   const matchedDstStandardWebDAVNames = useMemo(
     () =>
       findStandardWebDAVRemotesForPaths(
@@ -648,41 +702,38 @@ export default function TaskEditor({
     [nativeStorage.data?.remotes, form.srcPath, form.dstPath],
   );
 
+  const activeDirection = activeDirectionFromForm(form);
   const srcMultiple = form.method !== 3 || form.srcPath.length > 1;
-  const dstMultiple =
-    (form.method !== 2 && form.method !== 3) || form.dstPath.length > 1;
-  const activeMethodOption = methodOptions[form.method] ?? methodOptions[0];
-  const isDestructiveMethod =
-    form.method === 1 || form.method === 2 || form.method === 3;
+  const dstMultiple = form.method !== 3 || form.dstPath.length > 1;
+  const isDestructiveDirection = form.method === 1 || form.method === 3;
 
-  // Schedule preview data
-  const cronErrors = useMemo(
-    () => (form.isCron === 1 ? validateCronFields(form) : {}),
-    [form],
-  );
-  const cronErrorMessage = Object.values(cronErrors)[0] ?? "";
-  const upcomingRuns = useMemo(() => {
-    if (form.isCron !== 1 || cronErrorMessage) return [];
-    return computeNextCronRuns(form, 3);
-  }, [
-    form.isCron,
-    form.second,
-    form.minute,
-    form.hour,
-    form.day,
-    form.month,
-    form.day_of_week,
-    cronErrorMessage,
-  ]);
+  const srcFieldLabel =
+    activeDirection === "bidirectional"
+      ? "左侧同步目录（单选）"
+      : activeDirection === "upload"
+        ? "本地源目录"
+        : activeDirection === "download"
+          ? "远端源目录"
+          : "源目录";
+  const dstFieldLabel =
+    activeDirection === "bidirectional"
+      ? "右侧同步目录（单选）"
+      : activeDirection === "upload"
+        ? "远端目标目录"
+        : activeDirection === "download"
+          ? "本地目标目录"
+          : "目标目录";
 
-  const intervalDisplayValue = useMemo(() => {
-    if (intervalDraft !== null) return intervalDraft;
-    const factor =
-      intervalUnitOptions.find((u) => u.value === intervalUnit)?.factor ?? 1;
-    if (!Number.isFinite(form.interval) || form.interval <= 0) return "";
-    const scaled = form.interval / factor;
-    return Number.isInteger(scaled) ? String(scaled) : String(form.interval);
-  }, [intervalDraft, intervalUnit, form.interval]);
+  const directionSummaryText =
+    activeDirection === "bidirectional"
+      ? "双端文件的新增、修改和删除会互相同步；首次运行时将自动建立双向基线，建议保留「保留双方冲突副本」与双端回收站。"
+      : form.method === 1
+        ? "单向持续镜像：源端新增、修改会持续同步至目标端；源端删除时目标端也会同步清理（自动触发删除确认与回收站保护）。"
+        : "单向持续增量：源端新增与修改的文件会持续同步至目标端，不会删除目标端已有文件，适合安全备份。";
+
+  const effectivePollSec = form.extraFlags?.syncPollIntervalSec || 60;
+  const effectiveAuditMin = form.extraFlags?.syncAuditIntervalMin || 1440;
+  const effectiveDebounceSec = form.extraFlags?.watchDebounceSec || 30;
 
   const activeAdvancedCount =
     (form.bwLimit.trim() ? 1 : 0) +
@@ -714,11 +765,9 @@ export default function TaskEditor({
     (Number(form.extraFlags?.lowLevelRetries || 0) > 0 ? 1 : 0) +
     (form.extraFlags?.retriesSleep?.trim() ? 1 : 0) +
     (form.extraFlags?.resumeEnable ? 1 : 0) +
-    (form.extraFlags?.watchEnable ? 1 : 0) +
     (Number(form.extraFlags?.autoRetryMax || 0) > 0 ? 1 : 0) +
     (Number(form.extraFlags?.postSyncJobId || 0) > 0 ? 1 : 0) +
     (form.extraFlags?.checkSchedule?.trim() ? 1 : 0) +
-    (form.extraFlags?.missedCatchUp ? 1 : 0) +
     (form.extraFlags?.directStream ? 1 : 0) +
     (form.extraFlags?.bisyncResyncMode?.trim() ? 1 : 0) +
     (Number(form.extraFlags?.bisyncMaxDelete || 0) > 0 ? 1 : 0) +
@@ -726,11 +775,11 @@ export default function TaskEditor({
     (Number(form.copyConcurrency || 0) > 0 ? 1 : 0) +
     (Number(form.scanConcurrency || 0) > 0 ? 1 : 0) +
     (Number(form.maxRetries) >= 0 ? 1 : 0);
+
   const activePolicyCount =
     (form.compareMode !== 0 ? 1 : 0) +
-    (form.method !== 2 && form.conflictPolicy !== 0 ? 1 : 0) +
-    (form.method !== 2 && form.trashEnable ? 1 : 0) +
-    (form.method === 2 && form.deleteEmptySrcDirs ? 1 : 0);
+    (form.conflictPolicy !== 0 ? 1 : 0) +
+    (form.trashEnable ? 1 : 0);
 
   const runFilterTest = async () => {
     const samplePath = testPath.trim();
@@ -741,7 +790,10 @@ export default function TaskEditor({
     setTestingFilter(true);
     try {
       const payload = buildJobPayload(mergedForm);
-      const sizeBytes = Math.max(0, Math.round((Number(testSizeMB) || 0) * 1024 * 1024));
+      const sizeBytes = Math.max(
+        0,
+        Math.round((Number(testSizeMB) || 0) * 1024 * 1024),
+      );
       const ageMinutes = Math.max(0, Math.trunc(Number(testAgeMinutes) || 0));
       const res = await api.testJobFilter({
         exclude: payload.exclude || "",
@@ -766,14 +818,10 @@ export default function TaskEditor({
       setTestingFilter(false);
     }
   };
+
   const excludedFolders = useMemo(
     () => parseExcludeFolders(form.exclude),
     [form.exclude],
-  );
-
-  const selectedWeekdays = useMemo(
-    () => parseWeekdaySelection(form.day_of_week) ?? [0],
-    [form.day_of_week],
   );
 
   const sizeGroupError =
@@ -786,13 +834,13 @@ export default function TaskEditor({
   return (
     <RemoteDirCacheProvider cache={dirCacheRef.current}>
       <Editor
-        title={job ? "编辑任务" : initialDraft ? "复制任务" : "新建任务"}
+        title={job ? "编辑持续同步任务" : initialDraft ? "复制同步任务" : "新建持续同步任务"}
         visible
         busy={action.busy}
         onClose={onClose}
         onSave={save}
         dirty={effectiveDirty}
-        width={600}
+        width={620}
         className="task-editor-modal"
         footer={({ close }) => (
           <div className="editor-actions">
@@ -908,7 +956,7 @@ export default function TaskEditor({
                     <Input
                       value={form.remark}
                       onChange={(value) => change("remark", value)}
-                      placeholder="相册每日备份"
+                      placeholder="例如：相册持续同步到夸克网盘"
                     />
                   </Field>
 
@@ -939,79 +987,73 @@ export default function TaskEditor({
                     </div>
                   )}
 
-                  <Field
-                    label={
-                      <span className="field-label-with-tip">
-                        <span id={methodLabelId}>同步方式</span>
-                        <HelpTip content={syncMethodTip} label="同步方式说明" />
-                      </span>
-                    }
-                    ariaLabel="同步方式"
-                  >
-                    <div className="field-group" role="group">
-                      <Select
-                        aria-labelledby={methodLabelId}
-                        value={form.isCron === 3 && form.method === 1 ? 0 : form.method}
-                        optionList={methodOptions.map((method, value) => ({
-                          value,
-                          label: form.isCron === 3 && value === 0 ? "单向同步" : method.name,
-                        })).filter((o) => form.isCron !== 3 || o.value === 0 || o.value === 3)}
-                        onChange={(value) => {
-                          const method = Number(value);
-                          patch({ method, ...(method === 3 && form.method !== 3 ? { conflictPolicy: 2 } : {}) });
-                        }}
-                      />
+                  <Field label="同步方向" ariaLabel="同步方向">
+                    <div className="field-group">
                       <div
-                        className={`sync-method-banner${isDestructiveMethod ? " is-warning" : ""}`}
-                        role={isDestructiveMethod ? "status" : undefined}
+                        className="sync-direction-grid"
+                        role="radiogroup"
+                        aria-label="同步方向"
                       >
-                        {isDestructiveMethod ? (
+                        {directionCards.map((card) => {
+                          const selected = activeDirection === card.key;
+                          return (
+                            <button
+                              key={card.key}
+                              type="button"
+                              role="radio"
+                              aria-checked={selected}
+                              className={`sync-direction-card${selected ? " is-selected" : ""}`}
+                              onClick={() => handleDirectionSelect(card.key)}
+                            >
+                              <div className="sync-direction-card-head">
+                                <span className="sync-direction-card-icon">
+                                  <DirectionCardIcon kind={card.icon} />
+                                </span>
+                                <span className="sync-direction-card-title">
+                                  {card.title}
+                                </span>
+                                <span className="sync-direction-card-route">
+                                  {card.route}
+                                </span>
+                              </div>
+                              <div className="sync-direction-card-desc">
+                                {card.desc}
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <div
+                        className={`sync-method-banner${isDestructiveDirection ? " is-warning" : ""}`}
+                        role={isDestructiveDirection ? "status" : undefined}
+                      >
+                        {isDestructiveDirection ? (
                           <IconAlertTriangle aria-hidden="true" size="small" />
                         ) : (
                           <IconInfoCircle aria-hidden="true" size="small" />
                         )}
-                        <span>{activeMethodOption.description}</span>
+                        <span>{directionSummaryText}</span>
                       </div>
                     </div>
                   </Field>
 
-                  {form.isCron === 3 && form.method !== 3 && (
-                    <>
-                    <Field label="同步方向">
-                      <Select
-                        aria-label="同步方向"
-                        value={form.extraFlags?.syncDirection || "custom"}
-                        optionList={[
-                          { value: "upload", label: "上传本地变更（本地 → 远端）" },
-                          { value: "download", label: "下载远端变更（远端 → 本地）" },
-                          { value: "custom", label: "自定义单向（源 → 目标）" },
-                        ]}
-                        onChange={(value) => {
-                          const direction = String(value);
-                          const sourceLocal = form.srcPath.some((p) => p.split("/").filter(Boolean)[0] === "本地");
-                          const targetLocal = form.dstPath.some((p) => p.split("/").filter(Boolean)[0] === "本地");
-                          const swap = direction === "upload"
-                            ? !sourceLocal && targetLocal
-                            : direction === "download" && sourceLocal && !targetLocal;
-                          patch({
-                            extraFlags: { ...form.extraFlags, syncDirection: direction },
-                            ...(swap ? { srcPath: form.dstPath, dstPath: form.srcPath } : {}),
-                          });
-                        }}
-                      />
-                    </Field>
-                    <SettingRow label="同步删除" variant="bordered" tip="开启后，源端删除会传播到目标端，并沿用删除保护和回收站；关闭则保留目标端文件。">
+                  {activeDirection !== "bidirectional" && (
+                    <SettingRow
+                      label="同步删除"
+                      variant="bordered"
+                      tip="开启后，源端删除文件会传播到目标端，并沿用删除保护与回收站；关闭则永久保留目标端已有文件。"
+                    >
                       <Switch
                         aria-label="同步删除"
                         checked={form.method === 1}
                         onChange={(v) => change("method", v ? 1 : 0)}
                       />
                     </SettingRow>
-                    </>
                   )}
+
                   <div className="form-grid">
                     <Field
-                      label={form.method === 3 ? "源路径（单选）" : "源路径"}
+                      label={srcFieldLabel}
                       required
                       error={showStepError(0, "srcPath")}
                       fieldId="srcPath"
@@ -1027,11 +1069,7 @@ export default function TaskEditor({
                       />
                     </Field>
                     <Field
-                      label={
-                        form.method === 2 || form.method === 3
-                          ? "目标路径（单选）"
-                          : "目标路径"
-                      }
+                      label={dstFieldLabel}
                       required
                       error={showStepError(0, "dstPath")}
                       fieldId="dstPath"
@@ -1095,7 +1133,7 @@ export default function TaskEditor({
                               return;
                             }
                             handleDstPathChange(
-                              form.method === 2 || form.method === 3
+                              form.method === 3
                                 ? [check.normalized]
                                 : Array.from(new Set([...form.dstPath, check.normalized])),
                             );
@@ -1107,6 +1145,7 @@ export default function TaskEditor({
                       </div>
                     </div>
                   </Field>
+
                   {matchedDstStandardWebDAVNames.length > 0 && form.compareMode === 1 && (
                     <div className="sync-method-banner webdav-compare-tip" role="status">
                       <IconInfoCircle aria-hidden="true" size="small" />
@@ -1218,8 +1257,7 @@ export default function TaskEditor({
                         : undefined
                     }
                     onKeepFirstDst={
-                      (form.method === 2 || form.method === 3) &&
-                      form.dstPath.length > 1
+                      form.method === 3 && form.dstPath.length > 1
                         ? () => handleDstPathChange(form.dstPath.slice(0, 1))
                         : undefined
                     }
@@ -1258,91 +1296,72 @@ export default function TaskEditor({
                             }}
                           />
                         </Field>
-                        {form.method === 2 ? (
-                          <div className="sync-method-banner">
-                            <IconAlertTriangle aria-hidden="true" size="small" />
-                            <span>
-                              移动模式为保护源数据安全，目标端若已存在不同内容的文件将自动跳过并保留源文件，不执行覆盖、冲突副本或目标回收站操作。
-                            </span>
-                          </div>
-                        ) : (
-                          <>
-                            <Field label="同名冲突处理">
-                              <Select
-                                value={form.conflictPolicy}
-                                optionList={conflictPolicyOptions.map((o) => ({
-                                  label: form.method === 3 ? ["保留较新版本（另一版本删除）", "保留源端版本（目标版本删除）", "保留双方冲突副本（推荐）"][o.value] : o.label,
-                                  value: o.value,
-                                }))}
+                        <Field label="同名冲突处理">
+                          <Select
+                            value={form.conflictPolicy}
+                            optionList={conflictPolicyOptions.map((o) => ({
+                              label:
+                                form.method === 3
+                                  ? [
+                                      "保留较新版本（另一版本删除）",
+                                      "保留源端版本（目标版本删除）",
+                                      "保留双方冲突副本（推荐）",
+                                    ][o.value]
+                                  : o.label,
+                              value: o.value,
+                            }))}
+                            onChange={(v) => change("conflictPolicy", Number(v))}
+                          />
+                        </Field>
+                        <SettingRow
+                          label={
+                            form.method === 3
+                              ? "启用双端回收站（软删除）"
+                              : "启用目标端回收站（软删除）"
+                          }
+                          variant="bordered"
+                          tip={
+                            form.method === 3
+                              ? "开启后，双向同步删除或覆盖旧文件时先移至对应端的回收站子目录，避免误删不可恢复（选择「保留双方副本」时不触发覆盖备份）"
+                              : "开启后，同步删除或覆盖旧文件时先移至目标目录下的回收站子目录，避免误删不可恢复"
+                          }
+                        >
+                          <Switch
+                            aria-label="启用目标端回收站"
+                            checked={form.trashEnable}
+                            onChange={(v) => change("trashEnable", v)}
+                          />
+                        </SettingRow>
+                        {form.trashEnable && (
+                          <div className="form-grid form-grid--two">
+                            <Field
+                              label="回收站目录名"
+                              error={showStepError(0, "trashDir")}
+                              hint="自动从同步扫描中排除"
+                            >
+                              <Input
+                                value={form.trashDir}
+                                placeholder=".opensync-trash"
+                                onChange={(v) => change("trashDir", v)}
+                              />
+                            </Field>
+                            <Field
+                              label="回收站保留天数"
+                              hint="0 表示永久保留，不自动清理"
+                            >
+                              <Input
+                                inputMode="numeric"
+                                value={String(form.trashRetentionDays)}
+                                placeholder="30"
                                 onChange={(v) =>
-                                  change("conflictPolicy", Number(v))
+                                  change(
+                                    "trashRetentionDays",
+                                    Math.max(0, Math.trunc(Number(v) || 0)),
+                                  )
                                 }
                               />
                             </Field>
-                            <SettingRow
-                              label={
-                                form.method === 3
-                                  ? "启用双端回收站（软删除）"
-                                  : "启用目标端回收站（软删除）"
-                              }
-                              variant="bordered"
-                              tip={
-                                form.method === 3
-                                  ? "开启后，双向同步删除或覆盖旧文件时先移至对应端的回收站子目录，避免误删不可恢复（选择「保留双方副本」时不触发覆盖备份）"
-                                  : "开启后，全量删除或覆盖旧文件时先移至目标目录下的回收站子目录，避免误删不可恢复"
-                              }
-                            >
-                              <Switch
-                                aria-label="启用目标端回收站"
-                                checked={form.trashEnable}
-                                onChange={(v) => change("trashEnable", v)}
-                              />
-                            </SettingRow>
-                            {form.trashEnable && (
-                              <div className="form-grid form-grid--two">
-                                <Field
-                                  label="回收站目录名"
-                                  error={showStepError(0, "trashDir")}
-                                  hint="自动从同步扫描中排除"
-                                >
-                                  <Input
-                                    value={form.trashDir}
-                                    placeholder=".opensync-trash"
-                                    onChange={(v) => change("trashDir", v)}
-                                  />
-                                </Field>
-                                <Field
-                                  label="回收站保留天数"
-                                  hint="0 表示永久保留，不自动清理"
-                                >
-                                  <Input
-                                    inputMode="numeric"
-                                    value={String(form.trashRetentionDays)}
-                                    placeholder="30"
-                                    onChange={(v) =>
-                                      change(
-                                        "trashRetentionDays",
-                                        Math.max(0, Math.trunc(Number(v) || 0)),
-                                      )
-                                    }
-                                  />
-                                </Field>
-                              </div>
-                            )}
-                          </>
-                        )}
-                        {form.method === 2 && (
-                          <SettingRow
-                            label="移动完成后清理空源子目录"
-                            variant="bordered"
-                            tip="仅清理本次扫描过且全部文件已移空的源子目录，不会删除源根目录本身"
-                          >
-                            <Switch
-                              aria-label="移动完成后清理空源子目录"
-                              checked={form.deleteEmptySrcDirs}
-                              onChange={(v) => change("deleteEmptySrcDirs", v)}
-                            />
-                          </SettingRow>
+                          </div>
                         )}
                       </div>
                     )}
@@ -1352,177 +1371,74 @@ export default function TaskEditor({
 
               {panelMounted("schedule") && (
                 <div className="form-section" style={panelStyle("schedule")}>
-                  <Field label="调度方式">
-                    <Select
-                      value={form.isCron}
-                      optionList={[3, 1, 0, 2].map((value) => ({
-                        value,
-                        label: cronTypeNames[value],
-                      }))}
-                      onChange={(value) => {
-                        const nextIsCron = Number(value);
-                        if (nextIsCron === 3 && form.method === 2) {
-                          patch({ isCron:3, method:0 });
-                          return;
-                        }
-                        if (nextIsCron === 0) {
-                          const split = splitIntervalMinutes(
-                            form.interval > 0 ? form.interval : 1440,
-                          );
-                          setIntervalUnit(split.unit);
-                          setIntervalDraft(null);
-                          if (form.interval <= 0) {
-                            patch({ isCron: 0, interval: 1440 });
-                            return;
-                          }
-                        } else if (nextIsCron === 1) {
-                          setCronPresetMode(detectCronPresetMode(form));
-                        }
-                        change("isCron", nextIsCron);
-                      }}
+                  <SettingRow
+                    label="启用持续同步"
+                    variant="bordered"
+                    tip="开启后保存即自动启动本地实时监听与远端轮询，并立即执行首次对账；关闭则仅保存配置，可随时在总览恢复。"
+                  >
+                    <Switch
+                      aria-label="启用持续同步"
+                      checked={form.enable}
+                      onChange={(value) => change("enable", value)}
                     />
-                  </Field>
+                  </SettingRow>
 
-                  {form.isCron === 3 && (
-                    <div className="continuous-sync-panel">
-                      {matchedQuarkNames.length > 0 &&
-                        (form.extraFlags?.syncPollIntervalSec || 60) < 300 && (
-                          <div className="inline-hint" role="note" style={{ marginBottom: 8 }}>
-                            提示：当前任务包含夸克网盘（{matchedQuarkNames.join("、")}），建议将「远端检测间隔」设为 300 秒及以上，以降低触发夸克接口限流（429）的概率。
-                          </div>
-                        )}
-                      <div className="form-grid form-grid--three">
-                        <Field
-                          label="远端检测间隔（秒）"
-                          hint="默认 60 秒（10–86400），间隔越短请求越频繁"
-                          error={showStepError(1, "interval")}
-                        >
-                          <Input
-                            aria-label="远端检测间隔（秒）"
-                            inputMode="numeric"
-                            value={String(form.extraFlags?.syncPollIntervalSec || 60)}
-                            onChange={(v) =>
-                              change("extraFlags", {
-                                ...form.extraFlags,
-                                syncPollIntervalSec: Number(v),
-                              })
-                            }
-                          />
-                        </Field>
-                        <Field
-                          label="完整核对间隔（分钟）"
-                          hint="默认 1440 分钟（每天一次），补齐遗漏变化"
-                        >
-                          <Input
-                            aria-label="完整核对间隔（分钟）"
-                            inputMode="numeric"
-                            value={String(form.extraFlags?.syncAuditIntervalMin || 1440)}
-                            onChange={(v) =>
-                              change("extraFlags", {
-                                ...form.extraFlags,
-                                syncAuditIntervalMin: Number(v),
-                              })
-                            }
-                          />
-                        </Field>
-                        <Field
-                          label="变动合并等待（秒）"
-                          hint="默认 30 秒，连续写入停止后再触发同步"
-                        >
-                          <Input
-                            aria-label="持续同步变动合并等待（秒）"
-                            inputMode="numeric"
-                            value={String(form.extraFlags?.watchDebounceSec || 30)}
-                            onChange={(v) =>
-                              change("extraFlags", {
-                                ...form.extraFlags,
-                                watchDebounceSec: Math.min(
-                                  3600,
-                                  Math.max(2, Math.trunc(Number(v) || 2)),
-                                ),
-                              })
-                            }
-                          />
-                        </Field>
-                      </div>
-                      <div className="sync-method-banner" role="status">
-                        <IconInfoCircle aria-hidden="true" size="small" />
+                  <div className="continuous-sync-panel">
+                    {matchedQuarkNames.length > 0 && effectivePollSec < 300 && (
+                      <div className="sync-method-banner is-warning" role="note">
+                        <IconAlertTriangle aria-hidden="true" size="small" />
                         <span>
-                          本地变化自动监控，远端按间隔检测；重启及运行窗口恢复后自动补跑。普通 WebDAV 仅按大小比对可能漏掉同大小修改，需要更严格检测时请选择内容校验，会增加流量。
+                          当前任务包含夸克网盘（{matchedQuarkNames.join("、")}），建议将「远端检测间隔」设为 300 秒（5 分钟）及以上，降低触发接口限流（429）的概率。
                         </span>
                       </div>
-                    </div>
-                  )}
-                  {form.isCron === 0 && (
+                    )}
                     <Field
-                      label="执行间隔"
+                      label="远端检测间隔（秒）"
+                      hint="默认 60 秒（10–86400），用于周期发现远端变更及重启后补齐"
                       error={showStepError(1, "interval")}
-                      fieldId="interval"
                     >
-                      <div className="field-group" role="group">
-                        <div className="interval-control">
-                          <Input
-                            aria-label="执行间隔数值"
-                            inputMode="numeric"
-                            value={intervalDisplayValue}
-                            placeholder="输入正整数"
-                            onChange={(value) => {
-                              setIntervalDraft(value);
-                              change(
-                                "interval",
-                                intervalInputToMinutes(value, intervalUnit),
-                              );
-                            }}
-                            onBlur={() => {
-                              if (
-                                intervalDraft !== null &&
-                                /^\d+$/.test(intervalDraft.trim())
-                              ) {
-                                setIntervalDraft(null);
-                              }
-                            }}
-                          />
-                          <Select
-                            aria-label="执行间隔单位"
-                            value={intervalUnit}
-                            optionList={intervalUnitOptions.map((u) => ({
-                              value: u.value,
-                              label: u.label,
-                            }))}
-                            onChange={(next) => {
-                              const nextUnit = String(next) as IntervalUnit;
-                              const rawText =
-                                intervalDraft ?? intervalDisplayValue;
-                              setIntervalUnit(nextUnit);
-                              change(
-                                "interval",
-                                intervalInputToMinutes(rawText, nextUnit),
-                              );
-                            }}
-                          />
-                        </div>
+                      <div className="field-group">
+                        <Input
+                          aria-label="远端检测间隔（秒）"
+                          inputMode="numeric"
+                          value={pollDraft}
+                          placeholder="60"
+                          onChange={(v) => {
+                            setPollDraft(v);
+                            const parsed = parsePositiveIntDraft(v);
+                            change("extraFlags", {
+                              ...form.extraFlags,
+                              syncPollIntervalSec: parsed,
+                            });
+                          }}
+                          onBlur={() => {
+                            if (!pollDraft.trim()) {
+                              setPollDraft("60");
+                              change("extraFlags", {
+                                ...form.extraFlags,
+                                syncPollIntervalSec: 0,
+                              });
+                            }
+                          }}
+                        />
                         <div
                           className="schedule-chips"
                           role="group"
-                          aria-label="常用执行间隔"
+                          aria-label="常用远端检测间隔"
                         >
-                          {intervalPresets.map((preset) => {
-                            const presetMins = intervalInputToMinutes(
-                              String(preset.value),
-                              preset.unit,
-                            );
-                            const active =
-                              intervalDraft === null &&
-                              form.interval === presetMins;
+                          {pollIntervalPresets.map((preset) => {
+                            const active = effectivePollSec === preset.value;
                             return (
                               <button
-                                key={preset.label}
+                                key={preset.value}
                                 type="button"
                                 className={`schedule-chip${active ? " is-active" : ""}`}
                                 onClick={() => {
-                                  setIntervalUnit(preset.unit);
-                                  setIntervalDraft(null);
-                                  change("interval", presetMins);
+                                  setPollDraft(String(preset.value));
+                                  change("extraFlags", {
+                                    ...form.extraFlags,
+                                    syncPollIntervalSec: preset.value,
+                                  });
                                 }}
                               >
                                 每 {preset.label}
@@ -1532,250 +1448,99 @@ export default function TaskEditor({
                         </div>
                       </div>
                     </Field>
-                  )}
 
-                  {form.isCron === 1 && (
-                    <div className="schedule-cron-section">
-                      <div
-                        className="schedule-preset-bar"
-                        role="group"
-                        aria-label="定时周期"
+                    <div className="form-grid form-grid--two">
+                      <Field
+                        label="完整核对间隔（分钟）"
+                        hint="默认 1440 分钟（每天一次），全面核对双端一致性"
                       >
-                        {schedulePresetOptions.map((option) => (
-                          <button
-                            key={option.value}
-                            type="button"
-                            className={`schedule-preset-btn${cronPresetMode === option.value ? " is-active" : ""}`}
-                            aria-pressed={cronPresetMode === option.value}
-                            onClick={() => {
-                              setCronPresetMode(option.value);
-                              patch(applyCronPresetMode(form, option.value));
+                        <div className="field-group">
+                          <Input
+                            aria-label="完整核对间隔（分钟）"
+                            inputMode="numeric"
+                            value={auditDraft}
+                            placeholder="1440"
+                            onChange={(v) => {
+                              setAuditDraft(v);
+                              const parsed = parsePositiveIntDraft(v);
+                              change("extraFlags", {
+                                ...form.extraFlags,
+                                syncAuditIntervalMin: parsed,
+                              });
                             }}
-                          >
-                            {option.label}
-                          </button>
-                        ))}
-                      </div>
-
-                      {cronPresetMode === "daily" && (
-                        <div className="schedule-time-row">
-                          <Field label="执行小时">
-                            <Select
-                              aria-label="执行小时"
-                              value={String(Number(form.hour || 0))}
-                              optionList={hourOptions}
-                              onChange={(v) =>
-                                patch({
-                                  second: "0",
-                                  hour: String(v),
-                                  day: "*",
-                                  month: "*",
-                                  day_of_week: "*",
-                                })
+                            onBlur={() => {
+                              if (!auditDraft.trim()) {
+                                setAuditDraft("1440");
+                                change("extraFlags", {
+                                  ...form.extraFlags,
+                                  syncAuditIntervalMin: 0,
+                                });
                               }
-                            />
-                          </Field>
-                          <Field label="执行分钟">
-                            <Select
-                              aria-label="执行分钟"
-                              value={String(Number(form.minute || 0))}
-                              optionList={minuteOptions}
-                              onChange={(v) =>
-                                patch({
-                                  second: "0",
-                                  minute: String(v),
-                                  day: "*",
-                                  month: "*",
-                                  day_of_week: "*",
-                                })
-                              }
-                            />
-                          </Field>
-                        </div>
-                      )}
-
-                      {cronPresetMode === "weekly" && (
-                        <div className="form-section">
-                          <Field label="每周执行日">
-                            <div
-                              className="weekday-picker"
-                              role="group"
-                              aria-label="选择星期"
-                            >
-                              {weekdayOptions.map((day) => {
-                                const selected = selectedWeekdays.includes(
-                                  day.value,
-                                );
-                                return (
-                                  <button
-                                    key={day.value}
-                                    type="button"
-                                    className={`weekday-chip${selected ? " is-active" : ""}`}
-                                    aria-pressed={selected}
-                                    onClick={() => {
-                                      const next = selected
-                                        ? selectedWeekdays.length > 1
-                                          ? selectedWeekdays.filter(
-                                              (d) => d !== day.value,
-                                            )
-                                          : selectedWeekdays
-                                        : [...selectedWeekdays, day.value];
-                                      patch({
-                                        second: "0",
-                                        day: "*",
-                                        month: "*",
-                                        day_of_week:
-                                          formatWeekdayCronExpression(next),
-                                      });
-                                    }}
-                                  >
-                                    {day.label}
-                                  </button>
-                                );
-                              })}
-                            </div>
-                          </Field>
-                          <div className="schedule-time-row">
-                            <Field label="执行小时">
-                              <Select
-                                aria-label="执行小时"
-                                value={String(Number(form.hour || 0))}
-                                optionList={hourOptions}
-                                onChange={(v) =>
-                                  patch({ second: "0", hour: String(v) })
-                                }
-                              />
-                            </Field>
-                            <Field label="执行分钟">
-                              <Select
-                                aria-label="执行分钟"
-                                value={String(Number(form.minute || 0))}
-                                optionList={minuteOptions}
-                                onChange={(v) =>
-                                  patch({ second: "0", minute: String(v) })
-                                }
-                              />
-                            </Field>
-                          </div>
-                        </div>
-                      )}
-
-                      {cronPresetMode === "monthly" && (
-                        <div className="form-section">
-                          <div className="schedule-time-row schedule-time-row--monthly">
-                            <Field label="每月日期">
-                              <Select
-                                aria-label="每月日期"
-                                value={String(Number(form.day || 1))}
-                                optionList={monthDayOptions}
-                                onChange={(v) =>
-                                  patch({
-                                    second: "0",
-                                    day: String(v),
-                                    month: "*",
-                                    day_of_week: "*",
-                                  })
-                                }
-                              />
-                            </Field>
-                            <Field label="执行小时">
-                              <Select
-                                aria-label="执行小时"
-                                value={String(Number(form.hour || 0))}
-                                optionList={hourOptions}
-                                onChange={(v) =>
-                                  patch({ second: "0", hour: String(v) })
-                                }
-                              />
-                            </Field>
-                            <Field label="执行分钟">
-                              <Select
-                                aria-label="执行分钟"
-                                value={String(Number(form.minute || 0))}
-                                optionList={minuteOptions}
-                                onChange={(v) =>
-                                  patch({ second: "0", minute: String(v) })
-                                }
-                              />
-                            </Field>
-                          </div>
-                          {Number(form.day) >= 29 && (
-                            <div className="field-hint">
-                              提示：没有 {form.day} 日的月份（如 2 月）将自动跳过。
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-                      {cronPresetMode === "custom" && (
-                        <div className="form-section">
+                            }}
+                          />
                           <div
                             className="schedule-chips"
                             role="group"
-                            aria-label="常用 Cron 模板"
+                            aria-label="常用完整核对间隔"
                           >
-                            {customCronPresets.map((preset) => (
-                              <button
-                                key={preset.label}
-                                type="button"
-                                className="schedule-chip"
-                                onClick={() => patch(preset.fields)}
-                              >
-                                {preset.label}
-                              </button>
-                            ))}
-                          </div>
-                          <div className="cron-grid">
-                            {cronFields.map((field) => {
-                              const key = field.name as CronFieldKey;
-                              const rangeHint = cronFieldRanges[key][3];
-                              const err = cronErrors[key];
+                            {auditIntervalPresets.map((preset) => {
+                              const active = effectiveAuditMin === preset.value;
                               return (
-                                <Field
-                                  key={field.name}
-                                  label={
-                                    <span className="cron-field-label">
-                                      <span>{field.label}</span>
-                                      <span className="cron-field-range">
-                                        {rangeHint}
-                                      </span>
-                                    </span>
-                                  }
-                                  ariaLabel={field.label}
-                                  error={
-                                    validatedSteps.has(1) ? err : undefined
-                                  }
-                                  fieldId={key}
+                                <button
+                                  key={preset.value}
+                                  type="button"
+                                  className={`schedule-chip${active ? " is-active" : ""}`}
+                                  onClick={() => {
+                                    setAuditDraft(String(preset.value));
+                                    change("extraFlags", {
+                                      ...form.extraFlags,
+                                      syncAuditIntervalMin: preset.value,
+                                    });
+                                  }}
                                 >
-                                  <Input
-                                    value={form[key]}
-                                    placeholder={field.placeholder}
-                                    onChange={(value) => change(key, value)}
-                                  />
-                                </Field>
+                                  {preset.label}
+                                </button>
                               );
                             })}
                           </div>
                         </div>
-                      )}
+                      </Field>
+                      <Field
+                        label="变动合并等待（秒）"
+                        hint="默认 30 秒（2–3600），连续写入停止后再触发同步"
+                      >
+                        <Input
+                          aria-label="变动合并等待（秒）"
+                          inputMode="numeric"
+                          value={debounceDraft}
+                          placeholder="30"
+                          onChange={(v) => {
+                            setDebounceDraft(v);
+                            const parsed = parsePositiveIntDraft(v);
+                            change("extraFlags", {
+                              ...form.extraFlags,
+                              watchDebounceSec: parsed,
+                            });
+                          }}
+                          onBlur={() => {
+                            if (!debounceDraft.trim()) {
+                              setDebounceDraft("30");
+                              change("extraFlags", {
+                                ...form.extraFlags,
+                                watchDebounceSec: 0,
+                              });
+                            }
+                          }}
+                        />
+                      </Field>
                     </div>
-                  )}
+                  </div>
 
                   <div
-                    className={`schedule-preview-card${
-                      (form.isCron === 1 && cronErrorMessage) ||
-                      (form.isCron === 0 && validation.fields.interval)
-                        ? " is-invalid"
-                        : ""
-                    }`}
+                    className={`schedule-preview-card${validation.fields.interval ? " is-invalid" : ""}`}
                     aria-live="polite"
                   >
-                    {form.isCron === 1 && cronErrorMessage ? (
-                      <div className="schedule-preview-error" role="alert">
-                        <IconAlertTriangle aria-hidden="true" size="small" />
-                        <span>{cronErrorMessage}</span>
-                      </div>
-                    ) : form.isCron === 0 && validation.fields.interval ? (
+                    {validation.fields.interval ? (
                       <div className="schedule-preview-error" role="alert">
                         <IconAlertTriangle aria-hidden="true" size="small" />
                         <span>{validation.fields.interval}</span>
@@ -1783,78 +1548,23 @@ export default function TaskEditor({
                     ) : (
                       <>
                         <div className="schedule-preview-plan">
-                          {form.isCron === 0
-                            ? formatIntervalHuman(form.interval)
-                            : formatSchedulePlan(form)}
+                          {formatContinuousSyncPlan({
+                            pollIntervalSec: effectivePollSec,
+                            auditIntervalMin: effectiveAuditMin,
+                            debounceSec: effectiveDebounceSec,
+                          })}
                         </div>
-                        {form.isCron === 1 && upcomingRuns.length > 0 && (
-                          <div className="schedule-preview-runs">
-                            <span className="muted">预计接下来执行：</span>
-                            <div className="schedule-preview-run-list">
-                              {upcomingRuns.map((date) => (
-                                <span key={date.getTime()}>
-                                  {formatCronRunTime(date)}
-                                </span>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                        {form.isCron === 1 && upcomingRuns.length === 0 && (
-                          <div className="schedule-preview-error" role="alert">
-                            <IconAlertTriangle
-                              aria-hidden="true"
-                              size="small"
-                            />
-                            <span>
-                              该表达式在未来 5 年内没有匹配的执行时间，请检查日期与月份组合
-                            </span>
-                          </div>
-                        )}
-                        {form.isCron === 0 && (
-                          <div className="muted">
-                            保存后按设定间隔自动调度，也可在任务总览随时手动执行。
-                          </div>
-                        )}
+                        <div className="muted">
+                          本地授权目录变更通过实时监听自动捕获；服务重启或离开/恢复运行窗口后会自动对账补齐。
+                        </div>
                       </>
                     )}
                   </div>
 
-                  {form.isCron !== 2 && (
-                    <SettingRow
-                      label="启用定时调度"
-                      variant="bordered"
-                      tip="关闭后仅保存任务配置，不会按计划自动执行；可稍后在任务总览页开启"
-                    >
-                      <Switch
-                        aria-label="启用定时调度"
-                        checked={form.enable}
-                        onChange={(value) => change("enable", value)}
-                      />
-                    </SettingRow>
-                  )}
-
-                  {isNew && (form.isCron === 2 || form.enable) && (
-                    <div className="run-after-create">
-                      <Checkbox
-                        checked={runAfterCreate}
-                        onChange={(event) =>
-                          setRunAfterCreate(Boolean(event.target.checked))
-                        }
-                      >
-                        创建后立即执行一次
-                      </Checkbox>
-                      {runAfterCreate && form.method === 2 && (
-                        <span className="field-hint">
-                          移动模式将在确认后开始执行
-                        </span>
-                      )}
-                    </div>
-                  )}
-
                   <SettingRow
                     label="限制允许运行时间窗口"
                     variant="bordered"
-                    tip="开启后，定时调度仅在指定时段内启动（支持跨午夜，如 23:00 至 06:00），方便错峰利用夜间闲时带宽"
+                    tip="开启后，持续同步仅在指定时段内传输（支持跨午夜，如 23:00 至 06:00）；窗口外产生的变更会暂挂，进入窗口后自动补齐。"
                   >
                     <Switch
                       aria-label="限制允许运行时间窗口"
@@ -1885,12 +1595,12 @@ export default function TaskEditor({
                         </Field>
                       </div>
                       <SettingRow
-                        label="超出时间窗口时自动中止运行中的任务"
+                        label="超出时间窗口时自动中止运行中的传输"
                         variant="bordered"
-                        tip="关闭则允许已在窗口内启动的任务运行完毕；开启则在离开窗口后自动停止任务"
+                        tip="关闭则允许已在窗口内启动的批次传输完毕；开启则在离开窗口后自动中止，待下次窗口恢复续传"
                       >
                         <Switch
-                          aria-label="超出时间窗口时自动中止运行中的任务"
+                          aria-label="超出时间窗口时自动中止运行中的传输"
                           checked={form.windowStopOutside}
                           onChange={(v) => change("windowStopOutside", v)}
                         />
@@ -1913,7 +1623,7 @@ export default function TaskEditor({
                     <Field
                       label="选择通知渠道"
                       error={showStepError(1, "notifyIds")}
-                      hint="该任务的完成与审批通知仅发送到所选渠道"
+                      hint="该任务的异常、完成与删除确认通知仅发送到所选渠道"
                     >
                       <Select
                         multiple
@@ -2024,43 +1734,6 @@ export default function TaskEditor({
                               />
                             </Field>
                           )}
-                          <SettingRow
-                            label="本地目录实时监听同步（inotify）"
-                            variant="bordered"
-                            tip="当源目录包含本地授权目录时，自动监测文件新建、修改与删除，在静默防抖后自动触发增量同步"
-                          >
-                            <Switch
-                              aria-label="本地目录实时监听同步"
-                              disabled={form.isCron === 3}
-                              checked={form.isCron === 3 || Boolean(form.extraFlags?.watchEnable)}
-                              onChange={(v) =>
-                                change("extraFlags", {
-                                  ...form.extraFlags,
-                                  watchEnable: v,
-                                })
-                              }
-                            />
-                          </SettingRow>
-                          {form.extraFlags?.watchEnable && (
-                            <Field
-                              label="变动防抖等待（秒）"
-                              hint="默认 30 秒（2–3600），避免文件连续写入期间频繁触发同步"
-                            >
-                              <Input
-                                inputMode="numeric"
-                                value={String(form.extraFlags?.watchDebounceSec || 30)}
-                                onChange={(v) =>
-                                  change("extraFlags", {
-                                    ...form.extraFlags,
-                                    watchDebounceSec: Math.max(
-                                      0,
-                                      Math.min(3600, Math.trunc(Number(v) || 0)),
-                                    ),
-                                  })
-                                }
-                              />
-                            </Field>
-                          )}
                         </div>
 
                         <div className="advanced-option-group">
@@ -2160,7 +1833,7 @@ export default function TaskEditor({
                             </Field>
                             <Field
                               label="成功后串联触发任务"
-                              hint="同步完成后自动执行另一个任务"
+                              hint="同步批次完成后自动触发另一个任务"
                             >
                               <Select
                                 value={Number(form.extraFlags?.postSyncJobId || 0)}
@@ -2176,24 +1849,16 @@ export default function TaskEditor({
                                 onChange={(v) =>
                                   change("extraFlags", {
                                     ...form.extraFlags,
-                                    postSyncJobId: Math.max(0, Math.trunc(Number(v) || 0)),
+                                    postSyncJobId: Math.max(
+                                      0,
+                                      Math.trunc(Number(v) || 0),
+                                    ),
                                   })
                                 }
                               />
                             </Field>
                           </div>
                           <div className="native-checkbox-group">
-                            <Checkbox
-                              checked={Boolean(form.extraFlags?.missedCatchUp)}
-                              onChange={(e) =>
-                                change("extraFlags", {
-                                  ...form.extraFlags,
-                                  missedCatchUp: Boolean(e.target.checked),
-                                })
-                              }
-                            >
-                              NAS 关机/重启错过定时窗口时，启动后自动补跑一次
-                            </Checkbox>
                             <Checkbox
                               checked={Boolean(form.extraFlags?.directStream)}
                               onChange={(e) =>
@@ -2218,7 +1883,10 @@ export default function TaskEditor({
                                 onChange={(v) =>
                                   change(
                                     "copyConcurrency",
-                                    Math.max(0, Math.min(100, Math.trunc(Number(v) || 0))),
+                                    Math.max(
+                                      0,
+                                      Math.min(100, Math.trunc(Number(v) || 0)),
+                                    ),
                                   )
                                 }
                               />
@@ -2230,7 +1898,10 @@ export default function TaskEditor({
                                 onChange={(v) =>
                                   change(
                                     "scanConcurrency",
-                                    Math.max(0, Math.min(50, Math.trunc(Number(v) || 0))),
+                                    Math.max(
+                                      0,
+                                      Math.min(50, Math.trunc(Number(v) || 0)),
+                                    ),
                                   )
                                 }
                               />
@@ -2247,7 +1918,10 @@ export default function TaskEditor({
                                   }
                                   const n = Math.trunc(Number(trimmed));
                                   if (Number.isFinite(n)) {
-                                    change("maxRetries", Math.max(-1, Math.min(10, n)));
+                                    change(
+                                      "maxRetries",
+                                      Math.max(-1, Math.min(10, n)),
+                                    );
                                   }
                                 }}
                               />
@@ -2280,7 +1954,9 @@ export default function TaskEditor({
                                   const n = Number(v);
                                   change(
                                     "tpsLimit",
-                                    Number.isFinite(n) && n >= 0 ? Math.min(1000, n) : 0,
+                                    Number.isFinite(n) && n >= 0
+                                      ? Math.min(1000, n)
+                                      : 0,
                                   );
                                 }}
                               />
@@ -2295,7 +1971,10 @@ export default function TaskEditor({
                                 onChange={(v) =>
                                   change(
                                     "tpsLimitBurst",
-                                    Math.max(0, Math.min(1000, Math.trunc(Number(v) || 0))),
+                                    Math.max(
+                                      0,
+                                      Math.min(1000, Math.trunc(Number(v) || 0)),
+                                    ),
                                   )
                                 }
                               />
@@ -2323,7 +2002,10 @@ export default function TaskEditor({
                                 onChange={(v) =>
                                   change(
                                     "multiThreadStreams",
-                                    Math.max(0, Math.min(64, Math.trunc(Number(v) || 0))),
+                                    Math.max(
+                                      0,
+                                      Math.min(64, Math.trunc(Number(v) || 0)),
+                                    ),
                                   )
                                 }
                               />
@@ -2432,7 +2114,7 @@ export default function TaskEditor({
                                 })
                               }
                             >
-                              启用重命名追踪，避免重命名后重传（--track-renames，仅全量镜像与双向同步生效）
+                              启用重命名追踪，避免重命名后重传（--track-renames，开启同步删除或双向同步时生效）
                             </Checkbox>
                             <Checkbox
                               checked={Boolean(form.extraFlags?.useMmap)}
@@ -2528,7 +2210,10 @@ export default function TaskEditor({
                                 onChange={(v) =>
                                   change("extraFlags", {
                                     ...form.extraFlags,
-                                    maxBacklog: Math.max(0, Math.trunc(Number(v) || 0)),
+                                    maxBacklog: Math.max(
+                                      0,
+                                      Math.trunc(Number(v) || 0),
+                                    ),
                                   })
                                 }
                               />
@@ -2844,8 +2529,6 @@ export default function TaskEditor({
                     label="文件夹过滤"
                     hint="仅针对源目录，勾选要忽略的子文件夹；单层目录名（如 cache/）会匹配所有源目录下的同名目录"
                   >
-                    {/* ExcludeTree forwards id/aria-*; the group keeps the
-                        visible Field label associated with the tree region. */}
                     <div className="field-group" role="group">
                       <ExcludeTree
                         engineId={form.alistId}
@@ -3023,7 +2706,6 @@ function FileSizeFilterRow({
 
   const commitInput = (raw: string) => {
     clearDraft();
-    // 保留空输入而不是静默回退到 0 导致勾选框被自动取消
     if (raw.trim() === "") {
       change(valueKey, "");
       return;

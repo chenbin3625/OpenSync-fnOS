@@ -212,17 +212,17 @@ describe("全流程审计修复回归测试", () => {
     expect(validateTrashDir("bad*dir")).not.toBe("");
     expect(validateTrashDir("a/../b")).not.toBe("");
 
-    const moveForm = {
+    const disabledTrashForm = {
       ...defaultJobForm(1),
-      remark: "移动",
-      method: 2,
+      remark: "禁用回收站",
+      method: 0,
       srcPath: ["/openlist/src"],
       dstPath: ["/MyOSS/bucket/dst"],
-      trashEnable: true,
+      trashEnable: false,
       trashDir: "/bad*trash",
     };
-    expect(validateJobFormFields(moveForm, { remotes: sampleRemotes }).stepErrors[0]).toBe("");
-    const payload = buildJobPayload(moveForm);
+    expect(validateJobFormFields(disabledTrashForm, { remotes: sampleRemotes }).stepErrors[0]).toBe("");
+    const payload = buildJobPayload(disabledTrashForm);
     expect(payload.trashEnable).toBe(0);
     expect(payload.trashDir).toBe(".opensync-trash");
   });

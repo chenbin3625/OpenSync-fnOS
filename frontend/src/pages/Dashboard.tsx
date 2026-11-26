@@ -14,6 +14,7 @@ import Progress from "@douyinfe/semi-ui/lib/es/progress";
 import Select from "@douyinfe/semi-ui/lib/es/select";
 import Tag from "@douyinfe/semi-ui/lib/es/tag";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
+import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
 import {
   IconActivity,
   IconAlertTriangle,
@@ -44,17 +45,17 @@ import {
   LoadingPanel,
   SearchFilterInput,
   SectionCard,
-  Status,
   confirmAction,
   confirmDelete,
   errorToast,
 } from "../components/common";
+import { BwLimitChip } from "../components/BwLimitChip";
 import { DryRunModal } from "../components/DryRunModal";
 import { FullSyncApprovalModal } from "../components/FullSyncApprovalModal";
+import { describeBwLimit } from "../lib/bwLimit";
 import {
   buildSpeedChartGeometry,
   deriveDashboardRealtime,
-  findNextScheduledJob,
   formatAxisSpeed,
   formatMbps,
   formatSpeed,
@@ -67,15 +68,12 @@ import { useAction, useResource } from "../lib/hooks";
 import { formatDisplayPathList } from "../lib/syncPathPreview";
 import {
   cloneJobToForm,
-  findBatchMoveJobs,
   isLegacyOpenListJob,
 } from "../lib/taskForm";
 import {
   formatDuration,
   formatSize,
-  methodLabel,
   parseJobPathList,
-  taskRecordStatusNames,
 } from "./Home/homeUtils";
 import { calcTaskDisplayPercent } from "./Home/taskRows";
 import { formatTimestamp } from "../utils/date";
@@ -85,7 +83,15 @@ import type {
   FullSyncApproval,
   JobItem,
 } from "../types";
-import { SyncStatusTag } from "../components/SyncStatus";
+import {
+  SyncStatusTag,
+  formatRelativeSyncTime,
+  formatSecondsShort,
+  getContinuousSyncMeta,
+  isSyncStatusError,
+  resolveEffectiveSyncStatus,
+  syncStatusTone,
+} from "../components/SyncStatus";
 import type { TaskEditorSavedResult } from "./TaskEditor";
 
 const JobEditor = lazy(() => import("./TaskEditor"));
@@ -93,6 +99,7 @@ const JobEditor = lazy(() => import("./TaskEditor"));
 type StatusFilter =
   | "all"
   | "running"
+  | "synced"
   | "queued"
   | "approval"
   | "failed"
@@ -105,13 +112,16 @@ const SPEED_CHART_WIDTH = 600;
 const SPEED_CHART_HEIGHT = 104;
 
 function isJobFailed(job: DashboardJobItem): boolean {
-  return Boolean(job.lastTask && FAILED_STATUSES.includes(job.lastTask.status));
+  return Boolean(
+    isSyncStatusError(job.syncStatus) ||
+      (job.lastTask && FAILED_STATUSES.includes(job.lastTask.status)),
+  );
 }
 
-function methodTagColor(method: number): "blue" | "violet" | "cyan" | "grey" {
-  if (method === 0) return "blue";
-  if (method === 1) return "violet";
-  if (method === 2) return "cyan";
+function directionTagColor(directionKey: string): "blue" | "violet" | "cyan" | "grey" {
+  if (directionKey === "bidirectional") return "violet";
+  if (directionKey === "download") return "cyan";
+  if (directionKey === "upload") return "blue";
   return "grey";
 }
 
@@ -121,10 +131,16 @@ function jobDotTone(job: DashboardJobItem, legacy = false): string {
   if (job.running && job.paused) return "kpi-dot kpi-dot--warning";
   if (job.running) return "kpi-dot kpi-dot--primary kpi-dot--pulse";
   if (job.queued) return "kpi-dot kpi-dot--primary";
-  if (isJobFailed(job)) return "kpi-dot kpi-dot--danger";
-  if (job.enable !== 1) return "kpi-dot";
-  if (job.lastTask && (job.lastTask.status === 2 || job.lastTask.status === 8))
-    return "kpi-dot kpi-dot--success";
+  const effective = resolveEffectiveSyncStatus(job);
+  const tone = syncStatusTone(effective.state);
+  if (tone === "danger" || isJobFailed(job)) return "kpi-dot kpi-dot--danger";
+  if (tone === "warning") return "kpi-dot kpi-dot--warning";
+  if (tone === "primary") {
+    return effective.state === "scanning" || effective.state === "syncing"
+      ? "kpi-dot kpi-dot--primary kpi-dot--pulse"
+      : "kpi-dot kpi-dot--primary";
+  }
+  if (tone === "success") return "kpi-dot kpi-dot--success";
   return "kpi-dot";
 }
 
@@ -140,15 +156,6 @@ function formatSampleClock(seconds?: number | null): string {
   const ts = Number(seconds || 0);
   if (ts <= 0) return "--:--:--";
   return dayjs.unix(ts).format("HH:mm:ss");
-}
-
-function formatScheduleHint(job: DashboardJobItem): string {
-  if (job.isCron === 3) return job.enable === 1 ? "持续同步" : "持续同步已暂停";
-  if (job.nextRunTime > 0) return `下次 ${formatShortTime(job.nextRunTime)}`;
-  if (job.enable !== 1) return "已停用";
-  if (job.isCron === 2) return "仅手动触发";
-  if (job.isCron === 0 && job.interval > 0) return `每 ${job.interval} 分钟`;
-  return "定时计划";
 }
 
 function computeJobLiveMetrics(job: DashboardJobItem) {
@@ -229,6 +236,7 @@ export default function Dashboard() {
   const [localSpeedHistory, setLocalSpeedHistory] = useState<
     DashboardSpeedSample[]
   >([]);
+  const [bwNowTick, setBwNowTick] = useState<Date>(() => new Date());
 
   useEffect(() => {
     const sp = searchParams.get("storage");
@@ -315,6 +323,17 @@ export default function Dashboard() {
     [realtime.speedHistory],
   );
 
+  const globalBwInfo = useMemo(
+    () => describeBwLimit(realtime.globalBwLimit, { now: bwNowTick }),
+    [realtime.globalBwLimit, bwNowTick],
+  );
+
+  useEffect(() => {
+    if (!globalBwInfo.hasSchedule) return;
+    const timer = window.setInterval(() => setBwNowTick(new Date()), 60_000);
+    return () => window.clearInterval(timer);
+  }, [globalBwInfo.hasSchedule]);
+
   const runningJobsList = useMemo(
     () =>
       allJobs
@@ -328,30 +347,44 @@ export default function Dashboard() {
     [allJobs, engines.data],
   );
 
-  const nextScheduledJob = useMemo(
-    () => findNextScheduledJob(allJobs),
-    [allJobs],
-  );
-
-  const watchingCount = useMemo(
-    () => allJobs.filter((j) => j.watching && j.enable === 1).length,
-    [allJobs],
-  );
-
   const fullJobMap = useMemo(() => {
     const map = new Map<number, JobItem>();
     for (const j of jobsList.data?.dataList || []) map.set(j.id, j);
     return map;
   }, [jobsList.data]);
 
+  const syncSummary = useMemo(() => {
+    let monitoring = 0;
+    let synced = 0;
+    let pendingCount = 0;
+    for (const j of allJobs) {
+      if (isLegacyOpenListJob(j, engines.data) || j.enable !== 1) continue;
+      monitoring += 1;
+      const st = resolveEffectiveSyncStatus(j);
+      if (st.state === "synced") synced += 1;
+      if (st.pendingChanges > 0) pendingCount += st.pendingChanges;
+    }
+    return { monitoring, synced, pendingCount };
+  }, [allJobs, engines.data]);
+
   const statusCounts = useMemo(() => {
     let running = 0;
+    let synced = 0;
     let queued = 0;
     let approval = 0;
     let failed = 0;
     let disabled = 0;
     for (const job of allJobs) {
-      if (job.running) running += 1;
+      const st = resolveEffectiveSyncStatus(job);
+      if (job.running || st.state === "syncing" || st.state === "scanning") {
+        running += 1;
+      } else if (
+        job.enable === 1 &&
+        !isJobFailed(job) &&
+        (st.state === "synced" || st.state === "monitoring")
+      ) {
+        synced += 1;
+      }
       if (job.queued) queued += 1;
       if (job.pendingApproval) approval += 1;
       if (isJobFailed(job)) failed += 1;
@@ -360,6 +393,7 @@ export default function Dashboard() {
     return {
       all: allJobs.length,
       running,
+      synced,
       queued,
       approval,
       failed,
@@ -411,9 +445,35 @@ export default function Dashboard() {
         );
         if (!usesStorage) return false;
       }
-      if (methodFilter !== "all" && String(job.method) !== methodFilter)
+      if (methodFilter !== "all") {
+        const meta = getContinuousSyncMeta({
+          method: job.method,
+          extraFlags: job.extraFlags ?? fullJobMap.get(job.id)?.extraFlags,
+          syncStatus: job.syncStatus,
+        });
+        if (methodFilter === "sync_delete") {
+          if (meta.directionKey === "bidirectional" || !meta.syncDelete)
+            return false;
+        } else if (meta.directionKey !== methodFilter) {
+          return false;
+        }
+      }
+      const st = resolveEffectiveSyncStatus(job);
+      if (
+        statusFilter === "running" &&
+        !job.running &&
+        st.state !== "syncing" &&
+        st.state !== "scanning"
+      )
         return false;
-      if (statusFilter === "running" && !job.running) return false;
+      if (
+        statusFilter === "synced" &&
+        (job.running ||
+          job.enable !== 1 ||
+          isJobFailed(job) ||
+          (st.state !== "synced" && st.state !== "monitoring"))
+      )
+        return false;
       if (statusFilter === "queued" && !job.queued) return false;
       if (statusFilter === "approval" && !job.pendingApproval) return false;
       if (statusFilter === "failed" && !isJobFailed(job)) return false;
@@ -425,7 +485,7 @@ export default function Dashboard() {
       }
       return true;
     });
-  }, [allJobs, storageFilter, methodFilter, statusFilter, keyword]);
+  }, [allJobs, fullJobMap, storageFilter, methodFilter, statusFilter, keyword]);
 
   const hasActiveFilters =
     Boolean(keyword.trim()) ||
@@ -478,8 +538,7 @@ export default function Dashboard() {
   };
 
   const openJobDetail = (job: DashboardJobItem) => {
-    const tab = job.running ? "realtime" : "overview";
-    navigate(`/tasks?jobId=${job.id}&tab=${tab}`);
+    navigate(`/tasks?jobId=${job.id}&tab=overview`);
   };
 
   const openApprovalModal = (
@@ -542,24 +601,9 @@ export default function Dashboard() {
         title: `确认执行「${label}」？`,
         content:
           act === "disable"
-            ? "停用任务将同时中止其中正在运行的同步任务。"
-            : "将中止目标任务的当前执行，已完成的文件不会撤销。",
+            ? "暂停持续同步将停止监控并中止正在进行的传输，后续可随时恢复并自动补齐变更。"
+            : "将中止目标任务当前的传输批次，已完成的文件不会撤销，持续同步保持开启。",
         okText: "确认",
-        onOk: execute,
-      });
-      return;
-    }
-    const moveJobs = findBatchMoveJobs(act, allJobs, ids);
-    if (moveJobs.length > 0) {
-      const names = moveJobs
-        .slice(0, 3)
-        .map((j) => (j.remark || "").trim() || `任务 #${j.id}`)
-        .join("、");
-      const suffix = moveJobs.length > 3 ? ` 等 ${moveJobs.length} 个` : "";
-      confirmAction({
-        title: `确认执行「${label || "批量运行"}」？`,
-        content: `本次将启动移动模式任务（${names}${suffix}）。移动模式会在文件复制到目标目录并校验后删除源目录中的对应文件，是否确认立即执行？`,
-        okText: "确认移动并启动",
         onOk: execute,
       });
       return;
@@ -596,27 +640,40 @@ export default function Dashboard() {
   };
 
   const handleRunOne = (job: DashboardJobItem) => {
-    const startNow = () =>
+    void action.run(async () => {
+      try {
+        await api.jobAction({ id: String(job.id) });
+        Toast.success("已触发立即同步");
+        await refreshAll(true);
+      } catch (err) {
+        errorToast(err);
+      }
+    });
+  };
+
+  const handleToggleEnableOne = (job: DashboardJobItem) => {
+    const pausing = job.enable === 1;
+    const execute = () =>
       action.run(async () => {
         try {
-          await api.jobAction({ id: String(job.id) });
-          Toast.success("已提交执行");
+          await api.jobAction({ id: String(job.id), pause: pausing });
+          Toast.success(pausing ? "持续同步已暂停" : "持续同步已恢复");
           await refreshAll(true);
         } catch (err) {
           errorToast(err);
         }
       });
-    if (job.method === 2) {
+    if (pausing && job.running) {
       confirmAction({
-        title: "确认启动移动同步？",
+        title: "暂停持续同步并中止当前传输？",
         content:
-          "移动模式会在文件复制到目标目录并校验后删除源目录中的对应文件，是否确认立即执行？",
-        okText: "确认移动",
-        onOk: startNow,
+          "暂停后将停止监控并中止正在进行的传输批次（已完成文件不会撤销），恢复后自动补齐变更。",
+        okText: "暂停同步",
+        onOk: execute,
       });
       return;
     }
-    void startNow();
+    void execute();
   };
 
   const handleTogglePauseOne = (job: DashboardJobItem) => {
@@ -635,9 +692,10 @@ export default function Dashboard() {
 
   const handleStopOne = (job: DashboardJobItem) => {
     confirmAction({
-      title: "停止当前任务？",
-      content: "已完成的文件不会撤销。",
-      okText: "停止",
+      title: "中止本次同步批次？",
+      content:
+        "仅中止当前正在进行的传输批次，已完成的文件不会撤销；持续同步仍保持开启。",
+      okText: "中止本次",
       onOk: () =>
         action.run(async () => {
           try {
@@ -650,7 +708,7 @@ export default function Dashboard() {
                 abort: true,
               });
             }
-            Toast.success("已提交停止");
+            Toast.success("已提交中止本次同步");
             await refreshAll(true);
           } catch (err) {
             errorToast(err);
@@ -669,9 +727,14 @@ export default function Dashboard() {
     { key: "all", label: "全部", count: statusCounts.all, alwaysShow: true },
     {
       key: "running",
-      label: "运行中",
+      label: "同步中",
       count: statusCounts.running,
       alwaysShow: true,
+    },
+    {
+      key: "synced",
+      label: "已同步",
+      count: statusCounts.synced,
     },
     {
       key: "queued",
@@ -686,14 +749,14 @@ export default function Dashboard() {
     },
     {
       key: "failed",
-      label: "最近失败",
+      label: "同步异常",
       count: statusCounts.failed,
       tone: statusCounts.failed > 0 ? "danger" : undefined,
       alwaysShow: true,
     },
     {
       key: "disabled",
-      label: "已停用",
+      label: "已暂停",
       count: statusCounts.disabled,
       alwaysShow: true,
     },
@@ -850,13 +913,13 @@ export default function Dashboard() {
             </Button>
             <Button
               type="tertiary"
-              icon={<IconPlay aria-hidden="true" />}
-              disabled={action.busy || !allJobs.length}
+              icon={<IconRefresh aria-hidden="true" />}
+              disabled={action.busy || !syncSummary.monitoring}
               onClick={() =>
-                runBatch("run_all", undefined, "运行全部已启用任务")
+                runBatch("run_all", undefined, "立即同步全部持续任务")
               }
             >
-              全部运行
+              全部立即同步
             </Button>
             <Button
               type="danger"
@@ -867,10 +930,10 @@ export default function Dashboard() {
                 !((kpi?.runningJobs || 0) + (kpi?.queuedJobs || 0))
               }
               onClick={() =>
-                runBatch("stop_all", undefined, "停止全部运行中任务")
+                runBatch("stop_all", undefined, "中止全部传输批次")
               }
             >
-              全部停止
+              全部中止
             </Button>
             <span className="dashboard-header-divider" aria-hidden="true" />
             <Button
@@ -1089,13 +1152,39 @@ export default function Dashboard() {
                       />
                       {kpi.queuedJobs} 个排队等待中
                     </span>
+                  ) : globalBwInfo.configured ? (
+                    <Tooltip content={globalBwInfo.tooltipSummary}>
+                      <span
+                        className={`dashboard-kpi-stat dashboard-kpi-stat--truncate${
+                          globalBwInfo.isCurrentlyLimited ? " is-primary" : ""
+                        }`}
+                      >
+                        <span
+                          className={`kpi-dot${
+                            globalBwInfo.isCurrentlyLimited
+                              ? " kpi-dot--primary"
+                              : globalBwInfo.hasSchedule
+                                ? " kpi-dot--success"
+                                : ""
+                          }`}
+                          aria-hidden="true"
+                        />
+                        <span className="dashboard-kpi-stat-text">
+                          {syncSummary.monitoring > 0
+                            ? `监控 ${syncSummary.monitoring} 项 · ${globalBwInfo.kpiLabel}`
+                            : `当前空闲 · ${globalBwInfo.kpiLabel}`}
+                        </span>
+                      </span>
+                    </Tooltip>
+                  ) : syncSummary.monitoring > 0 ? (
+                    <span className="dashboard-kpi-stat is-success">
+                      <span className="kpi-dot kpi-dot--success" aria-hidden="true" />
+                      持续监控 {syncSummary.monitoring} 个任务
+                    </span>
                   ) : (
                     <span className="dashboard-kpi-stat">
                       <span className="kpi-dot" aria-hidden="true" />
-                      当前空闲
-                      {realtime.globalBwLimit
-                        ? ` · 限速 ${realtime.globalBwLimit}`
-                        : " · 无活跃传输"}
+                      当前空闲 · 无活跃传输
                     </span>
                   )}
                 </div>
@@ -1113,7 +1202,7 @@ export default function Dashboard() {
                 onClick={() => setStatusFilter("all")}
               >
                 <div className="dashboard-kpi-head">
-                  <span className="dashboard-kpi-label">同步任务</span>
+                  <span className="dashboard-kpi-label">持续同步</span>
                   <span
                     className="dashboard-kpi-icon dashboard-kpi-icon--primary"
                     aria-hidden="true"
@@ -1145,18 +1234,18 @@ export default function Dashboard() {
                 <div className="dashboard-kpi-foot">
                   <span className="dashboard-kpi-stat">
                     <span
-                      className="kpi-dot kpi-dot--primary"
+                      className="kpi-dot kpi-dot--success"
                       aria-hidden="true"
                     />
-                    已启用 {kpi.enabledJobs}
+                    已同步 {syncSummary.synced}
                   </span>
                   <span className="dashboard-kpi-stat">
                     <span className="kpi-dot" aria-hidden="true" />
-                    已停用 {disabledJobsCount}
+                    已暂停 {disabledJobsCount}
                   </span>
                   {statusCounts.failed > 0 && (
                     <span className="dashboard-kpi-stat is-danger">
-                      失败 {statusCounts.failed}
+                      异常 {statusCounts.failed}
                     </span>
                   )}
                 </div>
@@ -1388,11 +1477,11 @@ export default function Dashboard() {
                             后台传输 {realtime.activeTransfers}
                           </Tag>
                         )}
-                        <span className="dashboard-live-bw-chip">
-                          {realtime.globalBwLimit
-                            ? `全局限速 ${realtime.globalBwLimit}`
-                            : "全局不限速"}
-                        </span>
+                        <BwLimitChip
+                          expression={realtime.globalBwLimit}
+                          now={bwNowTick}
+                          onConfigure={() => navigate("/settings")}
+                        />
                       </>
                     )}
                   </div>
@@ -1442,23 +1531,23 @@ export default function Dashboard() {
                       <span className="dashboard-live-stat-label muted">
                         {realtime.isTransferring || realtime.isAllPaused
                           ? "本次传输"
-                          : "下次计划"}
+                          : "已同步状态"}
                       </span>
                       <strong className="dashboard-live-stat-val">
                         {realtime.isTransferring || realtime.isAllPaused
                           ? realtime.totalBytes > 0
                             ? `${formatSize(realtime.totalDoneBytes)} / ${formatSize(realtime.totalBytes)}`
                             : "扫描统计中"
-                          : nextScheduledJob
-                            ? formatShortTime(nextScheduledJob.nextRunTime)
-                            : "无定时计划"}
+                          : syncSummary.monitoring > 0
+                            ? `${syncSummary.synced} / ${syncSummary.monitoring} 已同步`
+                            : "暂无启用"}
                       </strong>
                     </div>
                     <div className="dashboard-live-stat-box">
                       <span className="dashboard-live-stat-label muted">
                         {realtime.isTransferring || realtime.isAllPaused
                           ? "预计剩余"
-                          : "持续监听"}
+                          : "持续监控"}
                       </span>
                       <strong className="dashboard-live-stat-val">
                         {realtime.isTransferring
@@ -1467,9 +1556,9 @@ export default function Dashboard() {
                             : "计算中"
                           : realtime.isAllPaused
                             ? "已暂停"
-                            : watchingCount > 0
-                              ? `${watchingCount} 个任务`
-                              : "未开启"}
+                            : syncSummary.monitoring > 0
+                              ? `${syncSummary.monitoring} 个任务`
+                              : "全部已暂停"}
                       </strong>
                     </div>
                   </div>
@@ -1719,31 +1808,24 @@ export default function Dashboard() {
                 ) : (
                   <div className="dashboard-live-idle-foot">
                     <div className="dashboard-live-idle-item">
-                      <IconClockStroked
+                      <IconRefresh
                         size="small"
                         className="muted"
                         aria-hidden="true"
                       />
-                      {nextScheduledJob ? (
-                        <button
-                          type="button"
-                          className="dashboard-live-idle-link"
-                          onClick={() => openJobDetail(nextScheduledJob)}
-                        >
-                          <span>
-                            下次计划：
-                            <strong>
-                              {nextScheduledJob.remark ||
-                                `同步任务 #${nextScheduledJob.id}`}
-                            </strong>
-                          </span>
-                          <span className="muted">
-                            {formatShortTime(nextScheduledJob.nextRunTime)}
-                          </span>
-                        </button>
+                      {syncSummary.monitoring > 0 ? (
+                        <span className="muted">
+                          <strong>{syncSummary.monitoring}</strong> 个持续同步任务正在实时监控变更
+                          {syncSummary.synced > 0
+                            ? `（${syncSummary.synced} 个已同步）`
+                            : ""}
+                          {syncSummary.pendingCount > 0
+                            ? ` · 待处理 ${syncSummary.pendingCount} 项`
+                            : ""}
+                        </span>
                       ) : (
                         <span className="muted">
-                          暂无待触发的定时计划，可点击「全部运行」或单任务启动
+                          当前没有运行中的持续同步任务，可恢复已有任务或新建同步
                         </span>
                       )}
                     </div>
@@ -1756,13 +1838,13 @@ export default function Dashboard() {
                         >
                           <IconAlertTriangle size="small" aria-hidden="true" />
                           <span>
-                            {statusCounts.failed} 个任务最近执行异常，点击排查
+                            {statusCounts.failed} 个任务同步异常，点击排查
                           </span>
                         </button>
                       ) : (
                         <span className="dashboard-live-idle-ok">
                           <IconTickCircle size="small" aria-hidden="true" />
-                          <span>所有已启用任务运行健康</span>
+                          <span>所有已启用同步任务健康运行</span>
                         </span>
                       )}
                     </div>
@@ -2114,15 +2196,16 @@ export default function Dashboard() {
                   optionList={storageFilterOptions}
                 />
                 <Select
-                  aria-label="按同步方式筛选"
+                  aria-label="按同步方向筛选"
                   value={methodFilter}
                   onChange={(v) => setMethodFilter(String(v))}
                   optionList={[
-                    { label: "全部方式", value: "all" },
-                    { label: "增量同步", value: "0" },
-                    { label: "全量同步", value: "1" },
-                    { label: "移动", value: "2" },
-                    { label: "双向同步", value: "3" },
+                    { label: "全部方向", value: "all" },
+                    { label: "双向同步", value: "bidirectional" },
+                    { label: "单向上传", value: "upload" },
+                    { label: "单向下载", value: "download" },
+                    { label: "自定义单向", value: "custom" },
+                    { label: "已开同步删除", value: "sync_delete" },
                   ]}
                 />
                 {hasActiveFilters && (
@@ -2147,38 +2230,38 @@ export default function Dashboard() {
                       size="small"
                       theme="solid"
                       disabled={action.busy}
-                      onClick={() => runBatch("run", selectedIds, "批量运行")}
+                      onClick={() => runBatch("run", selectedIds, "批量立即同步")}
                     >
-                      批量运行
+                      批量立即同步
                     </Button>
                     <Button
                       size="small"
                       type="danger"
                       theme="light"
                       disabled={action.busy}
-                      onClick={() => runBatch("stop", selectedIds, "批量停止")}
+                      onClick={() => runBatch("stop", selectedIds, "批量中止传输")}
                     >
-                      批量停止
+                      批量中止传输
                     </Button>
                     <Button
                       size="small"
                       type="tertiary"
                       disabled={action.busy}
                       onClick={() =>
-                        runBatch("enable", selectedIds, "批量启用")
+                        runBatch("enable", selectedIds, "批量恢复同步")
                       }
                     >
-                      批量启用
+                      批量恢复同步
                     </Button>
                     <Button
                       size="small"
                       type="tertiary"
                       disabled={action.busy}
                       onClick={() =>
-                        runBatch("disable", selectedIds, "批量停用")
+                        runBatch("disable", selectedIds, "批量暂停同步")
                       }
                     >
-                      批量停用
+                      批量暂停同步
                     </Button>
                     <Button
                       size="small"
@@ -2225,11 +2308,17 @@ export default function Dashboard() {
                       (displayDstList.length > 1
                         ? ` 等 ${displayDstList.length} 项`
                         : "");
-                    const fullRouteTitle = `${displaySrcList.join(", ") || "—"} → ${displayDstList.join(", ") || "—"}`;
+                    const fullRouteTitle = `${displaySrcList.join(", ") || "—"} ${job.method === 3 ? "⇄" : "→"} ${displayDstList.join(", ") || "—"}`;
                     const isSelected = selectedSet.has(job.id);
                     const legacy = isLegacyOpenListJob(job, engines.data);
                     const failed = isJobFailed(job);
                     const m = computeJobLiveMetrics(job);
+                    const meta = getContinuousSyncMeta({
+                      method: job.method,
+                      extraFlags: job.extraFlags ?? fullJobMap.get(job.id)?.extraFlags,
+                      syncStatus: job.syncStatus,
+                    });
+                    const effectiveStatus = resolveEffectiveSyncStatus(job);
 
                     const rowClassName = [
                       "dashboard-job-row",
@@ -2292,10 +2381,17 @@ export default function Dashboard() {
                             <Tag
                               size="small"
                               type="light"
-                              color={methodTagColor(job.method)}
+                              color={directionTagColor(meta.directionKey)}
                             >
-                              {methodLabel(job.method)}
+                              {meta.shortLabel}
                             </Tag>
+                            {!legacy &&
+                              meta.directionKey !== "bidirectional" &&
+                              meta.syncDelete && (
+                                <Tag size="small" type="light" color="orange">
+                                  同步删除
+                                </Tag>
+                              )}
                             {legacy && (
                               <Tag size="small" type="solid" color="red">
                                 旧版已停用
@@ -2308,32 +2404,17 @@ export default function Dashboard() {
                                   : "待确认删除"}
                               </Tag>
                             )}
-                            {!legacy && job.running && job.paused && (
-                              <Tag size="small" type="light" color="orange">
-                                已暂停
-                              </Tag>
-                            )}
                             {!legacy && job.queued && (
                               <Tag size="small" type="light" color="cyan">
                                 排队等待中
                               </Tag>
                             )}
-                            {!legacy && job.syncStatus && (
-                              <SyncStatusTag status={job.syncStatus} />
-                            )}
-                            {!legacy && !job.syncStatus && job.watching && (
-                              <Tag size="small" type="light" color="green">
-                                实时监听中
-                              </Tag>
+                            {!legacy && !job.pendingApproval && (
+                              <SyncStatusTag status={effectiveStatus} />
                             )}
                             {!legacy && job.checkRunning && (
                               <Tag size="small" type="light" color="blue">
                                 后台校验中
-                              </Tag>
-                            )}
-                            {!legacy && job.enable !== 1 && (
-                              <Tag size="small" type="light" color="grey">
-                                已停用
                               </Tag>
                             )}
                             {!legacy && job.windowEnable === 1 && (
@@ -2351,11 +2432,20 @@ export default function Dashboard() {
                               <span className="dashboard-path-seg">
                                 {srcSummary}
                               </span>
-                              <IconArrowRight
-                                size="small"
-                                className="dashboard-path-arrow"
-                                aria-hidden="true"
-                              />
+                              {meta.directionKey === "bidirectional" ? (
+                                <span
+                                  className="dashboard-path-arrow dashboard-path-arrow--bi"
+                                  aria-hidden="true"
+                                >
+                                  ⇄
+                                </span>
+                              ) : (
+                                <IconArrowRight
+                                  size="small"
+                                  className="dashboard-path-arrow"
+                                  aria-hidden="true"
+                                />
+                              )}
                               <span className="dashboard-path-seg">
                                 {dstSummary}
                               </span>
@@ -2481,52 +2571,109 @@ export default function Dashboard() {
                               </span>
                               <span className="dashboard-job-approval-action">
                                 {job.pendingApproval.status === "executing"
-                                  ? "不影响后续同步任务"
+                                  ? "不影响后续持续同步"
                                   : "同步已完成 · 点击查看清单并审批"}
                               </span>
                             </div>
-                          ) : (
+                          ) : effectiveStatus.state === "error" ||
+                            effectiveStatus.state === "needs_rebuild" ? (
+                            <div className="dashboard-job-sync-error">
+                              <span className="dashboard-job-sync-error-title">
+                                <IconAlertTriangle
+                                  size="small"
+                                  aria-hidden="true"
+                                />
+                                {effectiveStatus.state === "needs_rebuild"
+                                  ? "待重建双向同步基线"
+                                  : effectiveStatus.failures > 1
+                                    ? `同步异常（连续失败 ${effectiveStatus.failures} 次）`
+                                    : "同步异常"}
+                              </span>
+                              <span
+                                className="dashboard-job-sync-error-desc"
+                                title={effectiveStatus.error}
+                              >
+                                {effectiveStatus.error || "点击进入总览查看详情并重试"}
+                              </span>
+                            </div>
+                          ) : effectiveStatus.state === "paused" ? (
                             <>
-                              {job.lastTask ? (
-                                <div className="dashboard-job-last">
-                                  <Status
-                                    status={job.lastTask.status}
-                                    label={
-                                      taskRecordStatusNames[
-                                        job.lastTask.status
-                                      ] || String(job.lastTask.status)
-                                    }
-                                    error={job.lastTask.errMsg}
-                                  />
-                                  <span
-                                    className="muted"
-                                    title={formatTimestamp(
-                                      job.lastTask.createTime,
-                                      true,
-                                    )}
-                                  >
-                                    {formatShortTime(job.lastTask.createTime)}
-                                  </span>
-                                </div>
-                              ) : (
-                                <div className="dashboard-job-last">
-                                  <span className="muted">暂无执行记录</span>
-                                </div>
-                              )}
+                              <div className="dashboard-job-last">
+                                <span className="muted">持续同步已暂停</span>
+                              </div>
                               <div className="dashboard-job-schedule">
-                                <span
-                                  className="dashboard-job-schedule-item"
-                                  title={
-                                    job.nextRunTime > 0
-                                      ? formatTimestamp(job.nextRunTime, true)
-                                      : undefined
-                                  }
-                                >
+                                <span className="dashboard-job-schedule-item">
                                   <IconClockStroked
                                     size="small"
                                     aria-hidden="true"
                                   />
-                                  {formatScheduleHint(job)}
+                                  {effectiveStatus.lastSuccess > 0
+                                    ? `最近同步 ${formatRelativeSyncTime(effectiveStatus.lastSuccess)}`
+                                    : job.lastTask
+                                      ? `上次同步 ${formatShortTime(job.lastTask.createTime)}`
+                                      : "点击右侧按钮可随时恢复"}
+                                </span>
+                              </div>
+                            </>
+                          ) : effectiveStatus.state === "waiting_window" ? (
+                            <>
+                              <div className="dashboard-job-last">
+                                <span className="dashboard-job-sync-warn">
+                                  等待进入运行窗口
+                                </span>
+                              </div>
+                              <div className="dashboard-job-schedule">
+                                <span className="dashboard-job-schedule-item">
+                                  <IconClockStroked
+                                    size="small"
+                                    aria-hidden="true"
+                                  />
+                                  {job.windowStart || "00:00"}–{job.windowEnd || "06:00"}
+                                </span>
+                                {effectiveStatus.pendingChanges !== 0 && (
+                                  <span className="dashboard-job-last-metrics">
+                                    {effectiveStatus.pendingChanges < 0
+                                      ? "待完整核对"
+                                      : `待同步 ${effectiveStatus.pendingChanges} 项`}
+                                  </span>
+                                )}
+                              </div>
+                            </>
+                          ) : (
+                            <>
+                              <div className="dashboard-job-last">
+                                <span
+                                  className={
+                                    effectiveStatus.state === "synced"
+                                      ? "dashboard-job-sync-ok"
+                                      : "dashboard-job-sync-active"
+                                  }
+                                  title={
+                                    effectiveStatus.lastSuccess > 0
+                                      ? formatTimestamp(effectiveStatus.lastSuccess, true)
+                                      : undefined
+                                  }
+                                >
+                                  {effectiveStatus.state === "scanning"
+                                    ? "正在检测目录变更…"
+                                    : effectiveStatus.state === "pending"
+                                      ? effectiveStatus.pendingChanges < 0
+                                        ? "待完整核对"
+                                        : `待同步 ${effectiveStatus.pendingChanges} 项`
+                                      : effectiveStatus.state === "synced"
+                                        ? effectiveStatus.lastSuccess > 0
+                                          ? `已同步 · ${formatRelativeSyncTime(effectiveStatus.lastSuccess)}`
+                                          : "已同步"
+                                        : "持续监控中"}
+                                </span>
+                              </div>
+                              <div className="dashboard-job-schedule">
+                                <span className="dashboard-job-schedule-item">
+                                  <IconRefresh
+                                    size="small"
+                                    aria-hidden="true"
+                                  />
+                                  每 {formatSecondsShort(meta.pollIntervalSec)} 检测
                                 </span>
                                 {job.lastTask &&
                                   (job.lastTask.allNum !== undefined ||
@@ -2570,46 +2717,60 @@ export default function Dashboard() {
                                   setDryRunJob({ id: job.id, name: jobName })
                                 }
                               />
-                              {job.running && job.currentTaskId > 0 && (
-                                <IconButton
-                                  label={job.paused ? "继续传输" : "暂停传输"}
-                                  icon={
-                                    job.paused ? (
-                                      <IconPlay aria-hidden="true" />
-                                    ) : (
-                                      <IconPause aria-hidden="true" />
-                                    )
-                                  }
-                                  disabled={action.busy}
-                                  onClick={() => handleTogglePauseOne(job)}
-                                />
+                              {job.running || job.queued ? (
+                                <>
+                                  {job.running && job.currentTaskId > 0 && (
+                                    <IconButton
+                                      label={job.paused ? "继续传输" : "暂停传输"}
+                                      icon={
+                                        job.paused ? (
+                                          <IconPlay aria-hidden="true" />
+                                        ) : (
+                                          <IconPause aria-hidden="true" />
+                                        )
+                                      }
+                                      disabled={action.busy}
+                                      onClick={() => handleTogglePauseOne(job)}
+                                    />
+                                  )}
+                                  <IconButton
+                                    label="中止本次同步"
+                                    icon={<IconStop aria-hidden="true" />}
+                                    danger
+                                    disabled={action.busy}
+                                    onClick={() => handleStopOne(job)}
+                                  />
+                                </>
+                              ) : (
+                                <>
+                                  <IconButton
+                                    label={
+                                      job.enable === 1
+                                        ? "暂停持续同步"
+                                        : "恢复持续同步"
+                                    }
+                                    icon={
+                                      job.enable === 1 ? (
+                                        <IconPause aria-hidden="true" />
+                                      ) : (
+                                        <IconPlay aria-hidden="true" />
+                                      )
+                                    }
+                                    disabled={action.busy}
+                                    onClick={() => handleToggleEnableOne(job)}
+                                  />
+                                  <IconButton
+                                    label={
+                                      job.enable === 1
+                                        ? "立即同步"
+                                        : "请先恢复持续同步"
+                                    }
+                                    icon={<IconRefresh aria-hidden="true" />}
+                                    disabled={action.busy || job.enable !== 1}
+                                    onClick={() => handleRunOne(job)}
+                                  />
+                                </>
                               )}
-                              <IconButton
-                                label={
-                                  job.running || job.queued
-                                    ? "停止任务"
-                                    : "启动任务"
-                                }
-                                icon={
-                                  job.running || job.queued ? (
-                                    <IconStop aria-hidden="true" />
-                                  ) : (
-                                    <IconPlay aria-hidden="true" />
-                                  )
-                                }
-                                danger={job.running || job.queued}
-                                disabled={
-                                  action.busy ||
-                                  (!job.running &&
-                                    !job.queued &&
-                                    job.enable !== 1)
-                                }
-                                onClick={() =>
-                                  job.running || job.queued
-                                    ? handleStopOne(job)
-                                    : handleRunOne(job)
-                                }
-                              />
                               <IconButton
                                 label="复制任务"
                                 icon={<IconCopy aria-hidden="true" />}
@@ -2736,34 +2897,6 @@ export default function Dashboard() {
                   navigate(`/tasks?jobId=${createdId}&tab=overview`);
                 }
               };
-              if (result.runNow && createdId) {
-                const startCreated = () =>
-                  action.run(async () => {
-                    try {
-                      await api.jobAction({ id: String(createdId) });
-                      Toast.success("已提交执行");
-                    } catch (err) {
-                      errorToast(err);
-                    }
-                    await refreshAll(true);
-                    goToCreated();
-                  });
-                if (result.method === 2) {
-                  confirmAction({
-                    title: "确认启动移动同步？",
-                    content:
-                      "移动模式会在文件复制到目标目录并校验后删除源目录中的对应文件，是否确认立即执行？",
-                    okText: "确认移动",
-                    onOk: startCreated,
-                    onCancel: () => {
-                      void refreshAll(true).then(goToCreated);
-                    },
-                  });
-                  return;
-                }
-                void startCreated();
-                return;
-              }
               void refreshAll(true).then(goToCreated);
             }}
           />

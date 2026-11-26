@@ -798,6 +798,10 @@ func resumeUploadOneS3File(
 	onProgress(alreadyBytes, 0)
 
 	if len(missing) > 0 {
+		if opt.Controller != nil {
+			leaveGo := opt.Controller.EnterGoTransfer()
+			defer leaveGo()
+		}
 		var (
 			mu      sync.Mutex
 			partErr error
@@ -864,7 +868,7 @@ func resumeUploadOneS3File(
 						mu.Unlock()
 						return
 					}
-					if err := opt.Controller.ThrottleBytes(ctx, int(length)); err != nil {
+					if err := opt.Controller.ThrottleUploadBytes(ctx, int(length)); err != nil {
 						return
 					}
 					mu.Lock()

@@ -22,22 +22,31 @@ import (
 // bandwidth throttling) across both rclone subprocesses (via private loopback
 // --rc + SIGSTOP/SIGCONT) and pure-Go resumable transfer workers.
 type RCController struct {
-	mu             sync.Mutex
-	cond           *sync.Cond
-	paused         atomic.Bool
-	pausedSince    time.Time
-	pausedAccum    time.Duration
-	bwLimit        string
-	liveOverridden bool
-	hasSchedule    atomic.Bool
-	lastEvalMin    atomic.Int64
-	bytesPerSec    atomic.Int64
-	activeProcs    map[int]*rcEndpoint
-	nextProcKey    int
-	scheduleTimer  *time.Timer
-	closed         bool
-	throttleMu     sync.Mutex
-	nextSendTime   time.Time
+	mu               sync.Mutex
+	cond             *sync.Cond
+	paused           atomic.Bool
+	pausedSince      time.Time
+	pausedAccum      time.Duration
+	inheritsGlobal   bool
+	bwLimit          string
+	liveOverridden   bool
+	hasSchedule      atomic.Bool
+	lastEvalMin      atomic.Int64
+	bytesPerSec      atomic.Int64
+	upBytesPerSec    atomic.Int64
+	downBytesPerSec  atomic.Int64
+	activeProcs      map[int]*rcEndpoint
+	globalRcloneKeys map[int]int
+	nextProcKey      int
+	activeGoCount    int
+	globalGoKeys     map[int]int
+	nextGoKey        int
+	scheduleTimer    *time.Timer
+	closed           bool
+	throttleMu       sync.Mutex
+	nextSendTime     time.Time
+	nextUpSendTime   time.Time
+	nextDownSendTime time.Time
 }
 
 type rcEndpoint struct {
@@ -47,22 +56,54 @@ type rcEndpoint struct {
 	pass string
 }
 
-// NewRCController creates a live transfer controller initialized with initialBwLimit.
+// NewRCController creates a standalone live transfer controller initialized with initialBwLimit.
 func NewRCController(initialBwLimit string) *RCController {
 	c := &RCController{
-		bwLimit:     strings.TrimSpace(initialBwLimit),
-		activeProcs: make(map[int]*rcEndpoint),
+		bwLimit:          strings.TrimSpace(initialBwLimit),
+		activeProcs:      make(map[int]*rcEndpoint),
+		globalRcloneKeys: make(map[int]int),
+		globalGoKeys:     make(map[int]int),
 	}
 	c.cond = sync.NewCond(&c.mu)
-	now := time.Now()
+	c.refreshLocalRateCacheLocked(time.Now())
+	return c
+}
+
+// NewGlobalRCController creates a live transfer controller that shares the
+// process-wide global bandwidth cap across all concurrent tasks and pairs.
+func NewGlobalRCController() *RCController {
+	c := &RCController{
+		inheritsGlobal:   true,
+		activeProcs:      make(map[int]*rcEndpoint),
+		globalRcloneKeys: make(map[int]int),
+		globalGoKeys:     make(map[int]int),
+	}
+	c.cond = sync.NewCond(&c.mu)
+	return c
+}
+
+// InheritsGlobal reports whether this controller currently shares the global bandwidth budget.
+func (c *RCController) InheritsGlobal() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.inheritsGlobal
+}
+
+func (c *RCController) refreshLocalRateCacheLocked(now time.Time) {
 	activeRate, _, hasSchedule := ResolveBwLimitAt(c.bwLimit, now)
 	c.hasSchedule.Store(hasSchedule)
 	c.lastEvalMin.Store(now.Unix() / 60)
 	c.bytesPerSec.Store(parseEffectiveSingleRateBytes(activeRate))
-	return c
+	up, down := parseDirectionalRateBytes(activeRate)
+	c.upBytesPerSec.Store(up)
+	c.downBytesPerSec.Store(down)
 }
 
-// Close releases background timetable timers owned by this controller.
+// Close releases background timetable timers and detaches any remaining global
+// bandwidth slots owned by this controller.
 func (c *RCController) Close() {
 	if c == nil {
 		return
@@ -73,7 +114,24 @@ func (c *RCController) Close() {
 		c.scheduleTimer.Stop()
 		c.scheduleTimer = nil
 	}
+	rcloneKeys := make([]int, 0, len(c.globalRcloneKeys))
+	for _, k := range c.globalRcloneKeys {
+		rcloneKeys = append(rcloneKeys, k)
+	}
+	clear(c.globalRcloneKeys)
+	goKeys := make([]int, 0, len(c.globalGoKeys))
+	for _, k := range c.globalGoKeys {
+		goKeys = append(goKeys, k)
+	}
+	clear(c.globalGoKeys)
 	c.mu.Unlock()
+
+	for _, k := range rcloneKeys {
+		defaultGlobalBw.unregisterRclone(k)
+	}
+	for _, k := range goKeys {
+		defaultGlobalBw.unregisterGo(k)
+	}
 }
 
 // IsPaused reports whether transfers under this controller are currently paused.
@@ -104,8 +162,144 @@ func (c *RCController) BwLimit() string {
 		return ""
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.bwLimit
+	inherits := c.inheritsGlobal
+	spec := c.bwLimit
+	c.mu.Unlock()
+	if inherits {
+		return defaultGlobalBw.Get()
+	}
+	return spec
+}
+
+// EffectiveInitialRcloneBwLimit returns the --bwlimit argument a newly launched
+// rclone process under this controller should start with so concurrent streams
+// stay within the shared cap from the very first byte.
+func (c *RCController) EffectiveInitialRcloneBwLimit(fallback string) string {
+	if c == nil {
+		return strings.TrimSpace(fallback)
+	}
+	c.mu.Lock()
+	inherits := c.inheritsGlobal
+	spec := c.bwLimit
+	ownSlots := c.standaloneActiveSlotCountLocked()
+	c.mu.Unlock()
+
+	if inherits {
+		return defaultGlobalBw.EstimateNextRcloneRate()
+	}
+	effective := strings.TrimSpace(spec)
+	if effective == "" {
+		effective = strings.TrimSpace(fallback)
+	}
+	if effective == "" {
+		return ""
+	}
+	if ownSlots == 0 {
+		return effective
+	}
+	activeRate, _, _ := ResolveBwLimitAt(effective, time.Now())
+	if activeRate == "off" {
+		return ""
+	}
+	return splitBwRate(activeRate, ownSlots+1)
+}
+
+func (c *RCController) standaloneActiveSlotCountLocked() int {
+	if c.paused.Load() {
+		return 0
+	}
+	count := c.activeGoCount
+	for _, ep := range c.activeProcs {
+		if ep.addr != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func (c *RCController) rebalanceStandaloneAsyncLocked(now time.Time, newlyAttachedAddr string) {
+	if c.inheritsGlobal || c.paused.Load() {
+		return
+	}
+	rcCount := 0
+	eps := make([]*rcEndpoint, 0, len(c.activeProcs))
+	for _, ep := range c.activeProcs {
+		if ep.addr != "" {
+			rcCount++
+			cp := *ep
+			eps = append(eps, &cp)
+		}
+	}
+	if rcCount == 0 {
+		return
+	}
+	totalSlots := rcCount + c.activeGoCount
+	if !c.liveOverridden && (c.bwLimit == "" || totalSlots <= 1) {
+		return
+	}
+	activeRate, _, _ := ResolveBwLimitAt(c.bwLimit, now)
+	perSlotRate := splitBwRate(activeRate, totalSlots)
+	go func() {
+		for _, ep := range eps {
+			if newlyAttachedAddr != "" && ep.addr == newlyAttachedAddr {
+				time.Sleep(200 * time.Millisecond)
+			}
+			_ = pushRcloneBwLimit(context.Background(), ep, perSlotRate)
+		}
+	}()
+}
+
+// EnterGoTransfer registers an active pure-Go transfer stream (such as Quark
+// direct upload, S3 multipart upload, or resumable download) so concurrent
+// rclone and Go streams dynamically share the bandwidth budget.
+func (c *RCController) EnterGoTransfer() func() {
+	if c == nil {
+		return func() {}
+	}
+	c.mu.Lock()
+	c.nextGoKey++
+	localKey := c.nextGoKey
+	c.activeGoCount++
+	inherits := c.inheritsGlobal
+	isPaused := c.paused.Load()
+	if !inherits {
+		c.rebalanceStandaloneAsyncLocked(time.Now(), "")
+	}
+	c.mu.Unlock()
+
+	var gKey int
+	if inherits {
+		gKey = defaultGlobalBw.registerGo(isPaused)
+		c.mu.Lock()
+		if !c.closed && c.inheritsGlobal {
+			c.globalGoKeys[localKey] = gKey
+		} else {
+			c.mu.Unlock()
+			defaultGlobalBw.unregisterGo(gKey)
+			gKey = 0
+			c.mu.Lock()
+		}
+		c.mu.Unlock()
+	}
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			c.mu.Lock()
+			if c.activeGoCount > 0 {
+				c.activeGoCount--
+			}
+			gk := c.globalGoKeys[localKey]
+			delete(c.globalGoKeys, localKey)
+			if !c.inheritsGlobal {
+				c.rebalanceStandaloneAsyncLocked(time.Now(), "")
+			}
+			c.mu.Unlock()
+			if gk > 0 {
+				defaultGlobalBw.unregisterGo(gk)
+			}
+		})
+	}
 }
 
 // Attach registers a running rclone process and its private RC endpoint.
@@ -114,29 +308,36 @@ func (c *RCController) Attach(pid int, rcAddr, rcUser, rcPass string) func() {
 	if c == nil {
 		return func() {}
 	}
+	now := time.Now()
 	c.mu.Lock()
 	c.nextProcKey++
 	key := c.nextProcKey
 	ep := &rcEndpoint{pid: pid, addr: rcAddr, user: rcUser, pass: rcPass}
 	c.activeProcs[key] = ep
 	shouldPause := c.paused.Load()
-	shouldPushLive := c.liveOverridden
-	spec := c.bwLimit
-	if shouldPushLive && !c.closed {
-		c.armScheduleTimerLocked(time.Now())
+	inherits := c.inheritsGlobal
+	if !inherits && !c.closed && (c.liveOverridden || (c.bwLimit != "" && c.standaloneActiveSlotCountLocked() > 1)) {
+		c.armScheduleTimerLocked(now)
+	}
+	if !inherits {
+		c.rebalanceStandaloneAsyncLocked(now, rcAddr)
 	}
 	c.mu.Unlock()
 
 	if shouldPause && pid > 0 {
 		_ = pauseProcess(pid)
 	}
-	if shouldPushLive && rcAddr != "" && !shouldPause {
-		activeRate, _, _ := ResolveBwLimitAt(spec, time.Now())
-		go func() {
-			// Give rclone's RC HTTP listener a brief moment to bind before pushing the live rate.
-			time.Sleep(200 * time.Millisecond)
-			_ = pushRcloneBwLimit(context.Background(), ep, activeRate)
-		}()
+	if inherits && rcAddr != "" {
+		gKey := defaultGlobalBw.registerRclone(ep, shouldPause)
+		c.mu.Lock()
+		if !c.closed && c.inheritsGlobal {
+			c.globalRcloneKeys[key] = gKey
+		} else {
+			c.mu.Unlock()
+			defaultGlobalBw.unregisterRclone(gKey)
+			c.mu.Lock()
+		}
+		c.mu.Unlock()
 	}
 
 	var once sync.Once
@@ -144,7 +345,15 @@ func (c *RCController) Attach(pid int, rcAddr, rcUser, rcPass string) func() {
 		once.Do(func() {
 			c.mu.Lock()
 			delete(c.activeProcs, key)
+			gKey := c.globalRcloneKeys[key]
+			delete(c.globalRcloneKeys, key)
+			if !c.inheritsGlobal {
+				c.rebalanceStandaloneAsyncLocked(time.Now(), "")
+			}
 			c.mu.Unlock()
+			if gKey > 0 {
+				defaultGlobalBw.unregisterRclone(gKey)
+			}
 		})
 	}
 }
@@ -191,7 +400,22 @@ func (c *RCController) Pause() error {
 			pids = append(pids, ep.pid)
 		}
 	}
+	rcloneKeys := make([]int, 0, len(c.globalRcloneKeys))
+	for _, k := range c.globalRcloneKeys {
+		rcloneKeys = append(rcloneKeys, k)
+	}
+	goKeys := make([]int, 0, len(c.globalGoKeys))
+	for _, k := range c.globalGoKeys {
+		goKeys = append(goKeys, k)
+	}
 	c.mu.Unlock()
+
+	for _, k := range rcloneKeys {
+		defaultGlobalBw.setRclonePaused(k, true)
+	}
+	for _, k := range goKeys {
+		defaultGlobalBw.setGoPaused(k, true)
+	}
 
 	var firstErr error
 	for _, pid := range pids {
@@ -224,8 +448,18 @@ func (c *RCController) Resume() error {
 			eps = append(eps, &cp)
 		}
 	}
-	shouldSyncRate := c.liveOverridden
+	inherits := c.inheritsGlobal
+	rcloneKeys := make([]int, 0, len(c.globalRcloneKeys))
+	for _, k := range c.globalRcloneKeys {
+		rcloneKeys = append(rcloneKeys, k)
+	}
+	goKeys := make([]int, 0, len(c.globalGoKeys))
+	for _, k := range c.globalGoKeys {
+		goKeys = append(goKeys, k)
+	}
+	shouldSyncRate := !inherits && (c.liveOverridden || (c.bwLimit != "" && c.standaloneActiveSlotCountLocked() > 1))
 	spec := c.bwLimit
+	totalSlots := max(1, c.standaloneActiveSlotCountLocked())
 	c.cond.Broadcast()
 	c.mu.Unlock()
 
@@ -238,12 +472,20 @@ func (c *RCController) Resume() error {
 			firstErr = err
 		}
 	}
-	if shouldSyncRate && len(eps) > 0 {
+	if inherits {
+		for _, k := range rcloneKeys {
+			defaultGlobalBw.setRclonePaused(k, false)
+		}
+		for _, k := range goKeys {
+			defaultGlobalBw.setGoPaused(k, false)
+		}
+	} else if shouldSyncRate && len(eps) > 0 {
 		activeRate, _, _ := ResolveBwLimitAt(spec, time.Now())
+		perSlotRate := splitBwRate(activeRate, totalSlots)
 		go func() {
 			time.Sleep(150 * time.Millisecond)
 			for _, ep := range eps {
-				_ = pushRcloneBwLimit(context.Background(), ep, activeRate)
+				_ = pushRcloneBwLimit(context.Background(), ep, perSlotRate)
 			}
 		}()
 	}
@@ -270,9 +512,10 @@ func (c *RCController) WaitIfPaused(ctx context.Context) error {
 	return ctx.Err()
 }
 
-// SetBwLimit validates and applies a new bandwidth limit live across all active
-// rclone RC endpoints and Go resumable transfer workers. Supports single rates,
-// asymmetric up:down limits, and full rclone timetables; empty/"off"/"0" removes the cap.
+// SetBwLimit validates and applies a new per-task bandwidth limit live across
+// all active rclone RC endpoints and Go resumable transfer workers. Calling this
+// detaches a global-inheriting controller from the shared global pool so other
+// tasks immediately reclaim its share.
 func (c *RCController) SetBwLimit(ctx context.Context, rate string) error {
 	if c == nil {
 		return errors.New("任务不支持动态限速")
@@ -286,14 +529,25 @@ func (c *RCController) SetBwLimit(ctx context.Context, rate string) error {
 		storedSpec = ""
 	}
 	now := time.Now()
-	activeRate, _, hasSchedule := ResolveBwLimitAt(storedSpec, now)
+	activeRate, _, _ := ResolveBwLimitAt(storedSpec, now)
 
 	c.mu.Lock()
+	wasInheriting := c.inheritsGlobal
+	c.inheritsGlobal = false
+	var detachRcloneKeys, detachGoKeys []int
+	if wasInheriting {
+		for _, k := range c.globalRcloneKeys {
+			detachRcloneKeys = append(detachRcloneKeys, k)
+		}
+		clear(c.globalRcloneKeys)
+		for _, k := range c.globalGoKeys {
+			detachGoKeys = append(detachGoKeys, k)
+		}
+		clear(c.globalGoKeys)
+	}
 	c.bwLimit = storedSpec
 	c.liveOverridden = true
-	c.hasSchedule.Store(hasSchedule)
-	c.lastEvalMin.Store(now.Unix() / 60)
-	c.bytesPerSec.Store(parseEffectiveSingleRateBytes(activeRate))
+	c.refreshLocalRateCacheLocked(now)
 	eps := make([]*rcEndpoint, 0, len(c.activeProcs))
 	for _, ep := range c.activeProcs {
 		if ep.addr != "" {
@@ -301,22 +555,31 @@ func (c *RCController) SetBwLimit(ctx context.Context, rate string) error {
 			eps = append(eps, &cp)
 		}
 	}
+	totalSlots := max(1, len(eps)+c.activeGoCount)
 	isPaused := c.paused.Load()
 	if !c.closed {
 		c.armScheduleTimerLocked(now)
 	}
 	c.mu.Unlock()
 
+	for _, k := range detachRcloneKeys {
+		defaultGlobalBw.unregisterRclone(k)
+	}
+	for _, k := range detachGoKeys {
+		defaultGlobalBw.unregisterGo(k)
+	}
+
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	perSlotRate := splitBwRate(activeRate, totalSlots)
 	var errs []error
 	for _, ep := range eps {
 		// If the process is currently SIGSTOP'd, skip unreachable RC and sync on Resume().
 		if isPaused {
 			continue
 		}
-		if err := pushRcloneBwLimit(ctx, ep, activeRate); err != nil {
+		if err := pushRcloneBwLimit(ctx, ep, perSlotRate); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -331,7 +594,7 @@ func (c *RCController) armScheduleTimerLocked(now time.Time) {
 		c.scheduleTimer.Stop()
 		c.scheduleTimer = nil
 	}
-	if c.closed || !c.liveOverridden {
+	if c.closed || c.inheritsGlobal || !c.liveOverridden {
 		return
 	}
 	_, nextChange, hasSchedule := ResolveBwLimitAt(c.bwLimit, now)
@@ -348,14 +611,12 @@ func (c *RCController) armScheduleTimerLocked(now time.Time) {
 func (c *RCController) applyScheduledSlot() {
 	now := time.Now()
 	c.mu.Lock()
-	if c.closed || !c.liveOverridden {
+	if c.closed || c.inheritsGlobal || !c.liveOverridden {
 		c.mu.Unlock()
 		return
 	}
-	activeRate, _, hasSchedule := ResolveBwLimitAt(c.bwLimit, now)
-	c.hasSchedule.Store(hasSchedule)
-	c.lastEvalMin.Store(now.Unix() / 60)
-	c.bytesPerSec.Store(parseEffectiveSingleRateBytes(activeRate))
+	c.refreshLocalRateCacheLocked(now)
+	activeRate, _, _ := ResolveBwLimitAt(c.bwLimit, now)
 	eps := make([]*rcEndpoint, 0, len(c.activeProcs))
 	for _, ep := range c.activeProcs {
 		if ep.addr != "" {
@@ -363,6 +624,7 @@ func (c *RCController) applyScheduledSlot() {
 			eps = append(eps, &cp)
 		}
 	}
+	totalSlots := max(1, len(eps)+c.activeGoCount)
 	isPaused := c.paused.Load()
 	c.armScheduleTimerLocked(now)
 	c.mu.Unlock()
@@ -370,45 +632,96 @@ func (c *RCController) applyScheduledSlot() {
 	if isPaused {
 		return
 	}
+	perSlotRate := splitBwRate(activeRate, totalSlots)
 	for _, ep := range eps {
-		_ = pushRcloneBwLimit(context.Background(), ep, activeRate)
+		_ = pushRcloneBwLimit(context.Background(), ep, perSlotRate)
 	}
 }
 
 // ThrottleBytes paces pure-Go resumable transfers to obey live bytesPerSec limits,
 // dynamically re-evaluating scheduled timetables on minute boundaries.
 func (c *RCController) ThrottleBytes(ctx context.Context, n int) error {
+	return c.throttleDirected(ctx, n, throttleAny)
+}
+
+// ThrottleUploadBytes paces pure-Go upload workers using the upload rate cap
+// (so asymmetric rates like "5.5M:off" throttle uploads without throttling downloads).
+func (c *RCController) ThrottleUploadBytes(ctx context.Context, n int) error {
+	return c.throttleDirected(ctx, n, throttleUpload)
+}
+
+// ThrottleDownloadBytes paces pure-Go download workers using the download rate cap
+// (so asymmetric rates like "5.5M:off" leave downloads unlimited).
+func (c *RCController) ThrottleDownloadBytes(ctx context.Context, n int) error {
+	return c.throttleDirected(ctx, n, throttleDownload)
+}
+
+func (c *RCController) throttleDirected(ctx context.Context, n int, dir throttleDirection) error {
 	if c == nil || n <= 0 {
 		return ctx.Err()
+	}
+	c.mu.Lock()
+	inherits := c.inheritsGlobal
+	c.mu.Unlock()
+	if inherits {
+		return defaultGlobalBw.throttle(ctx, n, dir)
 	}
 	if c.hasSchedule.Load() {
 		curMin := time.Now().Unix() / 60
 		if c.lastEvalMin.Load() != curMin {
 			c.mu.Lock()
 			if c.lastEvalMin.Load() != curMin {
-				now := time.Now()
-				activeRate, _, _ := ResolveBwLimitAt(c.bwLimit, now)
-				c.bytesPerSec.Store(parseEffectiveSingleRateBytes(activeRate))
-				c.lastEvalMin.Store(curMin)
+				c.refreshLocalRateCacheLocked(time.Now())
 			}
 			c.mu.Unlock()
 		}
 	}
-	bps := c.bytesPerSec.Load()
+	var bps int64
+	switch dir {
+	case throttleUpload:
+		bps = c.upBytesPerSec.Load()
+	case throttleDownload:
+		bps = c.downBytesPerSec.Load()
+	default:
+		bps = c.bytesPerSec.Load()
+	}
 	if bps <= 0 {
 		return ctx.Err()
+	}
+	// If this standalone controller also has concurrent rclone processes, share
+	// its per-task cap proportionally with the Go workers.
+	c.mu.Lock()
+	rcActive := 0
+	for _, ep := range c.activeProcs {
+		if ep.addr != "" {
+			rcActive++
+		}
+	}
+	goActive := max(1, c.activeGoCount)
+	c.mu.Unlock()
+	if rcActive > 0 {
+		bps = max(minSplitRateBytes, (bps*int64(goActive))/int64(rcActive+goActive))
 	}
 	dur := time.Duration(float64(n) / float64(bps) * float64(time.Second))
 	if dur <= 0 {
 		return ctx.Err()
 	}
 	c.throttleMu.Lock()
-	now := time.Now()
-	if c.nextSendTime.Before(now) {
-		c.nextSendTime = now
+	var clock *time.Time
+	switch dir {
+	case throttleUpload:
+		clock = &c.nextUpSendTime
+	case throttleDownload:
+		clock = &c.nextDownSendTime
+	default:
+		clock = &c.nextSendTime
 	}
-	c.nextSendTime = c.nextSendTime.Add(dur)
-	wait := time.Until(c.nextSendTime)
+	now := time.Now()
+	if clock.Before(now) {
+		*clock = now
+	}
+	*clock = clock.Add(dur)
+	wait := time.Until(*clock)
 	c.throttleMu.Unlock()
 
 	if wait <= 0 {

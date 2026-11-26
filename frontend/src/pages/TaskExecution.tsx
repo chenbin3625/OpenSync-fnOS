@@ -32,10 +32,12 @@ import {
   LoadState,
   SearchFilterInput,
   Status,
+  confirmAction,
   confirmDelete,
-  confirmStopTask,
   errorToast,
 } from "../components/common";
+import { SyncStatusTag, syncStatusLabels } from "../components/SyncStatus";
+import { describeBwLimit, formatBwRateHuman } from "../lib/bwLimit";
 import { useAction, useMediaQuery, useResource } from "../lib/hooks";
 import { historyRangeParams } from "../lib/historyFilters";
 import { useClampedPage } from "../lib/pagination";
@@ -56,7 +58,7 @@ import {
   taskProgressPercent,
 } from "./Home/taskRows";
 import { formatTimestamp } from "../utils/date";
-import type { TaskItem, TaskRecord } from "../types";
+import type { SyncStatus, TaskItem, TaskRecord } from "../types";
 
 const statusTabs = [
   { key: 0, label: "等待", count: "wait" },
@@ -79,10 +81,18 @@ const fileTableWidths = {
 
 export const Realtime = memo(function Realtime({
   jobId,
+  syncStatus,
   onTaskEnded,
+  onOpenOverview,
+  onOpenHistory,
+  onSyncNow,
 }: {
   jobId: number;
+  syncStatus?: SyncStatus | null;
   onTaskEnded?: () => void;
+  onOpenOverview?: () => void;
+  onOpenHistory?: () => void;
+  onSyncNow?: () => void;
 }) {
   const {
     currentTask,
@@ -98,16 +108,21 @@ export const Realtime = memo(function Realtime({
   });
   const action = useAction();
   const hadTask = useRef(false);
+  const [batchFinished, setBatchFinished] = useState(false);
   useEffect(() => {
     if (currentTask) {
       hadTask.current = true;
+      setBatchFinished(false);
       return;
     }
     if (taskLoading || taskError || !hadTask.current) return;
     if (document.visibilityState === "hidden") return;
     hadTask.current = false;
+    setBatchFinished(true);
     onTaskEnded?.();
   }, [currentTask, taskLoading, taskError, onTaskEnded]);
+  const currentBw = (currentTask?.liveBwLimit || "").trim();
+  const currentBwInfo = useMemo(() => describeBwLimit(currentBw), [currentBw]);
   if (!currentTask) {
     if (taskError)
       return (
@@ -118,7 +133,44 @@ export const Realtime = memo(function Realtime({
         />
       );
     if (taskLoading) return <LoadingPanel />;
-    return <EmptyState />;
+    return (
+      <div className="realtime-idle-card" role="status">
+        <div className="realtime-idle-head">
+          <h3>
+            {batchFinished ? "本轮同步批次已完成" : "当前没有进行中的传输批次"}
+          </h3>
+          {syncStatus && <SyncStatusTag status={syncStatus} />}
+        </div>
+        <p className="muted">
+          {syncStatus?.state === "paused"
+            ? "持续同步当前已暂停，恢复同步后将自动检测变更并在此显示文件传输明细。"
+            : syncStatus?.state === "error" || syncStatus?.state === "needs_rebuild"
+              ? syncStatus.error || `当前状态：${syncStatusLabels[syncStatus.state]}`
+              : "持续同步正在后台监控本地与远端变更，检测到新变更触发同步后将自动显示逐文件进度。"}
+        </p>
+        <div className="realtime-idle-actions">
+          {onOpenOverview && (
+            <Button type="primary" theme="solid" onClick={onOpenOverview}>
+              返回总览
+            </Button>
+          )}
+          {onOpenHistory && (
+            <Button type="tertiary" theme="light" onClick={onOpenHistory}>
+              查看历史记录
+            </Button>
+          )}
+          {onSyncNow && (
+            <Button
+              type="tertiary"
+              icon={<IconRefresh aria-hidden="true" />}
+              onClick={onSyncNow}
+            >
+              立即同步
+            </Button>
+          )}
+        </div>
+      </div>
+    );
   }
   const task = currentTask;
   const activeTab = items.activeTab;
@@ -138,13 +190,25 @@ export const Realtime = memo(function Realtime({
     scanFinish: task.scanFinish,
   });
   const stop = () =>
-    confirmStopTask(() =>
-      action.run(async () => {
-        await api.taskAction(task.taskId, "stop");
-        window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
-        await refreshCurrentTask();
-      }),
-    );
+    confirmAction({
+      title: "中止本次同步批次？",
+      content:
+        "仅中止当前正在进行的传输批次，已完成的文件不会撤销；持续同步仍保持开启。",
+      okText: "中止本次",
+      okLabel: "中止本次同步",
+      onOk: () =>
+        action.run(async () => {
+          try {
+            await api.taskAction(task.taskId, "stop");
+            Toast.success("已提交中止本次同步");
+            window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
+            await refreshCurrentTask();
+          } catch (err) {
+            errorToast(err);
+            throw err;
+          }
+        }),
+    });
   const togglePause = () => {
     const resuming = Boolean(task.paused);
     void action.run(async () => {
@@ -162,30 +226,43 @@ export const Realtime = memo(function Realtime({
     void action.run(async () => {
       try {
         await api.taskAction(task.taskId, "bwlimit", undefined, { bwLimit: rate });
-        Toast.success(rate && rate !== "off" ? `实时限速已调整为 ${rate}` : "已解除实时限速");
+        Toast.success(
+          rate && rate !== "off"
+            ? `实时限速已调整为 ${formatBwRateHuman(rate)}`
+            : "已解除实时限速",
+        );
         await refreshCurrentTask();
       } catch (err) {
         errorToast(err);
       }
     });
-  const currentBw = (task.liveBwLimit || "").trim();
   const bwOptions = [
     { label: "不限速", value: "off" },
-    { label: "限速 5M/s", value: "5M" },
-    { label: "限速 10M/s", value: "10M" },
-    { label: "限速 20M/s", value: "20M" },
-    { label: "限速 50M/s", value: "50M" },
-    { label: "限速 100M/s", value: "100M" },
+    { label: "限速 5 MB/s", value: "5M" },
+    { label: "限速 10 MB/s", value: "10M" },
+    { label: "限速 20 MB/s", value: "20M" },
+    { label: "限速 50 MB/s", value: "50M" },
+    { label: "限速 100 MB/s", value: "100M" },
   ];
   const bwSelectValue =
     !currentBw || currentBw.toLowerCase() === "off"
       ? "off"
-      : bwOptions.some((o) => o.value === currentBw)
-        ? currentBw
-        : currentBw;
-  const effectiveBwOptions = bwOptions.some((o) => o.value === bwSelectValue)
-    ? bwOptions
-    : [{ label: `限速 ${bwSelectValue}`, value: bwSelectValue }, ...bwOptions];
+      : currentBw;
+  const hasCustomBwOption = !bwOptions.some((o) => o.value === bwSelectValue);
+  const effectiveBwOptions = hasCustomBwOption
+    ? [{ label: currentBwInfo.liveOptionLabel, value: bwSelectValue }, ...bwOptions]
+    : bwOptions;
+  const bwSelectControl = (
+    <Select
+      size="small"
+      aria-label="运行中动态限速"
+      className="execution-bw-select"
+      value={bwSelectValue}
+      optionList={effectiveBwOptions}
+      disabled={action.busy}
+      onChange={(v) => updateLiveBwLimit(String(v || "off"))}
+    />
+  );
   return (
     <div className="execution-view flex-column">
       <div className="execution-top">
@@ -207,15 +284,13 @@ export const Realtime = memo(function Realtime({
             )}
           </h2>
           <div className="execution-header-actions">
-            <Select
-              size="small"
-              aria-label="运行中动态限速"
-              className="execution-bw-select"
-              value={bwSelectValue}
-              optionList={effectiveBwOptions}
-              disabled={action.busy}
-              onChange={(v) => updateLiveBwLimit(String(v || "off"))}
-            />
+            {hasCustomBwOption ? (
+              <Tooltip content={currentBwInfo.tooltipSummary}>
+                <span>{bwSelectControl}</span>
+              </Tooltip>
+            ) : (
+              bwSelectControl
+            )}
             <Button
               type={task.paused ? "primary" : "tertiary"}
               theme={task.paused ? "solid" : "light"}
@@ -233,7 +308,7 @@ export const Realtime = memo(function Realtime({
               onClick={stop}
               disabled={action.busy}
             >
-              停止任务
+              中止本次同步
             </Button>
           </div>
         </div>

@@ -1625,8 +1625,8 @@ func SetTaskLiveBwLimit(ctx context.Context, taskID int64, rate string) error {
 	return task.SetLiveBwLimit(ctx, rate)
 }
 
-// ApplyGlobalDefaultBwLimitAsync propagates an updated global default bandwidth
-// limit to all currently running tasks that inherit the global default.
+// ApplyGlobalDefaultBwLimitAsync updates the process-wide global bandwidth cap
+// and immediately notifies all running tasks that inherit it.
 func ApplyGlobalDefaultBwLimitAsync(rate string) {
 	jobClientListMu.RLock()
 	tasks := make([]*JobTask, 0, len(jobClientList))
@@ -1639,10 +1639,8 @@ func ApplyGlobalDefaultBwLimitAsync(rate string) {
 		}
 	}
 	jobClientListMu.RUnlock()
-	if len(tasks) == 0 {
-		return
-	}
 	go func() {
+		_ = native.SetGlobalBwLimit(rate)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		for _, task := range tasks {
@@ -1669,6 +1667,10 @@ func RejectFullSyncTask(taskID int64) error {
 
 func GetPendingApproval(jobID int64) *FullSyncApproval {
 	return pendingDeleteApprovals.GetByJobID(jobID)
+}
+
+func GetPendingApprovalFiltered(jobID int64, offset, limit int, query, kind string) *FullSyncApproval {
+	return pendingDeleteApprovals.GetByJobIDFiltered(jobID, offset, limit, query, kind)
 }
 
 func ListPendingApprovals() []*FullSyncApproval {

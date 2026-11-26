@@ -694,7 +694,7 @@ func (c Config) DeleteFilesBatch(ctx context.Context, rootVirtual string, relPat
 			return nil, flushErr
 		}
 
-		cmd, cmdErr := s.Cmd(ctx, "delete", "--files-from-raw", listFile, "--no-traverse", "--", ep.Path)
+		cmd, cmdErr := s.Cmd(ctx, "delete", "--files-from-raw", listFile, "--no-traverse", "--checkers", "16", "--", ep.Path)
 		if cmdErr != nil {
 			s.Close()
 			return nil, cmdErr
@@ -710,12 +710,39 @@ func (c Config) DeleteFilesBatch(ctx context.Context, rootVirtual string, relPat
 		}
 	}
 
-	for _, rel := range individual {
+	if len(individual) == 1 {
 		if ctx.Err() != nil {
 			return errs, ctx.Err()
 		}
-		if delErr := c.DeletePath(ctx, rootTrim+"/"+rel, false, opts); delErr != nil {
-			errs[rel] = delErr
+		if delErr := c.DeletePath(ctx, rootTrim+"/"+individual[0], false, opts); delErr != nil {
+			errs[individual[0]] = delErr
+		}
+	} else if len(individual) > 1 {
+		var errMu sync.Mutex
+		sem := make(chan struct{}, min(4, len(individual)))
+		var wg sync.WaitGroup
+		for _, rel := range individual {
+			if ctx.Err() != nil {
+				break
+			}
+			sem <- struct{}{}
+			wg.Add(1)
+			go func(rel string) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				if ctx.Err() != nil {
+					return
+				}
+				if delErr := c.DeletePath(ctx, rootTrim+"/"+rel, false, opts); delErr != nil {
+					errMu.Lock()
+					errs[rel] = delErr
+					errMu.Unlock()
+				}
+			}(rel)
+		}
+		wg.Wait()
+		if ctx.Err() != nil {
+			return errs, ctx.Err()
 		}
 	}
 	return errs, nil
@@ -928,6 +955,218 @@ func (c Config) MovePath(ctx context.Context, srcVirtual, dstVirtual string, isD
 		return classifyRcloneError(dstEp.Backend, stderr)
 	}
 	return nil
+}
+
+// MoveFilesBatch moves multiple relative file paths from srcRootVirtual to
+// dstRootVirtual (preserving relative paths) using a single local os.Root
+// handle or a single `rclone move --files-from-raw` subprocess for remotes.
+// If the remote batch command reports an error, it falls back to bounded
+// concurrent individual moves so callers receive exact per-file errors.
+func (c Config) MoveFilesBatch(ctx context.Context, srcRootVirtual, dstRootVirtual string, relPaths []string, opts SessionOptions) (map[string]error, error) {
+	if len(relPaths) == 0 {
+		return nil, nil
+	}
+	srcEp, err := c.Resolve(srcRootVirtual)
+	if err != nil {
+		return nil, err
+	}
+	dstEp, err := c.Resolve(dstRootVirtual)
+	if err != nil {
+		return nil, err
+	}
+	if srcEp.ReadOnly || dstEp.ReadOnly {
+		return nil, errors.New("只读存储不支持移动操作")
+	}
+
+	seen := make(map[string]struct{}, len(relPaths))
+	cleanRels := make([]string, 0, len(relPaths))
+	for _, raw := range relPaths {
+		rel := strings.TrimPrefix(path.Clean("/"+strings.TrimSpace(raw)), "/")
+		if rel == "" || rel == "." || strings.HasPrefix(rel, "../") {
+			continue
+		}
+		if _, dup := seen[rel]; dup {
+			continue
+		}
+		seen[rel] = struct{}{}
+		cleanRels = append(cleanRels, rel)
+	}
+	if len(cleanRels) == 0 {
+		return nil, nil
+	}
+
+	errs := make(map[string]error)
+	// Fast path: local->local rename within the same authorized root.
+	if srcEp.IsLocal && dstEp.IsLocal {
+		_, srcSub := parts(srcRootVirtual)
+		_, dstSub := parts(dstRootVirtual)
+		srcID, srcBaseRel, _ := strings.Cut(srcSub, "/")
+		dstID, dstBaseRel, _ := strings.Cut(dstSub, "/")
+		if srcID != "" && srcID == dstID {
+			root, _, rootDev, hasRootDev, openErr := openDiskWithDev(srcID)
+			if openErr != nil {
+				return nil, openErr
+			}
+			defer root.Close()
+			madeDirs := make(map[string]struct{})
+			for _, rel := range cleanRels {
+				if ctx.Err() != nil {
+					return errs, ctx.Err()
+				}
+				srcTarget := rel
+				if srcBaseRel != "" && srcBaseRel != "." {
+					srcTarget = path.Join(srcBaseRel, rel)
+				}
+				dstTarget := rel
+				if dstBaseRel != "" && dstBaseRel != "." {
+					dstTarget = path.Join(dstBaseRel, rel)
+				}
+				if srcTarget == "" || srcTarget == "." || dstTarget == "" || dstTarget == "." {
+					errs[rel] = errors.New("拒绝移动本地授权根目录")
+					continue
+				}
+				st, statErr := root.Lstat(srcTarget)
+				if statErr != nil {
+					if errors.Is(statErr, os.ErrNotExist) {
+						continue
+					}
+					errs[rel] = statErr
+					continue
+				}
+				if st.Mode()&os.ModeSymlink != 0 || !sameDevice(st, rootDev, hasRootDev) {
+					errs[rel] = os.ErrPermission
+					continue
+				}
+				parentDir := path.Dir(dstTarget)
+				if _, ok := madeDirs[parentDir]; !ok {
+					if mkErr := mkdirAllPerm(root, parentDir, backupDirPerm); mkErr != nil {
+						errs[rel] = mkErr
+						continue
+					}
+					madeDirs[parentDir] = struct{}{}
+				}
+				if renErr := root.Rename(srcTarget, dstTarget); renErr != nil && !errors.Is(renErr, os.ErrNotExist) {
+					errs[rel] = renErr
+				}
+			}
+			return errs, nil
+		}
+	}
+
+	var batchSafe []string
+	var individual []string
+	for _, rel := range cleanRels {
+		if strings.ContainsAny(rel, "\r\n") {
+			individual = append(individual, rel)
+		} else {
+			batchSafe = append(batchSafe, rel)
+		}
+	}
+
+	srcRootTrim := strings.TrimRight(strings.TrimSpace(srcRootVirtual), "/")
+	dstRootTrim := strings.TrimRight(strings.TrimSpace(dstRootVirtual), "/")
+	if len(batchSafe) == 1 {
+		individual = append(individual, batchSafe[0])
+		batchSafe = nil
+	}
+	if len(batchSafe) > 1 {
+		srcName, srcSub := parts(srcRootVirtual)
+		dstName, dstSub := parts(dstRootVirtual)
+		var specs []SessionSpec
+		if !srcEp.IsLocal {
+			specs = append(specs, SessionSpec{Name: srcName, Mode: diskFullWrite})
+		}
+		if !dstEp.IsLocal && dstName != srcName {
+			specs = append(specs, SessionSpec{Name: dstName, Mode: diskFullWrite})
+		}
+		s, sessErr := c.SessionFor(specs, opts)
+		if sessErr != nil {
+			return nil, sessErr
+		}
+		srcArg := srcEp.Path
+		dstArg := dstEp.Path
+		var argErr error
+		if srcEp.IsLocal {
+			srcArg, argErr = s.diskWithMode(srcSub, diskFullWrite, false)
+		}
+		if argErr == nil && dstEp.IsLocal {
+			dstArg, argErr = s.diskWithMode(dstSub, diskFullWrite, false)
+		}
+		if argErr != nil {
+			s.Close()
+			return nil, argErr
+		}
+		listFile := filepath.Join(s.dir, "move-list")
+		f, createErr := os.OpenFile(listFile, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0600)
+		if createErr != nil {
+			s.Close()
+			return nil, createErr
+		}
+		bw := bufio.NewWriter(f)
+		for _, rel := range batchSafe {
+			if _, wErr := fmt.Fprintln(bw, rel); wErr != nil {
+				_ = f.Close()
+				s.Close()
+				return nil, wErr
+			}
+		}
+		if flushErr := errors.Join(bw.Flush(), f.Close()); flushErr != nil {
+			s.Close()
+			return nil, flushErr
+		}
+
+		cmd, cmdErr := s.Cmd(ctx, "move", "--files-from-raw", listFile, "--no-traverse", "--checkers", "16", "--transfers", "8", "--", srcArg, dstArg)
+		if cmdErr != nil {
+			s.Close()
+			return nil, cmdErr
+		}
+		_, stderr, runErr := limitedOutputWithStderr(cmd, 64<<10)
+		s.Close()
+		if runErr != nil && !isRcloneNotFound(stderr) {
+			if ctx.Err() != nil {
+				return errs, ctx.Err()
+			}
+			// Batch command failed; fall back to individual moves for exact per-file status.
+			individual = append(individual, batchSafe...)
+		}
+	}
+
+	if len(individual) == 1 {
+		if ctx.Err() != nil {
+			return errs, ctx.Err()
+		}
+		if mvErr := c.MovePath(ctx, srcRootTrim+"/"+individual[0], dstRootTrim+"/"+individual[0], false, opts); mvErr != nil {
+			errs[individual[0]] = mvErr
+		}
+	} else if len(individual) > 1 {
+		var errMu sync.Mutex
+		sem := make(chan struct{}, min(4, len(individual)))
+		var wg sync.WaitGroup
+		for _, rel := range individual {
+			if ctx.Err() != nil {
+				break
+			}
+			sem <- struct{}{}
+			wg.Add(1)
+			go func(rel string) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				if ctx.Err() != nil {
+					return
+				}
+				if mvErr := c.MovePath(ctx, srcRootTrim+"/"+rel, dstRootTrim+"/"+rel, false, opts); mvErr != nil {
+					errMu.Lock()
+					errs[rel] = mvErr
+					errMu.Unlock()
+				}
+			}(rel)
+		}
+		wg.Wait()
+		if ctx.Err() != nil {
+			return errs, ctx.Err()
+		}
+	}
+	return errs, nil
 }
 
 // About returns disk or remote storage space usage information.
@@ -1690,6 +1929,7 @@ func (c Config) Bisync(ctx context.Context, path1, path2 string, opt BisyncOptio
 		Inplace:              opt.Inplace,
 		CheckFirst:           opt.CheckFirst,
 		S3NoHead:             opt.S3NoHead,
+		Controller:           opt.Controller,
 	})
 	if err != nil {
 		return nil, err

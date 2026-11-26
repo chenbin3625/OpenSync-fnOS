@@ -23,6 +23,7 @@ import {
   estimateMbps,
   formatBwLimitSummary,
   formatBwRateHuman,
+  formatBwTimelineSegLabel,
   formatHHMM,
   formatNextChangeTime,
   getDayPreset,
@@ -373,7 +374,7 @@ function TimelinePreview({
                 >
                   {widthPct >= 14 && (
                     <span className="bw-timeline-seg-text">
-                      {seg.isUnlimited ? "不限" : seg.rate}
+                      {formatBwTimelineSegLabel(seg.rate)}
                     </span>
                   )}
                 </div>

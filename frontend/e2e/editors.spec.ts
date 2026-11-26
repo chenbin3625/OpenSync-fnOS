@@ -977,14 +977,8 @@ test("guides no-engine onboarding, detects cross-job conflicts, and deduplicates
       srcPath: '["/Photos"]',
       dstPath: '["/Backup"]',
       method: 0,
-      isCron: 1,
-      second: "0",
-      minute: "0",
-      hour: "2",
-      day: "*",
-      month: "*",
-      day_of_week: "*",
-      interval: 1440,
+      isCron: 3,
+      interval: 0,
       useCacheS: 0,
       useCacheT: 0,
       exclude: "",
@@ -1038,19 +1032,14 @@ test("guides no-engine onboarding, detects cross-job conflicts, and deduplicates
   await expect(preview.getByRole("alert")).toHaveCount(0);
 
   await dialog.getByRole("button", { name: "下一步", exact: true }).click();
-  await dialog.getByRole("combobox", { name: "调度方式", exact: true }).click();
-  await page.getByRole("option").filter({ hasText: "定时计划" }).click();
-  await expect(dialog.locator(".schedule-preview-card")).toContainText("预计接下来执行");
+  await expect(dialog.locator(".schedule-preview-card")).toContainText("远端每");
 
-  // 切换定时预设与固定间隔
-  await dialog.getByRole("button", { name: "每周", exact: true }).click();
-  await dialog.getByRole("button", { name: "周一", exact: true }).click();
-  await expect(dialog.locator(".schedule-preview-plan")).toContainText("每周");
+  // 切换远端轮询与完整核对快捷预设
+  await dialog.getByRole("button", { name: "5 分钟", exact: true }).click();
+  await expect(dialog.locator(".schedule-preview-plan")).toContainText("每 5 分钟");
 
-  await dialog.getByRole("combobox", { name: "调度方式", exact: true }).click();
-  await page.getByRole("option").filter({ hasText: "固定间隔" }).click();
   await dialog.getByRole("button", { name: "每 6 小时", exact: true }).click();
-  await expect(dialog.locator(".schedule-preview-plan")).toContainText("每 6 小时（360 分钟）");
+  await expect(dialog.locator(".schedule-preview-plan")).toContainText("每 6 小时完整核对");
 
   // 第 2 步直接可见「保存」与可选的「过滤规则」按钮，且窄屏下不裁切
   const footer = dialog.locator(".editor-actions");

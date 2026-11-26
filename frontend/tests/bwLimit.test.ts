@@ -2,10 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   createBwRateValue,
   createDefaultScheduleRule,
+  describeBwLimit,
   detectBwModelIssues,
   estimateMbps,
   formatBwLimitSummary,
+  formatBwRateCompact,
   formatBwRateHuman,
+  formatBwTimelineSegLabel,
   getDayTimelineSegments,
   hasDifferentWeekdays,
   parseBwLimit,
@@ -235,5 +238,68 @@ describe("bwLimit runtime resolution, timeline, and formatting", () => {
       "不限速（覆盖全局）",
     );
     expect(formatBwLimitSummary("", { allowInherit: true })).toBe("跟随全局设置");
+  });
+
+  it("formats compact rates, timeline segment labels, and rich display info", () => {
+    expect(formatBwRateCompact("off")).toBe("不限速");
+    expect(formatBwRateCompact("10M")).toBe("10 MB/s");
+    expect(formatBwRateCompact("5.5M:off")).toBe("上传 5.5 MB/s");
+    expect(formatBwRateCompact("off:20M")).toBe("下载 20 MB/s");
+    expect(formatBwRateCompact("5M:20M")).toBe("↑5 MB/s ↓20 MB/s");
+
+    expect(formatBwTimelineSegLabel("off")).toBe("不限");
+    expect(formatBwTimelineSegLabel("5.5M:off")).toBe("↑5.5M");
+    expect(formatBwTimelineSegLabel("off:20M")).toBe("↓20M");
+    expect(formatBwTimelineSegLabel("5M:20M")).toBe("↑5M/↓20M");
+    expect(formatBwTimelineSegLabel("10M")).toBe("10M");
+
+    const empty = describeBwLimit("");
+    expect(empty.configured).toBe(false);
+    expect(empty.chipLabel).toBe("全局不限速");
+    expect(empty.kpiLabel).toBe("");
+
+    const staticOff = describeBwLimit("off");
+    expect(staticOff.configured).toBe(false);
+    expect(staticOff.chipLabel).toBe("全局不限速");
+
+    const fixedUpload = describeBwLimit("5.5M:off");
+    expect(fixedUpload.configured).toBe(true);
+    expect(fixedUpload.hasSchedule).toBe(false);
+    expect(fixedUpload.isCurrentlyLimited).toBe(true);
+    expect(fixedUpload.chipLabel).toBe("全局限速 · 上传 5.5 MB/s");
+    expect(fixedUpload.kpiLabel).toBe("上传限速 5.5 MB/s");
+    expect(fixedUpload.liveOptionLabel).toBe("上传 5.5 MB/s");
+
+    const workdayExpr =
+      "Mon-10:00,5.5M:off Mon-20:00,off Tue-10:00,5.5M:off Tue-20:00,off Wed-10:00,5.5M:off Wed-20:00,off Thu-10:00,5.5M:off Thu-20:00,off Fri-10:00,5.5M:off Fri-20:00,off";
+    // Thursday 2026-11-26 14:30 -> inside limited window
+    const thuAfternoon = new Date(2026, 10, 26, 14, 30, 0);
+    const activeInfo = describeBwLimit(workdayExpr, { now: thuAfternoon });
+    expect(activeInfo.configured).toBe(true);
+    expect(activeInfo.hasSchedule).toBe(true);
+    expect(activeInfo.isCurrentlyLimited).toBe(true);
+    expect(activeInfo.chipLabel).toBe("定时限速 · 上传 5.5 MB/s");
+    expect(activeInfo.kpiLabel).toBe("定时 · 上传 5.5 MB/s");
+    expect(activeInfo.nextChangeLabel).toBe("今天 20:00 → 不限速");
+    expect(activeInfo.rules).toEqual([
+      {
+        daysLabel: "工作日",
+        timeRange: "10:00–20:00",
+        crossMidnight: false,
+        rateLabel: "上传 5.5 MB/s / 下载 不限",
+        rateCompact: "上传 5.5 MB/s",
+      },
+    ]);
+    expect(activeInfo.defaultRateHuman).toBe("不限速");
+
+    // Thursday 2026-11-26 08:45 -> before 10:00 window (currently unlimited)
+    const thuMorning = new Date(2026, 10, 26, 8, 45, 0);
+    const idleInfo = describeBwLimit(workdayExpr, { now: thuMorning });
+    expect(idleInfo.configured).toBe(true);
+    expect(idleInfo.hasSchedule).toBe(true);
+    expect(idleInfo.isCurrentlyLimited).toBe(false);
+    expect(idleInfo.chipLabel).toBe("定时限速 · 当前不限速");
+    expect(idleInfo.kpiLabel).toBe("定时 · 当前不限");
+    expect(idleInfo.nextChangeLabel).toBe("今天 10:00 → 上传 5.5 MB/s");
   });
 });

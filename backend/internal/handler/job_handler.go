@@ -8,6 +8,7 @@ import (
 	"opensync/internal/msg"
 	"opensync/internal/service"
 	"opensync/pkg/util"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -690,13 +691,26 @@ func TestJobFilter(c *gin.Context) {
 
 // GetPendingApproval handles GET /svr/job/approval.
 // With jobId it returns that job's pending deletion approval (or null);
-// without jobId it returns all pending deletion approvals.
+// optional query params offset, limit, q, type filter and paginate the target paths.
+// Without jobId it returns all pending deletion approvals.
 func GetPendingApproval(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
 	if rawJobID := c.Query("jobId"); rawJobID != "" {
 		jobID, err := parseRequiredID(rawJobID)
 		if err != nil {
 			respondError(c, err.Error())
+			return
+		}
+		rawOffset := strings.TrimSpace(c.Query("offset"))
+		rawLimit := strings.TrimSpace(c.Query("limit"))
+		query := strings.TrimSpace(c.Query("q"))
+		kind := strings.TrimSpace(c.Query("type"))
+		if rawOffset != "" || rawLimit != "" || query != "" || kind != "" {
+			offset, _ := strconv.Atoi(rawOffset)
+			limit, _ := strconv.Atoi(rawLimit)
+			handleService(c, func() (interface{}, error) {
+				return service.GetPendingApprovalFiltered(jobID, offset, limit, query, kind), nil
+			})
 			return
 		}
 		handleService(c, func() (interface{}, error) {

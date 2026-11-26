@@ -83,11 +83,21 @@ type JobTask struct {
 func newJobTask(taskID int64, jc *JobClient) (*JobTask, error) {
 	job := jc.jobSnapshot()
 	limits := taskRuntimeLimitsForJob(job)
+	var rcCtrl *native.RCController
+	if jobBw := strings.TrimSpace(util.StringValue(job["bwLimit"])); jobBw != "" {
+		rcCtrl = native.NewRCController(jobBw)
+	} else {
+		globalBw := globalDefaultBwLimit()
+		if native.GetGlobalBwLimit() != globalBw {
+			_ = native.SetGlobalBwLimit(globalBw)
+		}
+		rcCtrl = native.NewGlobalRCController()
+	}
 	jt := &JobTask{
 		TaskID:         taskID,
 		JobClient:      jc,
 		Job:            job,
-		rcController:   native.NewRCController(effectiveJobBwLimit(job)),
+		rcController:   rcCtrl,
 		CreateTime:     float64(time.Now().Unix()),
 		FinishedCounts: make(map[taskStatus]int),
 		FinishedSizes:  make(map[taskStatus]int64),
@@ -280,14 +290,21 @@ func (jt *JobTask) SetLiveBwLimit(ctx context.Context, rate string) error {
 	return nil
 }
 
-// ApplyGlobalBwLimit propagates an updated global default bandwidth limit to a
-// running task when the task inherits the global default and has not been
+// ApplyGlobalBwLimit propagates an updated global bandwidth limit to a
+// running task when the task inherits the global cap and has not been
 // manually overridden during this run.
 func (jt *JobTask) ApplyGlobalBwLimit(ctx context.Context, rate string) error {
 	if jt == nil || jt.rcController == nil || jt.bwLimitUserOverridden.Load() {
 		return nil
 	}
 	if jt.Job != nil && strings.TrimSpace(util.StringValue(jt.Job["bwLimit"])) != "" {
+		return nil
+	}
+	if jt.rcController.InheritsGlobal() {
+		if err := native.SetGlobalBwLimit(rate); err != nil {
+			return err
+		}
+		jt.notifyProgressNow()
 		return nil
 	}
 	if err := jt.rcController.SetBwLimit(ctx, rate); err != nil {

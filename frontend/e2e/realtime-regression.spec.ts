@@ -78,7 +78,7 @@ test("realtime view loads the initial active task snapshot", async ({ page }) =>
 
   await page.goto("/app/opensync/tasks?jobId=1&tab=realtime");
   await expect(page.getByRole("heading", { name: "正在同步" })).toBeVisible();
-  const stopButton = page.getByRole("button", { name: "停止任务", exact: true });
+  const stopButton = page.getByRole("button", { name: "中止本次同步", exact: true });
   await expect(stopButton).toHaveCSS("height", "28px");
   await stopButton.click();
   const dialog = page.getByRole("dialog");

@@ -279,14 +279,15 @@ const describeCronPlan = (values?: ScheduleValues | null) => {
 };
 
 export const formatSchedulePlan = (values?: ScheduleValues | null) => {
-  if (!values) return "不自动执行，只能手动触发";
-  if (values.isCron === 3) return "持续监控本地变化、定期检测远端，并自动补齐未完成变更";
+  if (!values || values.isCron === 3) {
+    return "持续监控本地变化、定期检测远端，并自动补齐未完成变更";
+  }
   if (values.isCron === 0) {
     const mins = Number(values.interval);
     return `每 ${Number.isFinite(mins) && mins >= 0 ? mins : 0} 分钟执行一次`;
   }
   if (values.isCron === 1) return describeCronPlan(values);
-  return "不自动执行，只能手动触发";
+  return "持续监控本地变化、定期检测远端，并自动补齐未完成变更";
 };
 
 export const parseJobPathList = (value: unknown): string[] => {
@@ -362,26 +363,12 @@ export const getJobName = (job: JobItem) => job.remark || `同步任务 #${job.i
 
 export const formatNextRun = (job?: JobItem | null) => {
   if (!job) return "—";
-  if (job.isCron === 3) return job.enable === 1 ? "持续同步中" : "持续同步已暂停";
-  if (job.isCron === 2) return "仅手动触发";
-  const nextRun = Number(job.nextRunTime);
-  if (!Number.isFinite(nextRun) || nextRun <= 0) return formatSchedule(job);
-  const date = new Date(nextRun * 1000);
-  if (!Number.isFinite(date.getTime())) return formatSchedule(job);
-  return date.toLocaleString("zh-CN", { hour12: false });
+  return job.enable === 1 ? "持续同步中" : "持续同步已暂停";
 };
 
 export const formatSchedule = (job?: JobItem | null) => {
   if (!job) return "—";
-  if (job.isCron === 3) return "持续同步";
-  if (job.isCron === 0) {
-    const mins = Number(job.interval);
-    return `每 ${Number.isFinite(mins) && mins >= 0 ? mins : 0} 分钟`;
-  }
-  if (job.isCron === 1) {
-    return describeCronPlan(job);
-  }
-  return "仅手动触发";
+  return "持续同步";
 };
 
 export function formatDuration(seconds: number): string {

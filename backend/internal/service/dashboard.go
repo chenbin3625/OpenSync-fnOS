@@ -354,17 +354,23 @@ func GetDashboardOverview() (map[string]interface{}, error) {
 				jobName = fmt.Sprintf("任务 #%d", jobID)
 			}
 			pendingApprovals = append(pendingApprovals, map[string]interface{}{
-				"jobId":       jobID,
-				"jobName":     jobName,
-				"taskId":      approval.TaskID,
-				"deleteCount": approval.DeleteCount,
-				"deleteSize":  approval.DeleteSize,
-				"pathCount":   approval.PathCount,
-				"status":      approval.Status,
-				"createdAt":   approval.CreatedAt,
-				"expiresAt":   approval.ExpiresAt,
-				"planChanged": approval.PlanChanged,
-				"lastError":   approval.LastError,
+				"jobId":         jobID,
+				"jobName":       jobName,
+				"taskId":        approval.TaskID,
+				"deleteCount":   approval.DeleteCount,
+				"deleteSize":    approval.DeleteSize,
+				"pathCount":     approval.PathCount,
+				"status":        approval.Status,
+				"createdAt":     approval.CreatedAt,
+				"expiresAt":     approval.ExpiresAt,
+				"planChanged":   approval.PlanChanged,
+				"lastError":     approval.LastError,
+				"execPhase":     approval.ExecPhase,
+				"execDone":      approval.ExecDone,
+				"execTotal":     approval.ExecTotal,
+				"execFailed":    approval.ExecFailed,
+				"execCurrent":   approval.ExecCurrent,
+				"execStartedAt": approval.ExecStartedAt,
 			})
 		}
 
@@ -409,6 +415,7 @@ func GetDashboardOverview() (map[string]interface{}, error) {
 			"windowEnable":    util.ToInt(job["windowEnable"]),
 			"windowStart":     job["windowStart"],
 			"windowEnd":       job["windowEnd"],
+			"extraFlags":      job["extraFlags"],
 			"nextRunTime":     nextRunTime,
 			"running":         running,
 			"paused":          running && paused,

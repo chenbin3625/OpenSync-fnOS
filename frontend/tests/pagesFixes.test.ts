@@ -270,10 +270,12 @@ describe("TaskEditor draft & interval validation", () => {
 
     const form = {
       ...defaultJobForm(1),
-      isCron: 0,
-      interval: parseIntervalInput("1.5"),
+      extraFlags: {
+        ...defaultJobForm(1).extraFlags,
+        syncPollIntervalSec: 5,
+      },
     };
-    expect(validateJobFormStep(form, 1)).toBe("执行间隔必须是大于 0 的整数");
+    expect(validateJobFormStep(form, 1)).toContain("10–86400");
   });
 
   it("tracks dirty state and validates unblurred file size drafts", () => {
@@ -402,8 +404,8 @@ describe("homeUtils guards", () => {
 
     expect(formatNextRun(null)).toBe("—");
     expect(formatSchedule(undefined)).toBe("—");
-    expect(formatNextRun({ ...baseJob, nextRunTime: Number.NaN })).toBe("每 15 分钟");
-    expect(formatNextRun({ ...baseJob, nextRunTime: 1e20 })).toBe("每 15 分钟");
-    expect(formatNextRun({ ...baseJob, nextRunTime: 0 })).toBe("每 15 分钟");
+    expect(formatNextRun({ ...baseJob, nextRunTime: Number.NaN })).toBe("持续同步中");
+    expect(formatNextRun({ ...baseJob, enable: 0 })).toBe("持续同步已暂停");
+    expect(formatSchedule(baseJob)).toBe("持续同步");
   });
 });

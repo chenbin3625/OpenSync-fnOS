@@ -542,11 +542,8 @@ test("task cards follow the reference card style and fill the detail pane", asyn
         srcPath: JSON.stringify(["/docker"]),
         dstPath: JSON.stringify(["/dav/nas/docker"]),
         method: 0,
-        isCron: 1,
+        isCron: 3,
         enable: 1,
-        hour: "2",
-        minute: "0",
-        second: "0",
         useCacheS: false,
         useCacheT: false,
         remark: name,
@@ -572,11 +569,9 @@ test("task cards follow the reference card style and fill the detail pane", asyn
     exact: true,
   });
   await expect(menu).toBeVisible();
-  // 源 → 目标 流向，以及「下次执行」
-  await expect(summary.locator(".flow-arrow")).toBeVisible();
-  await expect(
-    summary.locator(".flow-next").getByText("下次执行", { exact: true }),
-  ).toBeVisible();
+  // 源 → 目标 路由卡片，以及持续同步状态面板
+  await expect(summary.locator(".sync-route-arrow")).toBeVisible();
+  await expect(summary.locator(".continuous-status-card")).toBeVisible();
   await expect(
     summary.getByText("/docker", { exact: true }),
   ).toBeVisible();

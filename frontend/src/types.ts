@@ -228,6 +228,10 @@ export interface SyncStatus {
   nextPoll: number;
   error: string;
   failures: number;
+  direction?: string;
+  pollIntervalSec?: number;
+  auditIntervalMin?: number;
+  debounceSec?: number;
 }
 
 export interface JobCheckResult {
@@ -483,12 +487,20 @@ export interface FullSyncApproval {
   deleteCount: number;
   deleteSize: number;
   pathCount: number;
+  filteredCount?: number;
+  hasMore?: boolean;
   paths: FullSyncApprovalPath[];
   status?: "pending" | "executing" | string;
   createdAt?: number;
   expiresAt?: number;
   planChanged?: boolean;
   lastError?: string;
+  execPhase?: "verifying" | "deleting" | string;
+  execDone?: number;
+  execTotal?: number;
+  execFailed?: number;
+  execCurrent?: string;
+  execStartedAt?: number;
 }
 
 export interface CurrentTaskData {
@@ -565,6 +577,12 @@ export interface DashboardPendingApproval {
   expiresAt?: number;
   planChanged?: boolean;
   lastError?: string;
+  execPhase?: "verifying" | "deleting" | string;
+  execDone?: number;
+  execTotal?: number;
+  execFailed?: number;
+  execCurrent?: string;
+  execStartedAt?: number;
 }
 
 export interface DashboardJobItem {
@@ -601,6 +619,7 @@ export interface DashboardJobItem {
   windowEnable?: number;
   windowStart?: string | null;
   windowEnd?: string | null;
+  extraFlags?: string | NativeExtraFlags | null;
   lastTask?: {
     id: number;
     status: number;

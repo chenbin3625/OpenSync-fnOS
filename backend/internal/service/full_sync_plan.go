@@ -76,19 +76,27 @@ type fullSyncRelocation struct {
 // is a bounded preview so a large mirror does not put an unbounded payload in
 // API responses.
 type FullSyncApproval struct {
-	JobID       int64                  `json:"jobId,omitempty"`
-	JobName     string                 `json:"jobName,omitempty"`
-	TaskID      int64                  `json:"taskId,omitempty"`
-	DeleteCount int                    `json:"deleteCount"`
-	DeleteSize  int64                  `json:"deleteSize"`
-	PathCount   int                    `json:"pathCount"`
-	Paths       []FullSyncApprovalPath `json:"paths"`
-	Status      string                 `json:"status,omitempty"`
-	CreatedAt   int64                  `json:"createdAt,omitempty"`
-	ExpiresAt   int64                  `json:"expiresAt,omitempty"`
-	PlanChanged bool                   `json:"planChanged,omitempty"`
-	LastError   string                 `json:"lastError,omitempty"`
-	signature   string
+	JobID         int64                  `json:"jobId,omitempty"`
+	JobName       string                 `json:"jobName,omitempty"`
+	TaskID        int64                  `json:"taskId,omitempty"`
+	DeleteCount   int                    `json:"deleteCount"`
+	DeleteSize    int64                  `json:"deleteSize"`
+	PathCount     int                    `json:"pathCount"`
+	FilteredCount int                    `json:"filteredCount,omitempty"`
+	HasMore       bool                   `json:"hasMore,omitempty"`
+	Paths         []FullSyncApprovalPath `json:"paths"`
+	Status        string                 `json:"status,omitempty"`
+	CreatedAt     int64                  `json:"createdAt,omitempty"`
+	ExpiresAt     int64                  `json:"expiresAt,omitempty"`
+	PlanChanged   bool                   `json:"planChanged,omitempty"`
+	LastError     string                 `json:"lastError,omitempty"`
+	ExecPhase     string                 `json:"execPhase,omitempty"`
+	ExecDone      int                    `json:"execDone,omitempty"`
+	ExecTotal     int                    `json:"execTotal,omitempty"`
+	ExecFailed    int                    `json:"execFailed,omitempty"`
+	ExecCurrent   string                 `json:"execCurrent,omitempty"`
+	ExecStartedAt int64                  `json:"execStartedAt,omitempty"`
+	signature     string
 }
 
 type FullSyncApprovalPath struct {

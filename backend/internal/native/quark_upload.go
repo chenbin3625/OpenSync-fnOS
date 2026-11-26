@@ -49,6 +49,10 @@ func directUploadFilesToQuark(
 	if len(files) == 0 {
 		return nil
 	}
+	if opt.Controller != nil {
+		leaveGo := opt.Controller.EnterGoTransfer()
+		defer leaveGo()
+	}
 
 	orig := maps.Clone(remoteParams)
 	sessOpts := SessionOptions{ProxyURL: opt.ProxyURL}
@@ -334,7 +338,7 @@ func uploadOneFileToQuark(
 	var throttleFn func(context.Context, int) error
 	if opt.Controller != nil {
 		waitFn = opt.Controller.WaitIfPaused
-		throttleFn = opt.Controller.ThrottleBytes
+		throttleFn = opt.Controller.ThrottleUploadBytes
 	}
 
 	res, err := client.UploadFile(ctx, dstRel, quark.UploadFileOptions{

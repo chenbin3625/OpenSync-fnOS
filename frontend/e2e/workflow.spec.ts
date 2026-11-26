@@ -196,12 +196,8 @@ test("creates an engine and manual job, then edits without changing sync mode", 
       .getByRole("textbox", { name: "任务名称", exact: true })
       .fill(name);
     await page.getByRole("button", { name: "下一步", exact: true }).click();
-    await page.getByRole("combobox", { name: "调度方式", exact: true }).click();
-    await page.getByRole("option").filter({ hasText: "仅手动" }).click();
-    await expect(
-      page.getByRole("combobox", { name: "调度方式", exact: true }),
-    ).toHaveText("仅手动");
-    // 高级选项（目录缓存）折叠收纳在「执行计划」步内
+    await expect(dialog.locator(".schedule-preview-card")).toBeVisible();
+    // 高级选项（目录缓存）折叠收纳在「同步设置」步内
     await dialog
       .getByRole("button", { name: /高级选项（目录缓存）/ })
       .click();
@@ -219,7 +215,7 @@ test("creates an engine and manual job, then edits without changing sync mode", 
       .getByRole("button", { name: "保存", exact: true })
       .click();
     expect((await posted).postDataJSON()).toMatchObject({
-      isCron: 2,
+      isCron: 3,
       method: 0,
     });
     await expect(page.getByRole("dialog")).not.toBeVisible();
@@ -231,7 +227,7 @@ test("creates an engine and manual job, then edits without changing sync mode", 
     );
     jobId = job.id;
     expect(job.method).toBe(0);
-    expect(job.isCron).toBe(2);
+    expect(job.isCron).toBe(3);
     expect(job.enable).toBe(1);
     expect(job.srcPath).toContain("/Photos");
     expect(job.dstPath).toContain("/Backup");
@@ -279,7 +275,7 @@ test("creates an engine and manual job, then edits without changing sync mode", 
     ).json();
     expect(
       updated.data.dataList.find((j: { id: number }) => j.id === jobId),
-    ).toMatchObject({ method: 0, isCron: 2, remark: name + "-修改" });
+    ).toMatchObject({ method: 0, isCron: 3, remark: name + "-修改" });
   } finally {
     if (!engineId) {
       const es = await (await request.get("/app/opensync/svr/alist")).json();

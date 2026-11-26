@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { buildJobPayload, defaultJobForm, jobToForm, validateJobForm } from "../src/lib/taskForm";
 import { formatNextRun, formatSchedule, formatSchedulePlan } from "../src/pages/Home/homeUtils";
+import {
+  formatContinuousSyncPlan,
+  formatRelativeSyncTime,
+  getContinuousSyncMeta,
+  isSyncStatusError,
+  resolveEffectiveSyncStatus,
+} from "../src/lib/continuousSync";
 import type { JobForm } from "../src/lib/taskForm";
 import type { JobItem } from "../src/types";
 
@@ -40,22 +47,59 @@ describe("continuous synchronization", () => {
     expect(buildJobPayload(form)).not.toHaveProperty("syncStatus");
   });
 
-  it("validates polling limits, direction and move compatibility", () => {
+  it("validates polling limits, debounce limits, direction and rejects move mode", () => {
     expect(validateJobForm(draft())).toBe("");
     expect(validateJobForm({ ...draft(), extraFlags: { ...draft().extraFlags, syncPollIntervalSec: 9 } })).toContain("10–86400");
     expect(validateJobForm({ ...draft(), extraFlags: { ...draft().extraFlags, syncAuditIntervalMin: 10081 } })).toContain("10080");
+    expect(validateJobForm({ ...draft(), extraFlags: { ...draft().extraFlags, watchDebounceSec: 1 } })).toContain("2–3600");
     expect(validateJobForm({ ...draft(), extraFlags: { ...draft().extraFlags, syncDirection: "download" } })).toContain("下载");
-    expect(validateJobForm({ ...draft(), method: 2 })).toContain("移动任务");
+    expect(validateJobForm({ ...draft(), method: 2 })).toContain("持续同步");
   });
 
-  it("shows a continuous schedule while leaving existing schedules unchanged", () => {
+  it("normalizes all tasks to continuous sync schedule", () => {
     const job = stored(draft());
     expect(formatSchedulePlan(job)).toContain("持续");
     expect(formatSchedule(job)).toBe("持续同步");
     expect(formatNextRun(job)).toBe("持续同步中");
     expect(formatNextRun({ ...job, enable: 0 })).toBe("持续同步已暂停");
-    const legacy = jobToForm({ ...job, isCron: 1, extraFlags: "" });
-    expect(buildJobPayload(legacy).isCron).toBe(1);
-    expect(legacy.extraFlags?.syncDirection).toBe("");
+    const migrated = jobToForm({ ...job, isCron: 1, extraFlags: "" });
+    expect(buildJobPayload(migrated).isCron).toBe(3);
+    expect(migrated.extraFlags?.syncDirection).toBe("");
+  });
+
+  it("derives Cloud Sync metadata, readable cadence plan, relative sync time and error status", () => {
+    const uploadMeta = getContinuousSyncMeta({
+      method: 1,
+      extraFlags: JSON.stringify({ syncDirection: "upload", syncPollIntervalSec: 300, syncAuditIntervalMin: 360, watchDebounceSec: 15 }),
+    });
+    expect(uploadMeta).toMatchObject({
+      directionKey: "upload",
+      shortLabel: "单向上传",
+      arrow: "→",
+      syncDelete: true,
+      pollIntervalSec: 300,
+      auditIntervalMin: 360,
+      debounceSec: 15,
+    });
+    expect(formatContinuousSyncPlan(uploadMeta)).toBe(
+      "本地实时监听 · 远端每 5 分钟 检测 · 静默 15 秒 触发 · 每 6 小时完整核对",
+    );
+
+    const biMeta = getContinuousSyncMeta({ method: 3, extraFlags: "" });
+    expect(biMeta.directionKey).toBe("bidirectional");
+    expect(biMeta.arrow).toBe("⇄");
+
+    const nowMs = 1_700_000_000_000;
+    expect(formatRelativeSyncTime(1_700_000_000 - 5, nowMs)).toBe("刚刚");
+    expect(formatRelativeSyncTime(1_700_000_000 - 180, nowMs)).toBe("3 分钟前");
+    expect(formatRelativeSyncTime(1_700_000_000 - 7200, nowMs)).toBe("2 小时前");
+
+    expect(isSyncStatusError({ state: "error", pendingChanges: 0, lastSuccess: 0, lastPoll: 0, nextPoll: 0, error: "boom", failures: 2 })).toBe(true);
+    expect(isSyncStatusError({ state: "needs_rebuild", pendingChanges: 0, lastSuccess: 0, lastPoll: 0, nextPoll: 0, error: "", failures: 0 })).toBe(true);
+    expect(isSyncStatusError({ state: "synced", pendingChanges: 0, lastSuccess: 100, lastPoll: 100, nextPoll: 160, error: "", failures: 0 })).toBe(false);
+
+    expect(resolveEffectiveSyncStatus({ enable: 0 }).state).toBe("paused");
+    expect(resolveEffectiveSyncStatus({ enable: 1, running: true }).state).toBe("syncing");
+    expect(resolveEffectiveSyncStatus({ enable: 1 }).state).toBe("monitoring");
   });
 });

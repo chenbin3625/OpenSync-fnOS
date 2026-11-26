@@ -19,6 +19,7 @@ import (
 	"opensync/internal/mapper"
 	"opensync/internal/model"
 	"opensync/internal/msg"
+	"opensync/internal/native"
 	"opensync/internal/platform"
 	"opensync/internal/service"
 	"os"
@@ -295,6 +296,9 @@ func main() {
 		log.Fatal(err)
 	}
 	config.GetConfig()
+	if err := native.SetGlobalBwLimit(config.GetSystemSettings().DefaultBwLimit); err != nil {
+		log.Printf("Warning: failed to initialize global bandwidth limit: %v", err)
+	}
 	platform.LogOriginPolicy(config.GetConfig().Server.AllowedOrigins)
 	// Bind before touching the database. The "already running" probe used to
 	// come after InitSQL/InitJobs, so a second instance first rewrote the

@@ -317,7 +317,7 @@ test("dashboard renders KPI cards, padded section header, status filters and zer
   }
 
   // Interactive status pill filtering + reset
-  await page.getByRole("button", { name: /最近失败/ }).click();
+  await page.getByRole("button", { name: /同步异常/ }).click();
   await expect(page.locator(".dashboard-job-row")).toHaveCount(1);
   await expect(page.locator(".dashboard-job-row")).toContainText("工作文档异地容灾");
   await page.getByRole("button", { name: "重置筛选" }).click();

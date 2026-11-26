@@ -42,7 +42,7 @@ test("opens task editor with step navigation", async ({ page }) => {
   const dialog = page.getByRole("dialog");
   await expect(dialog).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "新建任务", exact: true }),
+    page.getByRole("heading", { name: "新建持续同步任务", exact: true }),
   ).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "基础与路径", exact: true }),
@@ -55,10 +55,13 @@ test("opens task editor with step navigation", async ({ page }) => {
     expect(dialogBox?.width).toBeLessThanOrEqual(620);
   }
   await expect(
-    dialog.getByRole("combobox", { name: "同步方式", exact: true }),
+    dialog.getByRole("radiogroup", { name: "同步方向", exact: true }),
+  ).toBeVisible();
+  await expect(
+    dialog.getByRole("radio", { name: /仅上传本地更改/ }),
   ).toBeVisible();
   await expect(dialog.locator(".sync-method-banner")).toContainText(
-    "不会删除目标端多余文件",
+    "不会删除目标端已有文件",
   );
   await expect(
     page.getByRole("button", { name: "下一步", exact: true }),
