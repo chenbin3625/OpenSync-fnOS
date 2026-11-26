@@ -166,9 +166,9 @@ test("320px task controls and realtime status tabs stay on one row", async ({
   const toolbar = page.locator(".page-toolbar");
   const toolbarBox = await toolbar.boundingBox();
   const actionBox = await toolbar
-    .getByRole("button", { name: "新建任务" })
+    .getByRole("button", { name: "返回任务列表" })
     .boundingBox();
-  const topTabBox = await toolbar.getByRole("tab", { name: "总览" }).boundingBox();
+  const topTabBox = await toolbar.getByRole("tab", { name: "任务详情" }).boundingBox();
   expect(toolbarBox!.height).toBeLessThanOrEqual(54);
   expect(
     Math.abs(

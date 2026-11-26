@@ -1,51 +1,31 @@
 import {
-  lazy,
-  Suspense,
-  useCallback,
   useEffect,
   useId,
   useMemo,
   useState,
 } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import Button from "@douyinfe/semi-ui/lib/es/button";
-import Checkbox from "@douyinfe/semi-ui/lib/es/checkbox";
 import Progress from "@douyinfe/semi-ui/lib/es/progress";
-import Select from "@douyinfe/semi-ui/lib/es/select";
 import Tag from "@douyinfe/semi-ui/lib/es/tag";
-import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
 import {
   IconActivity,
   IconAlertTriangle,
-  IconArrowRight,
   IconBarChartVStroked,
   IconChevronRight,
-  IconClockStroked,
   IconCloudStroked,
-  IconDeleteStroked,
-  IconPause,
-  IconPlay,
-  IconPlusStroked,
   IconRefresh,
   IconServerStroked,
-  IconStop,
   IconTickCircle,
 } from "@douyinfe/semi-icons";
 import dayjs from "dayjs";
 import { api } from "../api/client";
 import {
-  EmptyState,
   Header,
-  IconButton,
   InlineNotice,
   LoadState,
-  LoadingPanel,
-  SearchFilterInput,
   SectionCard,
-  confirmAction,
-  confirmDelete,
-  errorToast,
 } from "../components/common";
 import { BwLimitChip } from "../components/BwLimitChip";
 import { describeBwLimit } from "../lib/bwLimit";
@@ -60,44 +40,22 @@ import {
   sortStorageQuotas,
   splitSpeedParts,
 } from "../lib/dashboardMetrics";
-import { isDeepEqual, useAction, useResource } from "../lib/hooks";
-import { formatDisplayPathList } from "../lib/syncPathPreview";
-import {
-  isLegacyOpenListJob,
-  requiresFirstMirrorPreview,
-} from "../lib/taskForm";
+import { isDeepEqual, useResource } from "../lib/hooks";
+import { isLegacyOpenListJob } from "../lib/taskForm";
 import {
   formatDuration,
   formatSize,
-  parseJobPathList,
 } from "./Home/homeUtils";
 import { calcTaskDisplayPercent } from "./Home/taskRows";
-import { formatTimestamp } from "../utils/date";
 import type {
   DashboardJobItem,
   DashboardSpeedSample,
-  JobItem,
 } from "../types";
 import {
-  SyncStatusTag,
-  formatRelativeSyncTime,
-  formatSecondsShort,
-  getContinuousSyncMeta,
   isSyncStatusError,
   resolveEffectiveSyncStatus,
   syncStatusTone,
 } from "../components/SyncStatus";
-import type { TaskEditorSavedResult } from "./TaskEditor";
-
-const JobEditor = lazy(() => import("./TaskEditor"));
-
-type StatusFilter =
-  | "all"
-  | "running"
-  | "synced"
-  | "queued"
-  | "failed"
-  | "disabled";
 
 type InsightTab = "trend" | "quota";
 
@@ -112,15 +70,7 @@ function isJobFailed(job: DashboardJobItem): boolean {
   );
 }
 
-function directionTagColor(directionKey: string): "blue" | "violet" | "cyan" | "grey" {
-  if (directionKey === "bidirectional") return "violet";
-  if (directionKey === "download") return "cyan";
-  if (directionKey === "upload") return "blue";
-  return "grey";
-}
-
-function jobDotTone(job: DashboardJobItem, legacy = false): string {
-  if (legacy) return "kpi-dot kpi-dot--danger";
+function jobDotTone(job: DashboardJobItem): string {
   if (job.running && job.paused) return "kpi-dot kpi-dot--warning";
   if (job.running) return "kpi-dot kpi-dot--primary kpi-dot--pulse";
   if (job.queued) return "kpi-dot kpi-dot--primary";
@@ -135,14 +85,6 @@ function jobDotTone(job: DashboardJobItem, legacy = false): string {
   }
   if (tone === "success") return "kpi-dot kpi-dot--success";
   return "kpi-dot";
-}
-
-function formatShortTime(seconds?: number | null): string {
-  const ts = Number(seconds || 0);
-  if (ts <= 0) return "—";
-  const d = dayjs.unix(ts);
-  const sameYear = d.year() === dayjs().year();
-  return d.format(sameYear ? "MM-DD HH:mm" : "YYYY-MM-DD HH:mm");
 }
 
 function formatSampleClock(seconds?: number | null): string {
@@ -209,18 +151,10 @@ function computeJobLiveMetrics(job: DashboardJobItem) {
 
 export default function Dashboard() {
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
   const chartGradientId = useId();
   const dashboard = useResource((signal) => api.dashboard(signal));
-  const jobsList = useResource((signal) => api.jobMenu(signal));
   const engines = useResource((signal) => api.engines(signal));
-  const action = useAction();
 
-  const [searchInput, setSearchInput] = useState("");
-  const [keyword, setKeyword] = useState("");
-  const [storageFilter, setStorageFilter] = useState<string>(
-    () => searchParams.get("storage") || "all",
-  );
   const [trendRange, setTrendRange] = useState<7 | 30>(7);
   const [insightTab, setInsightTab] = useState<InsightTab>("trend");
   const [hoveredSampleIndex, setHoveredSampleIndex] = useState<number | null>(
@@ -231,27 +165,9 @@ export default function Dashboard() {
   >([]);
   const [bwNowTick, setBwNowTick] = useState<Date>(() => new Date());
 
-  useEffect(() => {
-    const sp = searchParams.get("storage");
-    setStorageFilter(sp || "all");
-  }, [searchParams]);
-
-  const [methodFilter, setMethodFilter] = useState<string>("all");
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
-  const [selectedIds, setSelectedIds] = useState<number[]>([]);
-  const [editorOpen, setEditorOpen] = useState(false);
-
-  const refreshAll = useCallback(
-    async (silent = true) => {
-      await Promise.all([
-        dashboard.refresh(silent),
-        jobsList.refresh(silent),
-        engines.refresh(silent),
-      ]);
-      window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
-    },
-    [dashboard.refresh, jobsList.refresh, engines.refresh],
-  );
+  const refreshAll = async () => {
+    await Promise.all([dashboard.refresh(), engines.refresh()]);
+  };
 
   const data = dashboard.data;
   const allJobs = data?.jobs || [];
@@ -332,12 +248,6 @@ export default function Dashboard() {
     [allJobs, engines.data],
   );
 
-  const fullJobMap = useMemo(() => {
-    const map = new Map<number, JobItem>();
-    for (const j of jobsList.data?.dataList || []) map.set(j.id, j);
-    return map;
-  }, [jobsList.data]);
-
   const syncSummary = useMemo(() => {
     let monitoring = 0;
     let synced = 0;
@@ -352,355 +262,14 @@ export default function Dashboard() {
     return { monitoring, synced, pendingCount };
   }, [allJobs, engines.data]);
 
-  const statusCounts = useMemo(() => {
-    let running = 0;
-    let synced = 0;
-    let queued = 0;
-    let failed = 0;
-    let disabled = 0;
-    for (const job of allJobs) {
-      const st = resolveEffectiveSyncStatus(job);
-      if (job.running || st.state === "syncing" || st.state === "scanning") {
-        running += 1;
-      } else if (
-        job.enable === 1 &&
-        !isJobFailed(job) &&
-        (st.state === "synced" || st.state === "monitoring")
-      ) {
-        synced += 1;
-      }
-      if (job.queued) queued += 1;
-      if (isJobFailed(job)) failed += 1;
-      if (job.enable !== 1) disabled += 1;
-    }
-    return {
-      all: allJobs.length,
-      running,
-      synced,
-      queued,
-      failed,
-      disabled,
-    };
-  }, [allJobs]);
-
-  const storageFilterOptions = useMemo(() => {
-    const names = new Set<string>(["本地"]);
-    for (const eng of engines.data || []) {
-      for (const name of Object.keys(eng.remotes || {})) {
-        if (name) names.add(name);
-      }
-    }
-    for (const job of allJobs) {
-      for (const p of [
-        ...parseJobPathList(job.srcPath),
-        ...parseJobPathList(job.dstPath),
-      ]) {
-        const seg = p.replace(/^\/+/, "").split("/")[0];
-        if (seg) names.add(seg);
-      }
-    }
-    return [
-      { label: "全部存储", value: "all" },
-      ...[...names]
-        .sort((a, b) =>
-          a === "本地" ? -1 : b === "本地" ? 1 : a.localeCompare(b),
-        )
-        .map((name) => ({
-          label: name === "本地" ? "本地目录" : name,
-          value: name,
-        })),
-    ];
-  }, [engines.data, allJobs]);
-
-  const filteredJobs = useMemo(() => {
-    const kw = keyword.trim().toLowerCase();
-    return allJobs.filter((job) => {
-      if (storageFilter !== "all") {
-        const paths = [
-          ...parseJobPathList(job.srcPath),
-          ...parseJobPathList(job.dstPath),
-        ];
-        const usesStorage = paths.some(
-          (p) =>
-            p.replace(/^\/+/, "").split("/")[0]?.toLowerCase() ===
-            storageFilter.toLowerCase(),
-        );
-        if (!usesStorage) return false;
-      }
-      if (methodFilter !== "all") {
-        const meta = getContinuousSyncMeta({
-          method: job.method,
-          extraFlags: job.extraFlags ?? fullJobMap.get(job.id)?.extraFlags,
-          syncStatus: job.syncStatus,
-        });
-        if (methodFilter === "sync_delete") {
-          if (meta.directionKey === "bidirectional" || !meta.syncDelete)
-            return false;
-        } else if (meta.directionKey !== methodFilter) {
-          return false;
-        }
-      }
-      const st = resolveEffectiveSyncStatus(job);
-      if (
-        statusFilter === "running" &&
-        !job.running &&
-        st.state !== "syncing" &&
-        st.state !== "scanning"
-      )
-        return false;
-      if (
-        statusFilter === "synced" &&
-        (job.running ||
-          job.enable !== 1 ||
-          isJobFailed(job) ||
-          (st.state !== "synced" && st.state !== "monitoring"))
-      )
-        return false;
-      if (statusFilter === "queued" && !job.queued) return false;
-      if (statusFilter === "failed" && !isJobFailed(job)) return false;
-      if (statusFilter === "disabled" && job.enable === 1) return false;
-      if (kw) {
-        const hay =
-          `${job.remark || ""} #${job.id} ${job.srcPath} ${job.dstPath}`.toLowerCase();
-        if (!hay.includes(kw)) return false;
-      }
-      return true;
-    });
-  }, [allJobs, fullJobMap, storageFilter, methodFilter, statusFilter, keyword]);
-
-  const hasActiveFilters =
-    Boolean(keyword.trim()) ||
-    storageFilter !== "all" ||
-    methodFilter !== "all" ||
-    statusFilter !== "all";
-
-  const resetFilters = () => {
-    setSearchInput("");
-    setKeyword("");
-    setStorageFilter("all");
-    setMethodFilter("all");
-    setStatusFilter("all");
-  };
-
-  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
-  const legacyJobCount = useMemo(
-    () => allJobs.filter((j) => isLegacyOpenListJob(j, engines.data)).length,
-    [allJobs, engines.data],
-  );
-  const selectableVisibleJobs = useMemo(
-    () =>
-      filteredJobs.filter((j) => !isLegacyOpenListJob(j, engines.data)),
-    [filteredJobs, engines.data],
-  );
-  const visibleAllSelected =
-    selectableVisibleJobs.length > 0 &&
-    selectableVisibleJobs.every((j) => selectedSet.has(j.id));
-  const visibleSomeSelected =
-    selectableVisibleJobs.some((j) => selectedSet.has(j.id)) &&
-    !visibleAllSelected;
-
-  const toggleSelectAllVisible = (checked: boolean) => {
-    if (checked) {
-      setSelectedIds(selectableVisibleJobs.map((j) => j.id));
-    } else {
-      const visible = new Set(selectableVisibleJobs.map((j) => j.id));
-      setSelectedIds((prev) => prev.filter((id) => !visible.has(id)));
-    }
-  };
-
-  const toggleSelect = (id: number, checked: boolean) => {
-    setSelectedIds((prev) =>
-      checked
-        ? prev.includes(id)
-          ? prev
-          : [...prev, id]
-        : prev.filter((item) => item !== id),
-    );
-  };
-
+  const failedJobsCount = allJobs.filter(isJobFailed).length;
+  const legacyJobCount = allJobs.filter((job) => isLegacyOpenListJob(job, engines.data)).length;
   const openJobDetail = (job: DashboardJobItem) => {
     navigate(`/tasks?jobId=${job.id}&tab=overview`);
   };
-
-  const runBatch = (
-    act: "run" | "stop" | "enable" | "disable" | "run_all" | "stop_all",
-    ids?: number[],
-    label?: string,
-  ) => {
-    if (act === "enable" && allJobs.some((job) => ids?.includes(job.id) && requiresFirstMirrorPreview(job))) {
-      Toast.warning("所选任务包含待预览的镜像。请先逐个确认镜像影响。");
-      return;
-    }
-    const execute = () =>
-      action.run(async () => {
-        try {
-          const res = await api.batchJobAction(act, ids);
-          if (res.failed > 0) {
-            Toast.warning(
-              `${label || "批量操作"}完成：成功 ${res.succeeded} 个，失败 ${res.failed} 个`,
-            );
-          } else {
-            Toast.success(
-              `${label || "批量操作"}完成（共 ${res.succeeded} 个任务）`,
-            );
-          }
-          setSelectedIds([]);
-          await refreshAll(true);
-        } catch (err) {
-          errorToast(err);
-        }
-      });
-
-    if (act === "stop" || act === "stop_all" || act === "disable") {
-      confirmAction({
-        title: `确认执行「${label}」？`,
-        content:
-          act === "disable"
-            ? "暂停持续同步将停止监控并中止正在进行的传输，后续可随时恢复并自动补齐变更。"
-            : "将中止目标任务当前的传输批次，已完成的文件不会撤销，持续同步保持开启。",
-        okText: "确认",
-        onOk: execute,
-      });
-      return;
-    }
-    void execute();
+  const openTaskList = (status = "all") => {
+    navigate(status === "all" ? "/sync" : `/sync?status=${status}`);
   };
-
-  const handleDeleteLegacy = (job: DashboardJobItem) => {
-    const jobName = job.remark || `同步任务 #${job.id}`;
-    confirmDelete(
-      `删除旧版 OpenList 任务「${jobName}」？`,
-      () =>
-        action.run(async () => {
-          await api.deleteJob(job.id);
-          setSelectedIds((prev) => prev.filter((id) => id !== job.id));
-          Toast.success("已删除旧版任务，请使用内置存储重新创建");
-          await refreshAll(true);
-        }),
-      "此任务关联已移除的旧版 OpenList 引擎且历史执行记录将一并删除。",
-    );
-  };
-
-  const handleRunOne = (job: DashboardJobItem) => {
-    void action.run(async () => {
-      try {
-        await api.jobAction({ id: String(job.id) });
-        Toast.success("已触发立即同步");
-        await refreshAll(true);
-      } catch (err) {
-        errorToast(err);
-      }
-    });
-  };
-
-  const handleToggleEnableOne = (job: DashboardJobItem) => {
-    if (requiresFirstMirrorPreview(job)) {
-      navigate(`/tasks?jobId=${job.id}&tab=overview&mirrorPreview=1`);
-      return;
-    }
-    const pausing = job.enable === 1;
-    const execute = () =>
-      action.run(async () => {
-        try {
-          await api.jobAction({ id: String(job.id), pause: pausing });
-          Toast.success(pausing ? "持续同步已暂停" : "持续同步已恢复");
-          await refreshAll(true);
-        } catch (err) {
-          errorToast(err);
-        }
-      });
-    if (pausing && job.running) {
-      confirmAction({
-        title: "暂停持续同步并中止当前传输？",
-        content:
-          "暂停后将停止监控并中止正在进行的传输批次（已完成文件不会撤销），恢复后自动补齐变更。",
-        okText: "暂停同步",
-        onOk: execute,
-      });
-      return;
-    }
-    void execute();
-  };
-
-  const handleTogglePauseOne = (job: DashboardJobItem) => {
-    if (!job.currentTaskId) return;
-    const resuming = Boolean(job.paused);
-    void action.run(async () => {
-      try {
-        await api.taskAction(job.currentTaskId, resuming ? "resume" : "pause");
-        Toast.success(resuming ? "已继续传输" : "已暂停传输");
-        await refreshAll(true);
-      } catch (err) {
-        errorToast(err);
-      }
-    });
-  };
-
-  const handleStopOne = (job: DashboardJobItem) => {
-    confirmAction({
-      title: "中止本次同步批次？",
-      content:
-        "仅中止当前正在进行的传输批次，已完成的文件不会撤销；持续同步仍保持开启。",
-      okText: "中止本次",
-      onOk: () =>
-        action.run(async () => {
-          try {
-            if (job.currentTaskId) {
-              await api.taskAction(job.currentTaskId, "stop");
-            } else {
-              await api.jobAction({
-                id: String(job.id),
-                pause: true,
-                abort: true,
-              });
-            }
-            Toast.success("已提交中止本次同步");
-            await refreshAll(true);
-          } catch (err) {
-            errorToast(err);
-          }
-        }),
-    });
-  };
-
-  const statusPills: Array<{
-    key: StatusFilter;
-    label: string;
-    count: number;
-    tone?: "warning" | "danger";
-    alwaysShow?: boolean;
-  }> = [
-    { key: "all", label: "全部", count: statusCounts.all, alwaysShow: true },
-    {
-      key: "running",
-      label: "同步中",
-      count: statusCounts.running,
-      alwaysShow: true,
-    },
-    {
-      key: "synced",
-      label: "已同步",
-      count: statusCounts.synced,
-    },
-    {
-      key: "queued",
-      label: "排队中",
-      count: statusCounts.queued,
-    },
-    {
-      key: "failed",
-      label: "同步异常",
-      count: statusCounts.failed,
-      tone: statusCounts.failed > 0 ? "danger" : undefined,
-      alwaysShow: true,
-    },
-    {
-      key: "disabled",
-      label: "已暂停",
-      count: statusCounts.disabled,
-      alwaysShow: true,
-    },
-  ];
 
   const kpi = data?.kpi;
   const recent = data?.recent7d;
@@ -777,7 +346,7 @@ export default function Dashboard() {
   const speedParts = splitSpeedParts(realtime.totalSpeed);
   const mbpsLabel = formatMbps(realtime.totalSpeed);
 
-  const liveCardTargetFilter: StatusFilter = kpi?.runningJobs
+  const liveCardTargetFilter = kpi?.runningJobs
     ? "running"
     : kpi?.queuedJobs
       ? "queued"
@@ -808,31 +377,6 @@ export default function Dashboard() {
       ? speedChart.points[speedChart.points.length - 1]
       : null;
 
-  const emptyJobAction =
-    !engines.loading && !engines.error && (engines.data?.length ?? 0) === 0 ? (
-      <div className="empty-guide">
-        <span className="muted">
-          存储服务尚未就绪，请前往存储管理检查本地目录或添加远程存储
-        </span>
-        <Button
-          type="primary"
-          theme="solid"
-          onClick={() => navigate("/engines")}
-        >
-          前往存储管理
-        </Button>
-      </div>
-    ) : !engines.loading ? (
-      <Button
-        type="primary"
-        theme="solid"
-        icon={<IconPlusStroked aria-hidden="true" />}
-        onClick={() => setEditorOpen(true)}
-      >
-        新建同步任务
-      </Button>
-    ) : undefined;
-
   return (
     <div className="page dashboard-page">
       <Header
@@ -843,41 +387,9 @@ export default function Dashboard() {
               type="tertiary"
               icon={<IconRefresh aria-hidden="true" />}
               loading={dashboard.loading}
-              onClick={() => void refreshAll(false)}
+              onClick={() => void refreshAll()}
             >
               刷新
-            </Button>
-            <Button
-              type="tertiary"
-              icon={<IconRefresh aria-hidden="true" />}
-              disabled={action.busy || !syncSummary.monitoring}
-              onClick={() =>
-                runBatch("run_all", undefined, "立即同步全部持续任务")
-              }
-            >
-              全部立即同步
-            </Button>
-            <Button
-              type="danger"
-              theme="light"
-              icon={<IconStop aria-hidden="true" />}
-              disabled={
-                action.busy ||
-                !((kpi?.runningJobs || 0) + (kpi?.queuedJobs || 0))
-              }
-              onClick={() =>
-                runBatch("stop_all", undefined, "中止全部传输批次")
-              }
-            >
-              全部中止
-            </Button>
-            <span className="dashboard-header-divider" aria-hidden="true" />
-            <Button
-              theme="solid"
-              icon={<IconPlusStroked aria-hidden="true" />}
-              onClick={() => setEditorOpen(true)}
-            >
-              新建任务
             </Button>
           </div>
         }
@@ -914,17 +426,10 @@ export default function Dashboard() {
                 className={[
                   "dashboard-kpi-card",
                   realtime.isAllPaused ? "is-warning" : "",
-                  statusFilter === liveCardTargetFilter ? "is-active" : "",
                 ]
                   .filter(Boolean)
                   .join(" ")}
-                onClick={() =>
-                  setStatusFilter((prev) =>
-                    prev === liveCardTargetFilter
-                      ? "all"
-                      : liveCardTargetFilter,
-                  )
-                }
+                onClick={() => openTaskList(liveCardTargetFilter)}
               >
                 <div className="dashboard-kpi-head">
                   <span className="dashboard-kpi-label">实时速率</span>
@@ -1050,13 +555,8 @@ export default function Dashboard() {
               {/* Card 2: Sync Jobs Inventory */}
               <button
                 type="button"
-                className={[
-                  "dashboard-kpi-card",
-                  statusFilter === "all" && !hasActiveFilters ? "" : "",
-                ]
-                  .filter(Boolean)
-                  .join(" ")}
-                onClick={() => setStatusFilter("all")}
+                className="dashboard-kpi-card"
+                onClick={() => openTaskList()}
               >
                 <div className="dashboard-kpi-head">
                   <span className="dashboard-kpi-label">持续同步</span>
@@ -1095,9 +595,9 @@ export default function Dashboard() {
                     <span className="kpi-dot" aria-hidden="true" />
                     已暂停 {disabledJobsCount}
                   </span>
-                  {statusCounts.failed > 0 && (
+                  {failedJobsCount > 0 && (
                     <span className="dashboard-kpi-stat is-danger">
-                      异常 {statusCounts.failed}
+                      异常 {failedJobsCount}
                     </span>
                   )}
                 </div>
@@ -1265,17 +765,8 @@ export default function Dashboard() {
                 return recent.failRuns > 0 ? (
                   <button
                     type="button"
-                    className={[
-                      "dashboard-kpi-card",
-                      statusFilter === "failed" ? "is-active" : "",
-                    ]
-                      .filter(Boolean)
-                      .join(" ")}
-                    onClick={() =>
-                      setStatusFilter((prev) =>
-                        prev === "failed" ? "all" : "failed",
-                      )
-                    }
+                    className="dashboard-kpi-card"
+                    onClick={() => openTaskList("failed")}
                   >
                     {recentCardBody}
                   </button>
@@ -1567,7 +1058,7 @@ export default function Dashboard() {
                         <Button
                           size="small"
                           theme="borderless"
-                          onClick={() => setStatusFilter("running")}
+                          onClick={() => openTaskList("running")}
                         >
                           查看全部
                         </Button>
@@ -1635,31 +1126,6 @@ export default function Dashboard() {
                                 }
                               />
                             </div>
-                            <div className="dashboard-live-task-actions">
-                              {job.currentTaskId > 0 && (
-                                <IconButton
-                                  size="small"
-                                  label={job.paused ? "继续传输" : "暂停传输"}
-                                  icon={
-                                    job.paused ? (
-                                      <IconPlay aria-hidden="true" />
-                                    ) : (
-                                      <IconPause aria-hidden="true" />
-                                    )
-                                  }
-                                  disabled={action.busy}
-                                  onClick={() => handleTogglePauseOne(job)}
-                                />
-                              )}
-                              <IconButton
-                                size="small"
-                                label="停止任务"
-                                danger
-                                icon={<IconStop aria-hidden="true" />}
-                                disabled={action.busy}
-                                onClick={() => handleStopOne(job)}
-                              />
-                            </div>
                           </div>
                         );
                       })}
@@ -1690,15 +1156,15 @@ export default function Dashboard() {
                       )}
                     </div>
                     <div className="dashboard-live-idle-item">
-                      {statusCounts.failed > 0 ? (
+                      {failedJobsCount > 0 ? (
                         <button
                           type="button"
                           className="dashboard-live-idle-alert is-danger"
-                          onClick={() => setStatusFilter("failed")}
+                          onClick={() => openTaskList("failed")}
                         >
                           <IconAlertTriangle size="small" aria-hidden="true" />
                           <span>
-                            {statusCounts.failed} 个任务同步异常，点击排查
+                            {failedJobsCount} 个任务同步异常，点击排查
                           </span>
                         </button>
                       ) : (
@@ -1974,659 +1440,10 @@ export default function Dashboard() {
               )}
             </div>
 
-            {/* All Sync Tasks List */}
-            <SectionCard
-              className="dashboard-jobs-card"
-              title={
-                <div className="dashboard-jobs-title">
-                  <h2>全部同步任务</h2>
-                  <span className="dashboard-count-pill">
-                    {hasActiveFilters
-                      ? `${filteredJobs.length} / ${allJobs.length}`
-                      : `共 ${allJobs.length} 项`}
-                  </span>
-                </div>
-              }
-              extra={
-                <div
-                  className="dashboard-status-pills"
-                  role="group"
-                  aria-label="按运行状态筛选"
-                >
-                  {statusPills
-                    .filter(
-                      (pill) =>
-                        pill.alwaysShow ||
-                        pill.count > 0 ||
-                        statusFilter === pill.key,
-                    )
-                    .map((pill) => (
-                      <button
-                        key={pill.key}
-                        type="button"
-                        aria-pressed={statusFilter === pill.key}
-                        className={[
-                          "dashboard-status-pill",
-                          statusFilter === pill.key ? "is-active" : "",
-                          pill.tone ? `is-${pill.tone}` : "",
-                        ]
-                          .filter(Boolean)
-                          .join(" ")}
-                        onClick={() => setStatusFilter(pill.key)}
-                      >
-                        <span>{pill.label}</span>
-                        <span className="dashboard-status-pill-count">
-                          {pill.count}
-                        </span>
-                      </button>
-                    ))}
-                </div>
-              }
-            >
-              <div className="dashboard-filters">
-                <Checkbox
-                  aria-label="全选当前列表任务"
-                  checked={visibleAllSelected}
-                  indeterminate={visibleSomeSelected}
-                  disabled={!selectableVisibleJobs.length}
-                  onChange={(e) =>
-                    toggleSelectAllVisible(Boolean(e.target.checked))
-                  }
-                >
-                  全选
-                </Checkbox>
-                <span
-                  className="dashboard-filters-divider"
-                  aria-hidden="true"
-                />
-                <SearchFilterInput
-                  ariaLabel="搜索任务名称或路径"
-                  placeholder="搜索任务名 / 路径"
-                  value={searchInput}
-                  onChange={(next) => {
-                    setSearchInput(next);
-                    setKeyword(next);
-                  }}
-                  onSearch={setKeyword}
-                />
-                <Select
-                  aria-label="按存储筛选"
-                  value={storageFilter}
-                  onChange={(v) => setStorageFilter(String(v))}
-                  optionList={storageFilterOptions}
-                />
-                <Select
-                  aria-label="按同步方向筛选"
-                  value={methodFilter}
-                  onChange={(v) => setMethodFilter(String(v))}
-                  optionList={[
-                    { label: "全部方向", value: "all" },
-                    { label: "双向同步", value: "bidirectional" },
-                    { label: "单向上传", value: "upload" },
-                    { label: "单向下载", value: "download" },
-                    { label: "自定义单向", value: "custom" },
-                    { label: "已开同步删除", value: "sync_delete" },
-                  ]}
-                />
-                {hasActiveFilters && (
-                  <Button
-                    size="small"
-                    theme="borderless"
-                    type="tertiary"
-                    onClick={resetFilters}
-                  >
-                    重置筛选
-                  </Button>
-                )}
-              </div>
-
-              {selectedIds.length > 0 && (
-                <div className="batch-action-bar">
-                  <span className="batch-action-summary">
-                    已选中 <strong>{selectedIds.length}</strong> 个任务
-                  </span>
-                  <div className="batch-action-buttons">
-                    <Button
-                      size="small"
-                      theme="solid"
-                      disabled={action.busy}
-                      onClick={() => runBatch("run", selectedIds, "批量立即同步")}
-                    >
-                      批量立即同步
-                    </Button>
-                    <Button
-                      size="small"
-                      type="danger"
-                      theme="light"
-                      disabled={action.busy}
-                      onClick={() => runBatch("stop", selectedIds, "批量中止传输")}
-                    >
-                      批量中止传输
-                    </Button>
-                    <Button
-                      size="small"
-                      type="tertiary"
-                      disabled={action.busy}
-                      onClick={() =>
-                        runBatch("enable", selectedIds, "批量恢复同步")
-                      }
-                    >
-                      批量恢复同步
-                    </Button>
-                    <Button
-                      size="small"
-                      type="tertiary"
-                      disabled={action.busy}
-                      onClick={() =>
-                        runBatch("disable", selectedIds, "批量暂停同步")
-                      }
-                    >
-                      批量暂停同步
-                    </Button>
-                    <Button
-                      size="small"
-                      theme="borderless"
-                      onClick={() => setSelectedIds([])}
-                    >
-                      取消选择
-                    </Button>
-                  </div>
-                </div>
-              )}
-
-              {!allJobs.length ? (
-                <EmptyState action={emptyJobAction} />
-              ) : !filteredJobs.length ? (
-                <div className="dashboard-filter-empty" role="status">
-                  <span className="muted">没有符合当前筛选条件的同步任务</span>
-                  <Button size="small" type="tertiary" onClick={resetFilters}>
-                    重置筛选条件
-                  </Button>
-                </div>
-              ) : (
-                <div className="dashboard-job-list">
-                  {filteredJobs.map((job) => {
-                    const jobName = job.remark || `同步任务 #${job.id}`;
-                    const srcList = parseJobPathList(job.srcPath);
-                    const dstList = parseJobPathList(job.dstPath);
-                    const displaySiblings = [...srcList, ...dstList];
-                    const displaySrcList = formatDisplayPathList(
-                      srcList,
-                      displaySiblings,
-                    );
-                    const displayDstList = formatDisplayPathList(
-                      dstList,
-                      displaySiblings,
-                    );
-                    const srcSummary =
-                      (displaySrcList[0] || "—") +
-                      (displaySrcList.length > 1
-                        ? ` 等 ${displaySrcList.length} 项`
-                        : "");
-                    const dstSummary =
-                      (displayDstList[0] || "—") +
-                      (displayDstList.length > 1
-                        ? ` 等 ${displayDstList.length} 项`
-                        : "");
-                    const fullRouteTitle = `${displaySrcList.join(", ") || "—"} ${job.method === 3 ? "⇄" : "→"} ${displayDstList.join(", ") || "—"}`;
-                    const isSelected = selectedSet.has(job.id);
-                    const legacy = isLegacyOpenListJob(job, engines.data);
-                    const failed = isJobFailed(job);
-                    const m = computeJobLiveMetrics(job);
-                    const meta = getContinuousSyncMeta({
-                      method: job.method,
-                      extraFlags: job.extraFlags ?? fullJobMap.get(job.id)?.extraFlags,
-                      syncStatus: job.syncStatus,
-                    });
-                    const effectiveStatus = resolveEffectiveSyncStatus(job);
-
-                    const rowClassName = [
-                      "dashboard-job-row",
-                      isSelected ? "is-selected" : "",
-                      legacy
-                        ? "is-failed"
-                        : job.running
-                          ? "is-running"
-                          : failed
-                            ? "is-failed"
-                            : "",
-                      legacy || (job.enable !== 1 && !job.running)
-                        ? "is-disabled"
-                        : "",
-                    ]
-                      .filter(Boolean)
-                      .join(" ");
-
-                    return (
-                      <div key={job.id} className={rowClassName}>
-                        <div className="dashboard-job-check">
-                          <Checkbox
-                            aria-label={
-                              legacy
-                                ? `${jobName}（旧版已停用，请删除重建）`
-                                : `选择 ${jobName}`
-                            }
-                            checked={!legacy && isSelected}
-                            disabled={legacy}
-                            onChange={(e) =>
-                              toggleSelect(job.id, Boolean(e.target.checked))
-                            }
-                          />
-                        </div>
-
-                        <div
-                          className="dashboard-job-info"
-                          onClick={() => openJobDetail(job)}
-                        >
-                          <div className="dashboard-job-title-line">
-                            <span className="dashboard-job-name-wrap">
-                              <span
-                                className={jobDotTone(job, legacy)}
-                                aria-hidden="true"
-                              />
-                              <button
-                                type="button"
-                                className="dashboard-job-title-btn"
-                                title={jobName}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  openJobDetail(job);
-                                }}
-                              >
-                                {jobName}
-                              </button>
-                            </span>
-                            <Tag
-                              size="small"
-                              type="light"
-                              color={directionTagColor(meta.directionKey)}
-                            >
-                              {meta.shortLabel}
-                            </Tag>
-                            {!legacy &&
-                              meta.directionKey !== "bidirectional" &&
-                              meta.syncDelete && (
-                                <Tag size="small" type="light" color="orange">
-                                  同步删除
-                                </Tag>
-                              )}
-                            {legacy && (
-                              <Tag size="small" type="solid" color="red">
-                                旧版已停用
-                              </Tag>
-                            )}
-                            {!legacy && job.queued && (
-                              <Tag size="small" type="light" color="cyan">
-                                排队等待中
-                              </Tag>
-                            )}
-                            {!legacy && (
-                              <SyncStatusTag status={effectiveStatus} />
-                            )}
-                            {!legacy && job.checkRunning && (
-                              <Tag size="small" type="light" color="blue">
-                                后台校验中
-                              </Tag>
-                            )}
-                            {!legacy && job.windowEnable === 1 && (
-                              <Tag size="small" type="light" color="violet">
-                                窗口 {job.windowStart}–{job.windowEnd}
-                              </Tag>
-                            )}
-                          </div>
-
-                          <div className="dashboard-job-meta">
-                            <span
-                              className="dashboard-path-route"
-                              title={fullRouteTitle}
-                            >
-                              <span className="dashboard-path-seg">
-                                {srcSummary}
-                              </span>
-                              {meta.directionKey === "bidirectional" ? (
-                                <span
-                                  className="dashboard-path-arrow dashboard-path-arrow--bi"
-                                  aria-hidden="true"
-                                >
-                                  ⇄
-                                </span>
-                              ) : (
-                                <IconArrowRight
-                                  size="small"
-                                  className="dashboard-path-arrow"
-                                  aria-hidden="true"
-                                />
-                              )}
-                              <span className="dashboard-path-seg">
-                                {dstSummary}
-                              </span>
-                            </span>
-                          </div>
-                        </div>
-
-                        <div
-                          className="dashboard-job-status-col"
-                          onClick={() => openJobDetail(job)}
-                        >
-                          {legacy ? (
-                            <div className="dashboard-job-approval-note">
-                              <span className="dashboard-job-approval-title">
-                                <IconAlertTriangle
-                                  size="small"
-                                  aria-hidden="true"
-                                />
-                                旧版 OpenList 任务已停用
-                              </span>
-                              <span className="dashboard-job-approval-action">
-                                已不再支持，请删除后重新创建
-                              </span>
-                            </div>
-                          ) : job.running ? (
-                            <div className="dashboard-job-progress">
-                              <div className="dashboard-job-progress-head">
-                                <span className="dashboard-job-progress-label">
-                                  {m.progressLabel}
-                                </span>
-                                <span className="dashboard-job-progress-right">
-                                  {!job.paused && m.liveSpeed > 0 && (
-                                    <span className="dashboard-job-speed">
-                                      {formatSpeed(m.liveSpeed)}
-                                    </span>
-                                  )}
-                                  <span className="dashboard-job-progress-pct">
-                                    {m.livePct}%
-                                  </span>
-                                </span>
-                              </div>
-                              <Progress
-                                percent={m.livePct}
-                                showInfo={false}
-                                stroke={
-                                  job.paused
-                                    ? "var(--semi-color-warning)"
-                                    : "var(--semi-color-primary)"
-                                }
-                              />
-                              <div className="dashboard-job-progress-sub">
-                                {m.liveTotal > 0 || m.liveTotalSize > 0 ? (
-                                  <>
-                                    {m.liveTotalSize > 0 && (
-                                      <span>
-                                        {formatSize(m.liveDoneSize)} /{" "}
-                                        {formatSize(m.liveTotalSize)}
-                                      </span>
-                                    )}
-                                    {m.liveTotal > 0 && (
-                                      <span>
-                                        已完成 {job.liveNum?.success ?? 0} /{" "}
-                                        {m.liveTotal} 项
-                                      </span>
-                                    )}
-                                    {!job.paused && m.liveRemainTime > 0 && (
-                                      <span>
-                                        剩余 {formatDuration(m.liveRemainTime)}
-                                      </span>
-                                    )}
-                                    {!m.liveScanFinish &&
-                                      m.scanTotalFiles > 0 &&
-                                      m.scanCheckedFiles > 0 && (
-                                        <span>
-                                          已核对 {m.scanCheckedFiles} /{" "}
-                                          {m.scanTotalFiles}
-                                        </span>
-                                      )}
-                                    {(job.liveNum?.fail ?? 0) > 0 && (
-                                      <span className="inline-error">
-                                        失败 {job.liveNum?.fail}
-                                      </span>
-                                    )}
-                                  </>
-                                ) : !m.liveScanFinish && m.liveScan ? (
-                                  <span>
-                                    {m.scanTotalFiles > 0 &&
-                                    m.scanCheckedFiles > 0
-                                      ? `已核对 ${m.scanCheckedFiles} / ${m.scanTotalFiles} 个文件`
-                                      : `已扫描 ${m.liveScan.scannedDirs} 个目录${
-                                          m.scanTotalFiles > 0
-                                            ? ` · ${m.scanTotalFiles} 个文件`
-                                            : ""
-                                        }`}
-                                  </span>
-                                ) : (
-                                  <span>正在扫描文件列表…</span>
-                                )}
-                              </div>
-                            </div>
-                          ) : effectiveStatus.state === "error" ? (
-                            <div className="dashboard-job-sync-error">
-                              <span className="dashboard-job-sync-error-title">
-                                <IconAlertTriangle
-                                  size="small"
-                                  aria-hidden="true"
-                                />
-                                {effectiveStatus.failures > 1
-                                  ? `同步异常（连续失败 ${effectiveStatus.failures} 次）`
-                                  : "同步异常"}
-                              </span>
-                              <span
-                                className="dashboard-job-sync-error-desc"
-                                title={effectiveStatus.error}
-                              >
-                                {effectiveStatus.error || "点击进入总览查看详情并重试"}
-                              </span>
-                            </div>
-                          ) : effectiveStatus.state === "paused" ? (
-                            <>
-                              <div className="dashboard-job-last">
-                                <span className="muted">持续同步已暂停</span>
-                              </div>
-                              <div className="dashboard-job-schedule">
-                                <span className="dashboard-job-schedule-item">
-                                  <IconClockStroked
-                                    size="small"
-                                    aria-hidden="true"
-                                  />
-                                  {effectiveStatus.lastSuccess > 0
-                                    ? `最近同步 ${formatRelativeSyncTime(effectiveStatus.lastSuccess)}`
-                                    : job.lastTask
-                                      ? `上次同步 ${formatShortTime(job.lastTask.createTime)}`
-                                      : "点击右侧按钮可随时恢复"}
-                                </span>
-                              </div>
-                            </>
-                          ) : effectiveStatus.state === "waiting_window" ? (
-                            <>
-                              <div className="dashboard-job-last">
-                                <span className="dashboard-job-sync-warn">
-                                  等待进入运行窗口
-                                </span>
-                              </div>
-                              <div className="dashboard-job-schedule">
-                                <span className="dashboard-job-schedule-item">
-                                  <IconClockStroked
-                                    size="small"
-                                    aria-hidden="true"
-                                  />
-                                  {job.windowStart || "00:00"}–{job.windowEnd || "06:00"}
-                                </span>
-                                {effectiveStatus.pendingChanges !== 0 && (
-                                  <span className="dashboard-job-last-metrics">
-                                    {effectiveStatus.pendingChanges < 0
-                                      ? "待完整核对"
-                                      : `待同步 ${effectiveStatus.pendingChanges} 项`}
-                                  </span>
-                                )}
-                              </div>
-                            </>
-                          ) : (
-                            <>
-                              <div className="dashboard-job-last">
-                                <span
-                                  className={
-                                    effectiveStatus.state === "synced"
-                                      ? "dashboard-job-sync-ok"
-                                      : "dashboard-job-sync-active"
-                                  }
-                                  title={
-                                    effectiveStatus.lastSuccess > 0
-                                      ? formatTimestamp(effectiveStatus.lastSuccess, true)
-                                      : undefined
-                                  }
-                                >
-                                  {effectiveStatus.state === "scanning"
-                                    ? "正在检测目录变更…"
-                                    : effectiveStatus.state === "pending"
-                                      ? effectiveStatus.pendingChanges < 0
-                                        ? "待完整核对"
-                                        : `待同步 ${effectiveStatus.pendingChanges} 项`
-                                      : effectiveStatus.state === "synced"
-                                        ? effectiveStatus.lastSuccess > 0
-                                          ? `已同步 · ${formatRelativeSyncTime(effectiveStatus.lastSuccess)}`
-                                          : "已同步"
-                                        : "持续监控中"}
-                                </span>
-                              </div>
-                              <div className="dashboard-job-schedule">
-                                <span className="dashboard-job-schedule-item">
-                                  <IconRefresh
-                                    size="small"
-                                    aria-hidden="true"
-                                  />
-                                  每 {formatSecondsShort(meta.pollIntervalSec)} 检测
-                                </span>
-                                {job.lastTask &&
-                                  (job.lastTask.allNum !== undefined ||
-                                    (job.lastTask.sumSize ?? 0) > 0) && (
-                                    <span className="dashboard-job-last-metrics">
-                                      {job.lastTask.allNum !== undefined
-                                        ? `${job.lastTask.successNum ?? 0}/${job.lastTask.allNum} 项`
-                                        : ""}
-                                      {job.lastTask.allNum !== undefined &&
-                                      (job.lastTask.sumSize ?? 0) > 0
-                                        ? " · "
-                                        : ""}
-                                      {(job.lastTask.sumSize ?? 0) > 0
-                                        ? formatSize(job.lastTask.sumSize || 0)
-                                        : ""}
-                                    </span>
-                                  )}
-                              </div>
-                            </>
-                          )}
-                        </div>
-
-                        <div className="row-actions dashboard-job-actions">
-                          {legacy ? (
-                            <IconButton
-                              label="删除旧版任务"
-                              icon={<IconDeleteStroked aria-hidden="true" />}
-                              danger
-                              disabled={action.busy}
-                              onClick={() => handleDeleteLegacy(job)}
-                            />
-                          ) : (
-                            <>
-                              {job.running || job.queued ? (
-                                <>
-                                  {job.running && job.currentTaskId > 0 && (
-                                    <IconButton
-                                      label={job.paused ? "继续传输" : "暂停传输"}
-                                      icon={
-                                        job.paused ? (
-                                          <IconPlay aria-hidden="true" />
-                                        ) : (
-                                          <IconPause aria-hidden="true" />
-                                        )
-                                      }
-                                      disabled={action.busy}
-                                      onClick={() => handleTogglePauseOne(job)}
-                                    />
-                                  )}
-                                  <IconButton
-                                    label="中止本次同步"
-                                    icon={<IconStop aria-hidden="true" />}
-                                    danger
-                                    disabled={action.busy}
-                                    onClick={() => handleStopOne(job)}
-                                  />
-                                </>
-                              ) : (
-                                <>
-                                  <IconButton
-                                    label={
-                                      job.enable === 1
-                                        ? "暂停持续同步"
-                                        : "恢复持续同步"
-                                    }
-                                    icon={
-                                      job.enable === 1 ? (
-                                        <IconPause aria-hidden="true" />
-                                      ) : (
-                                        <IconPlay aria-hidden="true" />
-                                      )
-                                    }
-                                    disabled={action.busy}
-                                    onClick={() => handleToggleEnableOne(job)}
-                                  />
-                                  <IconButton
-                                    label={
-                                      job.enable === 1
-                                        ? "立即同步"
-                                        : "请先恢复持续同步"
-                                    }
-                                    icon={<IconRefresh aria-hidden="true" />}
-                                    disabled={action.busy || job.enable !== 1}
-                                    onClick={() => handleRunOne(job)}
-                                  />
-                                </>
-                              )}
-                            </>
-                          )}
-                          <IconButton
-                            label="查看任务详情"
-                            icon={<IconChevronRight aria-hidden="true" />}
-                            onClick={() => openJobDetail(job)}
-                          />
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </SectionCard>
           </div>
         )}
       </LoadState>
 
-      {editorOpen && (
-        <Suspense fallback={<LoadingPanel />}>
-          <JobEditor
-            job={null}
-            engines={engines.data || []}
-            existingJobs={jobsList.data?.dataList || []}
-            enginesError={engines.error}
-            onRetryEngines={() => void engines.refresh()}
-            onNavigateEngines={() => {
-              setEditorOpen(false);
-              navigate("/engines");
-            }}
-            onClose={() => setEditorOpen(false)}
-            onSaved={(result: TaskEditorSavedResult) => {
-              setEditorOpen(false);
-              const createdId = result.createdId;
-              const mirrorPreviewId = result.mirrorPreviewId;
-              const goToCreated = () => {
-                if (mirrorPreviewId) {
-                  navigate(`/tasks?jobId=${mirrorPreviewId}&tab=overview&mirrorPreview=1`);
-                } else if (createdId) {
-                  navigate(`/tasks?jobId=${createdId}&tab=overview`);
-                }
-              };
-              void refreshAll(true).then(goToCreated);
-            }}
-          />
-        </Suspense>
-      )}
     </div>
   );
 }

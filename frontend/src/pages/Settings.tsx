@@ -336,40 +336,28 @@ export default function Settings() {
       const target = event.target as Element | null;
       if (!target) return;
       const anchor = target.closest("a[href]") as HTMLAnchorElement | null;
-      const menuToggle = target.closest(
-        "button.nav-menu-toggle",
-      ) as HTMLButtonElement | null;
-      let navElement: HTMLElement | null = null;
-      if (anchor) {
-        if (anchor.target && anchor.target !== "_self") return;
-        if (anchor.hasAttribute("download")) return;
-        try {
-          const dest = new URL(anchor.href, window.location.href);
-          if (dest.origin !== window.location.origin) return;
-          if (
-            dest.pathname + dest.search ===
-            window.location.pathname + window.location.search
-          ) {
-            return;
-          }
-          navElement = anchor;
-        } catch {
+      if (!anchor || (anchor.target && anchor.target !== "_self") || anchor.hasAttribute("download")) return;
+      try {
+        const dest = new URL(anchor.href, window.location.href);
+        if (dest.origin !== window.location.origin) return;
+        if (
+          dest.pathname + dest.search ===
+          window.location.pathname + window.location.search
+        ) {
           return;
         }
-      } else if (menuToggle) {
-        navElement = menuToggle;
+      } catch {
+        return;
       }
-      if (!navElement) return;
       event.preventDefault();
       event.stopPropagation();
-      const targetElement = navElement;
       confirmAction({
         title: "放弃未保存的修改？",
         content: "当前设置尚未保存，离开后修改将丢失。",
         okText: "放弃",
         onOk: () => {
           skipNextGuardRef.current = true;
-          targetElement.click();
+          anchor.click();
           skipNextGuardRef.current = false;
         },
       });

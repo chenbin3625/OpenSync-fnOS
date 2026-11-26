@@ -17,7 +17,6 @@ import {
   Route,
   Routes,
   useLocation,
-  useNavigate,
 } from "react-router-dom";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
@@ -110,7 +109,6 @@ function jobStatusDotClass(job: JobItem): string {
 
 function Shell({ children, version }: { children: ReactNode; version: string }) {
   const { pathname, search } = useLocation();
-  const navigate = useNavigate();
   const [theme, setTheme] = useState<"light" | "dark">("light");
   const [taskMenuOpen, setTaskMenuOpen] = useState(false);
   const [taskMenuTouched, setTaskMenuTouched] = useState(false);
@@ -144,8 +142,8 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
       setTaskMenuOpen(false);
       return;
     }
-    if (!taskMenuTouched) setTaskMenuOpen(true);
-  }, [hasTaskItems, taskMenuTouched]);
+    if (!taskMenuTouched) setTaskMenuOpen(pathname === "/tasks");
+  }, [hasTaskItems, pathname, taskMenuTouched]);
   useEffect(() => {
     applyTheme(theme);
   }, [theme]);
@@ -248,7 +246,6 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
     }
   }, [latest.setData, version]);
   useEffect(() => () => checkInFlight.current?.abort(), []);
-  const tasksSelected = pathname.startsWith("/tasks") && !hasTaskItems;
   return (
     <VersionContext
       value={{
@@ -262,62 +259,42 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
       <div className="app-shell">
         <aside className="app-sidebar" aria-label="主菜单">
           <nav aria-label="主导航">
-            <NavLink
-              to="/sync"
-              className={({ isActive }) => `nav-link${isActive ? " selected" : ""}`}
-            >
-              {sections[1].icon}
-              <span className="nav-label">{sections[1].label}</span>
-            </NavLink>
-            <NavLink
-              to="/dashboard"
-              className={({ isActive }) =>
-                `nav-link${isActive ? " selected" : ""}`
-              }
-            >
-              {sections[0].icon}
-              <span className="nav-label">{sections[0].label}</span>
-            </NavLink>
-            {hasTaskItems ? (
-              <button
-                type="button"
-                className={`nav-link nav-menu-toggle${tasksSelected ? " selected" : ""}`}
-                aria-expanded={taskMenuOpen}
-                aria-controls="task-menu"
-                onClick={() => {
-                  setTaskMenuTouched(true);
-                  if (!pathname.startsWith("/tasks")) {
-                    setTaskMenuOpen(true);
-                    navigate(taskHref(taskItems[0]));
-                    return;
-                  }
-                  setTaskMenuOpen((open) => !open);
-                }}
-              >
-                {taskMenuOpen ? (
-                  <IconTreeTriangleDown
-                    className="task-menu-triangle"
-                    aria-hidden="true"
-                  />
-                ) : (
-                  <IconTreeTriangleRight
-                    className="task-menu-triangle"
-                    aria-hidden="true"
-                  />
-                )}
-                <span className="nav-label">任务管理</span>
-              </button>
-            ) : (
+            <div className="task-nav">
               <NavLink
-                to="/tasks"
+                to="/sync"
                 className={({ isActive }) =>
-                  `nav-link${isActive ? " selected" : ""}`
+                  `nav-link${isActive || pathname === "/tasks" ? " selected" : ""}`
                 }
               >
                 {sections[1].icon}
-                <span className="nav-label">任务管理</span>
+                <span className="nav-label">{sections[1].label}</span>
               </NavLink>
-            )}
+              {hasTaskItems && (
+                <button
+                  type="button"
+                  className="task-nav-toggle"
+                  aria-label="任务快捷列表"
+                  aria-expanded={taskMenuOpen}
+                  aria-controls={taskMenuOpen ? "task-menu" : undefined}
+                  onClick={() => {
+                    setTaskMenuTouched(true);
+                    setTaskMenuOpen((open) => !open);
+                  }}
+                >
+                  {taskMenuOpen ? (
+                    <IconTreeTriangleDown
+                      className="task-menu-triangle"
+                      aria-hidden="true"
+                    />
+                  ) : (
+                    <IconTreeTriangleRight
+                      className="task-menu-triangle"
+                      aria-hidden="true"
+                    />
+                  )}
+                </button>
+              )}
+            </div>
             {taskMenu.error && (
               <InlineNotice
                 className="sidebar-task-error"
@@ -356,7 +333,7 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
                 })}
               </div>
             )}
-            {sections.slice(2, -1).map((section) => (
+            {[sections[0], ...sections.slice(2, -1)].map((section) => (
               <NavLink
                 key={section.path}
                 to={section.path}
@@ -449,7 +426,7 @@ function Workspace() {
       <Shell version={session.data.version}>
         <Routes>
           <Route path="/sync" element={<Tasks key="sync" overview />} />
-          <Route path="/dashboard" element={<Dashboard />} />
+          <Route path="/dashboard" element={<DashboardRoute />} />
           <Route path="/tasks" element={<Tasks key="details" />} />
           <Route path="/engines" element={<Engines />} />
           <Route path="/storages" element={<Engines />} />
@@ -460,6 +437,14 @@ function Workspace() {
       </Shell>
     </SessionContext>
   );
+}
+
+function DashboardRoute() {
+  const { search } = useLocation();
+  const storage = new URLSearchParams(search).get("storage");
+  return storage && storage !== "all"
+    ? <Navigate to={`/sync?${new URLSearchParams({ storage })}`} replace />
+    : <Dashboard />;
 }
 
 export function App() {

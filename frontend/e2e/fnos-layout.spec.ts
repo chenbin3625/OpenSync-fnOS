@@ -127,14 +127,15 @@ test("desktop sidebar is 220px with icon menus and bottom settings", async ({
   const sidebar = page.locator(".app-sidebar");
   await expect(sidebar).toBeVisible();
   expect((await sidebar.boundingBox())?.width).toBe(220);
-  const firstNav = sidebar.getByRole("button", { name: "任务管理" });
+  const firstNav = sidebar.getByRole("link", { name: "同步任务", exact: true });
   const firstNavBox = await firstNav.boundingBox();
   expect(firstNavBox?.width).toBe(204);
   expect(firstNavBox?.height).toBe(36);
   await expect(firstNav).toHaveCSS("font-size", "14px");
-  await expect(firstNav).toHaveAttribute("aria-expanded", "true");
+  const toggle = sidebar.getByRole("button", { name: "任务快捷列表" });
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
   await expect(sidebar.locator(".nav-submenu")).toHaveCount(1);
-  await expect(firstNav.locator(".task-menu-triangle")).toHaveAttribute(
+  await expect(toggle.locator(".task-menu-triangle")).toHaveAttribute(
     "aria-label",
     "tree_triangle_down",
   );
@@ -142,7 +143,7 @@ test("desktop sidebar is 220px with icon menus and bottom settings", async ({
     "aria-label",
     "folder_stroked",
   );
-  await expect(firstNav.locator(".task-menu-triangle")).toHaveCSS(
+  await expect(toggle.locator(".task-menu-triangle")).toHaveCSS(
     "font-size",
     "16px",
   );
@@ -221,7 +222,7 @@ test("task management expands in the sidebar and lists task names", async ({
   await page.goto(`/app/opensync/tasks?jobId=${jobId}`);
   const sidebar = page.locator(".app-sidebar");
   const taskToggle = sidebar.getByRole("button", {
-    name: "任务管理",
+    name: "任务快捷列表",
     exact: true,
   });
   await expect(taskToggle).toHaveAttribute("aria-expanded", "true");
@@ -242,14 +243,12 @@ test("task management expands in the sidebar and lists task names", async ({
 test("task tabs and page commands share an integrated toolbar row", async ({
   page,
 }) => {
-  // Typed explicitly: inferred as (string | null)[] the tab name was not
-  // assignable to getByRole's `name`, and only `action` is ever null.
-  const toolbars: { path: string; tab: string; action: string | null }[] = [
-    { path: "tasks?tab=overview", tab: "总览", action: "新建任务" },
-    { path: "tasks?tab=realtime", tab: "实时任务", action: null },
-    { path: "tasks?tab=history", tab: "历史任务", action: null },
+  const toolbars = [
+    { path: "tasks?tab=overview", tab: "任务详情" },
+    { path: "tasks?tab=realtime", tab: "实时任务" },
+    { path: "tasks?tab=history", tab: "历史任务" },
   ];
-  for (const { path, tab, action } of toolbars) {
+  for (const { path, tab } of toolbars) {
     await page.goto(`/app/opensync/${path}`);
     const toolbar = page.locator(".page-toolbar");
     await expect(toolbar).toBeVisible();
@@ -271,23 +270,16 @@ test("task tabs and page commands share an integrated toolbar row", async ({
     );
     const tabBox = await tabLocator.boundingBox();
     expect(tabBox).not.toBeNull();
-    if (action) {
-      const actionButton = toolbar.getByRole("button", {
-        name: action,
-        exact: true,
-      });
-      await expect(actionButton).toBeVisible();
-      const actionBox = await actionButton.boundingBox();
-      expect(actionBox).not.toBeNull();
-      if (page.viewportSize()!.width > 640) {
-        expect(
-          Math.abs(
-            tabBox!.y + tabBox!.height / 2 - actionBox!.y - actionBox!.height / 2,
-          ),
-        ).toBeLessThan(8);
-      }
-    } else {
-      await expect(toolbar.locator(".page-actions")).toHaveText("");
+    const actionButton = toolbar.getByRole("button", { name: "返回任务列表", exact: true });
+    await expect(actionButton).toBeVisible();
+    const actionBox = await actionButton.boundingBox();
+    expect(actionBox).not.toBeNull();
+    if (page.viewportSize()!.width > 640) {
+      expect(
+        Math.abs(
+          tabBox!.y + tabBox!.height / 2 - actionBox!.y - actionBox!.height / 2,
+        ),
+      ).toBeLessThan(8);
     }
   }
   // 引擎管理只有一个页面，不再有 Tab；工具栏仍须撑满高度并右对齐操作按钮。
@@ -321,7 +313,7 @@ test("mobile task tabs fit inside the page toolbar", async ({ page }) => {
   const toolbar = page.locator(".page-toolbar");
   const tabs = toolbar.getByRole("tab");
   const action = toolbar.getByRole("button", {
-    name: "新建任务",
+    name: "返回任务列表",
     exact: true,
   });
 

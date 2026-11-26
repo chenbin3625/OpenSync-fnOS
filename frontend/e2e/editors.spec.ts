@@ -785,9 +785,8 @@ test("task editor previews destination folders live across path rules and edit d
     return success(null);
   });
 
-  await page.goto("/app/opensync/tasks?jobId=51");
-  await page.getByRole("button", { name: "新建任务", exact: true }).click();
-  await page.getByRole("button", { name: "高级设置", exact: true }).click();
+  await page.goto("/app/opensync/sync");
+  await page.getByRole("button", { name: "新建同步任务", exact: true }).click();
   const dialog = page.getByRole("dialog");
   const preview = dialog.getByRole("region", { name: "同步位置预览" });
   await expect(preview).toContainText("选择源路径和目标路径后");
@@ -872,6 +871,7 @@ test("task editor previews destination folders live across path rules and edit d
   await page.getByRole("button", { name: "放弃", exact: true }).click();
   await expect(dialog).not.toBeVisible();
 
+  await page.getByRole("main").getByRole("link", { name: "已保存映射任务", exact: true }).click();
   await page
     .locator(".overview-card")
     .getByRole("button", { name: "编辑任务", exact: true })
@@ -942,12 +942,8 @@ test("guides no-engine onboarding, detects cross-job conflicts, and deduplicates
   });
 
   // 1. 无引擎时的冷启动引导
-  await page.goto("/app/opensync/tasks");
-  await expect(
-    page.getByRole("button", { name: "前往存储管理", exact: true }),
-  ).toBeVisible();
-  await page.getByRole("button", { name: "新建任务", exact: true }).click();
-  await page.getByRole("button", { name: "高级设置", exact: true }).click();
+  await page.goto("/app/opensync/sync");
+  await page.getByRole("button", { name: "新建同步任务", exact: true }).click();
   const emptyDialog = page.getByRole("dialog");
   await expect(emptyDialog.locator(".engine-empty-guide")).toContainText("内置存储尚未就绪");
   await emptyDialog
@@ -979,8 +975,8 @@ test("guides no-engine onboarding, detects cross-job conflicts, and deduplicates
   await page.goto("/app/opensync/tasks?jobId=50");
   // 总览页显示所属引擎与过滤概览
   await expect(page.locator(".overview-card")).toContainText("已有相册备份");
-  await page.getByRole("button", { name: "新建任务", exact: true }).click();
-  await page.getByRole("button", { name: "高级设置", exact: true }).click();
+  await page.getByRole("button", { name: "返回任务列表", exact: true }).click();
+  await page.getByRole("button", { name: "新建同步任务", exact: true }).click();
   const dialog = page.getByRole("dialog");
   await dialog.getByRole("textbox", { name: "任务名称", exact: true }).fill("新任务");
 
@@ -1133,9 +1129,8 @@ test("task editor quick-enables end-to-end crypt storage for remote destination"
     return success(null);
   });
 
-  await page.goto("/app/opensync/tasks");
-  await page.getByRole("button", { name: "新建任务" }).first().click();
-  await page.getByRole("button", { name: "高级设置", exact: true }).click();
+  await page.goto("/app/opensync/sync");
+  await page.getByRole("button", { name: "新建同步任务", exact: true }).click();
 
   const editorDialog = page
     .getByRole("dialog")

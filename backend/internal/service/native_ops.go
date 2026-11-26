@@ -989,7 +989,7 @@ func watchPeriodicCheckAlert(ctx context.Context, jobID int64, jobName string) {
 			}
 			if res.Status == "completed" && (res.DifferCount > 0 || res.MissingOnDstCount > 0 || res.ErrorCount > 0) {
 				title := fmt.Sprintf("[OpenSync] 定时一致性校验发现差异：%s", jobName)
-				content := fmt.Sprintf("任务「%s」(#%d) 一致性校验完成：\n一致：%d\n内容差异：%d\n目标缺失：%d\n源端缺失：%d\n错误：%d\n请前往任务管理查看校验报告或一键修复。",
+				content := fmt.Sprintf("任务「%s」(#%d) 一致性校验完成：\n一致：%d\n内容差异：%d\n目标缺失：%d\n源端缺失：%d\n错误：%d\n请在「同步任务」中打开该任务查看校验报告或一键修复。",
 					jobName, jobID, res.MatchedCount, res.DifferCount, res.MissingOnDstCount, res.MissingOnSrcCount, res.ErrorCount)
 				QueueSystemAlertNotification("check_alert", title, content, map[string]string{
 					"jobName": jobName,

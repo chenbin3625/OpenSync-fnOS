@@ -56,39 +56,38 @@ test("connects a first WebDAV account inline and reuses it from the sync home", 
   await dialog.getByRole("button", { name: "OpenList / AList (WebDAV)", exact: true }).click();
   await dialog.getByRole("textbox", { name: "存储名称", exact: true }).fill("PhotoCloud");
   await dialog.getByRole("button", { name: "保存存储", exact: true }).click();
-  await expect(dialog.getByRole("heading", { name: "设置同步", exact: true })).toBeVisible();
-  await expect(dialog.getByRole("button", { name: "创建并开始同步" })).toBeDisabled();
+  await expect(dialog.getByRole("heading", { name: "新建持续同步任务", exact: true })).toBeVisible();
+  await expect(dialog.getByRole("status").filter({ hasText: "文件夹访问权限" })).toBeVisible();
   localAuthorized = true;
   await dialog.getByRole("button", { name: "刷新目录" }).click();
+  await dialog.getByRole("radio", { name: /仅上传本地更改/ }).click();
 
   const picker = dialog.locator(".remote-paths");
   await picker.nth(0).getByRole("combobox").click();
   await page.locator('.remote-paths-dropdown [role="treeitem"][data-key="/本地/Photos"]').click();
   await picker.nth(1).getByRole("combobox").click();
   await page.locator('.remote-paths-dropdown [role="treeitem"][data-key="/PhotoCloud/Backup"]').click();
-  await expect(dialog.getByRole("textbox", { name: "任务名称" })).toHaveValue("Photos · PhotoCloud");
-  const direction = dialog.getByRole("combobox", { name: "同步方向" });
-  await direction.click();
-  await page.getByRole("option", { name: /仅下载/ }).click();
-  await expect(dialog.locator(".quick-sync-path")).toHaveText("/本地/Photos ← /PhotoCloud/Backup");
-  await direction.click();
-  await page.getByRole("option", { name: /仅上传/ }).click();
-  await expect(dialog.locator(".quick-sync-path")).toHaveText("/本地/Photos → /PhotoCloud/Backup");
-  await dialog.getByRole("button", { name: "创建并开始同步" }).click();
+  await expect(dialog.getByRole("textbox", { name: "任务名称" })).toHaveAttribute("placeholder", "Photos · PhotoCloud");
+  await dialog.getByRole("button", { name: "下一步", exact: true }).click();
+  await dialog.getByRole("button", { name: "保存", exact: true }).click();
   await expect(page).toHaveURL(/\/tasks\?jobId=1/);
   expect(savedJobs[0]).toMatchObject({
-    srcPath: ["/本地/Photos"], dstPath: ["/PhotoCloud/Backup"], method: 0, isCron: 3, enable: 1,
+    remark: "Photos · PhotoCloud", srcPath: ["/本地/Photos"], dstPath: ["/PhotoCloud/Backup"], method: 0, isCron: 3, enable: 1,
   });
 
   await page.goto("/app/opensync/sync");
   const group = page.locator(".sync-connection-group").filter({ hasText: "PhotoCloud" });
   await expect(group.getByRole("link", { name: "Photos · PhotoCloud" })).toBeVisible();
-  await group.getByRole("button", { name: "暂停同步" }).click();
-  await group.getByRole("button", { name: "恢复同步" }).click();
-  await expect(group.getByRole("button", { name: "暂停同步" })).toBeVisible();
+  await group.getByRole("link", { name: "Photos · PhotoCloud" }).click();
+  const detail = page.locator(".overview-card .overview-head-actions");
+  await detail.getByRole("button", { name: "暂停同步", exact: true }).click();
+  await detail.getByRole("button", { name: "恢复同步", exact: true }).click();
+  await expect(detail.getByRole("button", { name: "暂停同步", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "返回任务列表" }).click();
   await group.getByRole("button", { name: "添加同步任务" }).click();
-  await expect(dialog.getByRole("heading", { name: "设置同步", exact: true })).toBeVisible();
-  await expect(dialog.getByText("网盘文件夹 · PhotoCloud", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "新建持续同步任务", exact: true })).toBeVisible();
+  await dialog.getByRole("combobox", { name: "选择目标目录" }).click();
+  await expect(page.locator('.remote-paths-dropdown [role="treeitem"][data-key="/PhotoCloud/Backup"]')).toBeVisible();
 });
 
 test("edits Cloud Sync continuous direction, deletion policy and polling without persisting runtime state", async ({ page }) => {
@@ -151,8 +150,8 @@ test("edits Cloud Sync continuous direction, deletion policy and polling without
   await expect(dialog).toBeHidden();
   expect(enabled).toBe(true);
 
-  await page.getByRole("button", { name: "新建任务", exact: true }).click();
-  await dialog.getByRole("button", { name: "高级设置", exact: true }).click();
+  await page.getByRole("button", { name: "返回任务列表", exact: true }).click();
+  await page.getByRole("button", { name: "新建同步任务", exact: true }).click();
   await expect(page.getByRole("dialog").getByRole("radiogroup", { name: "同步方向" })).toBeVisible();
   await expect(page.getByRole("dialog").getByRole("switch", { name: "镜像对齐", exact: true })).toBeVisible();
   await page.getByRole("dialog").getByRole("button", { name: "取消", exact: true }).click();

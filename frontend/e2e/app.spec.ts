@@ -30,19 +30,17 @@ test("opens usable task workspace without a second login", async ({ page }) => {
   await page.goto("/app/opensync/tasks");
   await expect(page.getByRole("main")).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "新建任务", exact: true }),
+    page.getByRole("button", { name: "返回任务列表", exact: true }),
   ).toBeVisible();
   await expect(page.getByText("密码", { exact: true })).toHaveCount(0);
   await expect(page.locator(".task-workspace")).toBeVisible();
 });
 
 test("opens task editor with step navigation", async ({ page }) => {
-  await page.goto("/app/opensync/tasks");
-  await page.getByRole("button", { name: "新建任务", exact: true }).click();
+  await page.goto("/app/opensync/sync");
+  await page.getByRole("button", { name: "新建同步任务", exact: true }).click();
   const dialog = page.getByRole("dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog.getByRole("heading", { name: "选择网盘", exact: true })).toBeVisible();
-  await dialog.getByRole("button", { name: "高级设置", exact: true }).click();
   await expect(
     page.getByRole("heading", { name: "新建持续同步任务", exact: true }),
   ).toBeVisible();

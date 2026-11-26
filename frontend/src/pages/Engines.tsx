@@ -534,7 +534,7 @@ export default function Engines() {
                           color="cyan"
                           className="engine-clickable-tag"
                           onClick={() =>
-                            navigate(`/dashboard?storage=${encodeURIComponent(item.name)}`)
+                            navigate(`/sync?storage=${encodeURIComponent(item.name)}`)
                           }
                         >
                           {item.usedByJobs.length} 个任务

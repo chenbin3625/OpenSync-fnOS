@@ -219,7 +219,7 @@ test("continuous sync stays on overview and opens realtime details on demand", a
   await page.goto("/app/opensync/tasks?jobId=2");
   const toolbar = page.locator(".page-toolbar");
   await expect(
-    toolbar.getByRole("tab", { name: "总览", exact: true }),
+    toolbar.getByRole("tab", { name: "任务详情", exact: true }),
   ).toHaveAttribute("aria-selected", "true");
   await expect(page.locator(".continuous-live-progress")).toBeVisible();
 

@@ -245,11 +245,13 @@ async function routeDashboardFixtures(page: Page) {
         })),
         count: richDashboardFixture.jobs.length,
       });
+    if (url.pathname.endsWith("/job/batch"))
+      return success({ succeeded: 1, failed: 0 });
     return success(null);
   });
 }
 
-test("dashboard renders KPI cards, padded section header, status filters and zero overflow", async ({
+test("dashboard monitors live activity and links to the filtered task list", async ({
   page,
 }, testInfo) => {
   await routeDashboardFixtures(page);
@@ -261,8 +263,9 @@ test("dashboard renders KPI cards, padded section header, status filters and zer
   await expect(page.locator(".dashboard-live-card")).toBeVisible();
   await expect(page.locator(".dashboard-speed-chart")).toBeVisible();
   await expect(page.locator(".dashboard-live-task-row")).toHaveCount(2);
-  await expect(page.locator(".dashboard-job-speed").first()).toContainText("24.60 MB/s");
-  await expect(page.locator(".dashboard-job-row")).toHaveCount(5);
+  await expect(page.locator(".dashboard-live-task-speed").first()).toContainText("24.60 MB/s");
+  await expect(page.locator(".sync-overview-row")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "新建同步任务" })).toHaveCount(0);
 
   // Switch between Sync Trend and Storage Quota insights
   await page.getByRole("tab", { name: /存储配额/ }).click();
@@ -271,7 +274,7 @@ test("dashboard renders KPI cards, padded section header, status filters and zer
   await expect(page.locator(".dashboard-trend-chart")).toBeVisible();
 
   // Section card header must have explicit padding & flex layout (no unstyled header regression)
-  const cardHead = page.locator(".dashboard-jobs-card .section-card-head");
+  const cardHead = page.locator(".dashboard-live-card .section-card-head");
   await expect(cardHead).toBeVisible();
   await expect(cardHead).toHaveCSS("display", "flex");
   const paddingLeft = await cardHead.evaluate((el) =>
@@ -292,27 +295,6 @@ test("dashboard renders KPI cards, padded section header, status filters and zer
       fullPage: true,
     });
   }
-
-  // Interactive status pill filtering + reset
-  await page.getByRole("button", { name: /同步异常/ }).click();
-  await expect(page.locator(".dashboard-job-row")).toHaveCount(1);
-  await expect(page.locator(".dashboard-job-row")).toContainText("工作文档异地容灾");
-  await page.getByRole("button", { name: "重置筛选" }).click();
-  await expect(page.locator(".dashboard-job-row")).toHaveCount(5);
-
-  // Batch selection bar appears on selecting a row
-  await page.locator(".dashboard-job-row .dashboard-job-check .semi-checkbox").first().click();
-  await expect(page.locator(".batch-action-bar")).toBeVisible();
-  await expect(page.locator(".batch-action-bar")).toContainText("已选中 1 个任务");
-  await page.getByRole("button", { name: "取消选择" }).click();
-  await expect(page.locator(".batch-action-bar")).toHaveCount(0);
-
-  // Verify checkbox and job info sit tightly adjacent (regression guard for grid auto-placement)
-  const firstCheckBox = await page.locator(".dashboard-job-check").first().boundingBox();
-  const firstInfoBox = await page.locator(".dashboard-job-info").first().boundingBox();
-  expect(firstCheckBox).not.toBeNull();
-  expect(firstInfoBox).not.toBeNull();
-  expect(firstInfoBox!.x - (firstCheckBox!.x + firstCheckBox!.width)).toBeLessThanOrEqual(24);
 
   // Speed chart SVG and Y-axis must stay strictly contained inside .dashboard-speed-chart
   // and never overflow onto the active tasks list (regression guard for wide viewports).
@@ -341,7 +323,7 @@ test("dashboard renders KPI cards, padded section header, status filters and zer
   });
   const firstKpiCard = page.locator(".dashboard-kpi-card").first();
   await expect(firstKpiCard).toHaveCSS("background-color", "rgb(46, 48, 54)");
-  await expect(page.locator(".dashboard-job-title-btn").first()).toHaveCSS(
+  await expect(page.locator(".dashboard-live-task-name").first()).toHaveCSS(
     "color",
     "rgb(232, 234, 238)",
   );
@@ -352,6 +334,26 @@ test("dashboard renders KPI cards, padded section header, status filters and zer
       fullPage: true,
     });
   }
+
+  await page.locator(".dashboard-kpi-card").last().click();
+  await expect(page).toHaveURL(/\/sync\?status=failed$/);
+  const rows = page.locator(".sync-overview-row");
+  await expect(rows).toHaveCount(1);
+  await expect(rows).toContainText("工作文档异地容灾");
+  await page.getByRole("button", { name: "重置筛选" }).click();
+  await expect(rows).toHaveCount(5);
+
+  await rows.filter({ hasText: "家庭相册每日备份" }).locator(".semi-checkbox").click();
+  await expect(page.locator(".batch-action-bar")).toContainText("已选中 1 个任务");
+  const batch = page.waitForRequest((request) => request.url().endsWith("/job/batch"));
+  await page.getByRole("button", { name: "批量立即同步" }).click();
+  expect((await batch).postDataJSON()).toEqual({ action: "run", ids: [1] });
+  await expect(page.locator(".batch-action-bar")).toHaveCount(0);
+
+  await page.goto("/app/opensync/dashboard?storage=AliyunDrive");
+  await expect(page).toHaveURL(/\/sync\?storage=AliyunDrive$/);
+  await expect(rows).toHaveCount(1);
+  await expect(rows).toContainText("家庭相册每日备份");
 });
 
 test("dashboard chart stays bounded at 1920px and stays flicker-free across live polls", async ({

@@ -135,9 +135,8 @@ test("creates a WebDAV storage and continuous task, then edits without changing 
     await expect(
       page.locator(".storage-card").filter({ hasText: name }).getByRole("heading"),
     ).toBeVisible();
-    await page.goto("/app/opensync/tasks");
-    await page.getByRole("button", { name: "新建任务", exact: true }).click();
-    await page.getByRole("button", { name: "高级设置", exact: true }).click();
+    await page.goto("/app/opensync/sync");
+    await page.getByRole("button", { name: "新建同步任务", exact: true }).click();
     const dialog = page.getByRole("dialog");
     const manualPath = dialog.getByPlaceholder("/存储名称/存储桶/子目录");
     await manualPath.fill(`/${name}/Photos`);

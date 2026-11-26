@@ -109,7 +109,7 @@ export function RemotePaths({
   // 多选只负责保留用户明确勾选的目录，不做“选父自动选子”的隐藏级联。
   multiple = false,
   remotes,
-  storageRoot,
+  initialExpandedRoot,
   ariaLabel,
   "aria-labelledby": ariaLabelledBy,
 }: {
@@ -119,7 +119,7 @@ export function RemotePaths({
   onChange: (paths: string[]) => void;
   multiple?: boolean;
   remotes?: readonly NativeRemoteItem[];
-  storageRoot?: string;
+  initialExpandedRoot?: string;
   /** 同一表单中有多个目录选择框时，用不同名称让读屏用户区分 */
   ariaLabel?: string;
   "aria-labelledby"?: string;
@@ -129,11 +129,10 @@ export function RemotePaths({
   const onLoaded = useCallback(
     ({ path }: { path: string; children: TreeNodeData[] }) => {
       setLoadFailed(false);
-      // 根目录加载完成后，只展开根节点（显示一级目录）
-      if (path === "/") return storageRoot ? ["/", storageRoot] : ["/"];
-      if (path === storageRoot) return [path];
+      if (path === "/") return initialExpandedRoot ? ["/", initialExpandedRoot] : ["/"];
+      if (path === initialExpandedRoot) return [path];
     },
-    [storageRoot],
+    [initialExpandedRoot],
   );
 
   const onError = useCallback(() => setLoadFailed(true), []);
@@ -159,29 +158,22 @@ export function RemotePaths({
 
   useEffect(() => {
     const controller = resetTree(seed(value), []);
-    if (engineId && storageRoot) {
+    if (engineId && initialExpandedRoot) {
       void loadData().then(() => {
-        if (!controller.signal.aborted) return loadData({ key: storageRoot });
+        if (!controller.signal.aborted) return loadData({ key: initialExpandedRoot });
       });
     } else if (engineId) {
       void loadData();
     }
-  }, [engineId, resetTree, loadData, storageRoot]);
+  }, [engineId, resetTree, loadData, initialExpandedRoot]);
 
   // Keep manually added paths (e.g. non-existent native target subdirectories)
   // present in treeData so TreeSelect renders and removes their tags reliably,
   // while disabling non-syncable synthetic roots (/, /本地, bucketless object stores).
   const displayTreeData = useMemo(() => {
     const merged = value.length ? mergeMissingNodes(treeData, seed(value)) : treeData;
-    const scoped = storageRoot
-      ? merged.flatMap((node) =>
-          (node.key === "/" ? node.children || [] : [node]).filter(
-            (child) => child.key === storageRoot,
-          ),
-        )
-      : merged;
-    return applyDisabledPickerNodes(scoped, remotes);
-  }, [treeData, value, remotes, storageRoot]);
+    return applyDisabledPickerNodes(merged, remotes);
+  }, [treeData, value, remotes]);
 
   // 节点名不换行，过长时可横向滚动；悬停显示完整路径
   const renderLabel = useCallback(

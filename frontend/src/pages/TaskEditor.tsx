@@ -39,6 +39,7 @@ import {
   confirmAction,
   errorToast,
 } from "../components/common";
+import { NativeStorageEditor } from "../components/NativeStorageEditor";
 import { BwLimitEditor } from "../components/BwLimitEditor";
 import { ExcludeTree } from "../components/ExcludeTree";
 import { FileTypeFilter } from "../components/FileTypeFilter";
@@ -81,6 +82,7 @@ import {
   type JobFieldErrorKey,
   type JobForm,
 } from "../lib/taskForm";
+import { formatDisplayPath } from "../lib/syncPathPreview";
 import {
   compareModeOptions,
   conflictPolicyOptions,
@@ -103,7 +105,6 @@ import type {
   JobItem,
   NativeRemoteItem,
 } from "../types";
-import { QuickSyncEditor } from "./QuickSyncEditor";
 
 export { parseIntervalInput };
 export { hasPendingFileSizeDraftChange, mergeFileSizeDrafts };
@@ -111,8 +112,6 @@ export { hasPendingFileSizeDraftChange, mergeFileSizeDrafts };
 export interface TaskEditorSavedResult {
   createdId?: number;
   mirrorPreviewId?: number;
-  runNow?: boolean;
-  method: number;
 }
 
 const taskEditorTabs = [
@@ -221,39 +220,26 @@ type TaskEditorProps = {
   enginesError?: string;
   onRetryEngines?: () => void;
   onNavigateEngines?: () => void;
+  onStorageChanged?: () => void;
   onClose: () => void;
   onSaved: (result: TaskEditorSavedResult) => void;
 };
 
-export default function TaskEditor(props: TaskEditorProps) {
-  const [advancedDraft, setAdvancedDraft] = useState<JobForm>();
-  if (props.job || props.initialDraft || advancedDraft) {
-    return <AdvancedTaskEditor {...props} advancedDraft={advancedDraft} />;
-  }
-  return (
-    <QuickSyncEditor
-      initialRemote={props.initialRemote}
-      existingJobs={props.existingJobs}
-      onAdvanced={setAdvancedDraft}
-      onClose={props.onClose}
-      onSaved={props.onSaved}
-    />
-  );
-}
-
-function AdvancedTaskEditor({
+export default function TaskEditor({
   job,
   initialDraft,
-  advancedDraft,
+  initialRemote,
   engines,
   existingJobs,
   enginesError,
   onRetryEngines,
   onNavigateEngines,
+  onStorageChanged,
   onClose,
   onSaved,
-}: TaskEditorProps & { advancedDraft?: JobForm }) {
-  const defaultEngineId = engines[0]?.id;
+}: TaskEditorProps) {
+  const nativeStorage = useResource((signal) => api.nativeStorageState(signal));
+  const defaultEngineId = engines[0]?.id || nativeStorage.data?.engineId || undefined;
   const seedForm = useMemo(
     () =>
       initialDraft
@@ -265,7 +251,7 @@ function AdvancedTaskEditor({
           }
         : job
           ? { ...jobToForm(job), alistId: job.alistId || defaultEngineId }
-          : advancedDraft ?? defaultJobForm(defaultEngineId),
+          : defaultJobForm(defaultEngineId),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
   );
@@ -278,7 +264,8 @@ function AdvancedTaskEditor({
       );
     }
   }, [defaultEngineId, form.alistId, setForm]);
-  const nativeStorage = useResource((signal) => api.nativeStorageState(signal));
+  const [addingStorage, setAddingStorage] = useState(false);
+  const [preferredRemote, setPreferredRemote] = useState(initialRemote);
   const [nativeTarget, setNativeTarget] = useState("");
   const dirCacheRef = useRef<RemoteDirCache | null>(null);
   if (!dirCacheRef.current) {
@@ -310,7 +297,7 @@ function AdvancedTaskEditor({
 
   const effectiveDirty =
     dirty ||
-    Boolean(initialDraft || advancedDraft?.srcPath.length || advancedDraft?.dstPath.length) ||
+    Boolean(initialDraft) ||
     hasPendingFileSizeDraftChange(form, fileSizeDrafts);
 
   const [policyOpen, setPolicyOpen] = useState<boolean>(() =>
@@ -321,7 +308,7 @@ function AdvancedTaskEditor({
     ),
   );
   const [compareModeSource, setCompareModeSource] = useState<CompareModeSource>(
-    () => (seedForm.compareMode === 0 ? "default" : advancedDraft ? "auto" : "manual"),
+    () => (seedForm.compareMode === 0 ? "default" : "manual"),
   );
   const [advancedOpen, setAdvancedOpen] = useState<boolean>(() =>
     Boolean(
@@ -400,10 +387,21 @@ function AdvancedTaskEditor({
     if (scrollRef.current) scrollRef.current.scrollTop = 0;
   }, [activePanel]);
 
-  const mergedForm = useMemo(
-    () => mergeFileSizeDrafts(form, fileSizeDrafts),
-    [form, fileSizeDrafts],
+  const source = form.srcPath[0];
+  const target = form.dstPath[0];
+  const [sourceRoot, targetRoot] = [source, target].map(
+    (path) => path?.split("/").filter(Boolean)[0],
   );
+  const localPath = sourceRoot === "本地" ? source : targetRoot === "本地" ? target : undefined;
+  const remoteRoot = sourceRoot === "本地" ? targetRoot : sourceRoot;
+  const generatedName =
+    isNew && !initialDraft && source && target && localPath && remoteRoot && remoteRoot !== "本地"
+      ? `${formatDisplayPath(localPath).split("/").filter(Boolean).at(-1)} · ${remoteRoot}`
+      : "";
+  const mergedForm = useMemo(() => {
+    const merged = mergeFileSizeDrafts(form, fileSizeDrafts);
+    return generatedName && !merged.remark.trim() ? { ...merged, remark: generatedName } : merged;
+  }, [form, fileSizeDrafts, generatedName]);
   const validationOptions = useMemo(
     () => ({
       storedDstMap: job?.dstMap,
@@ -536,8 +534,6 @@ function AdvancedTaskEditor({
         onSaved({
           createdId,
           mirrorPreviewId: reviewMirror ? createdId ?? job?.id : undefined,
-          runNow: false,
-          method: payload.method,
         });
       } catch (err) {
         errorToast(err);
@@ -742,6 +738,12 @@ function AdvancedTaskEditor({
   );
 
   const activeDirection = activeDirectionFromForm(form);
+  const preferredRoot = preferredRemote ? `/${preferredRemote}` : undefined;
+  const refreshFolders = () => {
+    dirCacheRef.current?.invalidateEngine(form.alistId);
+    setRemoteTreeEpoch((epoch) => epoch + 1);
+    void nativeStorage.refresh();
+  };
   const legacySchedule = Boolean(job && form.isCron !== 3);
   const srcMultiple = form.method !== 3 || form.srcPath.length > 1;
   const dstMultiple = (form.method !== 3 && form.method !== 2) || form.dstPath.length > 1;
@@ -876,7 +878,7 @@ function AdvancedTaskEditor({
     <RemoteDirCacheProvider cache={dirCacheRef.current}>
       <Editor
         title={job ? legacySchedule ? "编辑同步任务" : "编辑持续同步任务" : initialDraft ? "复制同步任务" : "新建持续同步任务"}
-        visible
+        visible={!addingStorage}
         busy={action.busy}
         onClose={onClose}
         onSave={save}
@@ -997,7 +999,7 @@ function AdvancedTaskEditor({
                     <Input
                       value={form.remark}
                       onChange={(value) => change("remark", value)}
-                      placeholder="例如：相册持续同步到夸克网盘"
+                      placeholder={generatedName || "例如：相册持续同步到夸克网盘"}
                     />
                   </Field>
 
@@ -1009,7 +1011,7 @@ function AdvancedTaskEditor({
                     />
                   )}
 
-                  {!enginesError && engines.length === 0 && (
+                  {!enginesError && !form.alistId && (
                     <div className="engine-empty-guide" role="status">
                       <IconInfoCircle aria-hidden="true" size="small" />
                       <span>
@@ -1024,6 +1026,26 @@ function AdvancedTaskEditor({
                         >
                           前往存储管理
                         </Button>
+                      )}
+                    </div>
+                  )}
+
+                  {isNew && (
+                    <div className="field-group">
+                      <Button
+                        size="small"
+                        theme="light"
+                        onClick={() => setAddingStorage(true)}
+                      >
+                        添加网盘连接
+                      </Button>
+                      {preferredRemote && <span className="muted">优先浏览 {preferredRemote}</span>}
+                      {nativeStorage.data && !nativeStorage.data.localRoots?.length && (
+                        <InlineNotice
+                          role="status"
+                          message="需要同步 NAS 目录时，请在飞牛「应用设置 → 文件夹访问权限」中授权后刷新目录。"
+                          action={<Button size="small" onClick={refreshFolders}>刷新目录</Button>}
+                        />
                       )}
                     </div>
                   )}
@@ -1105,6 +1127,7 @@ function AdvancedTaskEditor({
                         value={form.srcPath}
                         onChange={handleSrcPathChange}
                         multiple={srcMultiple}
+                        initialExpandedRoot={activeDirection === "download" ? preferredRoot : activeDirection === "upload" ? "/本地" : undefined}
                         remotes={nativeStorage.data?.remotes}
                         ariaLabel="选择源目录"
                       />
@@ -1121,6 +1144,7 @@ function AdvancedTaskEditor({
                         value={form.dstPath}
                         onChange={handleDstPathChange}
                         multiple={dstMultiple}
+                        initialExpandedRoot={activeDirection === "download" ? "/本地" : preferredRoot}
                         remotes={nativeStorage.data?.remotes}
                         ariaLabel="选择目标目录"
                       />
@@ -2672,6 +2696,18 @@ function AdvancedTaskEditor({
           </fieldset>
         </Form>
       </Editor>
+      {addingStorage && (
+        <NativeStorageEditor
+          mode="form"
+          onClose={() => setAddingStorage(false)}
+          onSaved={(savedName) => {
+            setAddingStorage(false);
+            if (savedName) setPreferredRemote(savedName);
+            refreshFolders();
+            onStorageChanged?.();
+          }}
+        />
+      )}
       {quickCryptOpen && dstEncryption.encryptable.length > 0 && (
         <QuickCryptModal
           targets={dstEncryption.encryptable}

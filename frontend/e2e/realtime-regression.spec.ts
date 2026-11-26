@@ -1382,9 +1382,8 @@ test("remote path load errors remain actionable", async ({ page }) => {
     return response(200, null);
   });
 
-  await page.goto("/app/opensync/tasks");
-  await page.getByRole("button", { name: "新建任务", exact: true }).click();
-  await page.getByRole("button", { name: "高级设置", exact: true }).click();
+  await page.goto("/app/opensync/sync");
+  await page.getByRole("button", { name: "新建同步任务", exact: true }).click();
   await expect(page.getByText("目录暂时不可用").first()).toBeVisible();
   await expect(page.getByRole("button", { name: "重试" }).first()).toBeVisible();
 });

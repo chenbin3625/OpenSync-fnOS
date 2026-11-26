@@ -16,6 +16,7 @@ import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
 import {
   IconAlertTriangle,
+  IconArrowLeft,
   IconArrowRight,
   IconChevronRight,
   IconClockStroked,
@@ -398,31 +399,6 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
   );
   const conflictPreview = Boolean(selected?.method === 3 && params.get("conflicts") === "1");
   const closeMirrorPreview = () => update({ mirrorPreview: null }, { replace: true });
-  const emptyAction =
-    !engines.loading && !engines.error && (engines.data?.length ?? 0) === 0 ? (
-      <div className="empty-guide">
-        <span className="muted">
-          存储服务尚未就绪，请先前往存储管理检查本地目录或添加远程存储
-        </span>
-        <Button
-          type="primary"
-          theme="solid"
-          onClick={() => navigate("/engines")}
-        >
-          前往存储管理
-        </Button>
-      </div>
-    ) : !engines.loading ? (
-      <Button
-        type="primary"
-        theme="solid"
-        icon={<IconPlusStroked aria-hidden="true" />}
-        onClick={() => setEditor({ open: true, job: null })}
-      >
-        新建同步任务
-      </Button>
-    ) : undefined;
-
   return (
     <div className="page task-page">
       {overview ? (
@@ -452,25 +428,24 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
             <SyncOverview
               jobs={list}
               remotes={storage.data?.remotes || []}
-              busy={actions.busy}
+              engines={engines.data || []}
               onAdd={(initialRemote) => setEditor({ open: true, job: null, initialRemote })}
-              onToggle={toggleSync}
-              onRetry={(job) => triggerSyncNow(job.id)}
               onRepair={setRepair}
               onLocalFolders={() => setRepair("local")}
+              onJobsChanged={() => refreshJobs({ skipCurrentTask: true })}
             />
           )}
         </>
       ) : <>
       <Header
-        title="任务管理"
+        title="任务详情"
         tabs={
           <Tabs
             activeKey={tab}
             onChange={(key) => update({ tab: key })}
             keepDOM={false}
           >
-            <Tabs.TabPane tab="总览" itemKey="overview" />
+            <Tabs.TabPane tab="任务详情" itemKey="overview" />
             <Tabs.TabPane tab="历史任务" itemKey="history" />
             <Tabs.TabPane
               tab={
@@ -496,15 +471,12 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
           </Tabs>
         }
         actions={
-          tab === "overview" ? (
-            <Button
-              theme="solid"
-              icon={<IconPlusStroked aria-hidden="true" />}
-              onClick={() => setEditor({ open: true, job: null })}
-            >
-              新建任务
-            </Button>
-          ) : undefined
+          <Button
+            theme="borderless"
+            icon={<IconArrowLeft aria-hidden="true" />}
+            aria-label="返回任务列表"
+            onClick={() => navigate("/sync")}
+          />
         }
       />
       {engines.error && !engines.loading && (
@@ -572,7 +544,7 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
         }
       >
         {!jobs.loading && !jobs.error && !jobs.data?.count ? (
-          <EmptyState action={emptyAction} />
+          <EmptyState />
         ) : (
           <section className="task-detail-pane flex-column">
             {jobs.data && jobs.refreshError && (
@@ -782,6 +754,10 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
             existingJobs={list}
             enginesError={engines.error}
             onRetryEngines={() => void engines.refresh()}
+            onStorageChanged={() => {
+              void engines.refresh(true);
+              if (overview) void storage.refresh(true);
+            }}
             onNavigateEngines={() => {
               setEditor({ open: false, job: null });
               navigate("/engines");
