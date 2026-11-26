@@ -583,11 +583,55 @@ describe("existing synchronization contracts", () => {
     expect(form.multiThreadStreams).toBe(8);
     expect(form.createEmptySrcDirs).toBe(true);
     expect(form.followSymlinks).toBe(true);
-    expect(form.extraFlags).toEqual({
+    expect(form.extraFlags).toMatchObject({
       noUpdateModtime: true,
       inplace: false,
       checkFirst: true,
       s3NoHead: true,
+    });
+
+    const extendedForm = jobToForm({
+      ...stored,
+      extraFlags: JSON.stringify({
+        noUpdateModtime: true,
+        ignoreSize: true,
+        trackRenames: true,
+        useMmap: true,
+        maxTransfer: "50G",
+        cutoffMode: "soft",
+        maxDuration: "2h",
+        orderBy: "size,ascending",
+        maxBacklog: 1000,
+        bufferSize: "32M",
+        multiThreadCutoff: "100M",
+        multiThreadChunkSize: "16M",
+        userAgent: "OpenSync/1.0",
+        ioTimeout: "3m",
+        conTimeout: "30s",
+        bisyncResyncMode: "newer",
+        bisyncMaxDelete: 25,
+        bisyncForce: true,
+      }),
+    });
+    expect(JSON.parse(buildJobPayload(extendedForm).extraFlags)).toMatchObject({
+      noUpdateModtime: true,
+      ignoreSize: true,
+      trackRenames: true,
+      useMmap: true,
+      maxTransfer: "50G",
+      cutoffMode: "soft",
+      maxDuration: "2h",
+      orderBy: "size,ascending",
+      maxBacklog: 1000,
+      bufferSize: "32M",
+      multiThreadCutoff: "100M",
+      multiThreadChunkSize: "16M",
+      userAgent: "OpenSync/1.0",
+      ioTimeout: "3m",
+      conTimeout: "30s",
+      bisyncResyncMode: "newer",
+      bisyncMaxDelete: 25,
+      bisyncForce: true,
     });
 
     const payload = buildJobPayload(form);

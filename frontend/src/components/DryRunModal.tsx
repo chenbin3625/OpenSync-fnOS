@@ -15,6 +15,7 @@ import {
 import { api } from "../api/client";
 import { EmptyState, InlineNotice, errorToast } from "./common";
 import { formatSize, methodLabel } from "../pages/Home/homeUtils";
+import { formatDisplayPath } from "../lib/syncPathPreview";
 import type { DryRunItem, DryRunResult } from "../types";
 
 const actionMeta: Record<
@@ -349,7 +350,9 @@ export function DryRunModal({
                               <strong>{record.fileName}</strong>
                             </Tooltip>
                             <span className="muted">
-                              {record.dstPath || record.srcPath || "—"}
+                              {formatDisplayPath(
+                                record.dstPath || record.srcPath || "",
+                              ) || "—"}
                             </span>
                           </div>
                         ),

@@ -36,6 +36,7 @@ import {
 import { useAction, useMediaQuery, useResource } from "../lib/hooks";
 import { historyRangeParams } from "../lib/historyFilters";
 import { useClampedPage } from "../lib/pagination";
+import { formatDisplayPath } from "../lib/syncPathPreview";
 import { useRealtimeTask } from "./Home/useRealtimeTask";
 import { useRealtimeTaskItems } from "./Home/useRealtimeTaskItems";
 import {
@@ -694,21 +695,20 @@ export const FileTable = memo(function FileTable({
         title: "文件 / 目录",
         width: fileTableWidths.name,
         className: "file-col-name",
-        render: (_: unknown, record: TaskItem) => (
-          <div className="file-name">
-            <Tooltip content={getTaskDisplayName(record)} position="topLeft">
-              <strong>{getTaskDisplayName(record)}</strong>
-            </Tooltip>
-            <Tooltip
-              content={record.dstPath || record.srcPath || "—"}
-              position="topLeft"
-            >
-              <span className="muted">
-                {record.dstPath || record.srcPath || "—"}
-              </span>
-            </Tooltip>
-          </div>
-        ),
+        render: (_: unknown, record: TaskItem) => {
+          const itemPath =
+            formatDisplayPath(record.dstPath || record.srcPath || "") || "—";
+          return (
+            <div className="file-name">
+              <Tooltip content={getTaskDisplayName(record)} position="topLeft">
+                <strong>{getTaskDisplayName(record)}</strong>
+              </Tooltip>
+              <Tooltip content={itemPath} position="topLeft">
+                <span className="muted">{itemPath}</span>
+              </Tooltip>
+            </div>
+          );
+        },
       },
       {
         title: "大小",
@@ -896,11 +896,15 @@ const MobileFileRecord = memo(function MobileFileRecord({
         <div className="file-expanded">
           <div>
             <span>源目录</span>
-            <p className="file-expanded-path">{record.srcPath || "—"}</p>
+            <p className="file-expanded-path">
+              {formatDisplayPath(record.srcPath || "") || "—"}
+            </p>
           </div>
           <div>
             <span>目标目录</span>
-            <p className="file-expanded-path">{record.dstPath || "—"}</p>
+            <p className="file-expanded-path">
+              {formatDisplayPath(record.dstPath || "") || "—"}
+            </p>
           </div>
           {record.errMsg && (
             <div className="inline-error">

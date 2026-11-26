@@ -3,6 +3,7 @@ import Button from "@douyinfe/semi-ui/lib/es/button";
 import { IconAlertTriangle } from "@douyinfe/semi-icons";
 import {
   buildSyncPathPreview,
+  formatDisplayPath,
   type ExistingJobPathSummary,
   type SyncPathPreviewItem,
 } from "../lib/syncPathPreview";
@@ -27,18 +28,29 @@ const syncPreviewHelpTip = (
 
 function PreviewRow({
   item,
+  siblingPaths,
   showDirectExample,
 }: {
   item: SyncPathPreviewItem;
+  siblingPaths: readonly string[];
   showDirectExample: boolean;
 }) {
+  const displaySrcDir = formatDisplayPath(item.srcDir, siblingPaths);
+  const displayDstBasePrefix = formatDisplayPath(
+    item.dstBasePrefix,
+    siblingPaths,
+  );
+  const displayResolvedDst = formatDisplayPath(
+    item.resolvedDst,
+    siblingPaths,
+  );
   return (
     <div
       className={`sync-path-preview-item${item.hasConflict ? " is-conflict" : ""}`}
     >
       <div className="sync-path-preview-row">
         <span className="sync-path-preview-role">源</span>
-        <span className="sync-path-preview-path">{item.srcDir}</span>
+        <span className="sync-path-preview-path">{displaySrcDir}</span>
       </div>
       <div className="sync-path-preview-row sync-path-preview-row--dst">
         <span className="sync-path-preview-role sync-path-preview-role--dst">
@@ -46,7 +58,7 @@ function PreviewRow({
         </span>
         <span className="sync-path-preview-path">
           <span className="sync-path-preview-dst-base">
-            {item.dstBasePrefix}
+            {displayDstBasePrefix}
           </span>
           {item.appendedSuffix && (
             <mark className="sync-path-preview-dst-suffix">
@@ -60,7 +72,7 @@ function PreviewRow({
       </div>
       {showDirectExample && (
         <div className="sync-path-preview-example">
-          例：{item.srcDir}a.jpg → {item.resolvedDst}a.jpg
+          例：{displaySrcDir}a.jpg → {displayResolvedDst}a.jpg
         </div>
       )}
     </div>
@@ -99,6 +111,7 @@ export function SyncPathPreview({
       }),
     [srcPaths, dstPaths, storedDstMap, method, existingJobs, currentJobId, engineId],
   );
+  const allPaths = useMemo(() => [...srcPaths, ...dstPaths], [srcPaths, dstPaths]);
   const multipleDestinations = preview.groups.length > 1;
   const singleDirectRoot =
     preview.rule === "single-src" && preview.items.length > 0;
@@ -169,13 +182,14 @@ export function SyncPathPreview({
                       <div className="sync-path-preview-group-title">
                         <span>目标目录</span>
                         <span className="sync-path-preview-group-path">
-                          {group.dstBaseDir}
+                          {formatDisplayPath(group.dstBaseDir, allPaths)}
                         </span>
                       </div>
                       {group.items.map((item) => (
                         <PreviewRow
                           key={item.key}
                           item={item}
+                          siblingPaths={allPaths}
                           showDirectExample={
                             singleDirectRoot &&
                             !item.appendedSuffix &&
@@ -189,6 +203,7 @@ export function SyncPathPreview({
                     <PreviewRow
                       key={item.key}
                       item={item}
+                      siblingPaths={allPaths}
                       showDirectExample={
                         singleDirectRoot &&
                         !item.appendedSuffix &&

@@ -186,8 +186,9 @@ type SessionSpec struct {
 }
 
 type SessionOptions struct {
-	ProxyURL           string
-	InsecureSkipVerify bool
+	ProxyURL              string
+	InsecureSkipVerify    bool
+	PreserveCryptChecksum bool
 }
 
 type Session struct {
@@ -341,10 +342,10 @@ func (c Config) SessionFor(specs []SessionSpec, opts SessionOptions) (*Session, 
 		curMode := modeByRemote[n]
 		curChecksum := checksumByRemote[n]
 		switch p["type"] {
-		case "crypt", "chunker", "compress", "hasher":
+		case "crypt", "chunker", "compress", "hasher", "alias", "archive":
 			ref, _, cutOK := strings.Cut(p["remote"], ":")
 			if cutOK && ref != Local && c[ref] != nil && c[ref]["type"] != "local" {
-				enqueue(ref, curMode, curChecksum && p["type"] != "crypt")
+				enqueue(ref, curMode, curChecksum && (opts.PreserveCryptChecksum || p["type"] != "crypt"))
 			}
 		case "union":
 			if ups, err := ParseUnionUpstreams(p["upstreams"]); err == nil {
@@ -356,6 +357,15 @@ func (c Config) SessionFor(specs []SessionSpec, opts SessionOptions) (*Session, 
 							upMode = diskReadOnly
 						}
 						enqueue(ref, upMode, curChecksum)
+					}
+				}
+			}
+		case "combine":
+			if ups, err := ParseCombineUpstreams(p["upstreams"]); err == nil {
+				for _, up := range ups {
+					ref, _, cutOK := strings.Cut(up.Target, ":")
+					if cutOK && ref != Local && c[ref] != nil && c[ref]["type"] != "local" {
+						enqueue(ref, curMode, curChecksum)
 					}
 				}
 			}
@@ -386,7 +396,7 @@ func (c Config) SessionFor(specs []SessionSpec, opts SessionOptions) (*Session, 
 		if IsWrapperType(p["type"]) {
 			ref, sub, _ := strings.Cut(p["remote"], ":")
 			if ref == Local || (c[ref] != nil && c[ref]["type"] == "local") {
-				pinned, e := s.diskWithMode(sub, curMode, curChecksum && p["type"] != "crypt")
+				pinned, e := s.diskWithMode(sub, curMode, curChecksum && (opts.PreserveCryptChecksum || p["type"] != "crypt"))
 				if e != nil {
 					return nil, e
 				}
@@ -413,6 +423,23 @@ func (c Config) SessionFor(specs []SessionSpec, opts SessionOptions) (*Session, 
 				}
 			}
 			p["upstreams"] = FormatUnionUpstreams(ups)
+		}
+		if p["type"] == "combine" {
+			ups, err := ParseCombineUpstreams(p["upstreams"])
+			if err != nil {
+				return nil, err
+			}
+			for i := range ups {
+				ref, sub, _ := strings.Cut(ups[i].Target, ":")
+				if ref == Local || (c[ref] != nil && c[ref]["type"] == "local") {
+					pinned, e := s.diskWithMode(sub, curMode, curChecksum)
+					if e != nil {
+						return nil, e
+					}
+					ups[i].Target = pinned
+				}
+			}
+			p["upstreams"] = FormatCombineUpstreams(ups)
 		}
 		if p["type"] == "sftp" {
 			if allowHashCheck {

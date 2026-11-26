@@ -24,6 +24,7 @@ import {
   IconPause,
   IconPlay,
   IconPlusStroked,
+  IconRefresh,
   IconServerStroked,
   IconSettingStroked,
   IconTickCircle,
@@ -52,7 +53,11 @@ import {
   PendingApprovalBanner,
 } from "../components/FullSyncApprovalModal";
 import { useAction, useResource } from "../lib/hooks";
-import { buildSyncPathPreview } from "../lib/syncPathPreview";
+import {
+  buildSyncPathPreview,
+  formatDisplayPath,
+  formatDisplayPathList,
+} from "../lib/syncPathPreview";
 import {
   cloneJobToForm,
   resolveJobSelection,
@@ -132,6 +137,23 @@ export default function Tasks() {
   }, [replaceWith, params, setParams]);
   const selectedJobId = selected?.id;
   const deletedJobIdsRef = useRef<Set<number>>(new Set());
+  const hasCryptRemote = useMemo(() => {
+    if (!selected || !engines.data) return false;
+    const eng = engines.data.find((e) => e.id === selected.alistId);
+    if (!eng || (eng.kind !== "rclone" && eng.url !== "rclone://native")) {
+      return false;
+    }
+    const paths = [
+      ...parseJobPathList(selected.srcPath),
+      ...parseJobPathList(selected.dstPath),
+    ];
+    return paths.some((p) => {
+      const seg = p.replace(/^\/+/, "").split("/")[0];
+      if (!seg) return false;
+      const typ = eng.remoteDetails?.[seg]?.type || eng.remotes?.[seg];
+      return typ === "crypt";
+    });
+  }, [selected, engines.data]);
   const [snapshotState, setSnapshotState] = useState<{
     jobId: number;
     ok: boolean;
@@ -536,6 +558,25 @@ export default function Tasks() {
                     onRun={() => triggerRunJob(selected.id, selected.method)}
                     onDryRun={() => setDryRunOpen(true)}
                     onCheck={() => setCheckOpen(true)}
+                    onResyncBisync={() => {
+                      confirmAction({
+                        title: "重建双向同步基线（--resync）？",
+                        content:
+                          "适用于首次运行异常中断或基线清单丢失后的恢复。确认后将立即执行一次带 --resync 的双向同步，以消除基线不一致问题。",
+                        okText: "立即重建并同步",
+                        onOk: () =>
+                          actions.run(async () => {
+                            try {
+                              await api.resetBisyncJob(selected.id, true);
+                              Toast.success("已触发双向基线重建同步");
+                              await refreshJobs();
+                            } catch (err) {
+                              errorToast(err);
+                              throw err;
+                            }
+                          }),
+                      });
+                    }}
                     onClone={() =>
                       setEditor({
                         open: true,
@@ -646,6 +687,7 @@ export default function Tasks() {
         <CheckModal
           jobId={selected.id}
           jobName={getJobName(selected)}
+          hasCryptRemote={hasCryptRemote}
           onClose={() => setCheckOpen(false)}
         />
       )}
@@ -709,6 +751,7 @@ function Overview({
   onRun,
   onDryRun,
   onCheck,
+  onResyncBisync,
   onClone,
   onStop,
   onToggle,
@@ -723,6 +766,7 @@ function Overview({
   onRun: () => void;
   onDryRun: () => void;
   onCheck: () => void;
+  onResyncBisync: () => void;
   onClone: () => void;
   onStop: () => void;
   onToggle: () => void;
@@ -776,6 +820,47 @@ function Overview({
     if (obj.inplace) list.push("原地写入");
     if (obj.checkFirst) list.push("先比对后传输");
     if (obj.s3NoHead) list.push("跳过 S3 HEAD");
+    if (obj.ignoreSize) list.push("忽略大小差异");
+    if (obj.trackRenames) list.push("追踪重命名");
+    if (obj.useMmap) list.push("mmap 缓冲");
+    if (typeof obj.maxTransfer === "string" && obj.maxTransfer.trim()) {
+      list.push(`上限 ${obj.maxTransfer.trim()}`);
+    }
+    if (typeof obj.cutoffMode === "string" && obj.cutoffMode.trim()) {
+      list.push(`截断 ${obj.cutoffMode.trim()}`);
+    }
+    if (typeof obj.maxDuration === "string" && obj.maxDuration.trim()) {
+      list.push(`限时 ${obj.maxDuration.trim()}`);
+    }
+    if (typeof obj.orderBy === "string" && obj.orderBy.trim()) {
+      list.push(`排序 ${obj.orderBy.trim()}`);
+    }
+    if (Number(obj.maxBacklog || 0) > 0) list.push(`队列上限 ${obj.maxBacklog}`);
+    if (typeof obj.bufferSize === "string" && obj.bufferSize.trim()) {
+      list.push(`缓冲 ${obj.bufferSize.trim()}`);
+    }
+    if (typeof obj.multiThreadCutoff === "string" && obj.multiThreadCutoff.trim()) {
+      list.push(`多线程阈值 ${obj.multiThreadCutoff.trim()}`);
+    }
+    if (typeof obj.multiThreadChunkSize === "string" && obj.multiThreadChunkSize.trim()) {
+      list.push(`多线程块 ${obj.multiThreadChunkSize.trim()}`);
+    }
+    if (typeof obj.userAgent === "string" && obj.userAgent.trim()) {
+      list.push("自定义 UA");
+    }
+    if (typeof obj.ioTimeout === "string" && obj.ioTimeout.trim()) {
+      list.push(`I/O超时 ${obj.ioTimeout.trim()}`);
+    }
+    if (typeof obj.conTimeout === "string" && obj.conTimeout.trim()) {
+      list.push(`连接超时 ${obj.conTimeout.trim()}`);
+    }
+    if (typeof obj.bisyncResyncMode === "string" && obj.bisyncResyncMode.trim()) {
+      list.push(`基线策略 ${obj.bisyncResyncMode.trim()}`);
+    }
+    if (Number(obj.bisyncMaxDelete || 0) > 0) {
+      list.push(`最多删除 ${obj.bisyncMaxDelete}`);
+    }
+    if (obj.bisyncForce) list.push("强制(--force)");
     return list;
   }, [job.extraFlags]);
   const throttleLabels = [
@@ -798,11 +883,14 @@ function Overview({
     Boolean(job.followSymlinks) ? "跟随符号链接" : "",
     ...extraFlagLabels,
   ].filter(Boolean);
+  const srcList = parseJobPathList(job.srcPath);
+  const dstList = parseJobPathList(job.dstPath);
+  const displaySiblings = [...srcList, ...dstList];
   const pathPreview = useMemo(
     () =>
       buildSyncPathPreview({
-        srcPaths: parseJobPathList(job.srcPath),
-        dstPaths: parseJobPathList(job.dstPath),
+        srcPaths: srcList,
+        dstPaths: dstList,
         storedDstMap: job.dstMap,
         method: job.method,
       }),
@@ -824,6 +912,15 @@ function Overview({
             icon: <IconTickCircle aria-hidden="true" />,
             onClick: onCheck,
           },
+          ...(job.method === 3
+            ? [
+                {
+                  label: "重建双向基线（--resync）",
+                  icon: <IconRefresh aria-hidden="true" />,
+                  onClick: onResyncBisync,
+                },
+              ]
+            : []),
         ]
       : []),
     {
@@ -940,7 +1037,7 @@ function Overview({
               源目录
             </div>
             <div className="flow-sub flow-paths">
-              {parseJobPathList(job.srcPath).join("\n") || "—"}
+              {formatDisplayPathList(srcList, displaySiblings).join("\n") || "—"}
             </div>
           </div>
           <IconChevronRightStroked className="flow-arrow" aria-hidden="true" />
@@ -950,7 +1047,7 @@ function Overview({
               目标目录
             </div>
             <div className="flow-sub flow-paths">
-              {parseJobPathList(job.dstPath).join("\n") || "—"}
+              {formatDisplayPathList(dstList, displaySiblings).join("\n") || "—"}
             </div>
           </div>
           <div className="flow-node flow-next">
@@ -999,7 +1096,8 @@ function Overview({
                 <div className="overview-path-mapping">
                   {pathPreview.items.map((item) => (
                     <div key={item.key}>
-                      {item.srcDir} → {item.resolvedDst}
+                      {formatDisplayPath(item.srcDir, displaySiblings)} →{" "}
+                      {formatDisplayPath(item.resolvedDst, displaySiblings)}
                     </div>
                   ))}
                 </div>

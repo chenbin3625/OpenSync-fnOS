@@ -508,8 +508,9 @@ func CancelDryRun(c *gin.Context) {
 // StartJobCheck handles POST /svr/job/check
 func StartJobCheck(c *gin.Context) {
 	var req struct {
-		ID       *flexibleID `json:"id"`
-		Download bool        `json:"download"`
+		ID         *flexibleID `json:"id"`
+		Download   bool        `json:"download"`
+		CryptCheck bool        `json:"cryptCheck"`
 	}
 	if !bindJSONStrict(c, &req) {
 		return
@@ -524,7 +525,30 @@ func StartJobCheck(c *gin.Context) {
 		return
 	}
 	handleService(c, func() (interface{}, error) {
-		return service.StartJobCheck(jobID, req.Download)
+		return service.StartJobCheck(jobID, req.Download, req.CryptCheck)
+	})
+}
+
+// ResetBisyncJob handles POST /svr/job/bisync/resync
+func ResetBisyncJob(c *gin.Context) {
+	var req struct {
+		ID     *flexibleID `json:"id"`
+		RunNow bool        `json:"runNow"`
+	}
+	if !bindJSONStrict(c, &req) {
+		return
+	}
+	if req.ID == nil {
+		respondError(c, msg.T(msg.LostPart))
+		return
+	}
+	jobID, err := req.ID.parse()
+	if err != nil {
+		respondError(c, err.Error())
+		return
+	}
+	handleServiceVoid(c, func() error {
+		return service.ResetBisyncJob(jobID, req.RunNow)
 	})
 }
 

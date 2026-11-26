@@ -260,5 +260,96 @@ describe("native storage mock API lifecycle", () => {
     expect(checkRes.data.status).toBe("completed");
     expect(checkRes.data.download).toBe(true);
     expect(checkRes.data.matchedCount).toBeGreaterThan(0);
+
+    // 11. Extended backends (combine / azurefiles), browse write ops, cryptcheck, and bisync resync
+    const cryptCheckRes = await json<{
+      status: string;
+      mode?: string;
+      cryptCheck?: boolean;
+      download: boolean;
+    }>(
+      await fetch(`${apiUrl}/job/check`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: createdJob.data.id, cryptCheck: true }),
+      }),
+    );
+    expect(cryptCheckRes.code).toBe(200);
+    expect(cryptCheckRes.data.mode).toBe("cryptcheck");
+    expect(cryptCheckRes.data.cryptCheck).toBe(true);
+    expect(cryptCheckRes.data.download).toBe(false);
+
+    const resyncRes = await json<null>(
+      await fetch(`${apiUrl}/job/bisync/resync`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: createdJob.data.id, runNow: false }),
+      }),
+    );
+    expect(resyncRes.code).toBe(200);
+
+    const mkdirRes = await json<null>(
+      await fetch(`${apiUrl}/native/storage/mkdir`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: "/ArchiveV2/newdir" }),
+      }),
+    );
+    expect(mkdirRes.code).toBe(200);
+
+    const sizeRes = await json<{ count: number; bytes: number }>(
+      await fetch(`${apiUrl}/native/storage/size`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: "/ArchiveV2" }),
+      }),
+    );
+    expect(sizeRes.code).toBe(200);
+    expect(sizeRes.data.count).toBeGreaterThan(0);
+
+    const copyUrlBlocked = await json<null>(
+      await fetch(`${apiUrl}/native/storage/copyurl`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: "http://127.0.0.1/secret",
+          dstDir: "/ArchiveV2",
+        }),
+      }),
+    );
+    expect(copyUrlBlocked.code).not.toBe(200);
+
+    const copyUrlOk = await json<{ fileName: string }>(
+      await fetch(`${apiUrl}/native/storage/copyurl`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: "https://example.com/archive.tar.gz",
+          dstDir: "/ArchiveV2",
+          autoFilename: true,
+        }),
+      }),
+    );
+    expect(copyUrlOk.code).toBe(200);
+    expect(copyUrlOk.data.fileName).toBe("archive.tar.gz");
+
+    const linkRes = await json<{ url: string }>(
+      await fetch(`${apiUrl}/native/storage/link`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: "/ArchiveV2/backup-report.txt" }),
+      }),
+    );
+    expect(linkRes.code).toBe(200);
+    expect(linkRes.data.url).toContain("ArchiveV2");
+
+    const cleanupRes = await json<null>(
+      await fetch(`${apiUrl}/native/storage/cleanup`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "ArchiveV2" }),
+      }),
+    );
+    expect(cleanupRes.code).toBe(200);
   });
 });

@@ -229,6 +229,54 @@ function sanitizeSrcPathsForDstDerivation(srcPaths: readonly string[]): {
   };
 }
 
+function formatOneDisplayPath(
+  rawPath: string,
+  sanitizeOne: (cleanPath: string) => string,
+): string {
+  const trimmed = String(rawPath ?? "").trim();
+  if (!trimmed) return "";
+  if (pathHasParentSegment(trimmed) || pathHasUnsafeChars(trimmed)) {
+    return trimmed;
+  }
+  const hadTrailingSlash = trimmed.length > 1 && trimmed.endsWith("/");
+  const formatted = sanitizeOne(cleanPosixPath(trimmed));
+  return hadTrailingSlash && formatted !== "/"
+    ? normalizeDirPath(formatted)
+    : formatted;
+}
+
+/**
+ * Formats a virtual sync path for UI display by stripping the `~<12hex>`
+ * native local root fingerprint from the authorized root segment
+ * (`/<storage>/<base>~<12hex>[/...]`).
+ *
+ * When `siblingPaths` is supplied, any root segment whose stripped base name
+ * collides (case-insensitively) with a different raw root segment in
+ * `siblingPaths` retains its fingerprint so distinct volumes stay distinguishable.
+ */
+export function formatDisplayPath(
+  rawPath: string,
+  siblingPaths?: readonly string[],
+): string {
+  const trimmed = String(rawPath ?? "").trim();
+  if (!trimmed) return "";
+  const { sanitizeOne } = sanitizeSrcPathsForDstDerivation(
+    siblingPaths ?? [trimmed],
+  );
+  return formatOneDisplayPath(trimmed, sanitizeOne);
+}
+
+/** Formats a list of virtual sync paths for UI display using the list (or `siblingPaths`) for collision detection. */
+export function formatDisplayPathList(
+  paths: readonly string[],
+  siblingPaths?: readonly string[],
+): string[] {
+  const { sanitizeOne } = sanitizeSrcPathsForDstDerivation(
+    siblingPaths ?? paths,
+  );
+  return paths.map((rawPath) => formatOneDisplayPath(rawPath, sanitizeOne));
+}
+
 function commonSrcSelectionParentRaw(srcPaths: readonly string[]): string {
   if (srcPaths.length < 2) return "";
   let common = cleanPosixPath(srcPaths[0].trim());
@@ -560,10 +608,12 @@ export function buildSyncPathPreview({
     conflicts.push("双向同步模式只允许一个源目录和一个目标目录");
   }
 
+  const allConflictSiblings = [...cleanSrc, ...cleanDst];
+
   const overlap = findOverlappingPair(cleanSrc, cleanDst);
   if (overlap) {
     conflicts.push(
-      `源目录与目标目录不能相同或互相包含（${overlap[0]} / ${overlap[1]}）`,
+      `源目录与目标目录不能相同或互相包含（${formatDisplayPath(overlap[0], allConflictSiblings)} / ${formatDisplayPath(overlap[1], allConflictSiblings)}）`,
     );
     for (const item of items) {
       if (
@@ -578,7 +628,7 @@ export function buildSyncPathPreview({
   const nestedSrc = findNestedPair(cleanSrc);
   if (nestedSrc) {
     conflicts.push(
-      `多个源目录之间不能互相包含（${nestedSrc[0]} / ${nestedSrc[1]}）`,
+      `多个源目录之间不能互相包含（${formatDisplayPath(nestedSrc[0], cleanSrc)} / ${formatDisplayPath(nestedSrc[1], cleanSrc)}）`,
     );
     for (const item of items) {
       for (const otherSrc of cleanSrc) {
@@ -597,7 +647,7 @@ export function buildSyncPathPreview({
   const nestedConfiguredDst = findNestedPair(cleanDst);
   if (nestedConfiguredDst) {
     conflicts.push(
-      `多个目标目录之间不能互相包含（${nestedConfiguredDst[0]} / ${nestedConfiguredDst[1]}）`,
+      `多个目标目录之间不能互相包含（${formatDisplayPath(nestedConfiguredDst[0], cleanDst)} / ${formatDisplayPath(nestedConfiguredDst[1], cleanDst)}）`,
     );
     for (const item of items) {
       for (const otherDst of cleanDst) {
@@ -629,10 +679,13 @@ export function buildSyncPathPreview({
       const [first, second] = nestedResolved;
       const causedByPreserved =
         first.preservedFromStoredMap || second.preservedFromStoredMap;
+      const allResolved = items.map((item) => item.resolvedDst);
+      const firstDisplay = formatDisplayPath(first.resolvedDst, allResolved);
+      const secondDisplay = formatDisplayPath(second.resolvedDst, allResolved);
       conflicts.push(
         causedByPreserved
-          ? `多个目标目录之间不能互相包含（${first.resolvedDst} / ${second.resolvedDst}），修改目标路径可按新规则重新分配`
-          : `多个目标目录之间不能互相包含（${first.resolvedDst} / ${second.resolvedDst}）`,
+          ? `多个目标目录之间不能互相包含（${firstDisplay} / ${secondDisplay}），修改目标路径可按新规则重新分配`
+          : `多个目标目录之间不能互相包含（${firstDisplay} / ${secondDisplay}）`,
       );
     }
   }
@@ -659,7 +712,7 @@ export function buildSyncPathPreview({
           if (!reported.has(msgKey)) {
             reported.add(msgKey);
             conflicts.push(
-              `目标目录与任务「${otherName}」的目标位置冲突（${otherDst}）`,
+              `目标目录与任务「${otherName}」的目标位置冲突（${formatDisplayPath(otherDst)}）`,
             );
           }
         }

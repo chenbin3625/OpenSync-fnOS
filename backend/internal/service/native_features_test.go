@@ -224,7 +224,7 @@ func TestNativeFullSyncMoveBisyncDryRunCheckRenameAndRedaction(t *testing.T) {
 	}
 
 	// Consistency check on synced bisync job should report 2 matched, 0 differ
-	chk, err := StartJobCheck(biJobID, true)
+	chk, err := StartJobCheck(biJobID, true, false)
 	if err != nil {
 		t.Fatalf("StartJobCheck failed: %v", err)
 	}
@@ -303,5 +303,47 @@ func TestNativeFullSyncMoveBisyncDryRunCheckRenameAndRedaction(t *testing.T) {
 		"dstPath": []string{"/b"},
 	}); err == nil {
 		t.Fatal("expected method=3 on non-native engine to be rejected")
+	}
+
+	// --- 6. Storage browser write & size ops + Bisync baseline reset + extended extraFlags ---
+	t.Setenv("TRIM_DATA_ACCESSIBLE_PATHS", strings.Join([]string{srcFull, dstFull, biA, biB}, ":"))
+	if err := MkdirNativeStorage(ctx, NativePathInput{Path: vSrcFull + "/created_sub"}); err != nil {
+		t.Fatalf("MkdirNativeStorage failed: %v", err)
+	}
+	if st, err := os.Stat(filepath.Join(srcFull, "created_sub")); err != nil || !st.IsDir() {
+		t.Fatalf("created_sub missing on disk: %v", err)
+	}
+	if err := MoveNativeStoragePath(ctx, NativeMovePathInput{SrcPath: vSrcFull + "/created_sub", DstPath: vSrcFull + "/renamed_sub", IsDir: true}); err != nil {
+		t.Fatalf("MoveNativeStoragePath failed: %v", err)
+	}
+	if sz, err := SizeNativeStorage(ctx, NativePathInput{Path: vSrcFull}); err != nil || sz.Count == 0 {
+		t.Fatalf("SizeNativeStorage unexpected: %+v (%v)", sz, err)
+	}
+	if err := DeleteNativeStoragePath(ctx, NativeDeletePathInput{Path: vSrcFull + "/renamed_sub", IsDir: true}); err != nil {
+		t.Fatalf("DeleteNativeStoragePath failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(srcFull, "renamed_sub")); !os.IsNotExist(err) {
+		t.Fatal("expected renamed_sub deleted")
+	}
+	if err := ResetBisyncJob(biJobID, true); err != nil {
+		t.Fatalf("ResetBisyncJob failed: %v", err)
+	}
+	jc, _ := GetJobClientByID(biJobID)
+	if !jc.waitUntilIdle(30 * time.Second) {
+		t.Fatalf("bisync job did not finish after ResetBisyncJob")
+	}
+	if _, canonical, err := parseNativeExtraFlags(map[string]interface{}{
+		"maxTransfer":      "1G",
+		"cutoffMode":       "soft",
+		"orderBy":          "size,asc",
+		"bufferSize":       "16M",
+		"useMmap":          true,
+		"bisyncResyncMode": "path1",
+		"bisyncMaxDelete":  50,
+	}); err != nil || !strings.Contains(canonical, `"cutoffMode":"soft"`) {
+		t.Fatalf("parseNativeExtraFlags extended failed: %q (%v)", canonical, err)
+	}
+	if _, _, err := parseNativeExtraFlags(map[string]interface{}{"cutoffMode": "bad"}); err == nil {
+		t.Fatal("expected invalid cutoffMode rejected")
 	}
 }

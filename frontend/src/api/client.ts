@@ -13,10 +13,14 @@ import type {
   JobItem,
   NativeAboutInfo,
   NativeBrowseResult,
+  NativeCopyURLResult,
+  NativeDedupeResult,
   NativeExportResult,
   NativeImportPreview,
   NativeImportResult,
+  NativeLinkResult,
   NativeRenameResult,
+  NativeSizeInfo,
   NativeStorageState,
   NativeStorageTestResult,
   NotifyItem,
@@ -325,6 +329,75 @@ export const api = {
       data,
       timeoutMs: 30 * 60 * 1000,
     }),
+  mkdirNativeStorage: (path: string) =>
+    request("/native/storage/mkdir", { method: "POST", data: { path } }),
+  moveNativeStoragePath: (data: {
+    srcPath: string;
+    dstPath: string;
+    isDir: boolean;
+  }) =>
+    request("/native/storage/move", {
+      method: "POST",
+      data,
+      timeoutMs: 10 * 60 * 1000,
+    }),
+  deleteNativeStoragePath: (data: { path: string; isDir: boolean }) =>
+    request("/native/storage/delete", {
+      method: "POST",
+      data,
+      timeoutMs: 5 * 60 * 1000,
+    }),
+  sizeNativeStorage: (path: string) =>
+    request<NativeSizeInfo>("/native/storage/size", {
+      method: "POST",
+      data: { path },
+      timeoutMs: 2 * 60 * 1000,
+    }),
+  dedupeNativeStorage: (data: {
+    path: string;
+    mode: string;
+    byHash?: boolean;
+    sizeOnly?: boolean;
+    dryRun?: boolean;
+  }) =>
+    request<NativeDedupeResult>("/native/storage/dedupe", {
+      method: "POST",
+      data,
+      timeoutMs: 10 * 60 * 1000,
+    }),
+  cleanupNativeStorage: (name: string) =>
+    request("/native/storage/cleanup", {
+      method: "POST",
+      data: { name },
+      timeoutMs: 5 * 60 * 1000,
+    }),
+  linkNativeStorage: (data: {
+    path: string;
+    expire?: string;
+    unlink?: boolean;
+  }) =>
+    request<NativeLinkResult>("/native/storage/link", {
+      method: "POST",
+      data,
+    }),
+  copyUrlNativeStorage: (data: {
+    url: string;
+    dstDir: string;
+    fileName?: string;
+    autoFilename?: boolean;
+    noClobber?: boolean;
+  }) =>
+    request<NativeCopyURLResult>("/native/storage/copyurl", {
+      method: "POST",
+      data,
+      timeoutMs: 30 * 60 * 1000,
+    }),
+  setTierNativeStorage: (data: { path: string; tier: string }) =>
+    request("/native/storage/settier", {
+      method: "POST",
+      data,
+      timeoutMs: 5 * 60 * 1000,
+    }),
   previewNativeImport: (data: { config: string; configPassword?: string }) =>
     request<NativeImportPreview>("/native/storage/import/preview", {
       method: "POST",
@@ -456,10 +529,15 @@ export const api = {
     }),
   cancelDryRun: (id: number) =>
     request("/job/dry-run", { method: "DELETE", params: { id } }),
-  startJobCheck: (id: number, download = false) =>
+  startJobCheck: (id: number, download = false, cryptCheck = false) =>
     request<JobCheckResult>("/job/check", {
       method: "POST",
-      data: { id, download },
+      data: { id, download, cryptCheck },
+    }),
+  resetBisyncJob: (id: number, runNow = false) =>
+    request("/job/bisync/resync", {
+      method: "POST",
+      data: { id, runNow },
     }),
   getJobCheck: (id: number, signal?: AbortSignal) =>
     request<JobCheckResult | null>("/job/check", {

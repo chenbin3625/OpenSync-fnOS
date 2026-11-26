@@ -21,13 +21,51 @@ import (
 
 const nativePairMaxConcurrency = 4
 
-// nativeExtraFlags holds the strictly allowlisted boolean rclone tuning flags
-// persisted as JSON in job.extraFlags.
+// nativeExtraFlags holds the strictly allowlisted rclone tuning and bisync
+// flags persisted as JSON in job.extraFlags.
 type nativeExtraFlags struct {
-	NoUpdateModtime bool `json:"noUpdateModtime,omitempty"`
-	Inplace         bool `json:"inplace,omitempty"`
-	CheckFirst      bool `json:"checkFirst,omitempty"`
-	S3NoHead        bool `json:"s3NoHead,omitempty"`
+	NoUpdateModtime      bool   `json:"noUpdateModtime,omitempty"`
+	Inplace              bool   `json:"inplace,omitempty"`
+	CheckFirst           bool   `json:"checkFirst,omitempty"`
+	S3NoHead             bool   `json:"s3NoHead,omitempty"`
+	IgnoreSize           bool   `json:"ignoreSize,omitempty"`
+	TrackRenames         bool   `json:"trackRenames,omitempty"`
+	UseMmap              bool   `json:"useMmap,omitempty"`
+	MaxTransfer          string `json:"maxTransfer,omitempty"`
+	CutoffMode           string `json:"cutoffMode,omitempty"`
+	MaxDuration          string `json:"maxDuration,omitempty"`
+	OrderBy              string `json:"orderBy,omitempty"`
+	MaxBacklog           int    `json:"maxBacklog,omitempty"`
+	BufferSize           string `json:"bufferSize,omitempty"`
+	MultiThreadCutoff    string `json:"multiThreadCutoff,omitempty"`
+	MultiThreadChunkSize string `json:"multiThreadChunkSize,omitempty"`
+	UserAgent            string `json:"userAgent,omitempty"`
+	IOTimeout            string `json:"ioTimeout,omitempty"`
+	ConTimeout           string `json:"conTimeout,omitempty"`
+	BisyncResyncMode     string `json:"bisyncResyncMode,omitempty"`
+	BisyncMaxDelete      int    `json:"bisyncMaxDelete,omitempty"`
+	BisyncForce          bool   `json:"bisyncForce,omitempty"`
+}
+
+func extraFlagBool(val interface{}) (bool, bool) {
+	if b, ok := val.(bool); ok {
+		return b, true
+	}
+	if n, valid := strictJobEnable(val); valid {
+		return n == 1, true
+	}
+	return false, false
+}
+
+func extraFlagString(val interface{}) (string, bool) {
+	if val == nil {
+		return "", true
+	}
+	s, ok := val.(string)
+	if !ok {
+		return "", false
+	}
+	return strings.TrimSpace(s), true
 }
 
 func parseNativeExtraFlags(raw interface{}) (nativeExtraFlags, string, error) {
@@ -67,28 +105,119 @@ func parseNativeExtraFlags(raw interface{}) (nativeExtraFlags, string, error) {
 	}
 	var out nativeExtraFlags
 	for k, val := range rawMap {
-		b, ok := val.(bool)
-		if !ok {
-			if n, valid := strictJobEnable(val); valid {
-				b = n == 1
-			} else {
+		switch k {
+		case "noUpdateModtime", "inplace", "checkFirst", "s3NoHead", "ignoreSize", "trackRenames", "useMmap", "bisyncForce":
+			b, ok := extraFlagBool(val)
+			if !ok {
 				return nativeExtraFlags{}, "", publicError(msg.T(msg.ExtraFlagsInvalid))
 			}
-		}
-		switch k {
-		case "noUpdateModtime":
-			out.NoUpdateModtime = b
-		case "inplace":
-			out.Inplace = b
-		case "checkFirst":
-			out.CheckFirst = b
-		case "s3NoHead":
-			out.S3NoHead = b
+			switch k {
+			case "noUpdateModtime":
+				out.NoUpdateModtime = b
+			case "inplace":
+				out.Inplace = b
+			case "checkFirst":
+				out.CheckFirst = b
+			case "s3NoHead":
+				out.S3NoHead = b
+			case "ignoreSize":
+				out.IgnoreSize = b
+			case "trackRenames":
+				out.TrackRenames = b
+			case "useMmap":
+				out.UseMmap = b
+			case "bisyncForce":
+				out.BisyncForce = b
+			}
+		case "maxTransfer":
+			s, ok := extraFlagString(val)
+			if !ok || native.ValidateRcloneSize(s, false, "invalid") != nil {
+				return nativeExtraFlags{}, "", publicError("单次最大传输量（--max-transfer）格式无效，如 10G、500M")
+			}
+			out.MaxTransfer = s
+		case "cutoffMode":
+			s, ok := extraFlagString(val)
+			if !ok || native.ValidateCutoffMode(s) != nil {
+				return nativeExtraFlags{}, "", publicError("超限停止模式（--cutoff-mode）仅支持 hard、soft 或 cautious")
+			}
+			out.CutoffMode = strings.ToLower(s)
+		case "maxDuration":
+			s, ok := extraFlagString(val)
+			if !ok || native.ValidateDurationSpec(s, 365*24*time.Hour, "invalid") != nil {
+				return nativeExtraFlags{}, "", publicError("最大传输时长（--max-duration）格式无效，如 2h、30m")
+			}
+			out.MaxDuration = s
+		case "orderBy":
+			s, ok := extraFlagString(val)
+			if !ok || native.ValidateOrderBy(s) != nil {
+				return nativeExtraFlags{}, "", publicError("传输排序规则（--order-by）格式无效，如 size,asc、modtime,desc")
+			}
+			out.OrderBy = s
+		case "maxBacklog":
+			if val == nil || val == "" {
+				continue
+			}
+			n, ok := strictJobInt(val)
+			if !ok || n < 0 || n > 100000 {
+				return nativeExtraFlags{}, "", publicError("扫描积压上限（--max-backlog）需为 0–100000 的整数")
+			}
+			out.MaxBacklog = n
+		case "bufferSize":
+			s, ok := extraFlagString(val)
+			if !ok || native.ValidateRcloneSize(s, true, "invalid") != nil {
+				return nativeExtraFlags{}, "", publicError("读取缓冲区大小（--buffer-size）格式无效，如 16M、64M 或 0")
+			}
+			out.BufferSize = s
+		case "multiThreadCutoff":
+			s, ok := extraFlagString(val)
+			if !ok || native.ValidateRcloneSize(s, false, "invalid") != nil {
+				return nativeExtraFlags{}, "", publicError("多线程分片阈值（--multi-thread-cutoff）格式无效，如 256M、1G")
+			}
+			out.MultiThreadCutoff = s
+		case "multiThreadChunkSize":
+			s, ok := extraFlagString(val)
+			if !ok || native.ValidateRcloneSize(s, false, "invalid") != nil {
+				return nativeExtraFlags{}, "", publicError("多线程分块大小（--multi-thread-chunk-size）格式无效，如 64M、128M")
+			}
+			out.MultiThreadChunkSize = s
+		case "userAgent":
+			s, ok := extraFlagString(val)
+			if !ok || native.ValidateUserAgent(s) != nil {
+				return nativeExtraFlags{}, "", publicError("User-Agent 格式无效")
+			}
+			out.UserAgent = s
+		case "ioTimeout":
+			s, ok := extraFlagString(val)
+			if !ok || native.ValidateDurationSpec(s, 24*time.Hour, "invalid") != nil {
+				return nativeExtraFlags{}, "", publicError("I/O 超时（--timeout）格式无效，如 5m、30s")
+			}
+			out.IOTimeout = s
+		case "conTimeout":
+			s, ok := extraFlagString(val)
+			if !ok || native.ValidateDurationSpec(s, 24*time.Hour, "invalid") != nil {
+				return nativeExtraFlags{}, "", publicError("连接超时（--contimeout）格式无效，如 1m、15s")
+			}
+			out.ConTimeout = s
+		case "bisyncResyncMode":
+			s, ok := extraFlagString(val)
+			if !ok || native.ValidateBisyncResyncMode(s) != nil {
+				return nativeExtraFlags{}, "", publicError("双向基线冲突策略仅支持 newer、older、path1、path2、larger 或 smaller")
+			}
+			out.BisyncResyncMode = strings.ToLower(s)
+		case "bisyncMaxDelete":
+			if val == nil || val == "" {
+				continue
+			}
+			n, ok := strictJobInt(val)
+			if !ok || n < 0 || n > 1000000 {
+				return nativeExtraFlags{}, "", publicError("双向删除保护阈值（--max-delete）需为 0–1000000 的整数")
+			}
+			out.BisyncMaxDelete = n
 		default:
 			return nativeExtraFlags{}, "", publicError(msg.T(msg.ExtraFlagsInvalid))
 		}
 	}
-	if !out.NoUpdateModtime && !out.Inplace && !out.CheckFirst && !out.S3NoHead {
+	if out == (nativeExtraFlags{}) {
 		return out, "", nil
 	}
 	canonical, err := json.Marshal(out)
@@ -134,28 +263,41 @@ func buildNativeCopyOptions(job map[string]interface{}, dry bool, backupDir stri
 	now := time.Now()
 	conflictPolicy := util.ToInt(job["conflictPolicy"])
 	return native.CopyOptions{
-		Transfers:          limits.CopyConcurrency,
-		Checkers:           limits.ScanConcurrency,
-		Retries:            limits.MaxRetries,
-		Compare:            util.ToInt(job["compareMode"]),
-		SkipExisting:       conflictPolicy == 1,
-		ConflictPolicy:     conflictPolicy,
-		BackupDir:          backupDir,
-		DryRun:             dry,
-		ReportSkipped:      dry,
-		BwLimit:            effectiveJobBwLimit(job),
-		TPSLimit:           jobFloat64(job["tpsLimit"]),
-		TPSLimitBurst:      util.ToInt(job["tpsLimitBurst"]),
-		ModifyWindow:       strings.TrimSpace(util.StringValue(job["modifyWindow"])),
-		FastList:           util.ToInt(job["fastList"]) == 1,
-		MultiThreadStreams: util.ToInt(job["multiThreadStreams"]),
-		CreateEmptySrcDirs: util.ToInt(job["createEmptySrcDirs"]) == 1,
-		FollowSymlinks:     util.ToInt(job["followSymlinks"]) == 1,
-		NoUpdateModtime:    extra.NoUpdateModtime,
-		Inplace:            extra.Inplace,
-		CheckFirst:         extra.CheckFirst,
-		S3NoHead:           extra.S3NoHead,
-		ProxyURL:           globalNativeProxyURL(),
+		Transfers:            limits.CopyConcurrency,
+		Checkers:             limits.ScanConcurrency,
+		Retries:              limits.MaxRetries,
+		Compare:              util.ToInt(job["compareMode"]),
+		SkipExisting:         conflictPolicy == 1,
+		ConflictPolicy:       conflictPolicy,
+		BackupDir:            backupDir,
+		DryRun:               dry,
+		ReportSkipped:        dry,
+		BwLimit:              effectiveJobBwLimit(job),
+		TPSLimit:             jobFloat64(job["tpsLimit"]),
+		TPSLimitBurst:        util.ToInt(job["tpsLimitBurst"]),
+		ModifyWindow:         strings.TrimSpace(util.StringValue(job["modifyWindow"])),
+		FastList:             util.ToInt(job["fastList"]) == 1,
+		MultiThreadStreams:   util.ToInt(job["multiThreadStreams"]),
+		MultiThreadCutoff:    extra.MultiThreadCutoff,
+		MultiThreadChunkSize: extra.MultiThreadChunkSize,
+		BufferSize:           extra.BufferSize,
+		UseMmap:              extra.UseMmap,
+		MaxTransfer:          extra.MaxTransfer,
+		CutoffMode:           extra.CutoffMode,
+		MaxDuration:          extra.MaxDuration,
+		OrderBy:              extra.OrderBy,
+		MaxBacklog:           extra.MaxBacklog,
+		UserAgent:            extra.UserAgent,
+		IOTimeout:            extra.IOTimeout,
+		ConTimeout:           extra.ConTimeout,
+		IgnoreSize:           extra.IgnoreSize,
+		CreateEmptySrcDirs:   util.ToInt(job["createEmptySrcDirs"]) == 1,
+		FollowSymlinks:       util.ToInt(job["followSymlinks"]) == 1,
+		NoUpdateModtime:      extra.NoUpdateModtime,
+		Inplace:              extra.Inplace,
+		CheckFirst:           extra.CheckFirst,
+		S3NoHead:             extra.S3NoHead,
+		ProxyURL:             globalNativeProxyURL(),
 		Include: func(p string, info os.FileInfo) bool {
 			if exclude != nil && exclude.matchesListed(p, info.IsDir()) {
 				return false
@@ -1085,6 +1227,56 @@ func verifyAndDeleteMovedSource(ctx context.Context, cfg native.Config, srcDir, 
 
 func (m FileMetadata) ModTime() int64 { return m.Modified }
 
+func buildNativeBisyncOptions(job map[string]interface{}, dry bool) native.BisyncOptions {
+	limits := taskRuntimeLimitsForJob(job)
+	extra, _, _ := parseNativeExtraFlags(job["extraFlags"])
+	return native.BisyncOptions{
+		WorkDir:              bisyncWorkDir(util.ToInt64(job["id"])),
+		ResyncMode:           extra.BisyncResyncMode,
+		MaxDelete:            extra.BisyncMaxDelete,
+		Force:                extra.BisyncForce,
+		TrackRenames:         extra.TrackRenames,
+		DryRun:               dry,
+		Transfers:            limits.CopyConcurrency,
+		Checkers:             limits.ScanConcurrency,
+		Retries:              limits.MaxRetries,
+		Compare:              util.ToInt(job["compareMode"]),
+		ConflictPolicy:       util.ToInt(job["conflictPolicy"]),
+		FilterLines:          buildNativeRcloneFilterLines(job),
+		MinSize:              util.ToInt64(job["minFileSize"]),
+		MaxSize:              util.ToInt64(job["maxFileSize"]),
+		MinAgeMinutes:        util.ToInt(job["minFileAgeMinutes"]),
+		OlderThanDays:        util.ToInt(job["olderThanDays"]),
+		NewerThanDays:        util.ToInt(job["newerThanDays"]),
+		BwLimit:              effectiveJobBwLimit(job),
+		TPSLimit:             jobFloat64(job["tpsLimit"]),
+		TPSLimitBurst:        util.ToInt(job["tpsLimitBurst"]),
+		ModifyWindow:         strings.TrimSpace(util.StringValue(job["modifyWindow"])),
+		FastList:             util.ToInt(job["fastList"]) == 1,
+		MultiThreadStreams:   util.ToInt(job["multiThreadStreams"]),
+		MultiThreadCutoff:    extra.MultiThreadCutoff,
+		MultiThreadChunkSize: extra.MultiThreadChunkSize,
+		BufferSize:           extra.BufferSize,
+		UseMmap:              extra.UseMmap,
+		MaxTransfer:          extra.MaxTransfer,
+		CutoffMode:           extra.CutoffMode,
+		MaxDuration:          extra.MaxDuration,
+		OrderBy:              extra.OrderBy,
+		MaxBacklog:           extra.MaxBacklog,
+		UserAgent:            extra.UserAgent,
+		IOTimeout:            extra.IOTimeout,
+		ConTimeout:           extra.ConTimeout,
+		IgnoreSize:           extra.IgnoreSize,
+		CreateEmptySrcDirs:   util.ToInt(job["createEmptySrcDirs"]) == 1,
+		FollowSymlinks:       util.ToInt(job["followSymlinks"]) == 1,
+		NoUpdateModtime:      extra.NoUpdateModtime,
+		Inplace:              extra.Inplace,
+		CheckFirst:           extra.CheckFirst,
+		S3NoHead:             extra.S3NoHead,
+		ProxyURL:             globalNativeProxyURL(),
+	}
+}
+
 // runNativeBisync executes bidirectional sync (method=3) using `rclone bisync`.
 func (jt *JobTask) runNativeBisync() error {
 	ctx := jt.context()
@@ -1096,26 +1288,7 @@ func (jt *JobTask) runNativeBisync() error {
 		return errors.New("双向同步仅支持单个源目录与单个目标目录")
 	}
 	src, dst := srcPaths[0], dstPaths[0]
-	limits := taskRuntimeLimitsForJob(job)
-	opts := native.BisyncOptions{
-		WorkDir:            bisyncWorkDir(util.ToInt64(job["id"])),
-		DryRun:             false,
-		Transfers:          limits.CopyConcurrency,
-		Checkers:           limits.ScanConcurrency,
-		Retries:            limits.MaxRetries,
-		Compare:            util.ToInt(job["compareMode"]),
-		ConflictPolicy:     util.ToInt(job["conflictPolicy"]),
-		FilterLines:        buildNativeRcloneFilterLines(job),
-		BwLimit:            effectiveJobBwLimit(job),
-		TPSLimit:           jobFloat64(job["tpsLimit"]),
-		TPSLimitBurst:      util.ToInt(job["tpsLimitBurst"]),
-		ModifyWindow:       strings.TrimSpace(util.StringValue(job["modifyWindow"])),
-		FastList:           util.ToInt(job["fastList"]) == 1,
-		MultiThreadStreams: util.ToInt(job["multiThreadStreams"]),
-		CreateEmptySrcDirs: util.ToInt(job["createEmptySrcDirs"]) == 1,
-		FollowSymlinks:     util.ToInt(job["followSymlinks"]) == 1,
-		ProxyURL:           globalNativeProxyURL(),
-	}
+	opts := buildNativeBisyncOptions(job, false)
 	_, err := cfg.Bisync(ctx, src, dst, opts, func(v native.Event) {
 		if v.Stats != nil {
 			if v.Stats.Bytes > 0 || v.Stats.Transfers > 0 || len(v.Stats.Transferring) > 0 {
@@ -1522,26 +1695,7 @@ func dryRunNativeBisync(ctx context.Context, sess *dryRunSession, cfg native.Con
 		return errors.New("双向同步仅支持单个源目录与单个目标目录")
 	}
 	src, dst := srcPaths[0], dstPaths[0]
-	limits := taskRuntimeLimitsForJob(job)
-	opts := native.BisyncOptions{
-		WorkDir:            bisyncWorkDir(util.ToInt64(job["id"])),
-		DryRun:             true,
-		Transfers:          limits.CopyConcurrency,
-		Checkers:           limits.ScanConcurrency,
-		Retries:            limits.MaxRetries,
-		Compare:            util.ToInt(job["compareMode"]),
-		ConflictPolicy:     util.ToInt(job["conflictPolicy"]),
-		FilterLines:        buildNativeRcloneFilterLines(job),
-		BwLimit:            effectiveJobBwLimit(job),
-		TPSLimit:           jobFloat64(job["tpsLimit"]),
-		TPSLimitBurst:      util.ToInt(job["tpsLimitBurst"]),
-		ModifyWindow:       strings.TrimSpace(util.StringValue(job["modifyWindow"])),
-		FastList:           util.ToInt(job["fastList"]) == 1,
-		MultiThreadStreams: util.ToInt(job["multiThreadStreams"]),
-		CreateEmptySrcDirs: util.ToInt(job["createEmptySrcDirs"]) == 1,
-		FollowSymlinks:     util.ToInt(job["followSymlinks"]) == 1,
-		ProxyURL:           globalNativeProxyURL(),
-	}
+	opts := buildNativeBisyncOptions(job, true)
 	_, err := cfg.Bisync(ctx, src, dst, opts, func(v native.Event) {
 		if v.Stats != nil && v.Stats.Listed > 0 {
 			sess.scannedDirs.Store(v.Stats.Listed)

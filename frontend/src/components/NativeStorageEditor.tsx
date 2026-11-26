@@ -42,9 +42,13 @@ import type {
   AlistItem,
   NativeAboutInfo,
   NativeBrowseResult,
+  NativeCopyURLResult,
+  NativeDedupeResult,
   NativeDirEntry,
   NativeImportPreview,
+  NativeLinkResult,
   NativeRemoteItem,
+  NativeSizeInfo,
   NativeStorageState,
   NativeStorageTestResult,
 } from "../types";
@@ -64,13 +68,34 @@ type RemoteFormType =
   | "pcloud"
   | "mega"
   | "azureblob"
+  | "azurefiles"
   | "googlecloudstorage"
   | "swift"
+  | "oracleobjectstorage"
+  | "qingstor"
+  | "storj"
+  | "yandex"
+  | "koofr"
+  | "seafile"
+  | "pikpak"
+  | "protondrive"
+  | "iclouddrive"
+  | "jottacloud"
+  | "filen"
+  | "hidrive"
+  | "huaweidrive"
+  | "mailru"
+  | "fichier"
+  | "gofile"
+  | "pixeldrain"
   | "crypt"
   | "chunker"
   | "compress"
   | "hasher"
-  | "union";
+  | "alias"
+  | "archive"
+  | "union"
+  | "combine";
 
 type PanelView = "overview" | "form" | "import" | "export" | "browse";
 
@@ -89,13 +114,34 @@ const remoteTypeLabels: Record<string, string> = {
   pcloud: "pCloud",
   mega: "MEGA",
   azureblob: "Azure Blob",
+  azurefiles: "Azure Files",
   googlecloudstorage: "Google Cloud Storage",
   swift: "OpenStack Swift",
+  oracleobjectstorage: "Oracle Cloud Object Storage",
+  qingstor: "QingStor 青云对象存储",
+  storj: "Storj DCS",
+  yandex: "Yandex Disk",
+  koofr: "Koofr",
+  seafile: "Seafile",
+  pikpak: "PikPak",
+  protondrive: "Proton Drive",
+  iclouddrive: "iCloud Drive",
+  jottacloud: "Jottacloud",
+  filen: "Filen",
+  hidrive: "STRATO HiDrive",
+  huaweidrive: "华为云盘 / Huawei Drive",
+  mailru: "Mail.ru Cloud",
+  fichier: "1Fichier",
+  gofile: "Gofile",
+  pixeldrain: "Pixeldrain",
   crypt: "Crypt 加密",
   chunker: "Chunker 分片",
   compress: "Compress 压缩",
   hasher: "Hasher 哈希缓存",
+  alias: "Alias 路径别名",
+  archive: "Archive 压缩包浏览（只读）",
   union: "Union 多源聚合",
+  combine: "Combine 多存储目录组合",
   local: "本地目录别名",
 };
 
@@ -114,13 +160,34 @@ const formTypes: RemoteFormType[] = [
   "pcloud",
   "mega",
   "azureblob",
+  "azurefiles",
   "googlecloudstorage",
   "swift",
+  "oracleobjectstorage",
+  "qingstor",
+  "storj",
+  "yandex",
+  "koofr",
+  "seafile",
+  "pikpak",
+  "protondrive",
+  "iclouddrive",
+  "jottacloud",
+  "filen",
+  "hidrive",
+  "huaweidrive",
+  "mailru",
+  "fichier",
+  "gofile",
+  "pixeldrain",
   "crypt",
   "chunker",
   "compress",
   "hasher",
+  "alias",
+  "archive",
   "union",
+  "combine",
 ];
 
 const oauthTypes = new Set<RemoteFormType>([
@@ -129,6 +196,10 @@ const oauthTypes = new Set<RemoteFormType>([
   "dropbox",
   "box",
   "pcloud",
+  "yandex",
+  "jottacloud",
+  "hidrive",
+  "huaweidrive",
 ]);
 
 const wrapperTypes = new Set<RemoteFormType>([
@@ -136,6 +207,8 @@ const wrapperTypes = new Set<RemoteFormType>([
   "chunker",
   "compress",
   "hasher",
+  "alias",
+  "archive",
 ]);
 
 const proxyCapableTypes = new Set<RemoteFormType>([
@@ -150,8 +223,26 @@ const proxyCapableTypes = new Set<RemoteFormType>([
   "pcloud",
   "mega",
   "azureblob",
+  "azurefiles",
   "googlecloudstorage",
   "swift",
+  "oracleobjectstorage",
+  "qingstor",
+  "storj",
+  "yandex",
+  "koofr",
+  "seafile",
+  "pikpak",
+  "protondrive",
+  "iclouddrive",
+  "jottacloud",
+  "filen",
+  "hidrive",
+  "huaweidrive",
+  "mailru",
+  "fichier",
+  "gofile",
+  "pixeldrain",
 ]);
 
 const tlsSkipCapableTypes = new Set<RemoteFormType>([
@@ -167,8 +258,26 @@ const tlsSkipCapableTypes = new Set<RemoteFormType>([
   "pcloud",
   "mega",
   "azureblob",
+  "azurefiles",
   "googlecloudstorage",
   "swift",
+  "oracleobjectstorage",
+  "qingstor",
+  "storj",
+  "yandex",
+  "koofr",
+  "seafile",
+  "pikpak",
+  "protondrive",
+  "iclouddrive",
+  "jottacloud",
+  "filen",
+  "hidrive",
+  "huaweidrive",
+  "mailru",
+  "fichier",
+  "gofile",
+  "pixeldrain",
 ]);
 
 const allSecretKeys = new Set([
@@ -178,6 +287,7 @@ const allSecretKeys = new Set([
   "bearer_token",
   "password",
   "password2",
+  "key_pem",
   "key_file_pass",
   "key",
   "token",
@@ -186,6 +296,23 @@ const allSecretKeys = new Set([
   "sas_url",
   "auth_token",
   "application_credential_secret",
+  "access_grant",
+  "api_key",
+  "passphrase",
+  "library_key",
+  "connection_string",
+  "mailbox_password",
+  "otp_secret_key",
+  "client_access_token",
+  "client_refresh_token",
+  "client_salted_key_pass",
+  "trust_token",
+  "cookies",
+  "master_keys",
+  "private_key",
+  "file_password",
+  "folder_password",
+  "access_token",
 ]);
 
 const s3Providers: Record<string, string> = {
@@ -320,6 +447,9 @@ function buildRemoteOptions(draft: RemoteFormDraft): Record<string, string> {
     if (draft.forcePathStyle) settings.force_path_style = "true";
     if (draft.noCheckBucket) settings.no_check_bucket = "true";
   }
+  if (draft.type === "qingstor") {
+    settings.env_auth = "false";
+  }
   if (draft.type === "webdav" && draft.vendor) {
     settings.vendor = draft.vendor;
   }
@@ -443,6 +573,18 @@ function validateRemoteDraft(
     ) {
       errs.account = "请填写存储账户与密钥，或提供 SAS URL";
     }
+  } else if (draft.type === "azurefiles") {
+    const hasConn = hasSecret("connection_string");
+    const hasSAS = hasSecret("sas_url");
+    const hasKey = Boolean((draft.options.account || "").trim()) && hasSecret("key");
+    const hasSP =
+      Boolean((draft.options.account || "").trim()) &&
+      Boolean((draft.options.tenant || "").trim()) &&
+      Boolean((draft.options.client_id || "").trim()) &&
+      hasSecret("client_secret");
+    if (!hasConn && !hasSAS && !hasKey && !hasSP) {
+      errs.account = "请填写连接字符串、SAS URL、Account + Key 或 Service Principal 凭据";
+    }
   } else if (draft.type === "googlecloudstorage") {
     if (
       !hasSecret("service_account_credentials") &&
@@ -463,6 +605,94 @@ function validateRemoteDraft(
     if (!hasAppCred && !hasUserKey && !hasStorageToken) {
       errs.user = "请填写用户名与密钥、应用凭据或 Storage URL + Auth Token";
     }
+  } else if (draft.type === "oracleobjectstorage") {
+    if (!(draft.options.namespace || "").trim()) {
+      errs.namespace = "请输入 Oracle Namespace";
+    }
+    if (!(draft.options.region || "").trim()) {
+      errs.region = "请输入区域 (region)";
+    }
+  } else if (draft.type === "qingstor") {
+    if (!(draft.options.access_key_id || "").trim()) {
+      errs.access_key_id = "请输入 QingStor Access Key ID";
+    }
+    if (!hasSecret("secret_access_key")) {
+      errs.secret_access_key = "请输入 QingStor Secret Access Key";
+    }
+  } else if (draft.type === "storj") {
+    const hasGrant = hasSecret("access_grant");
+    const hasKeys =
+      Boolean((draft.options.satellite_address || "").trim()) &&
+      hasSecret("api_key") &&
+      hasSecret("passphrase");
+    if (!hasGrant && !hasKeys) {
+      errs.access_grant = "请填写 Access Grant，或填写 Satellite + API Key + Passphrase";
+    }
+  } else if (draft.type === "koofr") {
+    checkHttpUrl(draft.options.endpoint, "endpoint", " Koofr 服务地址");
+    if (!(draft.options.user || "").trim()) {
+      errs.user = "请输入 Koofr 用户名";
+    }
+    if (!hasSecret("password")) {
+      errs.password = "请输入 Koofr 应用密码";
+    }
+  } else if (draft.type === "seafile") {
+    checkHttpUrl(draft.options.url, "url", " Seafile 服务地址");
+    if (!(draft.options.user || "").trim()) {
+      errs.user = "请输入 Seafile 登录邮箱 / 用户名";
+    }
+    if (!hasSecret("pass") && !hasSecret("auth_token")) {
+      errs.pass = "请输入 Seafile 密码或 Auth Token";
+    }
+  } else if (draft.type === "pikpak") {
+    if (!(draft.options.user || "").trim()) {
+      errs.user = "请输入 PikPak 账号";
+    }
+    if (!hasSecret("pass")) {
+      errs.pass = "请输入 PikPak 密码";
+    }
+  } else if (draft.type === "protondrive") {
+    if (!(draft.options.username || "").trim()) {
+      errs.username = "请输入 Proton 用户名";
+    }
+    if (!hasSecret("password")) {
+      errs.password = "请输入 Proton 密码";
+    }
+  } else if (draft.type === "iclouddrive") {
+    if (!(draft.options.apple_id || "").trim()) {
+      errs.apple_id = "请输入 Apple ID";
+    }
+    if (!hasSecret("password")) {
+      errs.password = "请输入密码";
+    }
+  } else if (draft.type === "filen") {
+    if (!(draft.options.email || "").trim()) {
+      errs.email = "请输入 Filen 邮箱";
+    }
+    if (!hasSecret("password")) {
+      errs.password = "请输入 Filen 密码";
+    }
+    if (!hasSecret("api_key")) {
+      errs.api_key = "请输入 Filen API Key";
+    }
+  } else if (draft.type === "mailru") {
+    const hasToken = hasSecret("token");
+    const hasUserPass = Boolean((draft.options.user || "").trim()) && hasSecret("pass");
+    if (!hasToken && !hasUserPass) {
+      errs.user = "请填写账号与密码，或填写 OAuth Token JSON";
+    }
+  } else if (draft.type === "fichier") {
+    if (!hasSecret("api_key") && !(draft.options.shared_folder || "").trim()) {
+      errs.api_key = "请填写 1Fichier API Key 或共享目录链接";
+    }
+  } else if (draft.type === "gofile") {
+    if (!hasSecret("access_token") && !(draft.options.root_folder_id || "").trim()) {
+      errs.access_token = "请填写 Gofile Access Token 或 Root Folder ID";
+    }
+  } else if (draft.type === "pixeldrain") {
+    if (!hasSecret("api_key") && !(draft.options.root_folder_id || "").trim()) {
+      errs.api_key = "请填写 Pixeldrain API Key 或 Root Folder ID";
+    }
   } else if (draft.type === "crypt") {
     if (!(draft.options.remote || "").trim()) {
       errs.remote = "请输入底层存储路径";
@@ -477,6 +707,10 @@ function validateRemoteDraft(
   } else if (draft.type === "union") {
     if (!(draft.options.upstreams || "").trim()) {
       errs.upstreams = "请输入至少一个上游存储（空格分隔）";
+    }
+  } else if (draft.type === "combine") {
+    if (!(draft.options.upstreams || "").trim()) {
+      errs.upstreams = "请输入至少一个目录映射（格式：目录名=存储名:路径）";
     }
   }
 
@@ -574,6 +808,36 @@ export function NativeStorageEditor({
   const [restoreSubPath, setRestoreSubPath] = useState("");
   const [restoreOverwrite, setRestoreOverwrite] = useState(false);
   const [restoring, setRestoring] = useState(false);
+  const [cleaningName, setCleaningName] = useState<string | null>(null);
+  const [sizeInfo, setSizeInfo] = useState<NativeSizeInfo | null>(null);
+  const [sizing, setSizing] = useState(false);
+  const [mkdirOpen, setMkdirOpen] = useState(false);
+  const [mkdirName, setMkdirName] = useState("");
+  const [mkdirBusy, setMkdirBusy] = useState(false);
+  const [moveTarget, setMoveTarget] = useState<NativeDirEntry | null>(null);
+  const [moveDstPath, setMoveDstPath] = useState("");
+  const [moveBusy, setMoveBusy] = useState(false);
+  const [copyUrlOpen, setCopyUrlOpen] = useState(false);
+  const [copyUrlTarget, setCopyUrlTarget] = useState("");
+  const [copyUrlName, setCopyUrlName] = useState("");
+  const [copyUrlAutoName, setCopyUrlAutoName] = useState(true);
+  const [copyUrlNoClobber, setCopyUrlNoClobber] = useState(true);
+  const [copyUrlBusy, setCopyUrlBusy] = useState(false);
+  const [dedupeOpen, setDedupeOpen] = useState(false);
+  const [dedupeMode, setDedupeMode] = useState("newest");
+  const [dedupeByHash, setDedupeByHash] = useState(false);
+  const [dedupeDryRun, setDedupeDryRun] = useState(true);
+  const [dedupeBusy, setDedupeBusy] = useState(false);
+  const [dedupeResult, setDedupeResult] = useState<NativeDedupeResult | null>(null);
+  const [linkResult, setLinkResult] = useState<{
+    path: string;
+    res: NativeLinkResult;
+  } | null>(null);
+  const [linkingPath, setLinkingPath] = useState<string | null>(null);
+  const [setTierTarget, setSetTierTarget] = useState<NativeDirEntry | null>(null);
+  const [setTierValue, setSetTierValue] = useState("");
+  const [setTierBusy, setSetTierBusy] = useState(false);
+  const [deletingEntryPath, setDeletingEntryPath] = useState<string | null>(null);
 
   const notifyParent = useCallback(() => {
     onChanged?.();
@@ -631,6 +895,15 @@ export function NativeStorageEditor({
     exporting ||
     renaming ||
     restoring ||
+    cleaningName !== null ||
+    sizing ||
+    mkdirBusy ||
+    moveBusy ||
+    copyUrlBusy ||
+    dedupeBusy ||
+    setTierBusy ||
+    linkingPath !== null ||
+    deletingEntryPath !== null ||
     deletingName !== null ||
     testingRemoteName !== null;
 
@@ -737,6 +1010,8 @@ export function NativeStorageEditor({
     setBrowseError("");
     setBrowsePath(targetPath);
     setRestoreEntry(null);
+    setSizeInfo(null);
+    setLinkResult(null);
     try {
       const res = await api.browseNativeStorage(targetPath);
       setBrowseData(res);
@@ -898,6 +1173,203 @@ export function NativeStorageEditor({
       errorToast(err);
     } finally {
       setRestoring(false);
+    }
+  };
+
+  const handleCleanupRemote = (remoteName: string) => {
+    confirmAction({
+      title: `清理存储「${remoteName}」？`,
+      content:
+        "将调用 rclone cleanup 清空远端回收站或残留的分片上传碎片（具体行为取决于远端存储）。此操作不可撤销。",
+      okText: "确认清理",
+      onOk: async () => {
+        setCleaningName(remoteName);
+        try {
+          await api.cleanupNativeStorage(remoteName);
+          Toast.success(`已完成「${remoteName}」清理`);
+        } catch (err) {
+          errorToast(err);
+        } finally {
+          setCleaningName(null);
+        }
+      },
+    });
+  };
+
+  const handleSizeBrowse = async () => {
+    if (browsePath === "/") return;
+    setSizing(true);
+    try {
+      const res = await api.sizeNativeStorage(browsePath);
+      setSizeInfo(res);
+    } catch (err) {
+      errorToast(err);
+    } finally {
+      setSizing(false);
+    }
+  };
+
+  const handleExecuteMkdir = async () => {
+    const clean = mkdirName.trim().replace(/^\/+|\/+$/g, "");
+    if (!clean) {
+      Toast.warning("请输入目录名称");
+      return;
+    }
+    const target = `${browsePath.replace(/\/+$/, "")}/${clean}`;
+    setMkdirBusy(true);
+    try {
+      await api.mkdirNativeStorage(target);
+      Toast.success(`已创建目录 ${clean}`);
+      setMkdirOpen(false);
+      setMkdirName("");
+      await loadBrowse(browsePath);
+    } catch (err) {
+      errorToast(err);
+    } finally {
+      setMkdirBusy(false);
+    }
+  };
+
+  const handleExecuteMove = async () => {
+    if (!moveTarget) return;
+    const dst = moveDstPath.trim();
+    if (!dst || dst === moveTarget.path) {
+      Toast.warning("请输入新的目标路径");
+      return;
+    }
+    setMoveBusy(true);
+    try {
+      await api.moveNativeStoragePath({
+        srcPath: moveTarget.path,
+        dstPath: dst,
+        isDir: moveTarget.isDir,
+      });
+      Toast.success(`已移动到 ${dst}`);
+      setMoveTarget(null);
+      setMoveDstPath("");
+      await loadBrowse(browsePath);
+    } catch (err) {
+      errorToast(err);
+    } finally {
+      setMoveBusy(false);
+    }
+  };
+
+  const handleDeleteEntry = (entry: NativeDirEntry) => {
+    confirmDelete(
+      `删除${entry.isDir ? "目录" : "文件"}「${entry.name}」？`,
+      async () => {
+        setDeletingEntryPath(entry.path);
+        try {
+          await api.deleteNativeStoragePath({
+            path: entry.path,
+            isDir: entry.isDir,
+          });
+          Toast.success(`已删除「${entry.name}」`);
+          await loadBrowse(browsePath);
+        } catch (err) {
+          errorToast(err);
+        } finally {
+          setDeletingEntryPath(null);
+        }
+      },
+      entry.isDir
+        ? "将调用 rclone purge 递归删除该目录及其全部内容，操作不可撤销。"
+        : "将调用 rclone deletefile 永久删除该远端文件，操作不可撤销。",
+    );
+  };
+
+  const handleExecuteCopyUrl = async () => {
+    const targetUrl = copyUrlTarget.trim();
+    if (!targetUrl) {
+      Toast.warning("请输入要拉取的 HTTP / HTTPS 文件 URL");
+      return;
+    }
+    setCopyUrlBusy(true);
+    try {
+      const res: NativeCopyURLResult = await api.copyUrlNativeStorage({
+        url: targetUrl,
+        dstDir: browsePath,
+        fileName: copyUrlAutoName ? undefined : copyUrlName.trim(),
+        autoFilename: copyUrlAutoName,
+        noClobber: copyUrlNoClobber,
+      });
+      Toast.success(`已拉取文件${res.fileName ? `：${res.fileName}` : ""}`);
+      setCopyUrlOpen(false);
+      setCopyUrlTarget("");
+      setCopyUrlName("");
+      await loadBrowse(browsePath);
+    } catch (err) {
+      errorToast(err);
+    } finally {
+      setCopyUrlBusy(false);
+    }
+  };
+
+  const handleExecuteDedupe = async () => {
+    setDedupeBusy(true);
+    try {
+      const res = await api.dedupeNativeStorage({
+        path: browsePath,
+        mode: dedupeMode,
+        byHash: dedupeByHash,
+        dryRun: dedupeDryRun,
+      });
+      setDedupeResult(res);
+      Toast.success(dedupeDryRun ? "去重预览完成" : "去重执行完成");
+      if (!dedupeDryRun) {
+        await loadBrowse(browsePath);
+      }
+    } catch (err) {
+      errorToast(err);
+    } finally {
+      setDedupeBusy(false);
+    }
+  };
+
+  const handleLinkEntry = async (entry: NativeDirEntry, unlink = false) => {
+    setLinkingPath(entry.path);
+    try {
+      const res = await api.linkNativeStorage({
+        path: entry.path,
+        unlink,
+      });
+      if (unlink) {
+        Toast.success("已取消公开分享链接");
+        setLinkResult(null);
+      } else {
+        setLinkResult({ path: entry.path, res });
+        if (res.url) {
+          void navigator.clipboard?.writeText(res.url).catch(() => undefined);
+        }
+      }
+    } catch (err) {
+      errorToast(err);
+    } finally {
+      setLinkingPath(null);
+    }
+  };
+
+  const handleExecuteSetTier = async () => {
+    if (!setTierTarget) return;
+    const tier = setTierValue.trim();
+    if (!tier) {
+      Toast.warning("请输入目标存储类别 (Tier)");
+      return;
+    }
+    setSetTierBusy(true);
+    try {
+      await api.setTierNativeStorage({
+        path: setTierTarget.path,
+        tier,
+      });
+      Toast.success(`已将「${setTierTarget.name}」存储类别设为 ${tier}`);
+      setSetTierTarget(null);
+      setSetTierValue("");
+    } catch (err) {
+      errorToast(err);
+    } finally {
+      setSetTierBusy(false);
     }
   };
 
@@ -1642,6 +2114,20 @@ export function NativeStorageEditor({
                             ariaBusy={aboutLoadingName === item.name}
                             onClick={() => void handleAboutRemote(item.name)}
                           />
+                          {item.type !== "local" && (
+                            <IconButton
+                              label={
+                                cleaningName === item.name
+                                  ? "清理中…"
+                                  : `清理回收站与碎片 ${item.name}`
+                              }
+                              size="small"
+                              icon={<IconRefresh aria-hidden="true" />}
+                              disabled={anyBusy}
+                              ariaBusy={cleaningName === item.name}
+                              onClick={() => handleCleanupRemote(item.name)}
+                            />
+                          )}
                           <IconButton
                             label={`重命名存储 ${item.name}`}
                             size="small"
@@ -2285,28 +2771,159 @@ export function NativeStorageEditor({
                   </>
                 )}
                 {draft.type === "pcloud" && (
-                  <Field label="API 区域主机">
-                    <Select
-                      value={draft.options.hostname || "api.pcloud.com"}
-                      optionList={[
-                        { value: "api.pcloud.com", label: "美国区域 (api.pcloud.com)" },
-                        { value: "eapi.pcloud.com", label: "欧洲区域 (eapi.pcloud.com)" },
-                      ]}
-                      onChange={(v) => updateDraftOption("hostname", String(v))}
-                    />
-                  </Field>
+                  <>
+                    <div className="form-grid form-grid--two">
+                      <Field label="API 区域主机">
+                        <Select
+                          value={draft.options.hostname || "api.pcloud.com"}
+                          optionList={[
+                            { value: "api.pcloud.com", label: "美国区域 (api.pcloud.com)" },
+                            { value: "eapi.pcloud.com", label: "欧洲区域 (eapi.pcloud.com)" },
+                          ]}
+                          onChange={(v) => updateDraftOption("hostname", String(v))}
+                        />
+                      </Field>
+                      <Field label="根目录 ID（root_folder_id，可选）">
+                        <Input
+                          value={draft.options.root_folder_id || ""}
+                          onChange={(v) => updateDraftOption("root_folder_id", v)}
+                          placeholder="留空从根目录开始"
+                        />
+                      </Field>
+                    </div>
+                    <div className="form-grid form-grid--two">
+                      <Field label="账号邮箱（username，可选，替代 OAuth）">
+                        <Input
+                          value={draft.options.username || ""}
+                          onChange={(v) => updateDraftOption("username", v)}
+                          placeholder="user@example.com"
+                        />
+                      </Field>
+                      <Field label="登录密码（password，可选）">
+                        <Input
+                          mode="password"
+                          value={draft.options.password || ""}
+                          onChange={(v) => updateDraftOption("password", v)}
+                          placeholder={secretPlaceholder("password", "可选密码")}
+                        />
+                      </Field>
+                    </div>
+                  </>
                 )}
                 {draft.type === "box" && (
-                  <Field label="Box 账户类型">
-                    <Select
-                      value={draft.options.box_sub_type || "user"}
-                      optionList={[
-                        { value: "user", label: "个人账户 (user)" },
-                        { value: "enterprise", label: "企业账户 (enterprise)" },
-                      ]}
-                      onChange={(v) => updateDraftOption("box_sub_type", String(v))}
-                    />
-                  </Field>
+                  <>
+                    <div className="form-grid form-grid--three">
+                      <Field label="Box 账户类型">
+                        <Select
+                          value={draft.options.box_sub_type || "user"}
+                          optionList={[
+                            { value: "user", label: "个人账户 (user)" },
+                            { value: "enterprise", label: "企业账户 (enterprise)" },
+                          ]}
+                          onChange={(v) => updateDraftOption("box_sub_type", String(v))}
+                        />
+                      </Field>
+                      <Field label="根目录 ID（root_folder_id）">
+                        <Input
+                          value={draft.options.root_folder_id || ""}
+                          onChange={(v) => updateDraftOption("root_folder_id", v)}
+                          placeholder="默认 0"
+                        />
+                      </Field>
+                      <Field label="归属用户（owned_by）">
+                        <Input
+                          value={draft.options.owned_by || ""}
+                          onChange={(v) => updateDraftOption("owned_by", v)}
+                          placeholder="可选用户邮箱"
+                        />
+                      </Field>
+                    </div>
+                  </>
+                )}
+                {draft.type === "yandex" && (
+                  <div className="native-checkbox-group">
+                    <Checkbox
+                      checked={isBoolTrue(draft.options, "app_folder")}
+                      onChange={(e) =>
+                        toggleDraftBoolOption("app_folder", Boolean(e.target.checked))
+                      }
+                    >
+                      仅限应用专属目录（app_folder）
+                    </Checkbox>
+                    <Checkbox
+                      checked={isBoolTrue(draft.options, "hard_delete")}
+                      onChange={(e) =>
+                        toggleDraftBoolOption("hard_delete", Boolean(e.target.checked))
+                      }
+                    >
+                      永久删除而非移入回收站（hard_delete）
+                    </Checkbox>
+                  </div>
+                )}
+                {draft.type === "jottacloud" && (
+                  <div className="native-checkbox-group">
+                    <Checkbox
+                      checked={isBoolTrue(draft.options, "trashed_only")}
+                      onChange={(e) =>
+                        toggleDraftBoolOption("trashed_only", Boolean(e.target.checked))
+                      }
+                    >
+                      仅列出回收站文件（trashed_only）
+                    </Checkbox>
+                    <Checkbox
+                      checked={isBoolTrue(draft.options, "hard_delete")}
+                      onChange={(e) =>
+                        toggleDraftBoolOption("hard_delete", Boolean(e.target.checked))
+                      }
+                    >
+                      永久删除而非移入回收站（hard_delete）
+                    </Checkbox>
+                    <Checkbox
+                      checked={isBoolTrue(draft.options, "no_versions")}
+                      onChange={(e) =>
+                        toggleDraftBoolOption("no_versions", Boolean(e.target.checked))
+                      }
+                    >
+                      覆盖时避免保留历史版本（no_versions）
+                    </Checkbox>
+                  </div>
+                )}
+                {draft.type === "hidrive" && (
+                  <div className="form-grid form-grid--two">
+                    <Field label="根目录前缀（root_prefix）">
+                      <Input
+                        value={draft.options.root_prefix || ""}
+                        onChange={(v) => updateDraftOption("root_prefix", v)}
+                        placeholder="默认 /"
+                      />
+                    </Field>
+                    <Field label="自定义端点（endpoint，可选）">
+                      <Input
+                        value={draft.options.endpoint || ""}
+                        onChange={(v) => updateDraftOption("endpoint", v)}
+                        placeholder="留空使用默认 HiDrive API"
+                      />
+                    </Field>
+                  </div>
+                )}
+                {draft.type === "huaweidrive" && (
+                  <div className="form-grid form-grid--two">
+                    <Field label="根目录 ID（root_folder_id，可选）">
+                      <Input
+                        value={draft.options.root_folder_id || ""}
+                        onChange={(v) => updateDraftOption("root_folder_id", v)}
+                        placeholder="留空使用根目录"
+                      />
+                    </Field>
+                    <Field label="单页列举条数（list_chunk）">
+                      <Input
+                        inputMode="numeric"
+                        value={draft.options.list_chunk || ""}
+                        onChange={(v) => updateDraftOption("list_chunk", v)}
+                        placeholder="默认 100"
+                      />
+                    </Field>
+                  </div>
                 )}
               </>
             )}
@@ -2358,6 +2975,30 @@ export function NativeStorageEditor({
                     placeholder={secretPlaceholder("sas_url", "https://...?sv=...")}
                   />
                 </Field>
+                <div className="form-grid form-grid--three">
+                  <Field label="Tenant ID（可选，Service Principal）">
+                    <Input
+                      value={draft.options.tenant || ""}
+                      onChange={(v) => updateDraftOption("tenant", v)}
+                      placeholder="Azure AD Tenant ID"
+                    />
+                  </Field>
+                  <Field label="Client ID（可选）">
+                    <Input
+                      value={draft.options.client_id || ""}
+                      onChange={(v) => updateDraftOption("client_id", v)}
+                      placeholder="Application Client ID"
+                    />
+                  </Field>
+                  <Field label="Client Secret（可选）">
+                    <Input
+                      mode="password"
+                      value={draft.options.client_secret || ""}
+                      onChange={(v) => updateDraftOption("client_secret", v)}
+                      placeholder={secretPlaceholder("client_secret", "Client Secret")}
+                    />
+                  </Field>
+                </div>
                 <div className="form-grid form-grid--two">
                   <Field label="自定义端点（可选）">
                     <Input
@@ -2377,6 +3018,62 @@ export function NativeStorageEditor({
                         { value: "archive", label: "Archive" },
                       ]}
                       onChange={(v) => updateDraftOption("access_tier", String(v || ""))}
+                    />
+                  </Field>
+                </div>
+              </>
+            )}
+
+            {draft.type === "azurefiles" && (
+              <>
+                <div className="form-grid form-grid--two">
+                  <Field label="存储账户名（account）" error={fieldErrors.account}>
+                    <Input
+                      value={draft.options.account || ""}
+                      onChange={(v) => updateDraftOption("account", v)}
+                      placeholder="Azure Storage Account"
+                    />
+                  </Field>
+                  <Field label="访问密钥（key）">
+                    <Input
+                      mode="password"
+                      value={draft.options.key || ""}
+                      onChange={(v) => updateDraftOption("key", v)}
+                      placeholder={secretPlaceholder("key", "Storage Account Key")}
+                    />
+                  </Field>
+                </div>
+                <div className="form-grid form-grid--two">
+                  <Field label="SAS URL（可选，替代 Account + Key）">
+                    <Input
+                      mode="password"
+                      value={draft.options.sas_url || ""}
+                      onChange={(v) => updateDraftOption("sas_url", v)}
+                      placeholder={secretPlaceholder("sas_url", "https://...?sv=...")}
+                    />
+                  </Field>
+                  <Field label="连接字符串（connection_string，可选）">
+                    <Input
+                      mode="password"
+                      value={draft.options.connection_string || ""}
+                      onChange={(v) => updateDraftOption("connection_string", v)}
+                      placeholder={secretPlaceholder("connection_string", "DefaultEndpointsProtocol=...")}
+                    />
+                  </Field>
+                </div>
+                <div className="form-grid form-grid--two">
+                  <Field label="共享名称（share_name，可选）">
+                    <Input
+                      value={draft.options.share_name || ""}
+                      onChange={(v) => updateDraftOption("share_name", v)}
+                      placeholder="限定单个 Azure Files Share（可选）"
+                    />
+                  </Field>
+                  <Field label="自定义端点（endpoint，可选）">
+                    <Input
+                      value={draft.options.endpoint || ""}
+                      onChange={(v) => updateDraftOption("endpoint", v)}
+                      placeholder="留空使用默认 Azure Files 端点"
                     />
                   </Field>
                 </div>
@@ -2418,30 +3115,63 @@ export function NativeStorageEditor({
                   </Field>
                 </div>
                 <div className="form-grid form-grid--two">
-                  <Field label="存储类别（storage_class）">
+                  <Field label="OAuth Client ID（可选）">
                     <Input
-                      value={draft.options.storage_class || ""}
-                      onChange={(v) => updateDraftOption("storage_class", v)}
-                      placeholder="STANDARD / NEARLINE / COLDLINE / ARCHIVE"
+                      value={draft.options.client_id || ""}
+                      onChange={(v) => updateDraftOption("client_id", v)}
+                      placeholder="可选 Client ID"
                     />
                   </Field>
-                  <Field label="OAuth Token（可选）">
+                  <Field label="OAuth Client Secret（可选）">
                     <Input
                       mode="password"
-                      value={draft.options.token || ""}
-                      onChange={(v) => updateDraftOption("token", v)}
-                      placeholder={secretPlaceholder("token", "可选")}
+                      value={draft.options.client_secret || ""}
+                      onChange={(v) => updateDraftOption("client_secret", v)}
+                      placeholder={secretPlaceholder("client_secret", "可选")}
                     />
                   </Field>
                 </div>
-                <Checkbox
-                  checked={isBoolTrue(draft.options, "bucket_policy_only")}
-                  onChange={(e) =>
-                    toggleDraftBoolOption("bucket_policy_only", Boolean(e.target.checked))
-                  }
-                >
-                  统一存储桶级权限（bucket_policy_only）
-                </Checkbox>
+                <div className="form-grid form-grid--three">
+                  <Field label="对象 ACL（object_acl）">
+                    <Input
+                      value={draft.options.object_acl || ""}
+                      onChange={(v) => updateDraftOption("object_acl", v)}
+                      placeholder="如 private / projectPrivate"
+                    />
+                  </Field>
+                  <Field label="存储桶 ACL（bucket_acl）">
+                    <Input
+                      value={draft.options.bucket_acl || ""}
+                      onChange={(v) => updateDraftOption("bucket_acl", v)}
+                      placeholder="如 private / authenticatedRead"
+                    />
+                  </Field>
+                  <Field label="自定义端点（endpoint，可选）">
+                    <Input
+                      value={draft.options.endpoint || ""}
+                      onChange={(v) => updateDraftOption("endpoint", v)}
+                      placeholder="可选自定义 GCS URL"
+                    />
+                  </Field>
+                </div>
+                <div className="native-checkbox-group">
+                  <Checkbox
+                    checked={isBoolTrue(draft.options, "bucket_policy_only")}
+                    onChange={(e) =>
+                      toggleDraftBoolOption("bucket_policy_only", Boolean(e.target.checked))
+                    }
+                  >
+                    统一存储桶级权限（bucket_policy_only）
+                  </Checkbox>
+                  <Checkbox
+                    checked={isBoolTrue(draft.options, "anonymous")}
+                    onChange={(e) =>
+                      toggleDraftBoolOption("anonymous", Boolean(e.target.checked))
+                    }
+                  >
+                    匿名访问公共存储桶（无需凭据，仅只读）
+                  </Checkbox>
+                </div>
               </>
             )}
 
@@ -2471,11 +3201,18 @@ export function NativeStorageEditor({
                     />
                   </Field>
                 </div>
-                <div className="form-grid form-grid--two">
+                <div className="form-grid form-grid--three">
                   <Field label="租户 / 项目（tenant）">
                     <Input
                       value={draft.options.tenant || ""}
                       onChange={(v) => updateDraftOption("tenant", v)}
+                      placeholder="可选"
+                    />
+                  </Field>
+                  <Field label="租户 ID（tenant_id）">
+                    <Input
+                      value={draft.options.tenant_id || ""}
+                      onChange={(v) => updateDraftOption("tenant_id", v)}
                       placeholder="可选"
                     />
                   </Field>
@@ -2503,7 +3240,598 @@ export function NativeStorageEditor({
                     />
                   </Field>
                 </div>
+                <div className="form-grid form-grid--two">
+                  <Field label="直连 Storage URL（可选，免身份认证）">
+                    <Input
+                      value={draft.options.storage_url || ""}
+                      onChange={(v) => updateDraftOption("storage_url", v)}
+                      placeholder="https://swift.example.com/v1/AUTH_..."
+                    />
+                  </Field>
+                  <Field label="直连 Auth Token（可选）">
+                    <Input
+                      mode="password"
+                      value={draft.options.auth_token || ""}
+                      onChange={(v) => updateDraftOption("auth_token", v)}
+                      placeholder={secretPlaceholder("auth_token", "Auth Token")}
+                    />
+                  </Field>
+                </div>
+                <div className="form-grid form-grid--three">
+                  <Field label="应用凭据 ID（application_credential_id）">
+                    <Input
+                      value={draft.options.application_credential_id || ""}
+                      onChange={(v) =>
+                        updateDraftOption("application_credential_id", v)
+                      }
+                      placeholder="可选"
+                    />
+                  </Field>
+                  <Field label="应用凭据名（application_credential_name）">
+                    <Input
+                      value={draft.options.application_credential_name || ""}
+                      onChange={(v) =>
+                        updateDraftOption("application_credential_name", v)
+                      }
+                      placeholder="可选"
+                    />
+                  </Field>
+                  <Field label="应用凭据密钥（application_credential_secret）">
+                    <Input
+                      mode="password"
+                      value={draft.options.application_credential_secret || ""}
+                      onChange={(v) =>
+                        updateDraftOption("application_credential_secret", v)
+                      }
+                      placeholder={secretPlaceholder(
+                        "application_credential_secret",
+                        "Secret",
+                      )}
+                    />
+                  </Field>
+                </div>
               </>
+            )}
+
+            {draft.type === "oracleobjectstorage" && (
+              <>
+                <div className="form-grid form-grid--three">
+                  <Field label="Namespace" required error={fieldErrors.namespace}>
+                    <Input
+                      value={draft.options.namespace || ""}
+                      onChange={(v) => updateDraftOption("namespace", v)}
+                      placeholder="Object Storage Namespace"
+                    />
+                  </Field>
+                  <Field label="Region" required error={fieldErrors.region}>
+                    <Input
+                      value={draft.options.region || ""}
+                      onChange={(v) => updateDraftOption("region", v)}
+                      placeholder="如 us-ashburn-1 / ap-tokyo-1"
+                    />
+                  </Field>
+                  <Field label="认证方式（provider）">
+                    <Select
+                      value={draft.options.provider || "user_principal_auth"}
+                      optionList={[
+                        { value: "user_principal_auth", label: "OCI Config (~/.oci)" },
+                        { value: "env_auth", label: "环境变量 (env_auth)" },
+                        { value: "instance_principal_auth", label: "实例主体" },
+                        { value: "no_auth", label: "无认证（公共读）" },
+                      ]}
+                      onChange={(v) => updateDraftOption("provider", String(v))}
+                    />
+                  </Field>
+                </div>
+                <div className="form-grid form-grid--three">
+                  <Field label="Compartment OCID（可选）">
+                    <Input
+                      value={draft.options.compartment || ""}
+                      onChange={(v) => updateDraftOption("compartment", v)}
+                      placeholder="ocid1.compartment..."
+                    />
+                  </Field>
+                  <Field label="存储等级（storage_tier）">
+                    <Select
+                      value={draft.options.storage_tier || ""}
+                      optionList={[
+                        { value: "", label: "默认 (Standard)" },
+                        { value: "Standard", label: "Standard" },
+                        { value: "InfrequentAccess", label: "InfrequentAccess" },
+                        { value: "Archive", label: "Archive" },
+                      ]}
+                      onChange={(v) => updateDraftOption("storage_tier", String(v || ""))}
+                    />
+                  </Field>
+                  <Field label="自定义端点（endpoint，可选）">
+                    <Input
+                      value={draft.options.endpoint || ""}
+                      onChange={(v) => updateDraftOption("endpoint", v)}
+                      placeholder="留空使用区域默认端点"
+                    />
+                  </Field>
+                </div>
+              </>
+            )}
+
+            {draft.type === "qingstor" && (
+              <>
+                <div className="form-grid form-grid--two">
+                  <Field label="Access Key ID" required error={fieldErrors.access_key_id}>
+                    <Input
+                      value={draft.options.access_key_id || ""}
+                      onChange={(v) => updateDraftOption("access_key_id", v)}
+                      placeholder="QingStor Access Key ID"
+                    />
+                  </Field>
+                  <Field
+                    label="Secret Access Key"
+                    required={!draft.editing}
+                    error={fieldErrors.secret_access_key}
+                  >
+                    <Input
+                      mode="password"
+                      value={draft.options.secret_access_key || ""}
+                      onChange={(v) => updateDraftOption("secret_access_key", v)}
+                      placeholder={secretPlaceholder("secret_access_key", "Secret Access Key")}
+                    />
+                  </Field>
+                </div>
+                <div className="form-grid form-grid--two">
+                  <Field label="区域（zone，可选）">
+                    <Input
+                      value={draft.options.zone || ""}
+                      onChange={(v) => updateDraftOption("zone", v)}
+                      placeholder="如 pek3a / sh1a / gd2a"
+                    />
+                  </Field>
+                  <Field label="自定义端点（endpoint，可选）">
+                    <Input
+                      value={draft.options.endpoint || ""}
+                      onChange={(v) => updateDraftOption("endpoint", v)}
+                      placeholder="默认 https://stor.qingcloud.com:443"
+                    />
+                  </Field>
+                </div>
+              </>
+            )}
+
+            {draft.type === "storj" && (
+              <>
+                <Field label="Access Grant（推荐）" error={fieldErrors.access_grant}>
+                  <TextArea
+                    autosize={{ minRows: 2, maxRows: 4 }}
+                    value={draft.options.access_grant || ""}
+                    onChange={(v) => updateDraftOption("access_grant", v)}
+                    placeholder={secretPlaceholder(
+                      "access_grant",
+                      "粘贴 Storj Access Grant，或下方填写 Satellite + API Key + Passphrase",
+                    )}
+                  />
+                </Field>
+                <div className="form-grid form-grid--three">
+                  <Field label="Satellite 地址（可选）">
+                    <Input
+                      value={draft.options.satellite_address || ""}
+                      onChange={(v) => updateDraftOption("satellite_address", v)}
+                      placeholder="us1.storj.io"
+                    />
+                  </Field>
+                  <Field label="API Key（可选）">
+                    <Input
+                      mode="password"
+                      value={draft.options.api_key || ""}
+                      onChange={(v) => updateDraftOption("api_key", v)}
+                      placeholder={secretPlaceholder("api_key", "API Key")}
+                    />
+                  </Field>
+                  <Field label="加密短语（passphrase，可选）">
+                    <Input
+                      mode="password"
+                      value={draft.options.passphrase || ""}
+                      onChange={(v) => updateDraftOption("passphrase", v)}
+                      placeholder={secretPlaceholder("passphrase", "Encryption Passphrase")}
+                    />
+                  </Field>
+                </div>
+              </>
+            )}
+
+            {draft.type === "koofr" && (
+              <>
+                <div className="form-grid form-grid--two">
+                  <Field label="服务地址（endpoint）" required error={fieldErrors.endpoint}>
+                    <Input
+                      value={draft.options.endpoint || "https://app.koofr.net"}
+                      onChange={(v) => updateDraftOption("endpoint", v)}
+                      placeholder="https://app.koofr.net"
+                    />
+                  </Field>
+                  <Field label="提供方（provider）">
+                    <Select
+                      value={draft.options.provider || "koofr"}
+                      optionList={[
+                        { value: "koofr", label: "Koofr" },
+                        { value: "digiboxx", label: "DigiBoxx" },
+                        { value: "other", label: "其他兼容服务" },
+                      ]}
+                      onChange={(v) => updateDraftOption("provider", String(v))}
+                    />
+                  </Field>
+                </div>
+                <div className="form-grid form-grid--two">
+                  <Field label="用户名 / 邮箱（user）" required error={fieldErrors.user}>
+                    <Input
+                      value={draft.options.user || ""}
+                      onChange={(v) => updateDraftOption("user", v)}
+                      placeholder="user@example.com"
+                    />
+                  </Field>
+                  <Field
+                    label="应用专属密码（password）"
+                    required={!draft.editing}
+                    error={fieldErrors.password}
+                  >
+                    <Input
+                      mode="password"
+                      value={draft.options.password || ""}
+                      onChange={(v) => updateDraftOption("password", v)}
+                      placeholder={secretPlaceholder("password", "Koofr App Password")}
+                    />
+                  </Field>
+                </div>
+              </>
+            )}
+
+            {draft.type === "seafile" && (
+              <>
+                <Field label="Seafile 服务地址（url）" required error={fieldErrors.url}>
+                  <Input
+                    value={draft.options.url || ""}
+                    onChange={(v) => updateDraftOption("url", v)}
+                    placeholder="https://cloud.seafile.com"
+                  />
+                </Field>
+                <div className="form-grid form-grid--two">
+                  <Field label="登录邮箱 / 用户名（user）" required error={fieldErrors.user}>
+                    <Input
+                      value={draft.options.user || ""}
+                      onChange={(v) => updateDraftOption("user", v)}
+                      placeholder="user@example.com"
+                    />
+                  </Field>
+                  <Field label="密码（pass）" error={fieldErrors.pass}>
+                    <Input
+                      mode="password"
+                      value={draft.options.pass || ""}
+                      onChange={(v) => updateDraftOption("pass", v)}
+                      placeholder={secretPlaceholder("pass", "密码（或改填下方 Auth Token）")}
+                    />
+                  </Field>
+                </div>
+                <div className="form-grid form-grid--three">
+                  <Field label="Auth Token（可选，开启 2FA 时使用）">
+                    <Input
+                      mode="password"
+                      value={draft.options.auth_token || ""}
+                      onChange={(v) => updateDraftOption("auth_token", v)}
+                      placeholder={secretPlaceholder("auth_token", "API Auth Token")}
+                    />
+                  </Field>
+                  <Field label="限定资料库名称（library，可选）">
+                    <Input
+                      value={draft.options.library || ""}
+                      onChange={(v) => updateDraftOption("library", v)}
+                      placeholder="留空访问全部资料库"
+                    />
+                  </Field>
+                  <Field label="加密资料库密码（library_key，可选）">
+                    <Input
+                      mode="password"
+                      value={draft.options.library_key || ""}
+                      onChange={(v) => updateDraftOption("library_key", v)}
+                      placeholder={secretPlaceholder("library_key", "可选")}
+                    />
+                  </Field>
+                </div>
+              </>
+            )}
+
+            {draft.type === "pikpak" && (
+              <>
+                <div className="form-grid form-grid--two">
+                  <Field label="PikPak 账号（user）" required error={fieldErrors.user}>
+                    <Input
+                      value={draft.options.user || ""}
+                      onChange={(v) => updateDraftOption("user", v)}
+                      placeholder="邮箱或用户名"
+                    />
+                  </Field>
+                  <Field label="密码（pass）" required={!draft.editing} error={fieldErrors.pass}>
+                    <Input
+                      mode="password"
+                      value={draft.options.pass || ""}
+                      onChange={(v) => updateDraftOption("pass", v)}
+                      placeholder={secretPlaceholder("pass", "登录密码")}
+                    />
+                  </Field>
+                </div>
+                <div className="form-grid form-grid--two">
+                  <Field label="根目录 ID（root_folder_id，可选）">
+                    <Input
+                      value={draft.options.root_folder_id || ""}
+                      onChange={(v) => updateDraftOption("root_folder_id", v)}
+                      placeholder="留空从根目录开始"
+                    />
+                  </Field>
+                  <Field label="设备 ID（device_id，可选）">
+                    <Input
+                      value={draft.options.device_id || ""}
+                      onChange={(v) => updateDraftOption("device_id", v)}
+                      placeholder="可选"
+                    />
+                  </Field>
+                </div>
+              </>
+            )}
+
+            {draft.type === "protondrive" && (
+              <>
+                <div className="form-grid form-grid--two">
+                  <Field label="Proton 用户名" required error={fieldErrors.username}>
+                    <Input
+                      value={draft.options.username || ""}
+                      onChange={(v) => updateDraftOption("username", v)}
+                      placeholder="user@proton.me"
+                    />
+                  </Field>
+                  <Field
+                    label="登录密码"
+                    required={!draft.editing}
+                    error={fieldErrors.password}
+                  >
+                    <Input
+                      mode="password"
+                      value={draft.options.password || ""}
+                      onChange={(v) => updateDraftOption("password", v)}
+                      placeholder={secretPlaceholder("password", "Proton 登录密码")}
+                    />
+                  </Field>
+                </div>
+                <div className="form-grid form-grid--two">
+                  <Field label="邮箱解密密码（mailbox_password，双密码账户）">
+                    <Input
+                      mode="password"
+                      value={draft.options.mailbox_password || ""}
+                      onChange={(v) => updateDraftOption("mailbox_password", v)}
+                      placeholder={secretPlaceholder("mailbox_password", "可选")}
+                    />
+                  </Field>
+                  <Field label="2FA TOTP 密钥（otp_secret_key，可选）">
+                    <Input
+                      mode="password"
+                      value={draft.options.otp_secret_key || ""}
+                      onChange={(v) => updateDraftOption("otp_secret_key", v)}
+                      placeholder={secretPlaceholder("otp_secret_key", "Base32 2FA Secret")}
+                    />
+                  </Field>
+                </div>
+              </>
+            )}
+
+            {draft.type === "iclouddrive" && (
+              <>
+                <div className="form-grid form-grid--two">
+                  <Field label="Apple ID" required error={fieldErrors.apple_id}>
+                    <Input
+                      value={draft.options.apple_id || ""}
+                      onChange={(v) => updateDraftOption("apple_id", v)}
+                      placeholder="user@icloud.com"
+                    />
+                  </Field>
+                  <Field
+                    label="密码（password）"
+                    required={!draft.editing}
+                    error={fieldErrors.password}
+                  >
+                    <Input
+                      mode="password"
+                      value={draft.options.password || ""}
+                      onChange={(v) => updateDraftOption("password", v)}
+                      placeholder={secretPlaceholder("password", "Apple ID 密码")}
+                    />
+                  </Field>
+                </div>
+                <div className="form-grid form-grid--two">
+                  <Field label="Trust Token（可选）">
+                    <Input
+                      mode="password"
+                      value={draft.options.trust_token || ""}
+                      onChange={(v) => updateDraftOption("trust_token", v)}
+                      placeholder={secretPlaceholder("trust_token", "由 rclone config 生成")}
+                    />
+                  </Field>
+                  <Field label="Cookies（可选）">
+                    <Input
+                      mode="password"
+                      value={draft.options.cookies || ""}
+                      onChange={(v) => updateDraftOption("cookies", v)}
+                      placeholder={secretPlaceholder("cookies", "由 rclone config 生成")}
+                    />
+                  </Field>
+                </div>
+              </>
+            )}
+
+            {draft.type === "filen" && (
+              <>
+                <div className="form-grid form-grid--two">
+                  <Field label="Filen 邮箱（email）" required error={fieldErrors.email}>
+                    <Input
+                      value={draft.options.email || ""}
+                      onChange={(v) => updateDraftOption("email", v)}
+                      placeholder="user@example.com"
+                    />
+                  </Field>
+                  <Field
+                    label="密码（password）"
+                    required={!draft.editing}
+                    error={fieldErrors.password}
+                  >
+                    <Input
+                      mode="password"
+                      value={draft.options.password || ""}
+                      onChange={(v) => updateDraftOption("password", v)}
+                      placeholder={secretPlaceholder("password", "Filen 登录密码")}
+                    />
+                  </Field>
+                </div>
+                <div className="form-grid form-grid--two">
+                  <Field
+                    label="API Key"
+                    required={!draft.editing}
+                    error={fieldErrors.api_key}
+                  >
+                    <Input
+                      mode="password"
+                      value={draft.options.api_key || ""}
+                      onChange={(v) => updateDraftOption("api_key", v)}
+                      placeholder={secretPlaceholder("api_key", "Filen API Key")}
+                    />
+                  </Field>
+                  <Field label="根目录 UUID（base_folder_uuid，可选）">
+                    <Input
+                      value={draft.options.base_folder_uuid || ""}
+                      onChange={(v) => updateDraftOption("base_folder_uuid", v)}
+                      placeholder="留空为根文件夹"
+                    />
+                  </Field>
+                </div>
+              </>
+            )}
+
+            {draft.type === "mailru" && (
+              <>
+                <div className="form-grid form-grid--two">
+                  <Field label="Mail.ru 邮箱（user）" error={fieldErrors.user}>
+                    <Input
+                      value={draft.options.user || ""}
+                      onChange={(v) => updateDraftOption("user", v)}
+                      placeholder="user@mail.ru"
+                    />
+                  </Field>
+                  <Field label="应用密码（pass）">
+                    <Input
+                      mode="password"
+                      value={draft.options.pass || ""}
+                      onChange={(v) => updateDraftOption("pass", v)}
+                      placeholder={secretPlaceholder("pass", "Mail.ru 应用专用密码")}
+                    />
+                  </Field>
+                </div>
+                <Field label="或提供 OAuth Token JSON（可选）">
+                  <TextArea
+                    autosize={{ minRows: 2, maxRows: 4 }}
+                    value={draft.options.token || ""}
+                    onChange={(v) => updateDraftOption("token", v)}
+                    placeholder={secretPlaceholder("token", '{"access_token":...}')}
+                  />
+                </Field>
+              </>
+            )}
+
+            {draft.type === "fichier" && (
+              <>
+                <div className="form-grid form-grid--two">
+                  <Field label="1Fichier API Key" error={fieldErrors.api_key}>
+                    <Input
+                      mode="password"
+                      value={draft.options.api_key || ""}
+                      onChange={(v) => updateDraftOption("api_key", v)}
+                      placeholder={secretPlaceholder("api_key", "API Key（与共享目录二选一）")}
+                    />
+                  </Field>
+                  <Field label="共享目录链接（shared_folder，可选）">
+                    <Input
+                      value={draft.options.shared_folder || ""}
+                      onChange={(v) => updateDraftOption("shared_folder", v)}
+                      placeholder="https://1fichier.com/dir/..."
+                    />
+                  </Field>
+                </div>
+                <div className="form-grid form-grid--two">
+                  <Field label="文件解压/下载密码（file_password，可选）">
+                    <Input
+                      mode="password"
+                      value={draft.options.file_password || ""}
+                      onChange={(v) => updateDraftOption("file_password", v)}
+                      placeholder={secretPlaceholder("file_password", "可选")}
+                    />
+                  </Field>
+                  <Field label="目录密码（folder_password，可选）">
+                    <Input
+                      mode="password"
+                      value={draft.options.folder_password || ""}
+                      onChange={(v) => updateDraftOption("folder_password", v)}
+                      placeholder={secretPlaceholder("folder_password", "可选")}
+                    />
+                  </Field>
+                </div>
+              </>
+            )}
+
+            {draft.type === "gofile" && (
+              <div className="form-grid form-grid--three">
+                <Field label="Access Token（API Key）" error={fieldErrors.access_token}>
+                  <Input
+                    mode="password"
+                    value={draft.options.access_token || ""}
+                    onChange={(v) => updateDraftOption("access_token", v)}
+                    placeholder={secretPlaceholder("access_token", "Gofile Account Token")}
+                  />
+                </Field>
+                <Field label="Root Folder ID（可选）">
+                  <Input
+                    value={draft.options.root_folder_id || ""}
+                    onChange={(v) => updateDraftOption("root_folder_id", v)}
+                    placeholder="根目录 ID"
+                  />
+                </Field>
+                <Field label="Account ID（可选）">
+                  <Input
+                    value={draft.options.account_id || ""}
+                    onChange={(v) => updateDraftOption("account_id", v)}
+                    placeholder="可选"
+                  />
+                </Field>
+              </div>
+            )}
+
+            {draft.type === "pixeldrain" && (
+              <div className="form-grid form-grid--three">
+                <Field label="API Key" error={fieldErrors.api_key}>
+                  <Input
+                    mode="password"
+                    value={draft.options.api_key || ""}
+                    onChange={(v) => updateDraftOption("api_key", v)}
+                    placeholder={secretPlaceholder("api_key", "Pixeldrain API Key")}
+                  />
+                </Field>
+                <Field label="根目录 / 列表 ID（root_folder_id）">
+                  <Input
+                    value={draft.options.root_folder_id || ""}
+                    onChange={(v) => updateDraftOption("root_folder_id", v)}
+                    placeholder="默认 me（个人文件系统）"
+                  />
+                </Field>
+                <Field label="API 地址（api_url，可选）">
+                  <Input
+                    value={draft.options.api_url || ""}
+                    onChange={(v) => updateDraftOption("api_url", v)}
+                    placeholder="默认 https://pixeldrain.com/api"
+                  />
+                </Field>
+              </div>
             )}
 
             {wrapperTypes.has(draft.type) && (
@@ -2649,6 +3977,55 @@ export function NativeStorageEditor({
                         placeholder="如 24h 或 off"
                       />
                     </Field>
+                  </div>
+                )}
+
+                {draft.type === "archive" && (
+                  <div className="sync-method-banner">
+                    <IconInfoCircle aria-hidden="true" size="small" />
+                    <span>
+                      Archive 支持将压缩包（ZIP / TAR / 7z 等）挂载为只读虚拟目录进行浏览、校验和作为同步源，不支持写入。
+                    </span>
+                  </div>
+                )}
+              </>
+            )}
+
+            {draft.type === "combine" && (
+              <>
+                <Field
+                  label="目录映射列表（upstreams）"
+                  required
+                  error={fieldErrors.upstreams}
+                  hint="以空格分隔「目录名=存储名:路径」，将多个远端或本地目录挂载到同一虚拟根目录下，例如 photos=nas:/photos archive=s3:bucket"
+                >
+                  <TextArea
+                    autosize={{ minRows: 2, maxRows: 4 }}
+                    value={draft.options.upstreams || ""}
+                    onChange={(v) => updateDraftOption("upstreams", v)}
+                    placeholder="photos=remote1:photos docs=remote2:docs"
+                  />
+                </Field>
+                {quickBackingSources.length > 0 && (
+                  <div className="native-quick-picks">
+                    <span className="muted">快捷追加映射：</span>
+                    {quickBackingSources.map((src) => {
+                      const cleanDir = src.value.replace(/:$/, "").replace(/[^A-Za-z0-9_-]/g, "") || "dir";
+                      return (
+                        <button
+                          key={`combine-${src.kind}-${src.value}`}
+                          type="button"
+                          className="native-quick-chip"
+                          onClick={() => {
+                            const cur = (draft.options.upstreams || "").trim();
+                            const entry = `${cleanDir}=${src.value}`;
+                            updateDraftOption("upstreams", cur ? `${cur} ${entry}` : entry);
+                          }}
+                        >
+                          + {cleanDir}={src.label}
+                        </button>
+                      );
+                    })}
                   </div>
                 )}
               </>
@@ -2804,6 +4181,36 @@ export function NativeStorageEditor({
                           />
                         </Field>
                       </div>
+                      <div className="form-grid form-grid--three">
+                        <Field label="STS 临时会话令牌（session_token）">
+                          <Input
+                            mode="password"
+                            value={draft.options.session_token || ""}
+                            onChange={(v) => updateDraftOption("session_token", v)}
+                            placeholder={secretPlaceholder("session_token", "可选")}
+                          />
+                        </Field>
+                        <Field label="列举接口版本（list_version）">
+                          <Select
+                            value={draft.options.list_version || ""}
+                            optionList={[
+                              { value: "", label: "默认 (v2)" },
+                              { value: "1", label: "v1（老旧兼容）" },
+                              { value: "2", label: "v2" },
+                            ]}
+                            onChange={(v) => updateDraftOption("list_version", String(v || ""))}
+                          />
+                        </Field>
+                        <Field label="上传校验算法（upload_checksum_algorithm）">
+                          <Input
+                            value={draft.options.upload_checksum_algorithm || ""}
+                            onChange={(v) =>
+                              updateDraftOption("upload_checksum_algorithm", v)
+                            }
+                            placeholder="如 CRC32 / SHA256"
+                          />
+                        </Field>
+                      </div>
                       <div className="native-checkbox-group">
                         <Checkbox
                           checked={isBoolTrue(draft.options, "disable_http2")}
@@ -2824,33 +4231,90 @@ export function NativeStorageEditor({
                         >
                           使用 v2 签名认证（老旧 S3 兼容服务）
                         </Checkbox>
+                        <Checkbox
+                          checked={isBoolTrue(draft.options, "directory_markers")}
+                          onChange={(e) =>
+                            toggleDraftBoolOption(
+                              "directory_markers",
+                              Boolean(e.target.checked),
+                            )
+                          }
+                        >
+                          上传空目录时创建目录标记对象（directory_markers）
+                        </Checkbox>
+                        <Checkbox
+                          checked={isBoolTrue(draft.options, "leave_parts_on_error")}
+                          onChange={(e) =>
+                            toggleDraftBoolOption(
+                              "leave_parts_on_error",
+                              Boolean(e.target.checked),
+                            )
+                          }
+                        >
+                          出错时保留分片以便断点续传（leave_parts_on_error）
+                        </Checkbox>
+                        <Checkbox
+                          checked={isBoolTrue(draft.options, "no_head")}
+                          onChange={(e) =>
+                            toggleDraftBoolOption("no_head", Boolean(e.target.checked))
+                          }
+                        >
+                          跳过上传后 HEAD 校验（no_head）
+                        </Checkbox>
                       </div>
                     </>
                   )}
 
                   {draft.type === "webdav" && (
-                    <div className="form-grid form-grid--two">
-                      <Field label="Bearer Token（可选）">
-                        <Input
-                          mode="password"
-                          value={draft.options.bearer_token || ""}
-                          onChange={(v) => updateDraftOption("bearer_token", v)}
-                          placeholder={secretPlaceholder("bearer_token", "可选")}
-                        />
-                      </Field>
-                      <Field label="最小请求间隔（pacer_min_sleep）">
-                        <Input
-                          value={draft.options.pacer_min_sleep || ""}
-                          onChange={(v) => updateDraftOption("pacer_min_sleep", v)}
-                          placeholder="如 10ms"
-                        />
-                      </Field>
-                    </div>
+                    <>
+                      <div className="form-grid form-grid--two">
+                        <Field label="Bearer Token（可选）">
+                          <Input
+                            mode="password"
+                            value={draft.options.bearer_token || ""}
+                            onChange={(v) => updateDraftOption("bearer_token", v)}
+                            placeholder={secretPlaceholder("bearer_token", "可选")}
+                          />
+                        </Field>
+                        <Field label="最小请求间隔（pacer_min_sleep）">
+                          <Input
+                            value={draft.options.pacer_min_sleep || ""}
+                            onChange={(v) => updateDraftOption("pacer_min_sleep", v)}
+                            placeholder="如 10ms"
+                          />
+                        </Field>
+                      </div>
+                      <div className="form-grid form-grid--three">
+                        <Field label="Nextcloud 分块大小（nextcloud_chunk_size）">
+                          <Input
+                            value={draft.options.nextcloud_chunk_size || ""}
+                            onChange={(v) =>
+                              updateDraftOption("nextcloud_chunk_size", v)
+                            }
+                            placeholder="如 10M"
+                          />
+                        </Field>
+                        <Field label="自定义请求头（headers）">
+                          <Input
+                            value={draft.options.headers || ""}
+                            onChange={(v) => updateDraftOption("headers", v)}
+                            placeholder="Key,Value,Key2,Value2"
+                          />
+                        </Field>
+                        <Field label="文件名编码（encoding）">
+                          <Input
+                            value={draft.options.encoding || ""}
+                            onChange={(v) => updateDraftOption("encoding", v)}
+                            placeholder="留空默认"
+                          />
+                        </Field>
+                      </div>
+                    </>
                   )}
 
                   {draft.type === "sftp" && (
                     <>
-                      <div className="form-grid form-grid--two">
+                      <div className="form-grid form-grid--three">
                         <Field label="空闲超时（idle_timeout）">
                           <Input
                             value={draft.options.idle_timeout || ""}
@@ -2866,45 +4330,615 @@ export function NativeStorageEditor({
                             placeholder="默认 64"
                           />
                         </Field>
+                        <Field label="读写包大小（chunk_size）">
+                          <Input
+                            value={draft.options.chunk_size || ""}
+                            onChange={(v) => updateDraftOption("chunk_size", v)}
+                            placeholder="默认 32k"
+                          />
+                        </Field>
                       </div>
-                      <Checkbox
-                        checked={isBoolTrue(draft.options, "allow_hashcheck")}
-                        onChange={(e) =>
-                          toggleDraftBoolOption(
-                            "allow_hashcheck",
-                            Boolean(e.target.checked),
-                          )
-                        }
-                      >
-                        允许在 SFTP 服务端执行远端哈希命令（需要 SSH shell 权限；默认关闭以加固安全）
-                      </Checkbox>
+                      <Field label="远端 Shell 类型（shell_type）">
+                        <Select
+                          value={draft.options.shell_type || ""}
+                          optionList={[
+                            { value: "", label: "自动探测" },
+                            { value: "unix", label: "unix" },
+                            { value: "powershell", label: "powershell" },
+                            { value: "cmd", label: "cmd" },
+                            { value: "none", label: "none（禁用远端命令）" },
+                          ]}
+                          onChange={(v) => updateDraftOption("shell_type", String(v || ""))}
+                        />
+                      </Field>
+                      <div className="native-checkbox-group">
+                        <Checkbox
+                          checked={isBoolTrue(draft.options, "allow_hashcheck")}
+                          onChange={(e) =>
+                            toggleDraftBoolOption(
+                              "allow_hashcheck",
+                              Boolean(e.target.checked),
+                            )
+                          }
+                        >
+                          允许在 SFTP 服务端执行远端哈希命令（需要 SSH shell 权限；默认关闭以加固安全）
+                        </Checkbox>
+                        <Checkbox
+                          checked={isBoolTrue(draft.options, "use_insecure_cipher")}
+                          onChange={(e) =>
+                            toggleDraftBoolOption(
+                              "use_insecure_cipher",
+                              Boolean(e.target.checked),
+                            )
+                          }
+                        >
+                          兼容老旧 SSH 设备的弱加密套件（use_insecure_cipher）
+                        </Checkbox>
+                      </div>
                     </>
                   )}
 
                   {draft.type === "smb" && (
+                    <>
+                      <div className="form-grid form-grid--two">
+                        <Field label="Kerberos SPN（可选）">
+                          <Input
+                            value={draft.options.spn || ""}
+                            onChange={(v) => updateDraftOption("spn", v)}
+                            placeholder="cifs/server.example.com"
+                          />
+                        </Field>
+                        <Field label="空闲超时（idle_timeout）">
+                          <Input
+                            value={draft.options.idle_timeout || ""}
+                            onChange={(v) => updateDraftOption("idle_timeout", v)}
+                            placeholder="如 1m"
+                          />
+                        </Field>
+                      </div>
+                      <div className="native-checkbox-group">
+                        <Checkbox
+                          checked={isBoolTrue(draft.options, "hide_special_share")}
+                          onChange={(e) =>
+                            toggleDraftBoolOption(
+                              "hide_special_share",
+                              Boolean(e.target.checked),
+                            )
+                          }
+                        >
+                          隐藏特殊共享（如 print$ / IPC$）
+                        </Checkbox>
+                        <Checkbox
+                          checked={isBoolTrue(draft.options, "case_insensitive")}
+                          onChange={(e) =>
+                            toggleDraftBoolOption(
+                              "case_insensitive",
+                              Boolean(e.target.checked),
+                            )
+                          }
+                        >
+                          路径不区分大小写（case_insensitive）
+                        </Checkbox>
+                      </div>
+                    </>
+                  )}
+
+                  {draft.type === "ftp" && (
+                    <>
+                      <div className="form-grid form-grid--three">
+                        <Field label="并发连接数（concurrency）">
+                          <Input
+                            inputMode="numeric"
+                            value={draft.options.concurrency || ""}
+                            onChange={(v) => updateDraftOption("concurrency", v)}
+                            placeholder="0 为不限制"
+                          />
+                        </Field>
+                        <Field label="空闲超时（idle_timeout）">
+                          <Input
+                            value={draft.options.idle_timeout || ""}
+                            onChange={(v) => updateDraftOption("idle_timeout", v)}
+                            placeholder="如 1m"
+                          />
+                        </Field>
+                        <Field label="关闭连接超时（shut_timeout）">
+                          <Input
+                            value={draft.options.shut_timeout || ""}
+                            onChange={(v) => updateDraftOption("shut_timeout", v)}
+                            placeholder="如 1m"
+                          />
+                        </Field>
+                      </div>
+                      <div className="native-checkbox-group">
+                        <Checkbox
+                          checked={isBoolTrue(draft.options, "disable_tls13")}
+                          onChange={(e) =>
+                            toggleDraftBoolOption("disable_tls13", Boolean(e.target.checked))
+                          }
+                        >
+                          禁用 TLS 1.3（兼容部分老旧 FTPS 服务器）
+                        </Checkbox>
+                        <Checkbox
+                          checked={isBoolTrue(draft.options, "writing_mdtm")}
+                          onChange={(e) =>
+                            toggleDraftBoolOption("writing_mdtm", Boolean(e.target.checked))
+                          }
+                        >
+                          使用 MDTM 同步写入文件修改时间
+                        </Checkbox>
+                        <Checkbox
+                          checked={isBoolTrue(draft.options, "force_list_hidden")}
+                          onChange={(e) =>
+                            toggleDraftBoolOption(
+                              "force_list_hidden",
+                              Boolean(e.target.checked),
+                            )
+                          }
+                        >
+                          强制使用 LIST -a 列举隐藏文件（force_list_hidden）
+                        </Checkbox>
+                      </div>
+                    </>
+                  )}
+
+                  {draft.type === "http" && (
+                    <>
+                      <Field label="自定义 HTTP 请求头（headers）">
+                        <Input
+                          value={draft.options.headers || ""}
+                          onChange={(v) => updateDraftOption("headers", v)}
+                          placeholder="Authorization,Bearer xxx"
+                        />
+                      </Field>
+                      <div className="native-checkbox-group">
+                        <Checkbox
+                          checked={isBoolTrue(draft.options, "no_head")}
+                          onChange={(e) =>
+                            toggleDraftBoolOption("no_head", Boolean(e.target.checked))
+                          }
+                        >
+                          跳过 HEAD 探测请求（no_head）
+                        </Checkbox>
+                        <Checkbox
+                          checked={isBoolTrue(draft.options, "no_slash")}
+                          onChange={(e) =>
+                            toggleDraftBoolOption("no_slash", Boolean(e.target.checked))
+                          }
+                        >
+                          URL 指向单文件而非目录时关闭尾部斜杠（no_slash）
+                        </Checkbox>
+                      </div>
+                    </>
+                  )}
+
+                  {draft.type === "b2" && (
+                    <div className="form-grid form-grid--three">
+                      <Field label="分片大小（chunk_size）">
+                        <Input
+                          value={draft.options.chunk_size || ""}
+                          onChange={(v) => updateDraftOption("chunk_size", v)}
+                          placeholder="默认 96M"
+                        />
+                      </Field>
+                      <Field label="大文件分片阈值（upload_cutoff）">
+                        <Input
+                          value={draft.options.upload_cutoff || ""}
+                          onChange={(v) => updateDraftOption("upload_cutoff", v)}
+                          placeholder="默认 200M"
+                        />
+                      </Field>
+                      <Field label="自定义下载域名（download_url）">
+                        <Input
+                          value={draft.options.download_url || ""}
+                          onChange={(v) => updateDraftOption("download_url", v)}
+                          placeholder="如 https://cdn.example.com"
+                        />
+                      </Field>
+                    </div>
+                  )}
+
+                  {draft.type === "onedrive" && (
+                    <>
+                      <div className="form-grid form-grid--three">
+                        <Field label="OneDrive 区域（region）">
+                          <Select
+                            value={draft.options.region || "global"}
+                            optionList={[
+                              { value: "global", label: "国际版 (global)" },
+                              { value: "cn", label: "世纪互联 (cn)" },
+                              { value: "us", label: "US Gov (us)" },
+                              { value: "de", label: "德国 (de)" },
+                            ]}
+                            onChange={(v) => updateDraftOption("region", String(v))}
+                          />
+                        </Field>
+                        <Field label="分片上传大小（chunk_size）">
+                          <Input
+                            value={draft.options.chunk_size || ""}
+                            onChange={(v) => updateDraftOption("chunk_size", v)}
+                            placeholder="默认 10M（320k 倍数）"
+                          />
+                        </Field>
+                        <Field label="自定义 Auth URL（可选）">
+                          <Input
+                            value={draft.options.auth_url || ""}
+                            onChange={(v) => updateDraftOption("auth_url", v)}
+                            placeholder="可选"
+                          />
+                        </Field>
+                      </div>
+                      <div className="native-checkbox-group">
+                        <Checkbox
+                          checked={isBoolTrue(draft.options, "expose_onenote_files")}
+                          onChange={(e) =>
+                            toggleDraftBoolOption(
+                              "expose_onenote_files",
+                              Boolean(e.target.checked),
+                            )
+                          }
+                        >
+                          列出 OneNote 笔记本文件（只读）
+                        </Checkbox>
+                        <Checkbox
+                          checked={isBoolTrue(draft.options, "server_side_across_configs")}
+                          onChange={(e) =>
+                            toggleDraftBoolOption(
+                              "server_side_across_configs",
+                              Boolean(e.target.checked),
+                            )
+                          }
+                        >
+                          允许跨配置服务端直拷（server_side_across_configs）
+                        </Checkbox>
+                      </div>
+                    </>
+                  )}
+
+                  {draft.type === "drive" && (
+                    <>
+                      <div className="form-grid form-grid--two">
+                        <Field label="分片大小（chunk_size）">
+                          <Input
+                            value={draft.options.chunk_size || ""}
+                            onChange={(v) => updateDraftOption("chunk_size", v)}
+                            placeholder="默认 8M"
+                          />
+                        </Field>
+                        <Field label="分片阈值（upload_cutoff）">
+                          <Input
+                            value={draft.options.upload_cutoff || ""}
+                            onChange={(v) => updateDraftOption("upload_cutoff", v)}
+                            placeholder="默认 8M"
+                          />
+                        </Field>
+                      </div>
+                      <div className="native-checkbox-group">
+                        <Checkbox
+                          checked={isBoolTrue(draft.options, "shared_with_me")}
+                          onChange={(e) =>
+                            toggleDraftBoolOption("shared_with_me", Boolean(e.target.checked))
+                          }
+                        >
+                          仅访问“与我共享”的文件（shared_with_me）
+                        </Checkbox>
+                        <Checkbox
+                          checked={isBoolTrue(draft.options, "trashed_only")}
+                          onChange={(e) =>
+                            toggleDraftBoolOption("trashed_only", Boolean(e.target.checked))
+                          }
+                        >
+                          仅访问回收站内容（trashed_only）
+                        </Checkbox>
+                        <Checkbox
+                          checked={isBoolTrue(draft.options, "server_side_across_configs")}
+                          onChange={(e) =>
+                            toggleDraftBoolOption(
+                              "server_side_across_configs",
+                              Boolean(e.target.checked),
+                            )
+                          }
+                        >
+                          允许跨配置服务端复制（server_side_across_configs）
+                        </Checkbox>
+                      </div>
+                    </>
+                  )}
+
+                  {draft.type === "dropbox" && (
+                    <>
+                      <div className="form-grid form-grid--two">
+                        <Field label="分片大小（chunk_size）">
+                          <Input
+                            value={draft.options.chunk_size || ""}
+                            onChange={(v) => updateDraftOption("chunk_size", v)}
+                            placeholder="默认 48M"
+                          />
+                        </Field>
+                        <Field label="模拟团队成员（impersonate，可选）">
+                          <Input
+                            value={draft.options.impersonate || ""}
+                            onChange={(v) => updateDraftOption("impersonate", v)}
+                            placeholder="团队管理员代操作成员邮箱"
+                          />
+                        </Field>
+                      </div>
+                      <div className="native-checkbox-group">
+                        <Checkbox
+                          checked={isBoolTrue(draft.options, "shared_folders")}
+                          onChange={(e) =>
+                            toggleDraftBoolOption("shared_folders", Boolean(e.target.checked))
+                          }
+                        >
+                          访问共享文件夹（shared_folders）
+                        </Checkbox>
+                        <Checkbox
+                          checked={isBoolTrue(draft.options, "shared_files")}
+                          onChange={(e) =>
+                            toggleDraftBoolOption("shared_files", Boolean(e.target.checked))
+                          }
+                        >
+                          访问共享文件（shared_files）
+                        </Checkbox>
+                      </div>
+                    </>
+                  )}
+
+                  {draft.type === "mega" && (
                     <div className="native-checkbox-group">
                       <Checkbox
-                        checked={isBoolTrue(draft.options, "hide_special_share")}
+                        checked={isBoolTrue(draft.options, "hard_delete")}
                         onChange={(e) =>
-                          toggleDraftBoolOption(
-                            "hide_special_share",
-                            Boolean(e.target.checked),
-                          )
+                          toggleDraftBoolOption("hard_delete", Boolean(e.target.checked))
                         }
                       >
-                        隐藏特殊共享（如 print$ / IPC$）
+                        永久删除而非移入回收站（hard_delete）
                       </Checkbox>
                       <Checkbox
-                        checked={isBoolTrue(draft.options, "case_insensitive")}
+                        checked={isBoolTrue(draft.options, "use_https")}
+                        onChange={(e) =>
+                          toggleDraftBoolOption("use_https", Boolean(e.target.checked))
+                        }
+                      >
+                        强制使用 HTTPS 传输文件流（use_https）
+                      </Checkbox>
+                    </div>
+                  )}
+
+                  {draft.type === "azureblob" && (
+                    <>
+                      <div className="form-grid form-grid--three">
+                        <Field label="归档访问层（archive_tier）">
+                          <Input
+                            value={draft.options.archive_tier || ""}
+                            onChange={(v) => updateDraftOption("archive_tier", v)}
+                            placeholder="如 Archive"
+                          />
+                        </Field>
+                        <Field label="分片大小（chunk_size）">
+                          <Input
+                            value={draft.options.chunk_size || ""}
+                            onChange={(v) => updateDraftOption("chunk_size", v)}
+                            placeholder="默认 4M"
+                          />
+                        </Field>
+                        <Field label="分片阈值（upload_cutoff）">
+                          <Input
+                            value={draft.options.upload_cutoff || ""}
+                            onChange={(v) => updateDraftOption("upload_cutoff", v)}
+                            placeholder="默认 256M"
+                          />
+                        </Field>
+                      </div>
+                      <Checkbox
+                        checked={isBoolTrue(draft.options, "no_check_container")}
                         onChange={(e) =>
                           toggleDraftBoolOption(
-                            "case_insensitive",
+                            "no_check_container",
                             Boolean(e.target.checked),
                           )
                         }
                       >
-                        路径不区分大小写（case_insensitive）
+                        不尝试创建或检查容器存在性（no_check_container）
                       </Checkbox>
+                    </>
+                  )}
+
+                  {draft.type === "azurefiles" && (
+                    <>
+                      <div className="form-grid form-grid--three">
+                        <Field label="Tenant ID（可选）">
+                          <Input
+                            value={draft.options.tenant || ""}
+                            onChange={(v) => updateDraftOption("tenant", v)}
+                            placeholder="Azure Tenant ID"
+                          />
+                        </Field>
+                        <Field label="Client ID（可选）">
+                          <Input
+                            value={draft.options.client_id || ""}
+                            onChange={(v) => updateDraftOption("client_id", v)}
+                            placeholder="Client ID"
+                          />
+                        </Field>
+                        <Field label="Client Secret（可选）">
+                          <Input
+                            mode="password"
+                            value={draft.options.client_secret || ""}
+                            onChange={(v) => updateDraftOption("client_secret", v)}
+                            placeholder={secretPlaceholder("client_secret", "Optional")}
+                          />
+                        </Field>
+                      </div>
+                      <div className="form-grid form-grid--two">
+                        <Field label="分片大小（chunk_size）">
+                          <Input
+                            value={draft.options.chunk_size || ""}
+                            onChange={(v) => updateDraftOption("chunk_size", v)}
+                            placeholder="默认 4M"
+                          />
+                        </Field>
+                        <Field label="并发数（upload_concurrency）">
+                          <Input
+                            inputMode="numeric"
+                            value={draft.options.upload_concurrency || ""}
+                            onChange={(v) => updateDraftOption("upload_concurrency", v)}
+                            placeholder="默认 16"
+                          />
+                        </Field>
+                      </div>
+                    </>
+                  )}
+
+                  {draft.type === "swift" && (
+                    <div className="form-grid form-grid--two">
+                      <Field label="身份认证版本（auth_version）">
+                        <Select
+                          value={draft.options.auth_version || ""}
+                          optionList={[
+                            { value: "", label: "自动探测" },
+                            { value: "1", label: "v1" },
+                            { value: "2", label: "v2" },
+                            { value: "3", label: "v3" },
+                          ]}
+                          onChange={(v) => updateDraftOption("auth_version", String(v || ""))}
+                        />
+                      </Field>
+                      <Field label="分段阈值（chunk_size）">
+                        <Input
+                          value={draft.options.chunk_size || ""}
+                          onChange={(v) => updateDraftOption("chunk_size", v)}
+                          placeholder="默认 5G"
+                        />
+                      </Field>
+                    </div>
+                  )}
+
+                  {(draft.type === "oracleobjectstorage" || draft.type === "qingstor") && (
+                    <div className="form-grid form-grid--three">
+                      <Field label="分片大小（chunk_size）">
+                        <Input
+                          value={draft.options.chunk_size || ""}
+                          onChange={(v) => updateDraftOption("chunk_size", v)}
+                          placeholder="可选"
+                        />
+                      </Field>
+                      <Field label="分片阈值（upload_cutoff）">
+                        <Input
+                          value={draft.options.upload_cutoff || ""}
+                          onChange={(v) => updateDraftOption("upload_cutoff", v)}
+                          placeholder="可选"
+                        />
+                      </Field>
+                      <Field label="上传并发（upload_concurrency）">
+                        <Input
+                          inputMode="numeric"
+                          value={draft.options.upload_concurrency || ""}
+                          onChange={(v) => updateDraftOption("upload_concurrency", v)}
+                          placeholder="可选"
+                        />
+                      </Field>
+                    </div>
+                  )}
+
+                  {draft.type === "pikpak" && (
+                    <div className="native-checkbox-group">
+                      <Checkbox
+                        checked={isBoolTrue(draft.options, "use_trash")}
+                        onChange={(e) =>
+                          toggleDraftBoolOption("use_trash", Boolean(e.target.checked))
+                        }
+                      >
+                        删除时移至 PikPak 回收站（use_trash）
+                      </Checkbox>
+                      <Checkbox
+                        checked={isBoolTrue(draft.options, "trashed_only")}
+                        onChange={(e) =>
+                          toggleDraftBoolOption("trashed_only", Boolean(e.target.checked))
+                        }
+                      >
+                        仅列出回收站文件（trashed_only）
+                      </Checkbox>
+                    </div>
+                  )}
+
+                  {draft.type === "filen" && (
+                    <div className="form-grid form-grid--two">
+                      <Field label="Master Keys（可选，加速免交互认证）">
+                        <Input
+                          mode="password"
+                          value={draft.options.master_keys || ""}
+                          onChange={(v) => updateDraftOption("master_keys", v)}
+                          placeholder={secretPlaceholder("master_keys", "可选")}
+                        />
+                      </Field>
+                      <Field label="认证版本（auth_version）">
+                        <Input
+                          value={draft.options.auth_version || ""}
+                          onChange={(v) => updateDraftOption("auth_version", v)}
+                          placeholder="可选"
+                        />
+                      </Field>
+                    </div>
+                  )}
+
+                  {draft.type === "chunker" && (
+                    <div className="form-grid form-grid--two">
+                      <Field label="分片命名格式（name_format）">
+                        <Input
+                          value={draft.options.name_format || ""}
+                          onChange={(v) => updateDraftOption("name_format", v)}
+                          placeholder="*.rclone_chunk.###"
+                        />
+                      </Field>
+                      <Field label="元数据格式（meta_format）">
+                        <Select
+                          value={draft.options.meta_format || "simplejson"}
+                          optionList={[
+                            { value: "simplejson", label: "simplejson（默认）" },
+                            { value: "none", label: "none（无元数据文件）" },
+                          ]}
+                          onChange={(v) => updateDraftOption("meta_format", String(v))}
+                        />
+                      </Field>
+                    </div>
+                  )}
+
+                  {draft.type === "compress" && (
+                    <Field label="内存缓存上限（ram_cache_limit）">
+                      <Input
+                        value={draft.options.ram_cache_limit || ""}
+                        onChange={(v) => updateDraftOption("ram_cache_limit", v)}
+                        placeholder="默认 20M"
+                      />
+                    </Field>
+                  )}
+
+                  {draft.type === "hasher" && (
+                    <Field label="最大自动校验文件大小（auto_size）">
+                      <Input
+                        value={draft.options.auto_size || ""}
+                        onChange={(v) => updateDraftOption("auto_size", v)}
+                        placeholder="如 10M（0 禁用写入后自动补哈希）"
+                      />
+                    </Field>
+                  )}
+
+                  {draft.type === "union" && (
+                    <div className="form-grid form-grid--two">
+                      <Field label="可用空间缓存时长（cache_time）">
+                        <Input
+                          value={draft.options.cache_time || ""}
+                          onChange={(v) => updateDraftOption("cache_time", v)}
+                          placeholder="默认 120（秒）"
+                        />
+                      </Field>
+                      <Field label="最小预留剩余空间（min_free_space）">
+                        <Input
+                          value={draft.options.min_free_space || ""}
+                          onChange={(v) => updateDraftOption("min_free_space", v)}
+                          placeholder="默认 1G"
+                        />
+                      </Field>
                     </div>
                   )}
 
@@ -3133,6 +5167,56 @@ export function NativeStorageEditor({
               <span className="native-browse-path mono" title={browsePath}>
                 {browsePath}
               </span>
+              {browsePath !== "/" && (
+                <>
+                  <Button
+                    size="small"
+                    type="tertiary"
+                    icon={<IconPlusStroked aria-hidden="true" />}
+                    disabled={browsing || anyBusy}
+                    onClick={() => {
+                      setMkdirName("");
+                      setMkdirOpen(true);
+                    }}
+                  >
+                    新建目录
+                  </Button>
+                  <Button
+                    size="small"
+                    type="tertiary"
+                    icon={<IconUpload aria-hidden="true" />}
+                    disabled={browsing || anyBusy}
+                    onClick={() => {
+                      setCopyUrlTarget("");
+                      setCopyUrlName("");
+                      setCopyUrlOpen(true);
+                    }}
+                  >
+                    URL 拉取
+                  </Button>
+                  <Button
+                    size="small"
+                    type="tertiary"
+                    icon={<IconBarChartVStroked aria-hidden="true" />}
+                    loading={sizing}
+                    disabled={browsing || anyBusy}
+                    onClick={() => void handleSizeBrowse()}
+                  >
+                    统计大小
+                  </Button>
+                  <Button
+                    size="small"
+                    type="tertiary"
+                    disabled={browsing || anyBusy}
+                    onClick={() => {
+                      setDedupeResult(null);
+                      setDedupeOpen(true);
+                    }}
+                  >
+                    去重
+                  </Button>
+                </>
+              )}
               <Button
                 size="small"
                 type="tertiary"
@@ -3144,6 +5228,24 @@ export function NativeStorageEditor({
                 刷新
               </Button>
             </div>
+
+            {sizeInfo && (
+              <InlineNotice
+                icon={<IconBarChartVStroked aria-hidden="true" size="small" />}
+                message={`目录统计：共 ${sizeInfo.count} 个文件，总大小 ${formatSize(sizeInfo.bytes)}${sizeInfo.sizeless > 0 ? `（另有 ${sizeInfo.sizeless} 个无大小对象）` : ""}`}
+              />
+            )}
+
+            {linkResult && (
+              <InlineNotice
+                icon={<IconChainStroked aria-hidden="true" size="small" />}
+                message={
+                  linkResult.res.url
+                    ? `分享链接（${linkResult.path}）：${linkResult.res.url}`
+                    : linkResult.res.message || "分享链接操作完成"
+                }
+              />
+            )}
 
             {browseError && (
               <InlineNotice
@@ -3197,7 +5299,7 @@ export function NativeStorageEditor({
                           size="small"
                           type="tertiary"
                           icon={<IconDownload aria-hidden="true" />}
-                          disabled={restoring || !state?.localRoots.length}
+                          disabled={anyBusy || !state?.localRoots.length}
                           onClick={() => {
                             setRestoreEntry(entry);
                             if (!restoreLocalRoot && state?.localRoots.length) {
@@ -3207,6 +5309,45 @@ export function NativeStorageEditor({
                         >
                           恢复到本地
                         </Button>
+                        <IconButton
+                          label={`重命名/移动 ${entry.name}`}
+                          size="small"
+                          icon={<IconEditStroked aria-hidden="true" />}
+                          disabled={anyBusy}
+                          onClick={() => {
+                            setMoveTarget(entry);
+                            setMoveDstPath(entry.path);
+                          }}
+                        />
+                        <IconButton
+                          label={`生成分享链接 ${entry.name}`}
+                          size="small"
+                          icon={<IconChainStroked aria-hidden="true" />}
+                          disabled={anyBusy}
+                          ariaBusy={linkingPath === entry.path}
+                          onClick={() => void handleLinkEntry(entry, false)}
+                        />
+                        {!entry.isDir && (
+                          <IconButton
+                            label={`设置存储类别 ${entry.name}`}
+                            size="small"
+                            icon={<IconSettingStroked aria-hidden="true" />}
+                            disabled={anyBusy}
+                            onClick={() => {
+                              setSetTierTarget(entry);
+                              setSetTierValue("");
+                            }}
+                          />
+                        )}
+                        <IconButton
+                          label={`删除 ${entry.name}`}
+                          size="small"
+                          danger
+                          icon={<IconDeleteStroked aria-hidden="true" />}
+                          disabled={anyBusy}
+                          ariaBusy={deletingEntryPath === entry.path}
+                          onClick={() => handleDeleteEntry(entry)}
+                        />
                       </div>
                     )}
                   </div>
@@ -3480,6 +5621,193 @@ export function NativeStorageEditor({
                 maxLength={64}
                 onChange={setRenameNewName}
                 placeholder="输入新的存储名称"
+              />
+            </Field>
+          </div>
+        </Modal>
+      )}
+
+      {mkdirOpen && (
+        <Modal
+          visible
+          centered
+          width={420}
+          title={`新建目录 · ${browsePath}`}
+          onCancel={() => {
+            if (!mkdirBusy) setMkdirOpen(false);
+          }}
+          okText="创建"
+          confirmLoading={mkdirBusy}
+          onOk={() => void handleExecuteMkdir()}
+        >
+          <div className="editor-form">
+            <Field label="目录名称" required>
+              <Input
+                value={mkdirName}
+                onChange={setMkdirName}
+                placeholder="例如 photos-2026"
+              />
+            </Field>
+          </div>
+        </Modal>
+      )}
+
+      {moveTarget && (
+        <Modal
+          visible
+          centered
+          width={460}
+          title={`重命名/移动 · ${moveTarget.name}`}
+          onCancel={() => {
+            if (!moveBusy) setMoveTarget(null);
+          }}
+          okText="确认移动"
+          confirmLoading={moveBusy}
+          onOk={() => void handleExecuteMove()}
+        >
+          <div className="editor-form">
+            <Field
+              label="目标完整路径"
+              required
+              hint={`原路径：${moveTarget.path}`}
+            >
+              <Input
+                value={moveDstPath}
+                onChange={setMoveDstPath}
+                placeholder="/remote/new-path"
+              />
+            </Field>
+          </div>
+        </Modal>
+      )}
+
+      {copyUrlOpen && (
+        <Modal
+          visible
+          centered
+          width={480}
+          title={`从 URL 拉取文件 · ${browsePath}`}
+          onCancel={() => {
+            if (!copyUrlBusy) setCopyUrlOpen(false);
+          }}
+          okText="开始拉取"
+          confirmLoading={copyUrlBusy}
+          onOk={() => void handleExecuteCopyUrl()}
+        >
+          <div className="editor-form">
+            <Field label="源文件 URL" required hint="仅支持公共 http:// 或 https:// 资源">
+              <Input
+                value={copyUrlTarget}
+                onChange={setCopyUrlTarget}
+                placeholder="https://example.com/archive.tar.gz"
+              />
+            </Field>
+            <div className="native-checkbox-group">
+              <Checkbox
+                checked={copyUrlAutoName}
+                onChange={(e) => setCopyUrlAutoName(Boolean(e.target.checked))}
+              >
+                自动从 URL / 响应头探测文件名（--auto-filename）
+              </Checkbox>
+              <Checkbox
+                checked={copyUrlNoClobber}
+                onChange={(e) => setCopyUrlNoClobber(Boolean(e.target.checked))}
+              >
+                目标已存在同名文件时跳过覆盖（--no-clobber）
+              </Checkbox>
+            </div>
+            {!copyUrlAutoName && (
+              <Field label="保存文件名">
+                <Input
+                  value={copyUrlName}
+                  onChange={setCopyUrlName}
+                  placeholder="archive.tar.gz"
+                />
+              </Field>
+            )}
+          </div>
+        </Modal>
+      )}
+
+      {dedupeOpen && (
+        <Modal
+          visible
+          centered
+          width={520}
+          title={`重复文件清理 · ${browsePath}`}
+          onCancel={() => {
+            if (!dedupeBusy) setDedupeOpen(false);
+          }}
+          okText={dedupeDryRun ? "执行预览" : "执行去重"}
+          confirmLoading={dedupeBusy}
+          onOk={() => void handleExecuteDedupe()}
+        >
+          <div className="editor-form">
+            <Field label="去重策略（--dedupe-mode）">
+              <Select
+                value={dedupeMode}
+                optionList={[
+                  { value: "newest", label: "newest（保留最新修改，删除其余副本）" },
+                  { value: "oldest", label: "oldest（保留最旧文件）" },
+                  { value: "largest", label: "largest（保留体积最大）" },
+                  { value: "smallest", label: "smallest（保留体积最小）" },
+                  { value: "rename", label: "rename（对同名冲突追加编号后缀）" },
+                  { value: "first", label: "first（仅保留首个副本）" },
+                  { value: "list", label: "list（仅列出重复项，不改动）" },
+                ]}
+                onChange={(v) => setDedupeMode(String(v))}
+              />
+            </Field>
+            <div className="native-checkbox-group">
+              <Checkbox
+                checked={dedupeDryRun}
+                onChange={(e) => setDedupeDryRun(Boolean(e.target.checked))}
+              >
+                试运行预览，不实际修改或删除文件（--dry-run）
+              </Checkbox>
+              <Checkbox
+                checked={dedupeByHash}
+                onChange={(e) => setDedupeByHash(Boolean(e.target.checked))}
+              >
+                按文件内容哈希查重而非仅按同名查重（--by-hash）
+              </Checkbox>
+            </div>
+            {dedupeResult && dedupeResult.logs.length > 0 && (
+              <Field label="执行日志输出">
+                <TextArea
+                  readOnly
+                  autosize={{ minRows: 3, maxRows: 8 }}
+                  value={dedupeResult.logs.join("\n")}
+                />
+              </Field>
+            )}
+          </div>
+        </Modal>
+      )}
+
+      {setTierTarget && (
+        <Modal
+          visible
+          centered
+          width={420}
+          title={`设置存储类别 · ${setTierTarget.name}`}
+          onCancel={() => {
+            if (!setTierBusy) setSetTierTarget(null);
+          }}
+          okText="确认应用"
+          confirmLoading={setTierBusy}
+          onOk={() => void handleExecuteSetTier()}
+        >
+          <div className="editor-form">
+            <Field
+              label="目标存储分级（Tier）"
+              required
+              hint="例如 STANDARD / STANDARD_IA / GLACIER / ARCHIVE / Cool / Cold"
+            >
+              <Input
+                value={setTierValue}
+                onChange={setSetTierValue}
+                placeholder="STANDARD_IA"
               />
             </Field>
           </div>

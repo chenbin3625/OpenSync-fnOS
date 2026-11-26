@@ -1,4 +1,5 @@
 import type { JobItem, TaskItem, TreeNode } from "../../types";
+import { formatDisplayPath } from "../../lib/syncPathPreview";
 
 type ScheduleValues = {
   isCron?: number;
@@ -398,7 +399,7 @@ export function getTaskDisplayName(task: TaskItem): string {
   if (task.fileName) return task.fileName;
   const path = task.dstPath || task.srcPath || "";
   if (!path) return "--";
-  const cleanPath = path.replace(/\/+$/, "");
+  const cleanPath = formatDisplayPath(path).replace(/\/+$/, "");
   return cleanPath.split("/").pop() || cleanPath;
 }
 

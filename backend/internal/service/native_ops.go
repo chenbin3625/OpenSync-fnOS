@@ -57,6 +57,57 @@ type NativeRestoreInput struct {
 	Overwrite   bool   `json:"overwrite"`
 }
 
+type NativePathInput struct {
+	Path string `json:"path"`
+}
+
+type NativeMovePathInput struct {
+	SrcPath string `json:"srcPath"`
+	DstPath string `json:"dstPath"`
+	IsDir   bool   `json:"isDir"`
+}
+
+type NativeDeletePathInput struct {
+	Path  string `json:"path"`
+	IsDir bool   `json:"isDir"`
+}
+
+type NativeDedupeInput struct {
+	Path     string `json:"path"`
+	Mode     string `json:"mode"`
+	ByHash   bool   `json:"byHash"`
+	SizeOnly bool   `json:"sizeOnly"`
+	DryRun   bool   `json:"dryRun"`
+}
+
+type NativeLinkInput struct {
+	Path   string `json:"path"`
+	Expire string `json:"expire,omitempty"`
+	Unlink bool   `json:"unlink,omitempty"`
+}
+
+type NativeLinkResult struct {
+	URL     string `json:"url"`
+	Message string `json:"message,omitempty"`
+}
+
+type NativeCopyURLInput struct {
+	URL          string `json:"url"`
+	DstDir       string `json:"dstDir"`
+	FileName     string `json:"fileName,omitempty"`
+	AutoFilename bool   `json:"autoFilename,omitempty"`
+	NoClobber    bool   `json:"noClobber,omitempty"`
+}
+
+type NativeCopyURLResult struct {
+	FileName string `json:"fileName"`
+}
+
+type NativeSetTierInput struct {
+	Path string `json:"path"`
+	Tier string `json:"tier"`
+}
+
 // RenameNativeStorage atomically renames a remote and cascades the new name
 // across composite remotes (crypt/chunker/compress/hasher/union) and all
 // native sync jobs (srcPath, dstPath, dstMap).
@@ -293,6 +344,245 @@ func RestoreNativeFile(ctx context.Context, in NativeRestoreInput) error {
 	return nil
 }
 
+// MkdirNativeStorage creates a directory at in.Path.
+func MkdirNativeStorage(ctx context.Context, in NativePathInput) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	vPath := strings.TrimSpace(in.Path)
+	if vPath == "" {
+		return publicError("请提供要创建的目录路径")
+	}
+	_, c, err := loadExistingNativeRow()
+	if err != nil {
+		return err
+	}
+	opCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := c.Mkdir(opCtx, vPath, native.SessionOptions{ProxyURL: globalNativeProxyURL()}); err != nil {
+		return publicError(err.Error())
+	}
+	return nil
+}
+
+// MoveNativeStoragePath moves or renames a file/directory within native storage.
+func MoveNativeStoragePath(ctx context.Context, in NativeMovePathInput) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	src := strings.TrimSpace(in.SrcPath)
+	dst := strings.TrimSpace(in.DstPath)
+	if src == "" || dst == "" {
+		return publicError("请提供源路径与目标路径")
+	}
+	_, c, err := loadExistingNativeRow()
+	if err != nil {
+		return err
+	}
+	opCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	if err := c.MovePath(opCtx, src, dst, in.IsDir, native.SessionOptions{ProxyURL: globalNativeProxyURL()}); err != nil {
+		return publicError(err.Error())
+	}
+	return nil
+}
+
+// DeleteNativeStoragePath deletes a file or directory subtree within native storage.
+func DeleteNativeStoragePath(ctx context.Context, in NativeDeletePathInput) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	vPath := strings.TrimSpace(in.Path)
+	if vPath == "" {
+		return publicError("请提供要删除的路径")
+	}
+	_, c, err := loadExistingNativeRow()
+	if err != nil {
+		return err
+	}
+	opCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	if err := c.DeletePath(opCtx, vPath, in.IsDir, native.SessionOptions{ProxyURL: globalNativeProxyURL()}); err != nil {
+		return publicError(err.Error())
+	}
+	return nil
+}
+
+// SizeNativeStorage computes recursive object count and byte total for in.Path.
+func SizeNativeStorage(ctx context.Context, in NativePathInput) (*native.SizeInfo, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	vPath := strings.TrimSpace(in.Path)
+	if vPath == "" {
+		return nil, publicError("请提供要统计的目录路径")
+	}
+	_, c, err := loadExistingNativeRow()
+	if err != nil {
+		return nil, err
+	}
+	opCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	info, err := c.Size(opCtx, vPath, native.SessionOptions{ProxyURL: globalNativeProxyURL()})
+	if err != nil {
+		return nil, publicError(err.Error())
+	}
+	return info, nil
+}
+
+// DedupeNativeStorage finds or resolves duplicates at in.Path via `rclone dedupe`.
+func DedupeNativeStorage(ctx context.Context, in NativeDedupeInput) (*native.DedupeResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	vPath := strings.TrimSpace(in.Path)
+	if vPath == "" {
+		return nil, publicError("请提供要去重的目录路径")
+	}
+	_, c, err := loadExistingNativeRow()
+	if err != nil {
+		return nil, err
+	}
+	opCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	res, err := c.Dedupe(opCtx, vPath, native.DedupeOptions{
+		Mode:     in.Mode,
+		ByHash:   in.ByHash,
+		SizeOnly: in.SizeOnly,
+		DryRun:   in.DryRun,
+	}, native.SessionOptions{ProxyURL: globalNativeProxyURL()})
+	if err != nil {
+		return nil, publicError(err.Error())
+	}
+	return res, nil
+}
+
+// CleanupNativeStorage empties remote trash or incomplete uploads via `rclone cleanup`.
+func CleanupNativeStorage(ctx context.Context, in NativeAboutInput) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	name := strings.TrimSpace(in.Name)
+	if name == "" {
+		return publicError("请指定要清理的远端存储名称")
+	}
+	_, c, err := loadExistingNativeRow()
+	if err != nil {
+		return err
+	}
+	opCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	if err := c.Cleanup(opCtx, name, native.SessionOptions{ProxyURL: globalNativeProxyURL()}); err != nil {
+		return publicError(err.Error())
+	}
+	return nil
+}
+
+// LinkNativeStorage generates or revokes a public share link via `rclone link`.
+func LinkNativeStorage(ctx context.Context, in NativeLinkInput) (*NativeLinkResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	vPath := strings.TrimSpace(in.Path)
+	if vPath == "" {
+		return nil, publicError("请提供要生成分享链接的路径")
+	}
+	_, c, err := loadExistingNativeRow()
+	if err != nil {
+		return nil, err
+	}
+	opCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	out, err := c.Link(opCtx, vPath, in.Expire, in.Unlink, native.SessionOptions{ProxyURL: globalNativeProxyURL()})
+	if err != nil {
+		return nil, publicError(err.Error())
+	}
+	if in.Unlink {
+		return &NativeLinkResult{Message: out}, nil
+	}
+	return &NativeLinkResult{URL: out}, nil
+}
+
+// CopyURLNativeStorage pulls an HTTP(S) file directly into dstDir via `rclone copyurl`.
+func CopyURLNativeStorage(ctx context.Context, in NativeCopyURLInput) (*NativeCopyURLResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	rawURL := strings.TrimSpace(in.URL)
+	dstDir := strings.TrimSpace(in.DstDir)
+	if rawURL == "" || dstDir == "" {
+		return nil, publicError("请提供下载链接与目标目录")
+	}
+	_, c, err := loadExistingNativeRow()
+	if err != nil {
+		return nil, err
+	}
+	opCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	defer cancel()
+	savedName, err := c.CopyURL(opCtx, rawURL, dstDir, native.CopyURLOptions{
+		FileName:     in.FileName,
+		AutoFilename: in.AutoFilename,
+		NoClobber:    in.NoClobber,
+	}, native.SessionOptions{ProxyURL: globalNativeProxyURL()})
+	if err != nil {
+		return nil, publicError(err.Error())
+	}
+	return &NativeCopyURLResult{FileName: savedName}, nil
+}
+
+// SetTierNativeStorage changes storage class/tier on supported object storages via `rclone settier`.
+func SetTierNativeStorage(ctx context.Context, in NativeSetTierInput) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	vPath := strings.TrimSpace(in.Path)
+	tier := strings.TrimSpace(in.Tier)
+	if vPath == "" || tier == "" {
+		return publicError("请提供路径和目标存储类别")
+	}
+	_, c, err := loadExistingNativeRow()
+	if err != nil {
+		return err
+	}
+	opCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	if err := c.SetTier(opCtx, vPath, tier, native.SessionOptions{ProxyURL: globalNativeProxyURL()}); err != nil {
+		return publicError(err.Error())
+	}
+	return nil
+}
+
+// ResetBisyncJob marks a native bisync job for baseline resync (--resync) and optionally starts it.
+func ResetBisyncJob(jobID int64, runNow bool) error {
+	job, err := mapper.GetJobByID(jobID)
+	if err != nil {
+		return publicErrorIf(err, msg.T(msg.JobNotFound))
+	}
+	if util.ToInt(job["method"]) != 3 {
+		return publicError("仅双向同步任务支持重建基线")
+	}
+	cfg, err := loadNative(util.ToInt64(job["alistId"]))
+	if err != nil {
+		return err
+	}
+	if cfg == nil {
+		return publicError("双向同步仅支持原生 rclone 引擎")
+	}
+	jobClientListMu.RLock()
+	jc := jobClientList[jobID]
+	jobClientListMu.RUnlock()
+	if jc != nil && jc.isBusy() {
+		return publicError("任务正在执行中，请等待当前任务结束后再重置基线")
+	}
+	if err := native.MarkBisyncResyncPending(bisyncWorkDir(jobID)); err != nil {
+		return err
+	}
+	if runNow {
+		return DoJobManual(jobID)
+	}
+	return nil
+}
+
 // --- Async Consistency Check (`rclone check`) Manager ---
 
 const (
@@ -303,7 +593,9 @@ const (
 type JobCheckResult struct {
 	JobID             int64    `json:"jobId"`
 	Status            string   `json:"status"` // "running" | "completed" | "failed" | "cancelled"
+	Mode              string   `json:"mode"`   // "check" | "download" | "cryptcheck"
 	Download          bool     `json:"download"`
+	CryptCheck        bool     `json:"cryptCheck"`
 	StartedAt         int64    `json:"startedAt"`
 	FinishedAt        int64    `json:"finishedAt"`
 	CheckedFiles      int64    `json:"checkedFiles"`
@@ -354,8 +646,8 @@ var (
 	jobCheckSessions = make(map[int64]*jobCheckSession)
 )
 
-// StartJobCheck launches an asynchronous `rclone check` verification for a native job.
-func StartJobCheck(jobID int64, download bool) (*JobCheckResult, error) {
+// StartJobCheck launches an asynchronous `rclone check` / `rclone cryptcheck` verification for a native job.
+func StartJobCheck(jobID int64, download, cryptCheck bool) (*JobCheckResult, error) {
 	job, err := mapper.GetJobByID(jobID)
 	if err != nil {
 		return nil, publicErrorIf(err, msg.T(msg.JobNotFound))
@@ -369,6 +661,25 @@ func StartJobCheck(jobID int64, download bool) (*JobCheckResult, error) {
 	}
 	if cfg == nil {
 		return nil, publicError("一致性校验仅支持原生 rclone 引擎任务")
+	}
+	if download && cryptCheck {
+		cryptCheck = false
+	}
+	mode := "check"
+	if download {
+		mode = "download"
+	} else if cryptCheck {
+		mode = "cryptcheck"
+		hasCrypt := false
+		for _, p := range append(parsePathList(job["srcPath"]), parsePathList(job["dstPath"])...) {
+			if ep, resErr := cfg.Resolve(p); resErr == nil && ep.IsCrypt {
+				hasCrypt = true
+				break
+			}
+		}
+		if !hasCrypt {
+			return nil, publicError("cryptcheck 仅支持包含 Crypt 加密存储的任务")
+		}
 	}
 
 	jobCheckMu.Lock()
@@ -397,7 +708,9 @@ func StartJobCheck(jobID int64, download bool) (*JobCheckResult, error) {
 		result: JobCheckResult{
 			JobID:        jobID,
 			Status:       "running",
+			Mode:         mode,
 			Download:     download,
+			CryptCheck:   cryptCheck,
 			StartedAt:    time.Now().Unix(),
 			Differ:       []string{},
 			MissingOnSrc: []string{},
@@ -413,6 +726,7 @@ func StartJobCheck(jobID int64, download bool) (*JobCheckResult, error) {
 		defer cancel()
 		limits := taskRuntimeLimitsForJob(job)
 		filters := buildNativeRcloneFilterLines(job)
+		extra, _, _ := parseNativeExtraFlags(job["extraFlags"])
 		method := util.ToInt(job["method"])
 		srcPaths := parsePathList(job["srcPath"])
 		dstPaths := parsePathList(job["dstPath"])
@@ -445,16 +759,25 @@ func StartJobCheck(jobID int64, download bool) (*JobCheckResult, error) {
 				var pairChecked, pairTotal int64
 				res, err := cfg.Check(ctx, src, dst, native.CheckOptions{
 					Download:      download,
+					CryptCheck:    cryptCheck,
 					Compare:       util.ToInt(job["compareMode"]),
 					OneWay:        method == 0,
 					Checkers:      limits.ScanConcurrency,
 					Retries:       limits.MaxRetries,
 					FilterLines:   filters,
+					MinSize:       util.ToInt64(job["minFileSize"]),
+					MaxSize:       util.ToInt64(job["maxFileSize"]),
+					MinAgeMinutes: util.ToInt(job["minFileAgeMinutes"]),
+					OlderThanDays: util.ToInt(job["olderThanDays"]),
+					NewerThanDays: util.ToInt(job["newerThanDays"]),
 					BwLimit:       effectiveJobBwLimit(job),
 					TPSLimit:      jobFloat64(job["tpsLimit"]),
 					TPSLimitBurst: util.ToInt(job["tpsLimitBurst"]),
 					ModifyWindow:  strings.TrimSpace(util.StringValue(job["modifyWindow"])),
 					FastList:      util.ToInt(job["fastList"]) == 1,
+					UserAgent:     extra.UserAgent,
+					IOTimeout:     extra.IOTimeout,
+					ConTimeout:    extra.ConTimeout,
 					ProxyURL:      globalNativeProxyURL(),
 					MaxItems:      capLimit,
 				}, func(st *native.Stats) {

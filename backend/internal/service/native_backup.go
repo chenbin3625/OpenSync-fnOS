@@ -158,6 +158,15 @@ func collectNativeRemoteReferences(alistID int64, c native.Config) (jobsByRemote
 					}
 				}
 			}
+		} else if typ == "combine" {
+			if ups, err := native.ParseCombineUpstreams(params["upstreams"]); err == nil {
+				for _, up := range ups {
+					ref, _, _ := strings.Cut(up.Target, ":")
+					if target, ok := c.FindKey(ref); ok {
+						addDep(target, name)
+					}
+				}
+			}
 		}
 	}
 	for k := range cryptsByRemote {
@@ -858,6 +867,15 @@ func DeleteNativeStorage(name string) error {
 					ref, _, _ := strings.Cut(up.Target, ":")
 					if strings.EqualFold(ref, target) {
 						return publicError(fmt.Sprintf("存储 %q 正被合并存储 %q（union）引用，请先修改或删除对应存储", target, otherName))
+					}
+				}
+			}
+		} else if typ == "combine" {
+			if ups, err := native.ParseCombineUpstreams(params["upstreams"]); err == nil {
+				for _, up := range ups {
+					ref, _, _ := strings.Cut(up.Target, ":")
+					if strings.EqualFold(ref, target) {
+						return publicError(fmt.Sprintf("存储 %q 正被组合存储 %q（combine）引用，请先修改或删除对应存储", target, otherName))
 					}
 				}
 			}

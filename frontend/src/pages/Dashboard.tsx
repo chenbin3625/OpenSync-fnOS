@@ -39,6 +39,7 @@ import {
 import { DryRunModal } from "../components/DryRunModal";
 import { FullSyncApprovalModal } from "../components/FullSyncApprovalModal";
 import { useAction, useResource } from "../lib/hooks";
+import { formatDisplayPathList } from "../lib/syncPathPreview";
 import { cloneJobToForm, findBatchMoveJobs } from "../lib/taskForm";
 import {
   formatSize,
@@ -1134,13 +1135,26 @@ export default function Dashboard() {
                     const jobName = job.remark || `同步任务 #${job.id}`;
                     const srcList = parseJobPathList(job.srcPath);
                     const dstList = parseJobPathList(job.dstPath);
+                    const displaySiblings = [...srcList, ...dstList];
+                    const displaySrcList = formatDisplayPathList(
+                      srcList,
+                      displaySiblings,
+                    );
+                    const displayDstList = formatDisplayPathList(
+                      dstList,
+                      displaySiblings,
+                    );
                     const srcSummary =
-                      (srcList[0] || "—") +
-                      (srcList.length > 1 ? ` 等 ${srcList.length} 项` : "");
+                      (displaySrcList[0] || "—") +
+                      (displaySrcList.length > 1
+                        ? ` 等 ${displaySrcList.length} 项`
+                        : "");
                     const dstSummary =
-                      (dstList[0] || "—") +
-                      (dstList.length > 1 ? ` 等 ${dstList.length} 项` : "");
-                    const fullRouteTitle = `${srcList.join(", ") || "—"} → ${dstList.join(", ") || "—"}`;
+                      (displayDstList[0] || "—") +
+                      (displayDstList.length > 1
+                        ? ` 等 ${displayDstList.length} 项`
+                        : "");
+                    const fullRouteTitle = `${displaySrcList.join(", ") || "—"} → ${displayDstList.join(", ") || "—"}`;
                     const isSelected = selectedSet.has(job.id);
                     const failed = isJobFailed(job);
                     const livePct = Math.min(

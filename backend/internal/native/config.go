@@ -53,13 +53,34 @@ var supportedRemoteOrder = []string{
 	"pcloud",
 	"mega",
 	"azureblob",
+	"azurefiles",
 	"googlecloudstorage",
 	"swift",
+	"oracleobjectstorage",
+	"qingstor",
+	"storj",
+	"yandex",
+	"koofr",
+	"seafile",
+	"pikpak",
+	"protondrive",
+	"iclouddrive",
+	"jottacloud",
+	"filen",
+	"hidrive",
+	"huaweidrive",
+	"mailru",
+	"fichier",
+	"gofile",
+	"pixeldrain",
 	"crypt",
 	"chunker",
 	"compress",
 	"hasher",
+	"alias",
+	"archive",
 	"union",
+	"combine",
 }
 
 // openSyncMetaFields are OpenSync-owned per-remote options stripped before
@@ -71,28 +92,49 @@ var openSyncMetaFields = map[string]bool{
 }
 
 var fields = map[string]string{
-	"local":  "description",
-	"s3":     "provider env_auth access_key_id secret_access_key session_token region endpoint location_constraint acl storage_class force_path_style no_check_bucket v2_auth list_version chunk_size upload_cutoff upload_concurrency disable_http2 server_side_encryption sse_kms_key_id directory_markers leave_parts_on_error upload_checksum_algorithm no_head no_head_object insecure_skip_verify proxy_url description",
-	"webdav": "url vendor user pass bearer_token pacer_min_sleep nextcloud_chunk_size headers encoding insecure_skip_verify proxy_url description",
-	"sftp":   "host user port pass key_pem key_file_pass shell_type disable_hashcheck allow_hashcheck known_hosts idle_timeout concurrency chunk_size use_insecure_cipher set_modtime description",
-	"smb":    "host user port pass domain spn hide_special_share case_insensitive idle_timeout description",
-	"ftp":    "host user port pass tls explicit_tls disable_tls13 concurrency idle_timeout no_check_certificate shut_timeout writing_mdtm force_list_hidden insecure_skip_verify description",
-	"http":   "url headers no_head no_slash insecure_skip_verify proxy_url description",
-	"b2":     "account key endpoint hard_delete chunk_size upload_cutoff copy_cutoff download_url memory_pool_flush_time insecure_skip_verify proxy_url description",
-	"onedrive": "token drive_id drive_type client_id client_secret region auth_url token_url chunk_size expose_onenote_files server_side_across_configs insecure_skip_verify proxy_url description",
-	"drive":    "token client_id client_secret scope root_folder_id team_drive service_account_credentials shared_with_me trashed_only chunk_size upload_cutoff ack_abuse server_side_across_configs insecure_skip_verify proxy_url description",
-	"dropbox":  "token client_id client_secret chunk_size shared_files shared_folders impersonate insecure_skip_verify proxy_url description",
-	"box":      "token client_id client_secret root_folder_id box_sub_type owned_by insecure_skip_verify proxy_url description",
-	"pcloud":   "token client_id client_secret hostname username password root_folder_id insecure_skip_verify proxy_url description",
-	"mega":     "user pass debug hard_delete use_https insecure_skip_verify proxy_url description",
-	"azureblob": "account key sas_url endpoint tenant client_id client_secret access_tier archive_tier chunk_size upload_cutoff no_check_container insecure_skip_verify proxy_url description",
-	"googlecloudstorage": "project_number service_account_credentials token client_id client_secret location storage_class bucket_policy_only object_acl bucket_acl anonymous endpoint insecure_skip_verify proxy_url description",
-	"swift":    "user key auth domain tenant tenant_id tenant_domain region storage_url auth_token application_credential_id application_credential_name application_credential_secret auth_version chunk_size no_chunk insecure_skip_verify proxy_url description",
-	"crypt":    "remote password password2 filename_encryption directory_name_encryption filename_encoding suffix no_data_encryption description",
-	"chunker":  "remote chunk_size name_format start_from meta_format hash_type fail_hard transactions description",
-	"compress": "remote mode level ram_cache_limit description",
-	"hasher":   "remote hashes max_age auto_size description",
-	"union":    "upstreams action_policy create_policy search_policy cache_time min_free_space description",
+	"local":               "description",
+	"s3":                  "provider env_auth access_key_id secret_access_key session_token region endpoint location_constraint acl storage_class force_path_style no_check_bucket v2_auth list_version chunk_size upload_cutoff upload_concurrency disable_http2 server_side_encryption sse_kms_key_id directory_markers leave_parts_on_error upload_checksum_algorithm no_head no_head_object insecure_skip_verify proxy_url description",
+	"webdav":              "url vendor user pass bearer_token pacer_min_sleep nextcloud_chunk_size headers encoding insecure_skip_verify proxy_url description",
+	"sftp":                "host user port pass key_pem key_file_pass shell_type disable_hashcheck allow_hashcheck known_hosts idle_timeout concurrency chunk_size use_insecure_cipher set_modtime description",
+	"smb":                 "host user port pass domain spn hide_special_share case_insensitive idle_timeout description",
+	"ftp":                 "host user port pass tls explicit_tls disable_tls13 concurrency idle_timeout no_check_certificate shut_timeout writing_mdtm force_list_hidden insecure_skip_verify description",
+	"http":                "url headers no_head no_slash insecure_skip_verify proxy_url description",
+	"b2":                  "account key endpoint hard_delete chunk_size upload_cutoff copy_cutoff download_url memory_pool_flush_time insecure_skip_verify proxy_url description",
+	"onedrive":            "token drive_id drive_type client_id client_secret region auth_url token_url chunk_size expose_onenote_files server_side_across_configs insecure_skip_verify proxy_url description",
+	"drive":               "token client_id client_secret scope root_folder_id team_drive service_account_credentials shared_with_me trashed_only chunk_size upload_cutoff ack_abuse server_side_across_configs insecure_skip_verify proxy_url description",
+	"dropbox":             "token client_id client_secret chunk_size shared_files shared_folders impersonate insecure_skip_verify proxy_url description",
+	"box":                 "token client_id client_secret root_folder_id box_sub_type owned_by insecure_skip_verify proxy_url description",
+	"pcloud":              "token client_id client_secret hostname username password root_folder_id insecure_skip_verify proxy_url description",
+	"mega":                "user pass debug hard_delete use_https insecure_skip_verify proxy_url description",
+	"azureblob":           "account key sas_url endpoint tenant client_id client_secret access_tier archive_tier chunk_size upload_cutoff no_check_container insecure_skip_verify proxy_url description",
+	"azurefiles":          "account env_auth key sas_url connection_string tenant client_id client_secret username password endpoint share_name chunk_size upload_concurrency max_stream_size insecure_skip_verify proxy_url description",
+	"googlecloudstorage":  "project_number service_account_credentials token client_id client_secret location storage_class bucket_policy_only object_acl bucket_acl anonymous endpoint insecure_skip_verify proxy_url description",
+	"swift":               "user key auth domain tenant tenant_id tenant_domain region storage_url auth_token application_credential_id application_credential_name application_credential_secret auth_version chunk_size no_chunk insecure_skip_verify proxy_url description",
+	"oracleobjectstorage": "provider namespace compartment region endpoint storage_tier upload_cutoff chunk_size upload_concurrency leave_parts_on_error attempt_resume_upload no_check_bucket insecure_skip_verify proxy_url description",
+	"qingstor":            "env_auth access_key_id secret_access_key endpoint zone connection_retries upload_cutoff chunk_size upload_concurrency insecure_skip_verify proxy_url description",
+	"storj":               "provider access_grant satellite_address api_key passphrase insecure_skip_verify proxy_url description",
+	"yandex":              "token client_id client_secret hard_delete spoof_ua upload_wait app_folder insecure_skip_verify proxy_url description",
+	"koofr":               "provider endpoint mountid setmtime user password insecure_skip_verify proxy_url description",
+	"seafile":             "url user pass library library_key create_library auth_token insecure_skip_verify proxy_url description",
+	"pikpak":              "user pass device_id user_agent root_folder_id use_trash trashed_only no_media_link upload_cutoff chunk_size upload_concurrency insecure_skip_verify proxy_url description",
+	"protondrive":         "username password mailbox_password otp_secret_key client_uid client_access_token client_refresh_token client_salted_key_pass replace_existing_draft enable_caching insecure_skip_verify proxy_url description",
+	"iclouddrive":         "service apple_id password trust_token cookies client_id insecure_skip_verify proxy_url description",
+	"jottacloud":          "token client_id client_secret md5_memory_limit trashed_only hard_delete upload_resume_limit no_versions insecure_skip_verify proxy_url description",
+	"filen":               "email password api_key upload_concurrency master_keys private_key public_key auth_version base_folder_uuid insecure_skip_verify proxy_url description",
+	"hidrive":             "token client_id client_secret scope_access scope_role root_prefix endpoint chunk_size upload_cutoff upload_concurrency insecure_skip_verify proxy_url description",
+	"huaweidrive":         "token client_id client_secret root_folder_id chunk_size list_chunk upload_cutoff insecure_skip_verify proxy_url description",
+	"mailru":              "token user pass speedup_enable check_hash user_agent insecure_skip_verify proxy_url description",
+	"fichier":             "api_key shared_folder file_password folder_password cdn insecure_skip_verify proxy_url description",
+	"gofile":              "access_token root_folder_id account_id list_chunk insecure_skip_verify proxy_url description",
+	"pixeldrain":          "api_key root_folder_id api_url insecure_skip_verify proxy_url description",
+	"crypt":               "remote password password2 filename_encryption directory_name_encryption filename_encoding suffix no_data_encryption description",
+	"chunker":             "remote chunk_size name_format start_from meta_format hash_type fail_hard transactions description",
+	"compress":            "remote mode level ram_cache_limit description",
+	"hasher":              "remote hashes max_age auto_size description",
+	"alias":               "remote description",
+	"archive":             "remote description",
+	"union":               "upstreams action_policy create_policy search_policy cache_time min_free_space description",
+	"combine":             "upstreams description",
 }
 
 // SecretFields lists parameter keys whose values must never be echoed back to
@@ -113,14 +155,37 @@ var SecretFields = []string{
 	"sas_url",
 	"auth_token",
 	"application_credential_secret",
+	"access_grant",
+	"api_key",
+	"passphrase",
+	"library_key",
+	"connection_string",
+	"mailbox_password",
+	"otp_secret_key",
+	"client_access_token",
+	"client_refresh_token",
+	"client_salted_key_pass",
+	"trust_token",
+	"cookies",
+	"master_keys",
+	"private_key",
+	"file_password",
+	"folder_password",
+	"access_token",
 }
 
-// ObscuredFields lists parameter keys stored using rclone's password obfuscation.
+// ObscuredFields lists parameter keys stored using rclone's password obfuscation
+// across all backends.
 var ObscuredFields = []string{
 	"pass",
 	"password",
 	"password2",
 	"key_file_pass",
+	"library_key",
+	"mailbox_password",
+	"otp_secret_key",
+	"file_password",
+	"folder_password",
 }
 
 func IsSecretField(key string) bool {
@@ -129,6 +194,10 @@ func IsSecretField(key string) bool {
 
 func IsObscuredField(key string) bool {
 	return slices.Contains(ObscuredFields, key)
+}
+
+func IsObscuredFieldForType(typ, key string) bool {
+	return IsObscuredField(key) || (typ == "filen" && key == "api_key")
 }
 
 func IsOpenSyncMetaField(key string) bool {
@@ -150,7 +219,7 @@ func SupportedRemoteTypes() []string {
 
 func IsWrapperType(typ string) bool {
 	switch typ {
-	case "crypt", "chunker", "compress", "hasher":
+	case "crypt", "chunker", "compress", "hasher", "alias", "archive":
 		return true
 	default:
 		return false
@@ -158,7 +227,7 @@ func IsWrapperType(typ string) bool {
 }
 
 func IsCompositeType(typ string) bool {
-	return IsWrapperType(typ) || typ == "union"
+	return IsWrapperType(typ) || typ == "union" || typ == "combine"
 }
 
 func ValidName(s string) bool {
@@ -235,16 +304,113 @@ func ValidateProxyURL(value string) error {
 
 // ValidateModifyWindow validates an optional rclone --modify-window Go duration.
 func ValidateModifyWindow(value string) error {
+	return ValidateDurationSpec(value, 24*time.Hour, "时间精度容差格式无效，请使用如 1s、2s、100ms、1m（最大 24h）")
+}
+
+// ValidateDurationSpec validates an optional positive Go/rclone duration up to maxDur.
+func ValidateDurationSpec(value string, maxDur time.Duration, errMsg string) error {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
 		return nil
 	}
 	if len(trimmed) > 32 || strings.HasPrefix(trimmed, "-") || strings.IndexFunc(trimmed, unicode.IsControl) >= 0 {
-		return errors.New("时间精度容差格式无效，请使用如 1s、2s、100ms、1m（最大 24h）")
+		return errors.New(errMsg)
 	}
 	d, err := time.ParseDuration(trimmed)
-	if err != nil || d <= 0 || d > 24*time.Hour {
-		return errors.New("时间精度容差格式无效，请使用如 1s、2s、100ms、1m（最大 24h）")
+	if err != nil || d <= 0 || (maxDur > 0 && d > maxDur) {
+		return errors.New(errMsg)
+	}
+	return nil
+}
+
+// ValidateRcloneSize validates an optional rclone SizeSuffix value (e.g. 16M, 1G, 500K).
+func ValidateRcloneSize(value string, allowZero bool, errMsg string) error {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil
+	}
+	if len(trimmed) > 32 || strings.HasPrefix(trimmed, "-") || strings.IndexFunc(trimmed, unicode.IsControl) >= 0 || strings.ContainsAny(trimmed, " \t") {
+		return errors.New(errMsg)
+	}
+	if strings.EqualFold(trimmed, "off") || trimmed == "0" {
+		if allowZero {
+			return nil
+		}
+		return errors.New(errMsg)
+	}
+	if !bwRatePartPattern.MatchString(trimmed) {
+		return errors.New(errMsg)
+	}
+	return nil
+}
+
+// ValidateCutoffMode validates rclone --cutoff-mode values.
+func ValidateCutoffMode(value string) error {
+	trimmed := strings.ToLower(strings.TrimSpace(value))
+	switch trimmed {
+	case "", "hard", "soft", "cautious":
+		return nil
+	default:
+		return errors.New("超限停止模式仅支持 hard、soft 或 cautious")
+	}
+}
+
+// ValidateOrderBy validates rclone --order-by specifications.
+func ValidateOrderBy(value string) error {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil
+	}
+	if len(trimmed) > 128 || strings.IndexFunc(trimmed, unicode.IsControl) >= 0 || strings.ContainsAny(trimmed, " \t") {
+		return errors.New("传输排序规则格式无效，如 size,asc、modtime,desc、name,asc")
+	}
+	for _, clause := range strings.Split(trimmed, ":") {
+		if clause == "" {
+			return errors.New("传输排序规则格式无效")
+		}
+		field, arg, hasArg := strings.Cut(clause, ",")
+		switch strings.ToLower(field) {
+		case "size", "modtime", "name":
+			if hasArg {
+				switch strings.ToLower(arg) {
+				case "asc", "ascending", "desc", "descending":
+				default:
+					return errors.New("排序方向仅支持 asc 或 desc")
+				}
+			}
+		case "mixed":
+			if hasArg {
+				n, err := strconv.Atoi(arg)
+				if err != nil || n < 0 || n > 100 {
+					return errors.New("mixed 排序比例需为 0–100 的整数")
+				}
+			}
+		default:
+			return errors.New("排序字段仅支持 size、modtime、name 或 mixed")
+		}
+	}
+	return nil
+}
+
+// ValidateBisyncResyncMode validates rclone bisync --resync-mode values.
+func ValidateBisyncResyncMode(value string) error {
+	trimmed := strings.ToLower(strings.TrimSpace(value))
+	switch trimmed {
+	case "", "newer", "older", "path1", "path2", "larger", "smaller":
+		return nil
+	default:
+		return errors.New("双向基线冲突策略仅支持 newer、older、path1、path2、larger 或 smaller")
+	}
+}
+
+// ValidateUserAgent validates an optional HTTP User-Agent string.
+func ValidateUserAgent(value string) error {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil
+	}
+	if len(trimmed) > 256 || strings.IndexFunc(trimmed, unicode.IsControl) >= 0 {
+		return errors.New("User-Agent 长度不能超过 256 且不能包含控制字符")
 	}
 	return nil
 }
@@ -313,6 +479,86 @@ func FormatUnionUpstreams(items []UnionUpstream) string {
 	parts := make([]string, 0, len(items))
 	for _, item := range items {
 		token := item.Target + item.Suffix
+		if strings.ContainsAny(token, " \t") {
+			token = `"` + token + `"`
+		}
+		parts = append(parts, token)
+	}
+	return strings.Join(parts, " ")
+}
+
+// CombineUpstream represents one directory=target entry in an rclone combine backend.
+type CombineUpstream struct {
+	Name   string // directory name at the combine root
+	Target string // e.g. "remote:sub" or "/abs/local/path"
+}
+
+func splitQuotedTokens(raw string) ([]string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	var tokens []string
+	var cur strings.Builder
+	inQuote := false
+	for i := 0; i < len(raw); i++ {
+		ch := raw[i]
+		switch {
+		case ch == '"':
+			inQuote = !inQuote
+		case !inQuote && (ch == ' ' || ch == '\t'):
+			if cur.Len() > 0 {
+				tokens = append(tokens, cur.String())
+				cur.Reset()
+			}
+		default:
+			cur.WriteByte(ch)
+		}
+	}
+	if inQuote {
+		return nil, errors.New("upstreams 引号未闭合")
+	}
+	if cur.Len() > 0 {
+		tokens = append(tokens, cur.String())
+	}
+	return tokens, nil
+}
+
+// ParseCombineUpstreams parses rclone combine's "dir=remote:path" upstreams list.
+func ParseCombineUpstreams(raw string) ([]CombineUpstream, error) {
+	tokens, err := splitQuotedTokens(raw)
+	if err != nil {
+		return nil, err
+	}
+	if len(tokens) == 0 {
+		return nil, errors.New("缺少组合目录列表 upstreams（格式为 目录名=存储名:路径）")
+	}
+	seenNames := map[string]bool{}
+	out := make([]CombineUpstream, 0, len(tokens))
+	for _, tok := range tokens {
+		dirName, target, ok := strings.Cut(tok, "=")
+		dirName = strings.TrimSpace(dirName)
+		target = normalizeCryptRemote(target)
+		if !ok || dirName == "" || dirName == "." || dirName == ".." || strings.ContainsAny(dirName, `/\:`+"\r\n\x00") {
+			return nil, fmt.Errorf("combine 上游条目 %q 格式无效，应为 目录名=存储名:路径", tok)
+		}
+		if seenNames[strings.ToLower(dirName)] {
+			return nil, fmt.Errorf("combine 存在重复目录名 %q", dirName)
+		}
+		seenNames[strings.ToLower(dirName)] = true
+		if target == "" {
+			return nil, fmt.Errorf("combine 目录 %q 缺少目标路径", dirName)
+		}
+		out = append(out, CombineUpstream{Name: dirName, Target: target})
+	}
+	return out, nil
+}
+
+// FormatCombineUpstreams formats combine upstreams back into rclone's upstreams string.
+func FormatCombineUpstreams(items []CombineUpstream) string {
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		token := item.Name + "=" + item.Target
 		if strings.ContainsAny(token, " \t") {
 			token = `"` + token + `"`
 		}
@@ -394,7 +640,7 @@ func NormalizeParams(raw map[string]string) map[string]string {
 		if key == "" || key == "type" {
 			continue
 		}
-		if IsObscuredField(key) {
+		if IsObscuredFieldForType(typ, key) {
 			if v != "" {
 				out[key] = v
 			}
@@ -610,7 +856,7 @@ func RemoteSummary(p map[string]string) string {
 			return "Swift · " + v
 		}
 		return "OpenStack Swift"
-	case "crypt", "chunker", "compress", "hasher":
+	case "crypt", "chunker", "compress", "hasher", "alias", "archive":
 		if r := strings.TrimSpace(p["remote"]); r != "" {
 			return "底层 " + r
 		}
@@ -620,6 +866,97 @@ func RemoteSummary(p map[string]string) string {
 			return "合并 " + u
 		}
 		return ""
+	case "combine":
+		if u := strings.TrimSpace(p["upstreams"]); u != "" {
+			return "组合 " + u
+		}
+		return ""
+	case "yandex":
+		if f := strings.TrimSpace(p["app_folder"]); f != "" && f != "false" {
+			return "Yandex Disk · AppFolder"
+		}
+		return "Yandex Disk"
+	case "koofr":
+		if u := strings.TrimSpace(p["user"]); u != "" {
+			return "Koofr · " + u
+		}
+		return "Koofr"
+	case "seafile":
+		if u := strings.TrimSpace(p["url"]); u != "" {
+			return u
+		}
+		return "Seafile"
+	case "storj":
+		if s := strings.TrimSpace(p["satellite_address"]); s != "" {
+			return "Storj · " + s
+		}
+		return "Storj"
+	case "qingstor":
+		if z := strings.TrimSpace(p["zone"]); z != "" {
+			return "QingStor · " + z
+		}
+		return "QingStor"
+	case "oracleobjectstorage":
+		var parts []string
+		if v := strings.TrimSpace(p["namespace"]); v != "" {
+			parts = append(parts, v)
+		}
+		if v := strings.TrimSpace(p["region"]); v != "" {
+			parts = append(parts, v)
+		}
+		if len(parts) > 0 {
+			return "Oracle · " + strings.Join(parts, " · ")
+		}
+		return "Oracle Object Storage"
+	case "azurefiles":
+		var parts []string
+		if v := strings.TrimSpace(p["account"]); v != "" {
+			parts = append(parts, v)
+		}
+		if v := strings.TrimSpace(p["share_name"]); v != "" {
+			parts = append(parts, v)
+		}
+		if len(parts) > 0 {
+			return "Azure Files · " + strings.Join(parts, "/")
+		}
+		return "Azure Files"
+	case "pikpak":
+		if u := strings.TrimSpace(p["user"]); u != "" {
+			return "PikPak · " + u
+		}
+		return "PikPak"
+	case "protondrive":
+		if u := strings.TrimSpace(p["username"]); u != "" {
+			return "Proton Drive · " + u
+		}
+		return "Proton Drive"
+	case "iclouddrive":
+		if u := strings.TrimSpace(p["apple_id"]); u != "" {
+			return "iCloud · " + u
+		}
+		return "iCloud Drive"
+	case "jottacloud":
+		return "Jottacloud"
+	case "filen":
+		if u := strings.TrimSpace(p["email"]); u != "" {
+			return "Filen · " + u
+		}
+		return "Filen"
+	case "hidrive":
+		return "HiDrive"
+	case "huaweidrive":
+		return "华为云盘"
+	case "mailru":
+		if u := strings.TrimSpace(p["user"]); u != "" {
+			return "Mail.ru · " + u
+		}
+		return "Mail.ru Cloud"
+	case "fichier":
+		return "1Fichier"
+	case "gofile":
+		return "Gofile"
+	case "pixeldrain":
+		return "Pixeldrain"
 	default:
 		return p["type"]
 	}
@@ -778,6 +1115,20 @@ func (c Config) Rename(oldName, newName string) (Config, error) {
 				}
 			}
 		}
+		if cp["type"] == "combine" && cp["upstreams"] != "" {
+			if ups, err := ParseCombineUpstreams(cp["upstreams"]); err == nil {
+				changed := false
+				for i := range ups {
+					if ref, sub, cutOK := strings.Cut(ups[i].Target, ":"); cutOK && strings.EqualFold(ref, actualOld) {
+						ups[i].Target = newName + ":" + sub
+						changed = true
+					}
+				}
+				if changed {
+					cp["upstreams"] = FormatCombineUpstreams(ups)
+				}
+			}
+		}
 		next[key] = cp
 	}
 	if err := next.Validate(); err != nil {
@@ -892,13 +1243,25 @@ func (c Config) remoteDependencies(name string) []string {
 		return nil
 	}
 	switch p["type"] {
-	case "crypt", "chunker", "compress", "hasher":
+	case "crypt", "chunker", "compress", "hasher", "alias", "archive":
 		ref, _, ok := strings.Cut(p["remote"], ":")
 		if ok && ref != "" {
 			return []string{ref}
 		}
 	case "union":
 		ups, err := ParseUnionUpstreams(p["upstreams"])
+		if err != nil {
+			return nil
+		}
+		var deps []string
+		for _, up := range ups {
+			if ref, _, ok := strings.Cut(up.Target, ":"); ok && ref != "" {
+				deps = append(deps, ref)
+			}
+		}
+		return deps
+	case "combine":
+		ups, err := ParseCombineUpstreams(p["upstreams"])
 		if err != nil {
 			return nil
 		}
@@ -927,6 +1290,10 @@ func disallowedFieldError(name, typ, field string) error {
 		return fmt.Errorf("存储 %q 出于安全限制不支持本地凭据文件路径 service_account_file，请改用内嵌 JSON 字段 service_account_credentials", name)
 	case typ == "azureblob" && field == "service_principal_file":
 		return fmt.Errorf("存储 %q 出于安全限制不支持本地文件路径 service_principal_file，请改用内嵌 tenant/client_id/client_secret 或 sas_url", name)
+	case typ == "oracleobjectstorage" && (field == "config_file" || field == "sse_customer_key_file"):
+		return fmt.Errorf("存储 %q 出于安全限制不支持本地文件路径 %s", name, field)
+	case (typ == "azurefiles" || typ == "azureblob") && field == "client_certificate_path":
+		return fmt.Errorf("存储 %q 出于安全限制不支持本地证书路径 %s", name, field)
 	case strings.HasSuffix(field, "_command") || field == "ssh" || field == "credential_process":
 		return fmt.Errorf("存储 %q 的字段 %q 受安全限制不支持", name, field)
 	default:
@@ -935,12 +1302,14 @@ func disallowedFieldError(name, typ, field string) error {
 }
 
 func validateObscuredFields(name string, p map[string]string) error {
-	for _, k := range ObscuredFields {
-		if p[k] != "" {
-			decoded, err := base64.RawURLEncoding.DecodeString(p[k])
-			if err != nil || len(decoded) < 16 {
-				return fmt.Errorf("%s 的 %s 需要 rclone 配置中的混淆值", name, k)
-			}
+	typ := p["type"]
+	for k, v := range p {
+		if v == "" || !IsObscuredFieldForType(typ, k) {
+			continue
+		}
+		decoded, err := base64.RawURLEncoding.DecodeString(v)
+		if err != nil || len(decoded) < 16 {
+			return fmt.Errorf("%s 的 %s 需要 rclone 配置中的混淆值", name, k)
 		}
 	}
 	return nil
@@ -1108,7 +1477,7 @@ func ValidateEntry(name string, p map[string]string, plainSecrets bool) error {
 		if hasSA && !validateInlineJSONObject(p["service_account_credentials"]) {
 			return fmt.Errorf("%s 的 service_account_credentials 必须为有效 JSON", name)
 		}
-	case "dropbox", "box":
+	case "dropbox", "box", "yandex", "jottacloud", "hidrive", "huaweidrive":
 		if !validateOAuthTokenJSON(p["token"]) {
 			return fmt.Errorf("%s 需要填写有效的 OAuth token（JSON 中需包含 access_token 或 refresh_token）", name)
 		}
@@ -1131,6 +1500,17 @@ func ValidateEntry(name string, p map[string]string, plainSecrets bool) error {
 		hasSP := p["account"] != "" && p["tenant"] != "" && p["client_id"] != "" && p["client_secret"] != ""
 		if !hasSAS && !hasKey && !hasSP {
 			return fmt.Errorf("%s 需要填写 SAS URL，或 Account + Key，或 Account + Service Principal 凭据", name)
+		}
+		if hasSAS && !validURLWithQuery(p["sas_url"]) {
+			return fmt.Errorf("%s 的 sas_url 不是有效的 HTTP/HTTPS 地址", name)
+		}
+	case "azurefiles":
+		hasConn := p["connection_string"] != ""
+		hasSAS := p["sas_url"] != ""
+		hasKey := p["account"] != "" && p["key"] != ""
+		hasSP := p["account"] != "" && p["tenant"] != "" && p["client_id"] != "" && p["client_secret"] != ""
+		if !hasConn && !hasSAS && !hasKey && !hasSP {
+			return fmt.Errorf("%s 需要填写连接字符串、SAS URL、Account + Key 或 Service Principal 凭据", name)
 		}
 		if hasSAS && !validURLWithQuery(p["sas_url"]) {
 			return fmt.Errorf("%s 的 sas_url 不是有效的 HTTP/HTTPS 地址", name)
@@ -1160,6 +1540,65 @@ func ValidateEntry(name string, p map[string]string, plainSecrets bool) error {
 		if p["storage_url"] != "" && !validURL(p["storage_url"]) {
 			return fmt.Errorf("%s 的 storage_url 地址无效", name)
 		}
+	case "oracleobjectstorage":
+		if strings.TrimSpace(p["namespace"]) == "" || strings.TrimSpace(p["region"]) == "" {
+			return fmt.Errorf("%s 需要填写 Oracle Namespace 和 Region", name)
+		}
+	case "qingstor":
+		if p["access_key_id"] == "" || p["secret_access_key"] == "" || (p["env_auth"] != "" && p["env_auth"] != "false") {
+			return fmt.Errorf("%s 需要显式填写 QingStor Access Key ID 和 Secret Access Key", name)
+		}
+	case "storj":
+		hasGrant := p["access_grant"] != ""
+		hasKeys := p["satellite_address"] != "" && p["api_key"] != "" && p["passphrase"] != ""
+		if !hasGrant && !hasKeys {
+			return fmt.Errorf("%s 需要填写 Storj Access Grant，或 Satellite + API Key + Passphrase", name)
+		}
+	case "koofr":
+		if !validURL(p["endpoint"]) || p["user"] == "" || p["password"] == "" {
+			return fmt.Errorf("%s 需要填写有效的 Koofr endpoint、用户名和密码", name)
+		}
+	case "seafile":
+		if !validURL(p["url"]) || p["user"] == "" || (p["pass"] == "" && p["auth_token"] == "") {
+			return fmt.Errorf("%s 需要填写有效的 Seafile 服务地址、用户名和密码（或 auth_token）", name)
+		}
+	case "pikpak":
+		if p["user"] == "" || p["pass"] == "" {
+			return fmt.Errorf("%s 需要填写 PikPak 账号（user）和密码（pass）", name)
+		}
+	case "protondrive":
+		if p["username"] == "" || p["password"] == "" {
+			return fmt.Errorf("%s 需要填写 Proton 用户名和密码", name)
+		}
+	case "iclouddrive":
+		if p["apple_id"] == "" || p["password"] == "" {
+			return fmt.Errorf("%s 需要填写 Apple ID 和密码", name)
+		}
+	case "filen":
+		if p["email"] == "" || p["password"] == "" || p["api_key"] == "" {
+			return fmt.Errorf("%s 需要填写 Filen 邮箱、密码和 API Key", name)
+		}
+	case "mailru":
+		hasToken := p["token"] != ""
+		hasUserPass := p["user"] != "" && p["pass"] != ""
+		if !hasToken && !hasUserPass {
+			return fmt.Errorf("%s 需要填写有效的 OAuth token 或账号+密码", name)
+		}
+		if hasToken && !validateOAuthTokenJSON(p["token"]) {
+			return fmt.Errorf("%s 的 OAuth token 格式无效", name)
+		}
+	case "fichier":
+		if p["api_key"] == "" && p["shared_folder"] == "" {
+			return fmt.Errorf("%s 需要填写 1Fichier API Key 或共享目录链接", name)
+		}
+	case "gofile":
+		if p["access_token"] == "" && p["root_folder_id"] == "" {
+			return fmt.Errorf("%s 需要填写 Gofile Access Token 或 Root Folder ID", name)
+		}
+	case "pixeldrain":
+		if p["api_key"] == "" && p["root_folder_id"] == "" {
+			return fmt.Errorf("%s 需要填写 Pixeldrain API Key 或 Root Folder ID", name)
+		}
 	case "crypt":
 		if p["password"] == "" {
 			return fmt.Errorf("%s 缺少加密密码", name)
@@ -1167,12 +1606,16 @@ func ValidateEntry(name string, p map[string]string, plainSecrets bool) error {
 		if strings.TrimSpace(p["remote"]) == "" {
 			return fmt.Errorf("%s 缺少底层路径", name)
 		}
-	case "chunker", "compress", "hasher":
+	case "chunker", "compress", "hasher", "alias", "archive":
 		if strings.TrimSpace(p["remote"]) == "" {
 			return fmt.Errorf("%s 缺少底层路径 remote", name)
 		}
 	case "union":
 		if _, err := ParseUnionUpstreams(p["upstreams"]); err != nil {
+			return fmt.Errorf("%s：%s", name, err.Error())
+		}
+	case "combine":
+		if _, err := ParseCombineUpstreams(p["upstreams"]); err != nil {
 			return fmt.Errorf("%s：%s", name, err.Error())
 		}
 	}
@@ -1217,6 +1660,21 @@ func (c Config) Validate() error {
 				}
 				if ref == Local && sub == "" {
 					return fmt.Errorf("%s 的本地上游需要指定授权目录", name)
+				}
+			}
+		}
+		if p["type"] == "combine" {
+			ups, err := ParseCombineUpstreams(p["upstreams"])
+			if err != nil {
+				return fmt.Errorf("%s：%s", name, err.Error())
+			}
+			for _, up := range ups {
+				ref, sub, ok := strings.Cut(up.Target, ":")
+				if !ok || !cleanRelative(sub) || (ref != Local && c[ref] == nil) {
+					return fmt.Errorf("%s 的组合目录 %q（%s）必须引用已配置的存储或本地授权目录", name, up.Name, up.Target)
+				}
+				if ref == Local && sub == "" {
+					return fmt.Errorf("%s 的本地组合目录 %q 需要指定授权目录", name, up.Name)
 				}
 			}
 		}
@@ -1376,8 +1834,9 @@ func PrepareWithSkipObscure(ctx context.Context, existing, additions Config, pla
 			p["known_hosts"] = line
 		}
 		if plain {
-			for _, key := range ObscuredFields {
-				if p[key] == "" || (skipObscure != nil && skipObscure[name][key]) {
+			typ := p["type"]
+			for _, key := range slices.Sorted(maps.Keys(p)) {
+				if p[key] == "" || !IsObscuredFieldForType(typ, key) || (skipObscure != nil && skipObscure[name][key]) {
 					continue
 				}
 				if len(p[key]) > 65536 || strings.IndexFunc(p[key], unicode.IsControl) >= 0 {
@@ -1415,6 +1874,20 @@ func PrepareWithSkipObscure(ctx context.Context, existing, additions Config, pla
 				ups[i].Target = rewritten
 			}
 			p["upstreams"] = FormatUnionUpstreams(ups)
+		}
+		if p["type"] == "combine" {
+			ups, err := ParseCombineUpstreams(p["upstreams"])
+			if err != nil {
+				return err
+			}
+			for i := range ups {
+				rewritten, err := rewriteCompositeTarget(ups[i].Target, existing, additions)
+				if err != nil {
+					return err
+				}
+				ups[i].Target = rewritten
+			}
+			p["upstreams"] = FormatCombineUpstreams(ups)
 		}
 	}
 	return nil

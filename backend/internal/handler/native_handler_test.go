@@ -26,7 +26,17 @@ func TestNativeStorageHandlersRejectMalformedOrUnknownFields(t *testing.T) {
 		{"AboutNativeStorage unknown field", http.MethodPost, "/svr/native/storage/about", AboutNativeStorage, `{"name":"a","bogus":true}`},
 		{"BrowseNativeStorage unknown field", http.MethodPost, "/svr/native/storage/browse", BrowseNativeStorage, `{"path":"/a","bogus":true}`},
 		{"RestoreNativeFile unknown field", http.MethodPost, "/svr/native/storage/restore", RestoreNativeFile, `{"srcPath":"/a","dstLocalDir":"/b","bogus":true}`},
+		{"MkdirNativeStorage unknown field", http.MethodPost, "/svr/native/storage/mkdir", MkdirNativeStorage, `{"path":"/a/b","bogus":1}`},
+		{"MoveNativeStoragePath unknown field", http.MethodPost, "/svr/native/storage/move", MoveNativeStoragePath, `{"srcPath":"/a","dstPath":"/b","bogus":1}`},
+		{"DeleteNativeStoragePath unknown field", http.MethodPost, "/svr/native/storage/delete", DeleteNativeStoragePath, `{"path":"/a","bogus":1}`},
+		{"SizeNativeStorage unknown field", http.MethodPost, "/svr/native/storage/size", SizeNativeStorage, `{"path":"/a","bogus":1}`},
+		{"DedupeNativeStorage unknown field", http.MethodPost, "/svr/native/storage/dedupe", DedupeNativeStorage, `{"path":"/a","mode":"list","bogus":1}`},
+		{"CleanupNativeStorage unknown field", http.MethodPost, "/svr/native/storage/cleanup", CleanupNativeStorage, `{"name":"a","bogus":1}`},
+		{"LinkNativeStorage unknown field", http.MethodPost, "/svr/native/storage/link", LinkNativeStorage, `{"path":"/a","bogus":1}`},
+		{"CopyURLNativeStorage unknown field", http.MethodPost, "/svr/native/storage/copyurl", CopyURLNativeStorage, `{"url":"https://example.com/a","dstDir":"/a","bogus":1}`},
+		{"SetTierNativeStorage unknown field", http.MethodPost, "/svr/native/storage/settier", SetTierNativeStorage, `{"path":"/a","tier":"Cool","bogus":1}`},
 		{"StartJobCheck unknown field", http.MethodPost, "/svr/job/check", StartJobCheck, `{"id":1,"download":true,"bogus":1}`},
+		{"ResetBisyncJob unknown field", http.MethodPost, "/svr/job/bisync/resync", ResetBisyncJob, `{"id":1,"bogus":1}`},
 		{"SaveNativeEngine trailing json", http.MethodPut, "/svr/native/engine", SaveNativeEngine, `{"remark":"a"}{}`},
 	}
 	for _, tc := range cases {

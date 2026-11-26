@@ -154,6 +154,98 @@ func RestoreNativeFile(c *gin.Context) {
 	})
 }
 
+func MkdirNativeStorage(c *gin.Context) {
+	var in service.NativePathInput
+	if !bindJSONStrict(c, &in) {
+		return
+	}
+	handleServiceVoid(c, func() error {
+		return service.MkdirNativeStorage(c.Request.Context(), in)
+	})
+}
+
+func MoveNativeStoragePath(c *gin.Context) {
+	var in service.NativeMovePathInput
+	if !bindJSONStrict(c, &in) {
+		return
+	}
+	handleServiceVoid(c, func() error {
+		return service.MoveNativeStoragePath(c.Request.Context(), in)
+	})
+}
+
+func DeleteNativeStoragePath(c *gin.Context) {
+	var in service.NativeDeletePathInput
+	if !bindJSONStrict(c, &in) {
+		return
+	}
+	handleServiceVoid(c, func() error {
+		return service.DeleteNativeStoragePath(c.Request.Context(), in)
+	})
+}
+
+func SizeNativeStorage(c *gin.Context) {
+	var in service.NativePathInput
+	if !bindJSONStrict(c, &in) {
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	handleService(c, func() (interface{}, error) {
+		return service.SizeNativeStorage(c.Request.Context(), in)
+	})
+}
+
+func DedupeNativeStorage(c *gin.Context) {
+	var in service.NativeDedupeInput
+	if !bindJSONStrict(c, &in) {
+		return
+	}
+	handleService(c, func() (interface{}, error) {
+		return service.DedupeNativeStorage(c.Request.Context(), in)
+	})
+}
+
+func CleanupNativeStorage(c *gin.Context) {
+	var in service.NativeAboutInput
+	if !bindJSONStrict(c, &in) {
+		return
+	}
+	handleServiceVoid(c, func() error {
+		return service.CleanupNativeStorage(c.Request.Context(), in)
+	})
+}
+
+func LinkNativeStorage(c *gin.Context) {
+	var in service.NativeLinkInput
+	if !bindJSONStrict(c, &in) {
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	handleService(c, func() (interface{}, error) {
+		return service.LinkNativeStorage(c.Request.Context(), in)
+	})
+}
+
+func CopyURLNativeStorage(c *gin.Context) {
+	var in service.NativeCopyURLInput
+	if !bindJSONStrict(c, &in) {
+		return
+	}
+	handleService(c, func() (interface{}, error) {
+		return service.CopyURLNativeStorage(c.Request.Context(), in)
+	})
+}
+
+func SetTierNativeStorage(c *gin.Context) {
+	var in service.NativeSetTierInput
+	if !bindJSONStrict(c, &in) {
+		return
+	}
+	handleServiceVoid(c, func() error {
+		return service.SetTierNativeStorage(c.Request.Context(), in)
+	})
+}
+
 // AddAlist handles POST /svr/alist
 func AddAlist(c *gin.Context) {
 	var req map[string]interface{}

@@ -437,3 +437,180 @@ func TestExportImportEncryptedAboutBrowseRestoreCheckAndBisync(t *testing.T) {
 		t.Fatalf("Version() failed: %q (%v)", ver, err)
 	}
 }
+
+func TestExtendedBackendsCombineAliasArchiveAndNewOps(t *testing.T) {
+	// 1. Validate new backends, alias, archive, combine, and cycle detection
+	cfg := Config{
+		"yx": {
+			"type":  "yandex",
+			"token": `{"access_token":"tok","refresh_token":"ref"}`,
+		},
+		"kf": {
+			"type":     "koofr",
+			"endpoint": "https://app.koofr.net",
+			"user":     "u@example.com",
+			"password": "AAAAAAAAAAAAAAAAAAAAAA",
+		},
+		"sf": {
+			"type": "seafile",
+			"url":  "https://seafile.example.com",
+			"user": "u@example.com",
+			"pass": "AAAAAAAAAAAAAAAAAAAAAA",
+		},
+		"sj": {
+			"type":         "storj",
+			"access_grant": "grant123",
+		},
+		"qs": {
+			"type":              "qingstor",
+			"access_key_id":     "ak",
+			"secret_access_key": "sk",
+		},
+		"oci": {
+			"type":      "oracleobjectstorage",
+			"namespace": "ns",
+			"region":    "ap-tokyo-1",
+		},
+		"af": {
+			"type":       "azurefiles",
+			"account":    "acct",
+			"key":        "key",
+			"share_name": "share",
+		},
+		"ali": {
+			"type":   "alias",
+			"remote": "sj:bucket/sub",
+		},
+		"arc": {
+			"type":   "archive",
+			"remote": "sj:bucket/archive.zip",
+		},
+		"comb": {
+			"type":      "combine",
+			"upstreams": "koofr_dir=kf: yandex_dir=yx:backup",
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected new backends config valid, got: %v", err)
+	}
+	if _, _, err := cfg.Pair("/sj/bucket/src", "/arc/inner"); err == nil {
+		t.Fatal("expected archive backend to be rejected as read-only destination")
+	}
+	renamed, err := cfg.Rename("kf", "koofr_main")
+	if err != nil {
+		t.Fatalf("Rename kf failed: %v", err)
+	}
+	if !strings.Contains(renamed["comb"]["upstreams"], "koofr_dir=koofr_main:") {
+		t.Fatalf("combine upstreams did not cascade rename: %q", renamed["comb"]["upstreams"])
+	}
+	cycle := Config{
+		"a": {"type": "alias", "remote": "b:"},
+		"b": {"type": "combine", "upstreams": "sub=a:"},
+	}
+	if err := cycle.Validate(); err == nil {
+		t.Fatal("expected cycle across alias -> combine -> alias to fail validation")
+	}
+
+	// 2. Validate tuning & SSRF URL guards
+	if err := ValidateRcloneSize("64M", false, "bad"); err != nil {
+		t.Fatalf("ValidateRcloneSize valid failed: %v", err)
+	}
+	if err := ValidateRcloneSize("-1M", false, "bad"); err == nil {
+		t.Fatal("expected negative size rejected")
+	}
+	if err := ValidateOrderBy("size,asc:modtime,desc"); err != nil {
+		t.Fatalf("ValidateOrderBy valid failed: %v", err)
+	}
+	if err := ValidateOrderBy("invalid,asc"); err == nil {
+		t.Fatal("expected invalid order-by field rejected")
+	}
+	if err := validateCopyURLTarget("http://127.0.0.1:8080/secret"); err == nil {
+		t.Fatal("expected loopback copyurl rejected")
+	}
+	if err := validateCopyURLTarget("https://example.com/file.bin"); err != nil {
+		t.Fatalf("expected valid https copyurl accepted, got: %v", err)
+	}
+
+	requireRclone(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	base := t.TempDir()
+	srcDir := filepath.Join(base, "src")
+	cryptBacking := filepath.Join(base, "crypt_backing")
+	_ = os.MkdirAll(srcDir, 0755)
+	_ = os.MkdirAll(cryptBacking, 0755)
+	t.Setenv("TRIM_DATA_ACCESSIBLE_PATHS", srcDir+":"+cryptBacking)
+	t.Setenv("TRIM_PKGTMP", "")
+	vSrc, _ := virtualLocal(srcDir)
+
+	_ = os.WriteFile(filepath.Join(srcDir, "small.txt"), []byte("hi"), 0644)
+	_ = os.WriteFile(filepath.Join(srcDir, "big.bin"), []byte("0123456789abcdef"), 0644)
+
+	rtCfg := Config{
+		"vault": {
+			"type":     "crypt",
+			"remote":   cryptBacking,
+			"password": "vault-password-123",
+		},
+	}
+	if err := Prepare(ctx, nil, rtCfg, true); err != nil {
+		t.Fatalf("Prepare crypt failed: %v", err)
+	}
+	if err := rtCfg.Copy(ctx, vSrc, "/vault", CopyOptions{Transfers: 2, Checkers: 2, MaxBacklog: 100, BufferSize: "16M"}, nil); err != nil {
+		t.Fatalf("copy to crypt failed: %v", err)
+	}
+
+	// CryptCheck matches identical encrypted files without --download
+	cc, err := rtCfg.Check(ctx, vSrc, "/vault", CheckOptions{CryptCheck: true, Checkers: 2}, nil)
+	if err != nil {
+		t.Fatalf("CryptCheck failed: %v", err)
+	}
+	if cc.Mode != "cryptcheck" || cc.MatchedCount != 2 || cc.DifferCount != 0 || cc.MissingOnDstCount != 0 {
+		t.Fatalf("unexpected cryptcheck result: %+v", cc)
+	}
+
+	// Check with MinSize filter ignores small.txt (2 bytes)
+	chkFiltered, err := rtCfg.Check(ctx, vSrc, "/vault", CheckOptions{CryptCheck: true, MinSize: 10, Checkers: 2}, nil)
+	if err != nil {
+		t.Fatalf("filtered CryptCheck failed: %v", err)
+	}
+	if chkFiltered.MatchedCount != 1 {
+		t.Fatalf("expected 1 matched file with MinSize=10, got %+v", chkFiltered)
+	}
+
+	// Size & Dedupe list on crypt remote
+	szLocal, err := rtCfg.Size(ctx, vSrc, SessionOptions{})
+	if err != nil || szLocal.Count != 2 || szLocal.Bytes != 18 {
+		t.Fatalf("Size(vSrc) unexpected: %+v (%v)", szLocal, err)
+	}
+	szVault, err := rtCfg.Size(ctx, "/vault", SessionOptions{})
+	if err != nil || szVault.Count != 2 || szVault.Bytes != 18 {
+		t.Fatalf("Size(/vault) unexpected: %+v (%v)", szVault, err)
+	}
+	dedupeRes, err := rtCfg.Dedupe(ctx, "/vault", DedupeOptions{Mode: "list", DryRun: true}, SessionOptions{})
+	if err != nil || !dedupeRes.DryRun {
+		t.Fatalf("Dedupe list failed: %+v (%v)", dedupeRes, err)
+	}
+
+	// Bisync pending resync marker triggers --resync
+	workDir := filepath.Join(base, "bi_work")
+	biA := filepath.Join(base, "biA")
+	biB := filepath.Join(base, "biB")
+	_ = os.MkdirAll(biA, 0755)
+	_ = os.MkdirAll(biB, 0755)
+	t.Setenv("TRIM_DATA_ACCESSIBLE_PATHS", biA+":"+biB)
+	vBiA, _ := virtualLocal(biA)
+	vBiB, _ := virtualLocal(biB)
+	_ = os.WriteFile(filepath.Join(biA, "a.txt"), []byte("A"), 0644)
+	if _, err := rtCfg.Bisync(ctx, vBiA, vBiB, BisyncOptions{WorkDir: workDir, Transfers: 2, Checkers: 2}, nil); err != nil {
+		t.Fatalf("initial bisync failed: %v", err)
+	}
+	if err := MarkBisyncResyncPending(workDir); err != nil {
+		t.Fatalf("MarkBisyncResyncPending failed: %v", err)
+	}
+	res2, err := rtCfg.Bisync(ctx, vBiA, vBiB, BisyncOptions{WorkDir: workDir, ResyncMode: "newer", Transfers: 2, Checkers: 2}, nil)
+	if err != nil || !res2.Resynced {
+		t.Fatalf("expected bisync with pending marker to resync, got %+v (%v)", res2, err)
+	}
+}

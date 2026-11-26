@@ -247,7 +247,24 @@ export default function TaskEditor({
         seedForm.extraFlags?.noUpdateModtime ||
         seedForm.extraFlags?.inplace ||
         seedForm.extraFlags?.checkFirst ||
-        seedForm.extraFlags?.s3NoHead,
+        seedForm.extraFlags?.s3NoHead ||
+        seedForm.extraFlags?.ignoreSize ||
+        seedForm.extraFlags?.trackRenames ||
+        seedForm.extraFlags?.useMmap ||
+        seedForm.extraFlags?.maxTransfer ||
+        seedForm.extraFlags?.cutoffMode ||
+        seedForm.extraFlags?.maxDuration ||
+        seedForm.extraFlags?.orderBy ||
+        Number(seedForm.extraFlags?.maxBacklog || 0) > 0 ||
+        seedForm.extraFlags?.bufferSize ||
+        seedForm.extraFlags?.multiThreadCutoff ||
+        seedForm.extraFlags?.multiThreadChunkSize ||
+        seedForm.extraFlags?.userAgent ||
+        seedForm.extraFlags?.ioTimeout ||
+        seedForm.extraFlags?.conTimeout ||
+        seedForm.extraFlags?.bisyncResyncMode ||
+        Number(seedForm.extraFlags?.bisyncMaxDelete || 0) > 0 ||
+        seedForm.extraFlags?.bisyncForce,
     ),
   );
   const [runAfterCreate, setRunAfterCreate] = useState(false);
@@ -509,7 +526,24 @@ export default function TaskEditor({
         (form.extraFlags?.noUpdateModtime ? 1 : 0) +
         (form.extraFlags?.inplace ? 1 : 0) +
         (form.extraFlags?.checkFirst ? 1 : 0) +
-        (form.extraFlags?.s3NoHead ? 1 : 0)
+        (form.extraFlags?.s3NoHead ? 1 : 0) +
+        (form.extraFlags?.ignoreSize ? 1 : 0) +
+        (form.extraFlags?.trackRenames ? 1 : 0) +
+        (form.extraFlags?.useMmap ? 1 : 0) +
+        (form.extraFlags?.maxTransfer?.trim() ? 1 : 0) +
+        (form.extraFlags?.cutoffMode?.trim() ? 1 : 0) +
+        (form.extraFlags?.maxDuration?.trim() ? 1 : 0) +
+        (form.extraFlags?.orderBy?.trim() ? 1 : 0) +
+        (Number(form.extraFlags?.maxBacklog || 0) > 0 ? 1 : 0) +
+        (form.extraFlags?.bufferSize?.trim() ? 1 : 0) +
+        (form.extraFlags?.multiThreadCutoff?.trim() ? 1 : 0) +
+        (form.extraFlags?.multiThreadChunkSize?.trim() ? 1 : 0) +
+        (form.extraFlags?.userAgent?.trim() ? 1 : 0) +
+        (form.extraFlags?.ioTimeout?.trim() ? 1 : 0) +
+        (form.extraFlags?.conTimeout?.trim() ? 1 : 0) +
+        (form.extraFlags?.bisyncResyncMode?.trim() ? 1 : 0) +
+        (Number(form.extraFlags?.bisyncMaxDelete || 0) > 0 ? 1 : 0) +
+        (form.extraFlags?.bisyncForce ? 1 : 0)
       : (form.useCacheS ? 1 : 0) +
         (form.useCacheT ? 1 : 0) +
         (Number(form.scanIntervalS || 0) > 0 ? 1 : 0) +
@@ -1816,7 +1850,279 @@ export default function TaskEditor({
                               >
                                 跳过 S3 上传后 HEAD 校验以减少 API 调用（--s3-no-head）
                               </Checkbox>
+                              <Checkbox
+                                checked={Boolean(form.extraFlags?.ignoreSize)}
+                                onChange={(e) =>
+                                  change("extraFlags", {
+                                    ...form.extraFlags,
+                                    ignoreSize: Boolean(e.target.checked),
+                                  })
+                                }
+                              >
+                                仅按修改时间比对，忽略文件大小变化（--ignore-size）
+                              </Checkbox>
+                              <Checkbox
+                                checked={Boolean(form.extraFlags?.trackRenames)}
+                                onChange={(e) =>
+                                  change("extraFlags", {
+                                    ...form.extraFlags,
+                                    trackRenames: Boolean(e.target.checked),
+                                  })
+                                }
+                              >
+                                启用重命名追踪，避免重命名后重传（--track-renames）
+                              </Checkbox>
+                              <Checkbox
+                                checked={Boolean(form.extraFlags?.useMmap)}
+                                onChange={(e) =>
+                                  change("extraFlags", {
+                                    ...form.extraFlags,
+                                    useMmap: Boolean(e.target.checked),
+                                  })
+                                }
+                              >
+                                使用 mmap 零拷贝传输缓冲（--use-mmap）
+                              </Checkbox>
                             </div>
+                            <div className="form-grid form-grid--three">
+                              <Field
+                                label="单次传输总量上限（--max-transfer）"
+                                hint="留空不限，支持如 50G / 500M"
+                              >
+                                <Input
+                                  value={form.extraFlags?.maxTransfer || ""}
+                                  placeholder="如 100G / 500M"
+                                  showClear
+                                  onChange={(v) =>
+                                    change("extraFlags", {
+                                      ...form.extraFlags,
+                                      maxTransfer: v,
+                                    })
+                                  }
+                                />
+                              </Field>
+                              <Field label="达限截断模式（--cutoff-mode）">
+                                <Select
+                                  value={form.extraFlags?.cutoffMode || ""}
+                                  optionList={[
+                                    { label: "默认 (hard)", value: "" },
+                                    { label: "hard（立即停止）", value: "hard" },
+                                    { label: "soft（传完当前队列）", value: "soft" },
+                                    { label: "cautious（不再发起新传输）", value: "cautious" },
+                                  ]}
+                                  onChange={(v) =>
+                                    change("extraFlags", {
+                                      ...form.extraFlags,
+                                      cutoffMode: String(v || ""),
+                                    })
+                                  }
+                                />
+                              </Field>
+                              <Field
+                                label="最大运行时长（--max-duration）"
+                                hint="超时后平滑收尾退出，如 2h"
+                              >
+                                <Input
+                                  value={form.extraFlags?.maxDuration || ""}
+                                  placeholder="如 2h / 30m"
+                                  showClear
+                                  onChange={(v) =>
+                                    change("extraFlags", {
+                                      ...form.extraFlags,
+                                      maxDuration: v,
+                                    })
+                                  }
+                                />
+                              </Field>
+                            </div>
+                            <div className="form-grid form-grid--three">
+                              <Field label="传输优先级排序（--order-by）">
+                                <Select
+                                  value={form.extraFlags?.orderBy || ""}
+                                  optionList={[
+                                    { label: "默认顺序", value: "" },
+                                    { label: "小文件优先 (size,ascending)", value: "size,ascending" },
+                                    { label: "大文件优先 (size,descending)", value: "size,descending" },
+                                    { label: "最旧修改优先 (modtime,ascending)", value: "modtime,ascending" },
+                                    { label: "最新修改优先 (modtime,descending)", value: "modtime,descending" },
+                                    { label: "文件名升序 (name,ascending)", value: "name,ascending" },
+                                    { label: "文件名降序 (name,descending)", value: "name,descending" },
+                                  ]}
+                                  onChange={(v) =>
+                                    change("extraFlags", {
+                                      ...form.extraFlags,
+                                      orderBy: String(v || ""),
+                                    })
+                                  }
+                                />
+                              </Field>
+                              <Field
+                                label="预扫描队列上限（--max-backlog）"
+                                hint="0 使用默认；控制内存排队数"
+                              >
+                                <Input
+                                  inputMode="numeric"
+                                  value={String(form.extraFlags?.maxBacklog || 0)}
+                                  onChange={(v) =>
+                                    change("extraFlags", {
+                                      ...form.extraFlags,
+                                      maxBacklog: Math.max(0, Math.trunc(Number(v) || 0)),
+                                    })
+                                  }
+                                />
+                              </Field>
+                              <Field
+                                label="读写缓冲区（--buffer-size）"
+                                hint="留空默认 16M，设为 0 禁用"
+                              >
+                                <Input
+                                  value={form.extraFlags?.bufferSize || ""}
+                                  placeholder="如 16M / 32M / 0"
+                                  showClear
+                                  onChange={(v) =>
+                                    change("extraFlags", {
+                                      ...form.extraFlags,
+                                      bufferSize: v,
+                                    })
+                                  }
+                                />
+                              </Field>
+                            </div>
+                            <div className="form-grid form-grid--three">
+                              <Field
+                                label="多线程分流阈值（--multi-thread-cutoff）"
+                                hint="默认 250M"
+                              >
+                                <Input
+                                  value={form.extraFlags?.multiThreadCutoff || ""}
+                                  placeholder="如 250M / 100M"
+                                  showClear
+                                  onChange={(v) =>
+                                    change("extraFlags", {
+                                      ...form.extraFlags,
+                                      multiThreadCutoff: v,
+                                    })
+                                  }
+                                />
+                              </Field>
+                              <Field
+                                label="多线程分块（--multi-thread-chunk-size）"
+                                hint="默认 64M"
+                              >
+                                <Input
+                                  value={form.extraFlags?.multiThreadChunkSize || ""}
+                                  placeholder="如 64M / 32M"
+                                  showClear
+                                  onChange={(v) =>
+                                    change("extraFlags", {
+                                      ...form.extraFlags,
+                                      multiThreadChunkSize: v,
+                                    })
+                                  }
+                                />
+                              </Field>
+                              <Field label="User-Agent（--user-agent）">
+                                <Input
+                                  value={form.extraFlags?.userAgent || ""}
+                                  placeholder="可选 HTTP User-Agent"
+                                  showClear
+                                  onChange={(v) =>
+                                    change("extraFlags", {
+                                      ...form.extraFlags,
+                                      userAgent: v,
+                                    })
+                                  }
+                                />
+                              </Field>
+                            </div>
+                            <div className="form-grid form-grid--two">
+                              <Field label="I/O 空闲超时（--timeout）" hint="默认 5m">
+                                <Input
+                                  value={form.extraFlags?.ioTimeout || ""}
+                                  placeholder="如 5m / 30s"
+                                  showClear
+                                  onChange={(v) =>
+                                    change("extraFlags", {
+                                      ...form.extraFlags,
+                                      ioTimeout: v,
+                                    })
+                                  }
+                                />
+                              </Field>
+                              <Field label="连接超时（--contimeout）" hint="默认 1m">
+                                <Input
+                                  value={form.extraFlags?.conTimeout || ""}
+                                  placeholder="如 1m / 15s"
+                                  showClear
+                                  onChange={(v) =>
+                                    change("extraFlags", {
+                                      ...form.extraFlags,
+                                      conTimeout: v,
+                                    })
+                                  }
+                                />
+                              </Field>
+                            </div>
+                            {form.method === 3 && (
+                              <>
+                                <div className="form-grid form-grid--two">
+                                  <Field
+                                    label="双向基线冲突策略（--resync-mode）"
+                                    hint="首次同步或重建基线 (--resync) 时生效"
+                                  >
+                                    <Select
+                                      value={form.extraFlags?.bisyncResyncMode || ""}
+                                      optionList={[
+                                        { label: "默认 (path1)", value: "" },
+                                        { label: "path1（以左侧为准）", value: "path1" },
+                                        { label: "path2（以右侧为准）", value: "path2" },
+                                        { label: "newer（保留最新修改）", value: "newer" },
+                                        { label: "older（保留较旧文件）", value: "older" },
+                                        { label: "larger（保留较大文件）", value: "larger" },
+                                        { label: "smaller（保留较小文件）", value: "smaller" },
+                                      ]}
+                                      onChange={(v) =>
+                                        change("extraFlags", {
+                                          ...form.extraFlags,
+                                          bisyncResyncMode: String(v || ""),
+                                        })
+                                      }
+                                    />
+                                  </Field>
+                                  <Field
+                                    label="单次删除数安全上限（--max-delete）"
+                                    hint="0 表示禁用检查（非百分比，按对象数计）"
+                                  >
+                                    <Input
+                                      inputMode="numeric"
+                                      value={String(form.extraFlags?.bisyncMaxDelete || 0)}
+                                      onChange={(v) =>
+                                        change("extraFlags", {
+                                          ...form.extraFlags,
+                                          bisyncMaxDelete: Math.max(
+                                            0,
+                                            Math.trunc(Number(v) || 0),
+                                          ),
+                                        })
+                                      }
+                                    />
+                                  </Field>
+                                </div>
+                                <div className="native-checkbox-group">
+                                  <Checkbox
+                                    checked={Boolean(form.extraFlags?.bisyncForce)}
+                                    onChange={(e) =>
+                                      change("extraFlags", {
+                                        ...form.extraFlags,
+                                        bisyncForce: Boolean(e.target.checked),
+                                      })
+                                    }
+                                  >
+                                    超限删除仍强制执行（--force，谨慎启用）
+                                  </Checkbox>
+                                </div>
+                              </>
+                            )}
                           </>
                         )}
                       </div>

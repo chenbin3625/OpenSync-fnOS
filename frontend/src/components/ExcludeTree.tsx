@@ -9,6 +9,7 @@ import {
   buildExcludeCheckedKeys,
   initialExcludeExpandedKeys,
 } from "../lib/excludeTree";
+import { formatDisplayPath } from "../lib/syncPathPreview";
 import { useAsyncTree } from "../lib/useAsyncTree";
 
 export function ExcludeTree({
@@ -68,7 +69,7 @@ export function ExcludeTree({
 
     const keys = initialExcludeExpandedKeys(srcPaths);
     const roots: TreeNodeData[] = keys.map((p) => ({
-      label: p,
+      label: formatDisplayPath(p, keys),
       value: p,
       key: p,
       disabled: true,

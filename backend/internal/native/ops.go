@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -14,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // TreeEntry represents one file or directory in a recursive native tree scan.
@@ -840,21 +843,31 @@ func (c Config) Restore(ctx context.Context, srcVirtual, dstLocalDir string, isD
 // CheckOptions configures an rclone consistency verification check.
 type CheckOptions struct {
 	Download      bool
+	CryptCheck    bool
 	Compare       int // 0/2: hash/default, 1: size-only
 	OneWay        bool
 	Checkers      int
 	Retries       int
 	FilterLines   []string // rclone --filter-from rules
+	MinSize       int64
+	MaxSize       int64
+	MinAgeMinutes int
+	OlderThanDays int
+	NewerThanDays int
 	BwLimit       string
 	TPSLimit      float64
 	TPSLimitBurst int
 	ModifyWindow  string
 	FastList      bool
+	UserAgent     string
+	IOTimeout     string
+	ConTimeout    string
 	ProxyURL      string
 	MaxItems      int // cap preview items per category (default 500)
 }
 
 type CheckResult struct {
+	Mode              string   `json:"mode"` // "check" | "download" | "cryptcheck"
 	MatchedCount      int      `json:"matchedCount"`
 	DifferCount       int      `json:"differCount"`
 	MissingOnSrcCount int      `json:"missingOnSrcCount"`
@@ -867,24 +880,60 @@ type CheckResult struct {
 	Truncated         bool     `json:"truncated"`
 }
 
-// Check runs `rclone check` between src and dst and returns structured verification counts and previews.
+func appendFilterCriteriaFlags(args []string, minSize, maxSize int64, minAgeMin, olderDays, newerDays int) []string {
+	if minSize > 0 {
+		args = append(args, "--min-size", strconv.FormatInt(minSize, 10)+"B")
+	}
+	if maxSize > 0 {
+		args = append(args, "--max-size", strconv.FormatInt(maxSize, 10)+"B")
+	}
+	effectiveMinMinutes := minAgeMin
+	if olderDays > 0 {
+		olderMinutes := olderDays * 24 * 60
+		if olderMinutes > effectiveMinMinutes {
+			effectiveMinMinutes = olderMinutes
+		}
+	}
+	if effectiveMinMinutes > 0 {
+		args = append(args, "--min-age", strconv.Itoa(effectiveMinMinutes)+"m")
+	}
+	if newerDays > 0 {
+		args = append(args, "--max-age", strconv.Itoa(newerDays*24)+"h")
+	}
+	return args
+}
+
+// Check runs `rclone check` (or `rclone cryptcheck` when CryptCheck is enabled)
+// between src and dst and returns structured verification counts and previews.
 func (c Config) Check(ctx context.Context, src, dst string, opt CheckOptions, emit func(*Stats)) (*CheckResult, error) {
 	srcEp, dstEp, err := c.Pair(src, dst)
 	if err != nil {
 		return nil, err
 	}
-	useChecksum := !opt.Download && opt.Compare != 1 && endpointSupportsNativeMD5(srcEp) && endpointSupportsNativeMD5(dstEp)
+	useCryptCheck := opt.CryptCheck && !opt.Download
+	if opt.CryptCheck && !srcEp.IsCrypt && !dstEp.IsCrypt {
+		return nil, errors.New("cryptcheck 仅支持包含 Crypt 加密存储的任务")
+	}
+	swappedForCrypt := false
+	if useCryptCheck && !dstEp.IsCrypt && srcEp.IsCrypt {
+		if opt.OneWay {
+			return nil, errors.New("源端为 Crypt 且开启单向校验时请改用常规或逐字节校验")
+		}
+		swappedForCrypt = true
+	}
+
+	useChecksum := !opt.Download && !useCryptCheck && opt.Compare != 1 && endpointSupportsNativeMD5(srcEp) && endpointSupportsNativeMD5(dstEp)
 
 	srcName, srcSub := parts(src)
 	dstName, dstSub := parts(dst)
 	var specs []SessionSpec
 	if !srcEp.IsLocal {
-		specs = append(specs, SessionSpec{Name: srcName, Mode: diskReadOnly, Checksum: useChecksum})
+		specs = append(specs, SessionSpec{Name: srcName, Mode: diskReadOnly, Checksum: useChecksum || useCryptCheck})
 	}
 	if !dstEp.IsLocal {
-		specs = append(specs, SessionSpec{Name: dstName, Mode: diskReadOnly, Checksum: useChecksum})
+		specs = append(specs, SessionSpec{Name: dstName, Mode: diskReadOnly, Checksum: useChecksum || useCryptCheck})
 	}
-	s, err := c.SessionFor(specs, SessionOptions{ProxyURL: opt.ProxyURL})
+	s, err := c.SessionFor(specs, SessionOptions{ProxyURL: opt.ProxyURL, PreserveCryptChecksum: useCryptCheck})
 	if err != nil {
 		return nil, err
 	}
@@ -892,14 +941,14 @@ func (c Config) Check(ctx context.Context, src, dst string, opt CheckOptions, em
 
 	srcArg := srcEp.Path
 	if srcEp.IsLocal {
-		srcArg, err = s.diskWithMode(srcSub, diskReadOnly, useChecksum)
+		srcArg, err = s.diskWithMode(srcSub, diskReadOnly, useChecksum || useCryptCheck)
 		if err != nil {
 			return nil, err
 		}
 	}
 	dstArg := dstEp.Path
 	if dstEp.IsLocal {
-		dstArg, err = s.diskWithMode(dstSub, diskReadOnly, useChecksum)
+		dstArg, err = s.diskWithMode(dstSub, diskReadOnly, useChecksum || useCryptCheck)
 		if err != nil {
 			return nil, err
 		}
@@ -911,8 +960,17 @@ func (c Config) Check(ctx context.Context, src, dst string, opt CheckOptions, em
 	missDstFile := filepath.Join(s.dir, "missing-dst")
 	errFile := filepath.Join(s.dir, "errors")
 
+	subCmd := "check"
+	modeLabel := "check"
+	if opt.Download {
+		modeLabel = "download"
+	} else if useCryptCheck {
+		subCmd = "cryptcheck"
+		modeLabel = "cryptcheck"
+	}
+
 	args := []string{
-		"check",
+		subCmd,
 		"--use-json-log", "--log-level", "INFO", "--stats", "1s",
 		"--checkers", strconv.Itoa(max(1, opt.Checkers)),
 		"--retries", strconv.Itoa(max(1, opt.Retries+1)),
@@ -924,7 +982,7 @@ func (c Config) Check(ctx context.Context, src, dst string, opt CheckOptions, em
 	}
 	if opt.Download {
 		args = append(args, "--download")
-	} else if opt.Compare == 1 {
+	} else if !useCryptCheck && opt.Compare == 1 {
 		args = append(args, "--size-only")
 	}
 	if opt.OneWay {
@@ -937,17 +995,25 @@ func (c Config) Check(ctx context.Context, src, dst string, opt CheckOptions, em
 		}
 		args = append(args, "--filter-from", filterFile)
 	}
+	args = appendFilterCriteriaFlags(args, opt.MinSize, opt.MaxSize, opt.MinAgeMinutes, opt.OlderThanDays, opt.NewerThanDays)
 	args, err = appendTuningFlags(args, CopyOptions{
 		BwLimit:       opt.BwLimit,
 		TPSLimit:      opt.TPSLimit,
 		TPSLimitBurst: opt.TPSLimitBurst,
 		ModifyWindow:  opt.ModifyWindow,
 		FastList:      opt.FastList,
+		UserAgent:     opt.UserAgent,
+		IOTimeout:     opt.IOTimeout,
+		ConTimeout:    opt.ConTimeout,
 	})
 	if err != nil {
 		return nil, err
 	}
-	args = append(args, "--", srcArg, dstArg)
+	if swappedForCrypt {
+		args = append(args, "--", dstArg, srcArg)
+	} else {
+		args = append(args, "--", srcArg, dstArg)
+	}
 
 	cmd, err := s.Cmd(ctx, args...)
 	if err != nil {
@@ -996,7 +1062,7 @@ func (c Config) Check(ctx context.Context, src, dst string, opt CheckOptions, em
 	if runErr != nil && (cmd.ProcessState == nil || cmd.ProcessState.ExitCode() != 1) {
 		detail := sanitizeRcloneError(errBuf.String())
 		if detail != "" {
-			log.Printf("native rclone check failed (%v): %s", runErr, detail)
+			log.Printf("native rclone %s failed (%v): %s", subCmd, runErr, detail)
 			return nil, fmt.Errorf("一致性校验失败：%s", detail)
 		}
 		return nil, fmt.Errorf("一致性校验失败：%w", runErr)
@@ -1007,6 +1073,7 @@ func (c Config) Check(ctx context.Context, src, dst string, opt CheckOptions, em
 		limit = 500
 	}
 	res := &CheckResult{
+		Mode:         modeLabel,
 		Differ:       []string{},
 		MissingOnSrc: []string{},
 		MissingOnDst: []string{},
@@ -1016,10 +1083,17 @@ func (c Config) Check(ctx context.Context, src, dst string, opt CheckOptions, em
 	var trunc bool
 	res.DifferCount, res.Differ, trunc = readLinesCapped(differFile, limit)
 	res.Truncated = res.Truncated || trunc
-	res.MissingOnSrcCount, res.MissingOnSrc, trunc = readLinesCapped(missSrcFile, limit)
-	res.Truncated = res.Truncated || trunc
-	res.MissingOnDstCount, res.MissingOnDst, trunc = readLinesCapped(missDstFile, limit)
-	res.Truncated = res.Truncated || trunc
+	if swappedForCrypt {
+		res.MissingOnDstCount, res.MissingOnDst, trunc = readLinesCapped(missSrcFile, limit)
+		res.Truncated = res.Truncated || trunc
+		res.MissingOnSrcCount, res.MissingOnSrc, trunc = readLinesCapped(missDstFile, limit)
+		res.Truncated = res.Truncated || trunc
+	} else {
+		res.MissingOnSrcCount, res.MissingOnSrc, trunc = readLinesCapped(missSrcFile, limit)
+		res.Truncated = res.Truncated || trunc
+		res.MissingOnDstCount, res.MissingOnDst, trunc = readLinesCapped(missDstFile, limit)
+		res.Truncated = res.Truncated || trunc
+	}
 	res.ErrorCount, res.Errors, trunc = readLinesCapped(errFile, limit)
 	res.Truncated = res.Truncated || trunc
 	return res, nil
@@ -1053,24 +1127,50 @@ func readLinesCapped(filePath string, limit int) (total int, items []string, tru
 
 // BisyncOptions configures a bidirectional rclone bisync run.
 type BisyncOptions struct {
-	WorkDir            string
-	ForceResync        bool
-	DryRun             bool
-	Transfers          int
-	Checkers           int
-	Retries            int
-	Compare            int // 0: size,modtime; 1: size; 2: size,modtime,checksum
-	ConflictPolicy     int // 0: newer (delete loser), 1: path1 (delete loser), 2: none (keep both with suffix)
-	FilterLines        []string
-	BwLimit            string
-	TPSLimit           float64
-	TPSLimitBurst      int
-	ModifyWindow       string
-	FastList           bool
-	MultiThreadStreams int
-	CreateEmptySrcDirs bool
-	FollowSymlinks     bool
-	ProxyURL           string
+	WorkDir              string
+	ForceResync          bool
+	ResyncMode           string // newer | older | path1 | path2 | larger | smaller
+	MaxDelete            int    // >0 limits max deletes (--max-delete)
+	Force                bool
+	TrackRenames         bool
+	DryRun               bool
+	Transfers            int
+	Checkers             int
+	Retries              int
+	Compare              int // 0: size,modtime; 1: size; 2: size,modtime,checksum
+	ConflictPolicy       int // 0: newer (delete loser), 1: path1 (delete loser), 2: none (keep both with suffix)
+	FilterLines          []string
+	MinSize              int64
+	MaxSize              int64
+	MinAgeMinutes        int
+	OlderThanDays        int
+	NewerThanDays        int
+	BwLimit              string
+	TPSLimit             float64
+	TPSLimitBurst        int
+	ModifyWindow         string
+	FastList             bool
+	MultiThreadStreams   int
+	MultiThreadCutoff    string
+	MultiThreadChunkSize string
+	BufferSize           string
+	UseMmap              bool
+	MaxTransfer          string
+	CutoffMode           string
+	MaxDuration          string
+	OrderBy              string
+	MaxBacklog           int
+	UserAgent            string
+	IOTimeout            string
+	ConTimeout           string
+	IgnoreSize           bool
+	CreateEmptySrcDirs   bool
+	FollowSymlinks       bool
+	NoUpdateModtime      bool
+	Inplace              bool
+	CheckFirst           bool
+	S3NoHead             bool
+	ProxyURL             string
 }
 
 type BisyncResult struct {
@@ -1131,7 +1231,7 @@ func (c Config) Bisync(ctx context.Context, path1, path2 string, opt BisyncOptio
 		}
 	}
 
-	needResync := opt.ForceResync || !bisyncHasListingState(opt.WorkDir)
+	needResync := opt.ForceResync || bisyncHasPendingResyncMarker(opt.WorkDir) || !bisyncHasListingState(opt.WorkDir)
 
 	args := []string{
 		"bisync",
@@ -1165,7 +1265,26 @@ func (c Config) Bisync(ctx context.Context, path1, path2 string, opt BisyncOptio
 	}
 
 	if needResync {
-		args = append(args, "--resync", "--resync-mode", "newer")
+		resyncMode := strings.ToLower(strings.TrimSpace(opt.ResyncMode))
+		if resyncMode == "" {
+			resyncMode = "newer"
+		}
+		if err := ValidateBisyncResyncMode(resyncMode); err != nil {
+			return nil, err
+		}
+		args = append(args, "--resync", "--resync-mode", resyncMode)
+	}
+	if opt.MaxDelete > 0 {
+		args = append(args, "--max-delete", strconv.Itoa(opt.MaxDelete))
+	}
+	if opt.Force {
+		args = append(args, "--force")
+	}
+	if opt.TrackRenames {
+		args = append(args, "--track-renames")
+	}
+	if opt.IgnoreSize && opt.Compare != 1 {
+		args = append(args, "--ignore-size")
 	}
 	if opt.DryRun {
 		args = append(args, "--dry-run")
@@ -1180,13 +1299,30 @@ func (c Config) Bisync(ctx context.Context, path1, path2 string, opt BisyncOptio
 		}
 		args = append(args, "--filter-from", filterFile)
 	}
+	args = appendFilterCriteriaFlags(args, opt.MinSize, opt.MaxSize, opt.MinAgeMinutes, opt.OlderThanDays, opt.NewerThanDays)
 	args, err = appendTuningFlags(args, CopyOptions{
-		BwLimit:            opt.BwLimit,
-		TPSLimit:           opt.TPSLimit,
-		TPSLimitBurst:      opt.TPSLimitBurst,
-		ModifyWindow:       opt.ModifyWindow,
-		FastList:           opt.FastList,
-		MultiThreadStreams: opt.MultiThreadStreams,
+		BwLimit:              opt.BwLimit,
+		TPSLimit:             opt.TPSLimit,
+		TPSLimitBurst:        opt.TPSLimitBurst,
+		ModifyWindow:         opt.ModifyWindow,
+		FastList:             opt.FastList,
+		MultiThreadStreams:   opt.MultiThreadStreams,
+		MultiThreadCutoff:    opt.MultiThreadCutoff,
+		MultiThreadChunkSize: opt.MultiThreadChunkSize,
+		BufferSize:           opt.BufferSize,
+		UseMmap:              opt.UseMmap,
+		MaxTransfer:          opt.MaxTransfer,
+		CutoffMode:           opt.CutoffMode,
+		MaxDuration:          opt.MaxDuration,
+		OrderBy:              opt.OrderBy,
+		MaxBacklog:           opt.MaxBacklog,
+		UserAgent:            opt.UserAgent,
+		IOTimeout:            opt.IOTimeout,
+		ConTimeout:           opt.ConTimeout,
+		NoUpdateModtime:      opt.NoUpdateModtime,
+		Inplace:              opt.Inplace,
+		CheckFirst:           opt.CheckFirst,
+		S3NoHead:             opt.S3NoHead,
 	})
 	if err != nil {
 		return nil, err
@@ -1282,7 +1418,26 @@ func (c Config) Bisync(ctx context.Context, path1, path2 string, opt BisyncOptio
 		}
 		return nil, fmt.Errorf("双向同步失败（%v）", runErr)
 	}
+	if needResync && !opt.DryRun {
+		_ = os.Remove(filepath.Join(opt.WorkDir, ".resync-pending"))
+	}
 	return &BisyncResult{Resynced: needResync}, nil
+}
+
+func bisyncHasPendingResyncMarker(workDir string) bool {
+	_, err := os.Stat(filepath.Join(workDir, ".resync-pending"))
+	return err == nil
+}
+
+// MarkBisyncResyncPending flags workDir so the next live bisync run triggers --resync.
+func MarkBisyncResyncPending(workDir string) error {
+	if strings.TrimSpace(workDir) == "" {
+		return errors.New("缺少双向同步状态目录")
+	}
+	if err := os.MkdirAll(workDir, 0700); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(workDir, ".resync-pending"), []byte("1\n"), 0600)
 }
 
 func bisyncHasListingState(workDir string) bool {
@@ -1296,6 +1451,396 @@ func bisyncHasListingState(workDir string) bool {
 		}
 	}
 	return false
+}
+
+// SizeInfo reports recursive object count and byte total for a virtual path.
+type SizeInfo struct {
+	Count    int64 `json:"count"`
+	Bytes    int64 `json:"bytes"`
+	Sizeless int64 `json:"sizeless"`
+}
+
+// Size counts objects and total bytes under virtualPath.
+func (c Config) Size(ctx context.Context, virtualPath string, opts SessionOptions) (*SizeInfo, error) {
+	ep, err := c.Resolve(virtualPath)
+	if err != nil {
+		return nil, err
+	}
+	if ep.IsLocal {
+		_, sub := parts(virtualPath)
+		entries, exists, err := listLocalTree(ctx, sub, TreeOptions{})
+		if err != nil {
+			return nil, err
+		}
+		if !exists {
+			return nil, errors.New("本地目录不存在")
+		}
+		info := &SizeInfo{}
+		for _, e := range entries {
+			if !e.IsDir {
+				info.Count++
+				info.Bytes += e.Size
+			}
+		}
+		return info, nil
+	}
+	name, _ := parts(virtualPath)
+	s, err := c.SessionFor([]SessionSpec{{Name: name, Mode: diskReadOnly}}, opts)
+	if err != nil {
+		return nil, err
+	}
+	defer s.Close()
+	cmd, err := s.Cmd(ctx, "size", "--json", "--", ep.Path)
+	if err != nil {
+		return nil, err
+	}
+	out, stderr, err := limitedOutputWithStderr(cmd, 64<<10)
+	if err != nil {
+		return nil, classifyRcloneError(ep.Backend, stderr)
+	}
+	var parsed SizeInfo
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		return nil, errors.New("无法解析目录统计信息")
+	}
+	return &parsed, nil
+}
+
+// DedupeOptions configures `rclone dedupe` on a virtual path.
+type DedupeOptions struct {
+	Mode     string // list | skip | first | newest | oldest | largest | smallest | rename
+	ByHash   bool
+	SizeOnly bool
+	DryRun   bool
+}
+
+type DedupeResult struct {
+	Mode   string   `json:"mode"`
+	DryRun bool     `json:"dryRun"`
+	Logs   []string `json:"logs"`
+}
+
+// Dedupe finds (and optionally resolves) duplicate files/names using `rclone dedupe`.
+func (c Config) Dedupe(ctx context.Context, virtualPath string, opt DedupeOptions, opts SessionOptions) (*DedupeResult, error) {
+	ep, err := c.Resolve(virtualPath)
+	if err != nil {
+		return nil, err
+	}
+	mode := strings.ToLower(strings.TrimSpace(opt.Mode))
+	if mode == "" {
+		mode = "list"
+	}
+	switch mode {
+	case "list", "skip", "first", "newest", "oldest", "largest", "smallest", "rename":
+	default:
+		return nil, errors.New("不支持的去重模式")
+	}
+	if ep.ReadOnly && mode != "list" && !opt.DryRun {
+		return nil, errors.New("只读存储仅支持去重预览（list）")
+	}
+	sessionMode := diskFullWrite
+	if mode == "list" || opt.DryRun {
+		sessionMode = diskReadOnly
+	}
+
+	name, sub := parts(virtualPath)
+	var specs []SessionSpec
+	if !ep.IsLocal {
+		specs = append(specs, SessionSpec{Name: name, Mode: sessionMode, Checksum: opt.ByHash})
+	}
+	s, err := c.SessionFor(specs, opts)
+	if err != nil {
+		return nil, err
+	}
+	defer s.Close()
+
+	targetArg := ep.Path
+	if ep.IsLocal {
+		targetArg, err = s.diskWithMode(sub, sessionMode, opt.ByHash)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	args := []string{"dedupe", "--dedupe-mode", mode, "--use-json-log", "--log-level", "INFO"}
+	if opt.ByHash {
+		args = append(args, "--by-hash")
+	}
+	if opt.SizeOnly {
+		args = append(args, "--size-only")
+	}
+	if opt.DryRun && mode != "list" {
+		args = append(args, "--dry-run")
+	}
+	args = append(args, "--", targetArg)
+
+	cmd, err := s.Cmd(ctx, args...)
+	if err != nil {
+		return nil, err
+	}
+	logs, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	var lines []string
+	var errMsgs []string
+	scan := bufio.NewScanner(logs)
+	scan.Buffer(make([]byte, 4096), 4<<20)
+	for scan.Scan() {
+		var m struct {
+			Msg, Object, Level string
+		}
+		if json.Unmarshal(scan.Bytes(), &m) != nil {
+			continue
+		}
+		if m.Level == "error" || m.Level == "critical" {
+			if msg := strings.TrimSpace(m.Msg); msg != "" {
+				errMsgs = append(errMsgs, sanitizeRcloneError(msg))
+			}
+		}
+		if m.Object != "" || strings.Contains(m.Msg, "duplicate") || strings.Contains(m.Msg, "Deleted") || strings.Contains(m.Msg, "Renamed") || strings.Contains(m.Msg, "Skipping") {
+			entry := strings.TrimSpace(m.Msg)
+			if m.Object != "" {
+				entry = m.Object + ": " + entry
+			}
+			if len(lines) < 500 {
+				lines = append(lines, sanitizeRcloneError(entry))
+			}
+		}
+	}
+	if scan.Err() != nil {
+		_ = cmd.Process.Kill()
+	}
+	runErr := cmd.Wait()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if runErr != nil {
+		if len(errMsgs) > 0 {
+			return nil, fmt.Errorf("去重执行失败：%s", errMsgs[0])
+		}
+		return nil, fmt.Errorf("去重执行失败：%w", runErr)
+	}
+	if lines == nil {
+		lines = []string{}
+	}
+	return &DedupeResult{
+		Mode:   mode,
+		DryRun: opt.DryRun || mode == "list",
+		Logs:   lines,
+	}, nil
+}
+
+// Cleanup runs `rclone cleanup` on a configured remote (or subpath) to empty trash/old versions.
+func (c Config) Cleanup(ctx context.Context, targetName string, opts SessionOptions) error {
+	targetName = strings.TrimSpace(targetName)
+	if targetName == "" || targetName == Local || (c[targetName] != nil && c[targetName]["type"] == "local") {
+		return errors.New("请指定支持清理的远端存储名称")
+	}
+	canonical, ok := c.FindKey(targetName)
+	if !ok {
+		return fmt.Errorf("存储 %q 不存在", targetName)
+	}
+	if c[canonical]["type"] == "http" {
+		return errors.New("HTTP 只读存储不支持清理操作")
+	}
+	s, err := c.SessionFor([]SessionSpec{{Name: canonical, Mode: diskFullWrite}}, opts)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	cmd, err := s.Cmd(ctx, "cleanup", "--", canonical+":")
+	if err != nil {
+		return err
+	}
+	_, stderr, err := limitedOutputWithStderr(cmd, 64<<10)
+	if err != nil {
+		low := strings.ToLower(stderr)
+		if strings.Contains(low, "doesn't support cleanup") || strings.Contains(low, "not supported") || strings.Contains(low, "not implemented") {
+			return errors.New("该存储后端不支持清理回收站/碎片")
+		}
+		return classifyRcloneError(c[canonical]["type"], stderr)
+	}
+	return nil
+}
+
+// Link generates or removes a public share link for virtualPath using `rclone link`.
+func (c Config) Link(ctx context.Context, virtualPath, expire string, unlink bool, opts SessionOptions) (string, error) {
+	ep, err := c.ResolveEntry(virtualPath)
+	if err != nil {
+		return "", err
+	}
+	if ep.IsLocal {
+		return "", errors.New("本地目录不支持生成公开分享链接")
+	}
+	if expire = strings.TrimSpace(expire); expire != "" {
+		if err := ValidateDurationSpec(expire, 3650*24*time.Hour, "分享有效期格式无效，如 1d、12h、30m"); err != nil {
+			return "", err
+		}
+	}
+	name, _ := parts(virtualPath)
+	s, err := c.SessionFor([]SessionSpec{{Name: name, Mode: diskReadOnly}}, opts)
+	if err != nil {
+		return "", err
+	}
+	defer s.Close()
+	args := []string{"link"}
+	if expire != "" {
+		args = append(args, "--expire", expire)
+	}
+	if unlink {
+		args = append(args, "--unlink")
+	}
+	args = append(args, "--", ep.Path)
+	cmd, err := s.Cmd(ctx, args...)
+	if err != nil {
+		return "", err
+	}
+	out, stderr, err := limitedOutputWithStderr(cmd, 64<<10)
+	if err != nil {
+		low := strings.ToLower(stderr)
+		if strings.Contains(low, "doesn't support") || strings.Contains(low, "not supported") || strings.Contains(low, "not implemented") {
+			return "", errors.New("该存储后端不支持生成公开分享链接")
+		}
+		return "", classifyRcloneError(ep.Backend, stderr)
+	}
+	trimmed := strings.TrimSpace(string(out))
+	if unlink {
+		return trimmed, nil
+	}
+	lines := strings.Split(trimmed, "\n")
+	link := strings.TrimSpace(lines[len(lines)-1])
+	if link == "" {
+		return "", errors.New("未返回分享链接")
+	}
+	return link, nil
+}
+
+// CopyURLOptions configures `rclone copyurl`.
+type CopyURLOptions struct {
+	FileName     string
+	AutoFilename bool
+	NoClobber    bool
+}
+
+func validateCopyURLTarget(rawURL string) error {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" || len(rawURL) > 2048 {
+		return errors.New("请输入有效的 HTTP/HTTPS 下载链接")
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+		return errors.New("仅支持有效的 HTTP/HTTPS 下载链接")
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return errors.New("出于安全限制，禁止拉取本机回环地址")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+			return errors.New("出于安全限制，禁止拉取回环或链路本地地址")
+		}
+	}
+	return nil
+}
+
+// CopyURL downloads an HTTP(S) URL directly into dstDirVirtual using `rclone copyurl`.
+func (c Config) CopyURL(ctx context.Context, rawURL, dstDirVirtual string, opt CopyURLOptions, opts SessionOptions) (string, error) {
+	if err := validateCopyURLTarget(rawURL); err != nil {
+		return "", err
+	}
+	dstEp, err := c.Resolve(dstDirVirtual)
+	if err != nil {
+		return "", err
+	}
+	if dstEp.ReadOnly {
+		return "", errors.New("只读存储不支持写入文件")
+	}
+	fileName := strings.TrimSpace(opt.FileName)
+	if fileName != "" {
+		if strings.ContainsAny(fileName, `/\`+"\r\n\x00") || fileName == "." || fileName == ".." {
+			return "", errors.New("目标文件名无效")
+		}
+	} else if !opt.AutoFilename {
+		return "", errors.New("请指定保存文件名或启用自动识别文件名")
+	}
+
+	dstName, dstSub := parts(dstDirVirtual)
+	var specs []SessionSpec
+	if !dstEp.IsLocal {
+		specs = append(specs, SessionSpec{Name: dstName, Mode: diskAppendWrite})
+	}
+	s, err := c.SessionFor(specs, opts)
+	if err != nil {
+		return "", err
+	}
+	defer s.Close()
+
+	dstArg := dstEp.Path
+	if dstEp.IsLocal {
+		dstArg, err = s.diskWithMode(dstSub, diskAppendWrite, false)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	args := []string{"copyurl"}
+	if opt.NoClobber {
+		args = append(args, "--no-clobber")
+	}
+	if fileName != "" {
+		args = append(args, "--", rawURL, joinRcloneRemotePath(dstArg, fileName))
+	} else {
+		args = append(args, "--auto-filename", "--header-filename", "--print-filename", "--", rawURL, dstArg)
+	}
+	cmd, err := s.Cmd(ctx, args...)
+	if err != nil {
+		return "", err
+	}
+	out, stderr, err := limitedOutputWithStderr(cmd, 64<<10)
+	if err != nil {
+		return "", classifyRcloneError(dstEp.Backend, stderr)
+	}
+	if fileName != "" {
+		return fileName, nil
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// SetTier changes the storage tier/class for objects at virtualPath using `rclone settier`.
+func (c Config) SetTier(ctx context.Context, virtualPath, tier string, opts SessionOptions) error {
+	tier = strings.TrimSpace(tier)
+	if tier == "" || len(tier) > 64 || strings.IndexFunc(tier, func(r rune) bool { return r < '!' || r > '~' }) >= 0 {
+		return errors.New("请填写有效的存储类别名称（如 STANDARD、IA、GLACIER、Hot、Cool、Archive）")
+	}
+	ep, err := c.ResolveEntry(virtualPath)
+	if err != nil {
+		return err
+	}
+	if ep.IsLocal || ep.ReadOnly {
+		return errors.New("仅支持对象存储修改存储类别")
+	}
+	name, _ := parts(virtualPath)
+	s, err := c.SessionFor([]SessionSpec{{Name: name, Mode: diskFullWrite}}, opts)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	cmd, err := s.Cmd(ctx, "settier", tier, "--", ep.Path)
+	if err != nil {
+		return err
+	}
+	_, stderr, err := limitedOutputWithStderr(cmd, 64<<10)
+	if err != nil {
+		low := strings.ToLower(stderr)
+		if strings.Contains(low, "doesn't support") || strings.Contains(low, "not supported") || strings.Contains(low, "not implemented") {
+			return errors.New("该存储后端不支持修改存储类别")
+		}
+		return classifyRcloneError(ep.Backend, stderr)
+	}
+	return nil
 }
 
 func localAbsToVirtual(absPath string) (string, bool) {

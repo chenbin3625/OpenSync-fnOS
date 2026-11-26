@@ -12,13 +12,17 @@ import type {
   JobItem,
   NativeAboutInfo,
   NativeBrowseResult,
+  NativeCopyURLResult,
+  NativeDedupeResult,
   NativeExportResult,
   NativeImportCandidate,
   NativeImportPreview,
   NativeImportResult,
+  NativeLinkResult,
   NativeLocalRoot,
   NativeRemoteItem,
   NativeRenameResult,
+  NativeSizeInfo,
   NativeStorageState,
   NativeStorageTestResult,
   NotifyItem,
@@ -790,7 +794,25 @@ export class MockStore {
       "client_secret",
       "service_account_credentials",
       "sas_url",
+      "auth_token",
       "application_credential_secret",
+      "access_grant",
+      "api_key",
+      "passphrase",
+      "library_key",
+      "connection_string",
+      "mailbox_password",
+      "otp_secret_key",
+      "client_access_token",
+      "client_refresh_token",
+      "client_salted_key_pass",
+      "trust_token",
+      "cookies",
+      "master_keys",
+      "private_key",
+      "file_password",
+      "folder_password",
+      "access_token",
     ]);
     const supportedTypes = [
       "local",
@@ -808,13 +830,34 @@ export class MockStore {
       "pcloud",
       "mega",
       "azureblob",
+      "azurefiles",
       "googlecloudstorage",
       "swift",
+      "oracleobjectstorage",
+      "qingstor",
+      "storj",
+      "yandex",
+      "koofr",
+      "seafile",
+      "pikpak",
+      "protondrive",
+      "iclouddrive",
+      "jottacloud",
+      "filen",
+      "hidrive",
+      "huaweidrive",
+      "mailru",
+      "fichier",
+      "gofile",
+      "pixeldrain",
       "crypt",
       "chunker",
       "compress",
       "hasher",
+      "alias",
+      "archive",
       "union",
+      "combine",
     ];
     const remotes: NativeRemoteItem[] = [...this.nativeRemotes.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
@@ -830,7 +873,14 @@ export class MockStore {
         for (const [otherName, otherParams] of this.nativeRemotes.entries()) {
           if (otherName === name) continue;
           const ot = otherParams.type;
-          if (ot === "crypt" || ot === "chunker" || ot === "compress" || ot === "hasher") {
+          if (
+            ot === "crypt" ||
+            ot === "chunker" ||
+            ot === "compress" ||
+            ot === "hasher" ||
+            ot === "alias" ||
+            ot === "archive"
+          ) {
             const ref = (otherParams.remote || "").split(":")[0];
             if (ref.toLowerCase() === name.toLowerCase()) {
               usedByCrypts.push(otherName);
@@ -841,6 +891,17 @@ export class MockStore {
               upstreams.some(
                 (u) => u.replace(/:(?:ro|nc|ep)$/i, "").split(":")[0]?.toLowerCase() === name.toLowerCase(),
               )
+            ) {
+              usedByCrypts.push(otherName);
+            }
+          } else if (ot === "combine") {
+            const upstreams = (otherParams.upstreams || "").split(/\s+/).filter(Boolean);
+            if (
+              upstreams.some((u) => {
+                const eq = u.indexOf("=");
+                const rhs = eq >= 0 ? u.slice(eq + 1) : u;
+                return rhs.split(":")[0]?.toLowerCase() === name.toLowerCase();
+              })
             ) {
               usedByCrypts.push(otherName);
             }
@@ -1017,15 +1078,46 @@ export class MockStore {
       "pcloud",
       "mega",
       "azureblob",
+      "azurefiles",
       "googlecloudstorage",
       "swift",
+      "oracleobjectstorage",
+      "qingstor",
+      "storj",
+      "yandex",
+      "koofr",
+      "seafile",
+      "pikpak",
+      "protondrive",
+      "iclouddrive",
+      "jottacloud",
+      "filen",
+      "hidrive",
+      "huaweidrive",
+      "mailru",
+      "fichier",
+      "gofile",
+      "pixeldrain",
       "crypt",
       "chunker",
       "compress",
       "hasher",
+      "alias",
+      "archive",
       "union",
+      "combine",
     ]);
-    const oauthTypes = new Set(["onedrive", "drive", "dropbox", "box", "pcloud"]);
+    const oauthTypes = new Set([
+      "onedrive",
+      "drive",
+      "dropbox",
+      "box",
+      "pcloud",
+      "yandex",
+      "jottacloud",
+      "hidrive",
+      "huaweidrive",
+    ]);
     const items: NativeImportCandidate[] = Object.entries(parsed)
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([name, params]) => {
@@ -1340,13 +1432,117 @@ export class MockStore {
     return null;
   }
 
-  startJobCheck(jobId: number, download: boolean): JobCheckResult | null {
+  mkdirNativeStorage(path: string): string | null {
+    if (!path?.trim() || path.trim() === "/") return "请提供有效目录路径";
+    return null;
+  }
+
+  moveNativeStoragePath(input: {
+    srcPath: string;
+    dstPath: string;
+    isDir?: boolean;
+  }): string | null {
+    if (!input.srcPath?.trim() || !input.dstPath?.trim()) {
+      return "请提供源路径与目标路径";
+    }
+    return null;
+  }
+
+  deleteNativeStoragePath(input: {
+    path: string;
+    isDir?: boolean;
+  }): string | null {
+    if (!input.path?.trim() || input.path.trim() === "/") return "请提供有效路径";
+    return null;
+  }
+
+  sizeNativeStorage(path: string): NativeSizeInfo | string {
+    if (!path?.trim() || path.trim() === "/") return "请提供有效路径";
+    return { count: 18, bytes: 128 * 1024 * 1024, sizeless: 0 };
+  }
+
+  dedupeNativeStorage(input: {
+    path: string;
+    mode?: string;
+    dryRun?: boolean;
+  }): NativeDedupeResult | string {
+    if (!input.path?.trim() || input.path.trim() === "/") return "请提供有效路径";
+    return {
+      mode: input.mode || "newest",
+      dryRun: Boolean(input.dryRun),
+      logs: [`[mock] Checked ${input.path}: 0 duplicates found`],
+    };
+  }
+
+  cleanupNativeStorage(name: string): string | null {
+    if (!name?.trim() || name.trim() === "本地") return "请提供远端存储名称";
+    return null;
+  }
+
+  linkNativeStorage(input: {
+    path: string;
+    expire?: string;
+    unlink?: boolean;
+  }): NativeLinkResult | string {
+    if (!input.path?.trim() || input.path.trim() === "/") return "请提供有效路径";
+    if (input.unlink) {
+      return { url: "", message: "已取消共享链接" };
+    }
+    return { url: `https://share.example.com/s${input.path}` };
+  }
+
+  copyUrlNativeStorage(input: {
+    url: string;
+    dstDir: string;
+    fileName?: string;
+    autoFilename?: boolean;
+    noClobber?: boolean;
+  }): NativeCopyURLResult | string {
+    if (!input.url?.trim() || !input.dstDir?.trim()) return "请提供 URL 和目标目录";
+    try {
+      const parsed = new URL(input.url.trim());
+      if (
+        ["127.0.0.1", "localhost", "::1"].includes(parsed.hostname) ||
+        parsed.hostname.startsWith("169.254.")
+      ) {
+        return "不允许访问本机回环或链路本地地址";
+      }
+      const fallback = parsed.pathname.split("/").filter(Boolean).pop() || "downloaded.bin";
+      return { fileName: input.fileName?.trim() || fallback };
+    } catch {
+      return "URL 格式无效";
+    }
+  }
+
+  setTierNativeStorage(input: { path: string; tier: string }): string | null {
+    if (!input.path?.trim() || !input.tier?.trim()) return "请提供路径和存储级别";
+    return null;
+  }
+
+  resetBisyncJob(jobId: number, runNow = false): string | null {
+    const job = this.jobs.find((j) => j.id === jobId);
+    if (!job) return "任务不存在";
+    if (job.method !== 3) return "仅双向同步任务支持重建基线";
+    if (runNow) {
+      this.runJob(jobId);
+    }
+    return null;
+  }
+
+  startJobCheck(
+    jobId: number,
+    download: boolean,
+    cryptCheck = false,
+  ): JobCheckResult | null {
     const job = this.jobs.find((j) => j.id === jobId);
     if (!job) return null;
+    const mode = cryptCheck ? "cryptcheck" : download ? "download" : "check";
     const result: JobCheckResult = {
       jobId,
       status: "completed",
-      download,
+      mode,
+      download: !cryptCheck && download,
+      cryptCheck,
       startedAt: now() - 1,
       finishedAt: now(),
       checkedFiles: 24,

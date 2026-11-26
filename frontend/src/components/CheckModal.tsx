@@ -20,13 +20,15 @@ type CheckTab = "differ" | "missingOnDst" | "missingOnSrc" | "errors";
 export function CheckModal({
   jobId,
   jobName,
+  hasCryptRemote = false,
   onClose,
 }: {
   jobId: number;
   jobName: string;
+  hasCryptRemote?: boolean;
   onClose: () => void;
 }) {
-  const [downloadMode, setDownloadMode] = useState(false);
+  const [checkMode, setCheckMode] = useState<"check" | "download" | "cryptcheck">("check");
   const [result, setResult] = useState<JobCheckResult | null>(null);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState("");
@@ -76,13 +78,17 @@ export function CheckModal({
     }, 1200);
   };
 
-  const startCheck = async (download: boolean) => {
+  const startCheck = async (mode: "check" | "download" | "cryptcheck") => {
     const gen = ++runGenRef.current;
     stopPolling();
     setStarting(true);
     setError("");
     try {
-      const initial = await api.startJobCheck(jobId, download);
+      const initial = await api.startJobCheck(
+        jobId,
+        mode === "download",
+        mode === "cryptcheck",
+      );
       if (!mountedRef.current || runGenRef.current !== gen) return;
       setResult(initial);
       setStarting(false);
@@ -109,7 +115,13 @@ export function CheckModal({
         }
         if (existing) {
           setResult(existing);
-          setDownloadMode(Boolean(existing.download));
+          setCheckMode(
+            existing.cryptCheck || existing.mode === "cryptcheck"
+              ? "cryptcheck"
+              : existing.download
+                ? "download"
+                : "check",
+          );
           if (existing.status === "running") {
             startPolling(gen);
           }
@@ -119,7 +131,7 @@ export function CheckModal({
         /* ignore initial lookup failure */
       }
       if (!controller.signal.aborted && mountedRef.current && runGenRef.current === gen) {
-        void startCheck(false);
+        void startCheck("check");
       }
     })();
     return () => {
@@ -189,7 +201,7 @@ export function CheckModal({
             className="editor-actions-start"
             icon={<IconRefresh aria-hidden="true" />}
             disabled={isRunning}
-            onClick={() => void startCheck(downloadMode)}
+            onClick={() => void startCheck(checkMode)}
           >
             重新校验
           </Button>
@@ -202,15 +214,30 @@ export function CheckModal({
       <div className="dry-run-body">
         <div className="dry-run-note check-modal-toolbar">
           <span>
-            调用 rclone check 只读比对源目录与目标目录的文件哈希与大小，验证备份完整性，不会修改任何文件。
+            调用 rclone {checkMode === "cryptcheck" ? "cryptcheck" : "check"} 只读比对源目录与目标目录的文件校验信息，验证备份完整性，不会修改任何文件。
           </span>
-          <Checkbox
-            checked={downloadMode}
-            disabled={isRunning}
-            onChange={(e) => setDownloadMode(Boolean(e.target.checked))}
-          >
-            逐字节下载校验（--download，适合无哈希远端，耗时更长）
-          </Checkbox>
+          <div className="native-checkbox-group">
+            <Checkbox
+              checked={checkMode === "download"}
+              disabled={isRunning}
+              onChange={(e) =>
+                setCheckMode(Boolean(e.target.checked) ? "download" : "check")
+              }
+            >
+              逐字节下载校验（--download，适合无哈希远端，耗时更长）
+            </Checkbox>
+            {hasCryptRemote && (
+              <Checkbox
+                checked={checkMode === "cryptcheck"}
+                disabled={isRunning}
+                onChange={(e) =>
+                  setCheckMode(Boolean(e.target.checked) ? "cryptcheck" : "check")
+                }
+              >
+                Crypt 密文校验（rclone cryptcheck，核验加密远端密文哈希与一致性）
+              </Checkbox>
+            )}
+          </div>
         </div>
 
         {error && (
@@ -218,7 +245,7 @@ export function CheckModal({
             role="alert"
             icon={<IconAlertTriangle aria-hidden="true" size="small" />}
             message={error}
-            onRetry={() => void startCheck(downloadMode)}
+            onRetry={() => void startCheck(checkMode)}
           />
         )}
 
@@ -249,7 +276,13 @@ export function CheckModal({
             <div className="dry-run-kpis">
               <div className="dry-run-kpi">
                 <span className="dry-run-kpi-label">校验模式</span>
-                <strong>{result.download ? "逐字节" : "哈希/大小"}</strong>
+                <strong>
+                  {result.cryptCheck || result.mode === "cryptcheck"
+                    ? "Crypt 密文"
+                    : result.download
+                      ? "逐字节"
+                      : "哈希/大小"}
+                </strong>
                 <span className="muted">
                   已核验 {result.checkedFiles} 项
                 </span>

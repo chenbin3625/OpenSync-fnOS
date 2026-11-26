@@ -4,6 +4,8 @@ import {
   cleanPathList,
   commonSrcSelectionParent,
   dstPathForSrcSelection,
+  formatDisplayPath,
+  formatDisplayPathList,
   jobDstMapKey,
   stripNativeLocalRootID,
   syncPathContains,
@@ -527,6 +529,52 @@ describe("syncPathPreview parity with backend path mapping", () => {
     expect(preserved.items.map((item) => item.resolvedDst)).toEqual([
       "/openlist/quark/docker~b3fbe6ed1ca9/",
       "/openlist/quark/sec/",
+    ]);
+  });
+
+  it("formats native local root paths for display without the fingerprint suffix unless colliding", () => {
+    expect(formatDisplayPath("")).toBe("");
+    expect(formatDisplayPath("/本地/docker~b3fbe6ed1ca9")).toBe("/本地/docker");
+    expect(formatDisplayPath("/本地/docker~b3fbe6ed1ca9/")).toBe("/本地/docker/");
+    expect(
+      formatDisplayPath("/本地/docker~b3fbe6ed1ca9/foo~0123456789ab"),
+    ).toBe("/本地/docker/foo~0123456789ab");
+    expect(formatDisplayPath("/openlist/quark/docker~b3fbe6ed1ca9/")).toBe(
+      "/openlist/quark/docker~b3fbe6ed1ca9/",
+    );
+
+    const nonColliding = [
+      "/本地/docker~b3fbe6ed1ca9",
+      "/本地/photos~5f78544a37a3",
+      "/本地/sec~972efbdc2b1f",
+      "/本地/sync~bd3b4223a876",
+    ];
+    expect(formatDisplayPathList(nonColliding)).toEqual([
+      "/本地/docker",
+      "/本地/photos",
+      "/本地/sec",
+      "/本地/sync",
+    ]);
+
+    // Sibling subdirectories under the same local root share one rootID and strip cleanly.
+    expect(
+      formatDisplayPathList([
+        "/本地/docker~b3fbe6ed1ca9/nginx",
+        "/本地/docker~b3fbe6ed1ca9/redis",
+      ]),
+    ).toEqual(["/本地/docker/nginx", "/本地/docker/redis"]);
+
+    // Distinct volumes with the same folder name retain their suffixes so they stay distinguishable.
+    expect(
+      formatDisplayPathList([
+        "/本地/Photos~111111111111",
+        "/本地/photos~222222222222",
+        "/本地/sec~972efbdc2b1f",
+      ]),
+    ).toEqual([
+      "/本地/Photos~111111111111",
+      "/本地/photos~222222222222",
+      "/本地/sec",
     ]);
   });
 });

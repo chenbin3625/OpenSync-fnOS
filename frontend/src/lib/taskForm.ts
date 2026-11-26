@@ -50,13 +50,34 @@ function parseNotifyIdList(value: unknown): number[] {
   return [];
 }
 
-function parseNativeExtraFlags(value: unknown): Required<NativeExtraFlags> {
-  const empty: Required<NativeExtraFlags> = {
+function emptyNativeExtraFlags(): Required<NativeExtraFlags> {
+  return {
     noUpdateModtime: false,
     inplace: false,
     checkFirst: false,
     s3NoHead: false,
+    ignoreSize: false,
+    trackRenames: false,
+    useMmap: false,
+    maxTransfer: "",
+    cutoffMode: "",
+    maxDuration: "",
+    orderBy: "",
+    maxBacklog: 0,
+    bufferSize: "",
+    multiThreadCutoff: "",
+    multiThreadChunkSize: "",
+    userAgent: "",
+    ioTimeout: "",
+    conTimeout: "",
+    bisyncResyncMode: "",
+    bisyncMaxDelete: 0,
+    bisyncForce: false,
   };
+}
+
+function parseNativeExtraFlags(value: unknown): Required<NativeExtraFlags> {
+  const empty = emptyNativeExtraFlags();
   if (!value) return empty;
   let obj: Record<string, unknown> | null = null;
   if (typeof value === "string") {
@@ -74,11 +95,34 @@ function parseNativeExtraFlags(value: unknown): Required<NativeExtraFlags> {
     obj = value as Record<string, unknown>;
   }
   if (!obj) return empty;
+  const str = (k: string) =>
+    typeof obj![k] === "string" ? String(obj![k]).trim() : "";
+  const num = (k: string) => {
+    const n = Number(obj![k] ?? 0);
+    return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 0;
+  };
   return {
     noUpdateModtime: Boolean(obj.noUpdateModtime),
     inplace: Boolean(obj.inplace),
     checkFirst: Boolean(obj.checkFirst),
     s3NoHead: Boolean(obj.s3NoHead),
+    ignoreSize: Boolean(obj.ignoreSize),
+    trackRenames: Boolean(obj.trackRenames),
+    useMmap: Boolean(obj.useMmap),
+    maxTransfer: str("maxTransfer"),
+    cutoffMode: str("cutoffMode"),
+    maxDuration: str("maxDuration"),
+    orderBy: str("orderBy"),
+    maxBacklog: num("maxBacklog"),
+    bufferSize: str("bufferSize"),
+    multiThreadCutoff: str("multiThreadCutoff"),
+    multiThreadChunkSize: str("multiThreadChunkSize"),
+    userAgent: str("userAgent"),
+    ioTimeout: str("ioTimeout"),
+    conTimeout: str("conTimeout"),
+    bisyncResyncMode: str("bisyncResyncMode"),
+    bisyncMaxDelete: num("bisyncMaxDelete"),
+    bisyncForce: Boolean(obj.bisyncForce),
   };
 }
 
@@ -89,6 +133,28 @@ function serializeNativeExtraFlags(flags: NativeExtraFlags | undefined): string 
   if (flags.inplace) out.inplace = true;
   if (flags.checkFirst) out.checkFirst = true;
   if (flags.s3NoHead) out.s3NoHead = true;
+  if (flags.ignoreSize) out.ignoreSize = true;
+  if (flags.trackRenames) out.trackRenames = true;
+  if (flags.useMmap) out.useMmap = true;
+  if (flags.maxTransfer?.trim()) out.maxTransfer = flags.maxTransfer.trim();
+  if (flags.cutoffMode?.trim()) out.cutoffMode = flags.cutoffMode.trim();
+  if (flags.maxDuration?.trim()) out.maxDuration = flags.maxDuration.trim();
+  if (flags.orderBy?.trim()) out.orderBy = flags.orderBy.trim();
+  if (Number(flags.maxBacklog || 0) > 0)
+    out.maxBacklog = Math.trunc(Number(flags.maxBacklog));
+  if (flags.bufferSize?.trim()) out.bufferSize = flags.bufferSize.trim();
+  if (flags.multiThreadCutoff?.trim())
+    out.multiThreadCutoff = flags.multiThreadCutoff.trim();
+  if (flags.multiThreadChunkSize?.trim())
+    out.multiThreadChunkSize = flags.multiThreadChunkSize.trim();
+  if (flags.userAgent?.trim()) out.userAgent = flags.userAgent.trim();
+  if (flags.ioTimeout?.trim()) out.ioTimeout = flags.ioTimeout.trim();
+  if (flags.conTimeout?.trim()) out.conTimeout = flags.conTimeout.trim();
+  if (flags.bisyncResyncMode?.trim())
+    out.bisyncResyncMode = flags.bisyncResyncMode.trim();
+  if (Number(flags.bisyncMaxDelete || 0) > 0)
+    out.bisyncMaxDelete = Math.trunc(Number(flags.bisyncMaxDelete));
+  if (flags.bisyncForce) out.bisyncForce = true;
   return Object.keys(out).length > 0 ? JSON.stringify(out) : "";
 }
 
@@ -140,12 +206,7 @@ export function defaultJobForm(alistId?: number) {
     multiThreadStreams: 0,
     createEmptySrcDirs: false,
     followSymlinks: false,
-    extraFlags: {
-      noUpdateModtime: false,
-      inplace: false,
-      checkFirst: false,
-      s3NoHead: false,
-    } as Required<NativeExtraFlags>,
+    extraFlags: emptyNativeExtraFlags(),
     ...defaultCronFields,
   };
 }

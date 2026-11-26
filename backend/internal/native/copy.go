@@ -52,19 +52,32 @@ type CopyOptions struct {
 	ReportSkipped bool
 
 	// Performance & transfer tuning
-	BwLimit            string
-	TPSLimit           float64
-	TPSLimitBurst      int
-	ModifyWindow       string
-	FastList           bool
-	MultiThreadStreams int
-	CreateEmptySrcDirs bool
-	FollowSymlinks     bool
-	NoUpdateModtime    bool
-	Inplace            bool
-	CheckFirst         bool
-	S3NoHead           bool
-	ProxyURL           string
+	BwLimit              string
+	TPSLimit             float64
+	TPSLimitBurst        int
+	ModifyWindow         string
+	FastList             bool
+	MultiThreadStreams   int
+	MultiThreadCutoff    string
+	MultiThreadChunkSize string
+	BufferSize           string
+	UseMmap              bool
+	MaxTransfer          string
+	CutoffMode           string
+	MaxDuration          string
+	OrderBy              string
+	MaxBacklog           int
+	UserAgent            string
+	IOTimeout            string
+	ConTimeout           string
+	IgnoreSize           bool
+	CreateEmptySrcDirs   bool
+	FollowSymlinks       bool
+	NoUpdateModtime      bool
+	Inplace              bool
+	CheckFirst           bool
+	S3NoHead             bool
+	ProxyURL             string
 }
 
 type Event struct {
@@ -197,6 +210,72 @@ func appendTuningFlags(args []string, opt CopyOptions) ([]string, error) {
 	}
 	if opt.MultiThreadStreams > 0 {
 		args = append(args, "--multi-thread-streams", strconv.Itoa(opt.MultiThreadStreams))
+	}
+	if mtc := strings.TrimSpace(opt.MultiThreadCutoff); mtc != "" {
+		if err := ValidateRcloneSize(mtc, false, "多线程分片阈值格式无效，如 256M、1G"); err != nil {
+			return nil, err
+		}
+		args = append(args, "--multi-thread-cutoff", mtc)
+	}
+	if mtcs := strings.TrimSpace(opt.MultiThreadChunkSize); mtcs != "" {
+		if err := ValidateRcloneSize(mtcs, false, "多线程分块大小格式无效，如 64M、128M"); err != nil {
+			return nil, err
+		}
+		args = append(args, "--multi-thread-chunk-size", mtcs)
+	}
+	if bs := strings.TrimSpace(opt.BufferSize); bs != "" {
+		if err := ValidateRcloneSize(bs, true, "读取缓冲区大小格式无效，如 16M、64M 或 0"); err != nil {
+			return nil, err
+		}
+		args = append(args, "--buffer-size", bs)
+	}
+	if opt.UseMmap {
+		args = append(args, "--use-mmap")
+	}
+	if mt := strings.TrimSpace(opt.MaxTransfer); mt != "" {
+		if err := ValidateRcloneSize(mt, false, "单次最大传输量格式无效，如 10G、500M"); err != nil {
+			return nil, err
+		}
+		args = append(args, "--max-transfer", mt)
+	}
+	if cm := strings.TrimSpace(opt.CutoffMode); cm != "" {
+		if err := ValidateCutoffMode(cm); err != nil {
+			return nil, err
+		}
+		args = append(args, "--cutoff-mode", strings.ToUpper(cm))
+	}
+	if md := strings.TrimSpace(opt.MaxDuration); md != "" {
+		if err := ValidateDurationSpec(md, 365*24*time.Hour, "最大传输时长格式无效，如 2h、30m"); err != nil {
+			return nil, err
+		}
+		args = append(args, "--max-duration", md)
+	}
+	if ob := strings.TrimSpace(opt.OrderBy); ob != "" {
+		if err := ValidateOrderBy(ob); err != nil {
+			return nil, err
+		}
+		args = append(args, "--order-by", ob)
+	}
+	if opt.MaxBacklog > 0 {
+		args = append(args, "--max-backlog", strconv.Itoa(opt.MaxBacklog))
+	}
+	if ua := strings.TrimSpace(opt.UserAgent); ua != "" {
+		if err := ValidateUserAgent(ua); err != nil {
+			return nil, err
+		}
+		args = append(args, "--user-agent", ua)
+	}
+	if iot := strings.TrimSpace(opt.IOTimeout); iot != "" {
+		if err := ValidateDurationSpec(iot, 24*time.Hour, "I/O 超时格式无效，如 5m、30s"); err != nil {
+			return nil, err
+		}
+		args = append(args, "--timeout", iot)
+	}
+	if ct := strings.TrimSpace(opt.ConTimeout); ct != "" {
+		if err := ValidateDurationSpec(ct, 24*time.Hour, "连接超时格式无效，如 1m、15s"); err != nil {
+			return nil, err
+		}
+		args = append(args, "--contimeout", ct)
 	}
 	if opt.NoUpdateModtime {
 		args = append(args, "--no-update-modtime")
@@ -463,6 +542,9 @@ func (c Config) Copy(ctx context.Context, src, dst string, opt CopyOptions, emit
 		args = append(args, "--checksum")
 	} else if opt.Compare == 1 {
 		args = append(args, "--size-only")
+	}
+	if opt.IgnoreSize && opt.Compare != 1 {
+		args = append(args, "--ignore-size")
 	}
 	if skipExisting {
 		args = append(args, "--ignore-existing")

@@ -117,17 +117,57 @@ export interface NativeBrowseResult {
   entries: NativeDirEntry[];
 }
 
+export interface NativeSizeInfo {
+  count: number;
+  bytes: number;
+  sizeless: number;
+}
+
+export interface NativeDedupeResult {
+  mode: string;
+  dryRun: boolean;
+  logs: string[];
+}
+
+export interface NativeLinkResult {
+  url: string;
+  message?: string;
+}
+
+export interface NativeCopyURLResult {
+  fileName: string;
+}
+
 export interface NativeExtraFlags {
   noUpdateModtime?: boolean;
   inplace?: boolean;
   checkFirst?: boolean;
   s3NoHead?: boolean;
+  ignoreSize?: boolean;
+  trackRenames?: boolean;
+  useMmap?: boolean;
+  maxTransfer?: string;
+  cutoffMode?: string;
+  maxDuration?: string;
+  orderBy?: string;
+  maxBacklog?: number;
+  bufferSize?: string;
+  multiThreadCutoff?: string;
+  multiThreadChunkSize?: string;
+  userAgent?: string;
+  ioTimeout?: string;
+  conTimeout?: string;
+  bisyncResyncMode?: string;
+  bisyncMaxDelete?: number;
+  bisyncForce?: boolean;
 }
 
 export interface JobCheckResult {
   jobId: number;
   status: "running" | "completed" | "failed" | "cancelled" | string;
+  mode?: "check" | "download" | "cryptcheck" | string;
   download: boolean;
+  cryptCheck?: boolean;
   startedAt: number;
   finishedAt: number;
   checkedFiles: number;

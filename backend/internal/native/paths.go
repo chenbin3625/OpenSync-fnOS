@@ -267,7 +267,7 @@ func wrapperChainFingerprint(c Config, start string) string {
 
 func backendRequiresContainer(backend string) bool {
 	switch backend {
-	case "s3", "smb", "b2", "azureblob", "googlecloudstorage", "swift":
+	case "s3", "smb", "b2", "azureblob", "googlecloudstorage", "swift", "oracleobjectstorage", "qingstor", "storj":
 		return true
 	default:
 		return false
@@ -310,6 +310,7 @@ func (c Config) resolveEndpoint(v string, allowFile bool) (Endpoint, error) {
 	}
 
 	isCrypt := false
+	isReadOnlyWrapper := false
 	hasWrapper := false
 	ref := name
 	var backing string
@@ -318,6 +319,9 @@ func (c Config) resolveEndpoint(v string, allowFile bool) (Endpoint, error) {
 		hasWrapper = true
 		if c[ref]["type"] == "crypt" {
 			isCrypt = true
+		}
+		if c[ref]["type"] == "archive" {
+			isReadOnlyWrapper = true
 		}
 		var prefix string
 		ref, prefix, _ = strings.Cut(c[ref]["remote"], ":")
@@ -345,7 +349,7 @@ func (c Config) resolveEndpoint(v string, allowFile bool) (Endpoint, error) {
 		Vendor:         vendor,
 		Sub:            sub,
 		IsCrypt:        isCrypt,
-		ReadOnly:       backend == "http",
+		ReadOnly:       backend == "http" || isReadOnlyWrapper,
 		AllowHashCheck: allowHashCheck,
 	}
 
@@ -385,6 +389,24 @@ func (c Config) resolveEndpoint(v string, allowFile bool) (Endpoint, error) {
 			combinedSub := strings.TrimSuffix(strings.Trim(uSub+"/"+rest, "/"), "/")
 			if combinedSub != "" {
 				targetPath += "/" + combinedSub
+			}
+			if ep, err := c.Resolve(targetPath); err == nil {
+				backingIDs = append(backingIDs, ep.BackingIdentity)
+			}
+		}
+		result.UnionBackingIDs = backingIDs
+	}
+	if backend == "combine" {
+		ups, err := ParseCombineUpstreams(options["upstreams"])
+		if err != nil {
+			return Endpoint{}, err
+		}
+		var backingIDs []string
+		for _, up := range ups {
+			uRef, uSub, _ := strings.Cut(up.Target, ":")
+			targetPath := "/" + uRef
+			if uSub != "" {
+				targetPath += "/" + uSub
 			}
 			if ep, err := c.Resolve(targetPath); err == nil {
 				backingIDs = append(backingIDs, ep.BackingIdentity)

@@ -9,6 +9,7 @@ import TreeSelect, {
 import { IconFolderStroked, IconRefresh } from "@douyinfe/semi-icons";
 import type { TreeNodeData } from "@douyinfe/semi-ui/lib/es/tree/interface";
 import { buildPathTreeData } from "../pages/Home/homeUtils";
+import { formatDisplayPath } from "../lib/syncPathPreview";
 import { useAsyncTree } from "../lib/useAsyncTree";
 import { splitDirPath } from "../lib/treeUtils";
 
@@ -16,21 +17,35 @@ function seed(paths: string[]): TreeNodeData[] {
   const convert = (
     nodes: ReturnType<typeof buildPathTreeData>,
   ): TreeNodeData[] =>
-    nodes.map((n) => ({
-      label: n.title,
-      value: n.value,
-      key: n.key,
-      isLeaf: false,
-      ...(n.children?.length ? { children: convert(n.children) } : {}),
-    }));
+    nodes.map((n) => {
+      const val = String(n.value ?? "");
+      const label =
+        val && val !== "/"
+          ? splitDirPath(formatDisplayPath(val, paths)).name
+          : n.title;
+      return {
+        label,
+        value: n.value,
+        key: n.key,
+        isLeaf: false,
+        ...(n.children?.length ? { children: convert(n.children) } : {}),
+      };
+    });
   return convert(buildPathTreeData(paths));
 }
 
 /** 选择框内的路径：父路径弱化并可从左侧省略，最后一级目录名始终完整可见 */
-function SelectedPath({ path }: { path: string }) {
-  const { parent, name } = splitDirPath(path);
+function SelectedPath({
+  path,
+  siblingPaths,
+}: {
+  path: string;
+  siblingPaths?: readonly string[];
+}) {
+  const displayPath = formatDisplayPath(path, siblingPaths);
+  const { parent, name } = splitDirPath(displayPath);
   return (
-    <span className="remote-paths-selected" title={path}>
+    <span className="remote-paths-selected" title={displayPath}>
       {parent && (
         <span className="remote-paths-selected-parent">
           {/* 外层 rtl 让省略号出现在左侧，内层 ltr 保证斜杠顺序不被重排 */}
@@ -129,7 +144,10 @@ export function RemotePaths({
   // 节点名不换行，过长时可横向滚动；悬停显示完整路径
   const renderLabel = useCallback(
     (label?: ReactNode, node?: TreeNodeData, keyword?: string) => (
-      <span className="remote-paths-node" title={String(node?.key ?? "")}>
+      <span
+        className="remote-paths-node"
+        title={formatDisplayPath(String(node?.key ?? ""), value)}
+      >
         {keyword && typeof label === "string" ? (
           <Highlight
             highlightClassName="semi-tree-option-highlight"
@@ -141,13 +159,14 @@ export function RemotePaths({
         )}
       </span>
     ),
-    [],
+    [value],
   );
 
   // 使用 Semi 原生浅蓝 Tag（color="blue" type="light"）+ 文件夹图标，
   // “+N” 悬浮层里的标签（挂在 body 下）也能保持一致。
   const renderSelectedTag: RenderSelectedItemInMultiple = (node, { onClose }) => {
     const path = String(node.value ?? node.key);
+    const displayPath = formatDisplayPath(path, value);
     return {
       isRenderInTag: false,
       content: (
@@ -162,9 +181,9 @@ export function RemotePaths({
           closable={Boolean(engineId)}
           onClose={onClose}
           // 标签聚焦后按 Delete / Backspace 可移除，读屏需要知道是哪个目录
-          aria-label={`已选目录 ${path}`}
+          aria-label={`已选目录 ${displayPath}`}
         >
-          <SelectedPath path={path} />
+          <SelectedPath path={path} siblingPaths={value} />
         </Tag>
       ),
     };
@@ -172,7 +191,10 @@ export function RemotePaths({
   const renderSelectedItem: RenderSelectedItem = multiple
     ? renderSelectedTag
     : (node: TreeNodeData) => (
-        <SelectedPath path={String(node.value ?? node.key)} />
+        <SelectedPath
+          path={String(node.value ?? node.key)}
+          siblingPaths={value}
+        />
       );
 
   const refreshButton = (
