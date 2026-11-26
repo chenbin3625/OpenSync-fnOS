@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"opensync/internal/quark"
 )
 
 const EngineURL = "rclone://native"
@@ -41,6 +43,7 @@ var (
 var supportedRemoteOrder = []string{
 	"s3",
 	"webdav",
+	"quark",
 	"sftp",
 	"smb",
 	"ftp",
@@ -96,6 +99,7 @@ var fields = map[string]string{
 	"local":               "description",
 	"s3":                  "provider env_auth access_key_id secret_access_key session_token region endpoint location_constraint acl storage_class force_path_style no_check_bucket v2_auth list_version chunk_size upload_cutoff upload_concurrency disable_http2 server_side_encryption sse_kms_key_id directory_markers leave_parts_on_error upload_checksum_algorithm no_head no_head_object insecure_skip_verify proxy_url description",
 	"webdav":              "url vendor user pass bearer_token pacer_min_sleep nextcloud_chunk_size headers encoding insecure_skip_verify proxy_url description",
+	"quark":               "cookie root_folder_id account_name upload_concurrency part_size tps_limit user_agent insecure_skip_verify proxy_url description",
 	"sftp":                "host user port pass key_pem key_file_pass shell_type disable_hashcheck allow_hashcheck known_hosts idle_timeout concurrency chunk_size use_insecure_cipher set_modtime description",
 	"smb":                 "host user port pass domain spn hide_special_share case_insensitive idle_timeout description",
 	"ftp":                 "host user port pass tls explicit_tls disable_tls13 concurrency idle_timeout no_check_certificate shut_timeout writing_mdtm force_list_hidden insecure_skip_verify description",
@@ -168,6 +172,7 @@ var SecretFields = []string{
 	"client_salted_key_pass",
 	"trust_token",
 	"cookies",
+	"cookie",
 	"master_keys",
 	"private_key",
 	"file_password",
@@ -715,6 +720,19 @@ func NormalizeParams(raw map[string]string) map[string]string {
 			}
 			continue
 		}
+		if key == "cookie" {
+			v = strings.ReplaceAll(v, "\r\n", "")
+			v = strings.ReplaceAll(v, "\r", "")
+			v = strings.ReplaceAll(v, "\n", "")
+			v = strings.TrimSpace(v)
+			if len(v) >= 7 && strings.EqualFold(v[:7], "cookie:") {
+				v = strings.TrimSpace(v[7:])
+			}
+			if v != "" {
+				out[key] = v
+			}
+			continue
+		}
 		if key == "service_account_credentials" || key == "token" {
 			v = strings.TrimSpace(v)
 			if v == "" {
@@ -829,6 +847,14 @@ func RemoteSummary(p map[string]string) string {
 			return urlStr + " · " + user
 		}
 		return urlStr
+	case "quark":
+		if acct := strings.TrimSpace(p["account_name"]); acct != "" {
+			return "夸克网盘 · " + acct
+		}
+		if rf := strings.TrimSpace(p["root_folder_id"]); rf != "" && rf != "0" {
+			return "夸克网盘 · 目录 " + rf
+		}
+		return "夸克网盘"
 	case "sftp", "smb", "ftp":
 		host := strings.TrimSpace(p["host"])
 		port := strings.TrimSpace(p["port"])
@@ -1199,6 +1225,35 @@ func (c Config) Rename(oldName, newName string) (Config, error) {
 	return next, nil
 }
 
+// UsesBuiltInDriver reports whether name or any transitive composite dependency
+// uses an OpenSync built-in driver (such as quark) that external official rclone
+// does not natively support.
+func (c Config) UsesBuiltInDriver(name string) bool {
+	visited := make(map[string]bool)
+	var walk func(cur string) bool
+	walk = func(cur string) bool {
+		canonical, ok := c.FindKey(cur)
+		if !ok || visited[canonical] {
+			return false
+		}
+		visited[canonical] = true
+		p := c[canonical]
+		if p["type"] == "quark" {
+			return true
+		}
+		for _, dep := range c.remoteDependencies(canonical) {
+			if strings.EqualFold(dep, Local) {
+				continue
+			}
+			if walk(dep) {
+				return true
+			}
+		}
+		return false
+	}
+	return walk(name)
+}
+
 // ExportINI formats selected (or all) remotes into standard rclone.conf INI.
 // When encryptPassword is non-empty, rclone encrypts the output using that password.
 func (c Config) ExportINI(ctx context.Context, names []string, encryptPassword string) (string, error) {
@@ -1206,9 +1261,18 @@ func (c Config) ExportINI(ctx context.Context, names []string, encryptPassword s
 		return "", errors.New("当前没有可导出的远端存储配置")
 	}
 	selected := map[string]bool{}
+	var skippedBuiltIn []string
 	if len(names) == 0 {
 		for k := range c {
+			if c.UsesBuiltInDriver(k) {
+				skippedBuiltIn = append(skippedBuiltIn, k)
+				continue
+			}
 			selected[k] = true
+		}
+		slices.Sort(skippedBuiltIn)
+		if len(selected) == 0 && len(skippedBuiltIn) > 0 {
+			return "", errors.New("当前仅包含 OpenSync 内置网盘驱动（如夸克网盘），暂不支持导出到外部官方 rclone")
 		}
 	} else {
 		var queue []string
@@ -1220,6 +1284,9 @@ func (c Config) ExportINI(ctx context.Context, names []string, encryptPassword s
 			key, ok := c.FindKey(raw)
 			if !ok {
 				return "", fmt.Errorf("存储 %q 不存在", raw)
+			}
+			if c.UsesBuiltInDriver(key) {
+				return "", fmt.Errorf("存储 %q 使用 OpenSync 内置夸克网盘驱动，外部官方 rclone 暂不支持直接导出", key)
 			}
 			if !selected[key] {
 				selected[key] = true
@@ -1233,6 +1300,9 @@ func (c Config) ExportINI(ctx context.Context, names []string, encryptPassword s
 			queue = queue[1:]
 			for _, dep := range c.remoteDependencies(cur) {
 				if dep != Local && c[dep] != nil && !selected[dep] {
+					if c.UsesBuiltInDriver(dep) {
+						return "", fmt.Errorf("存储依赖 %q 使用 OpenSync 内置夸克网盘驱动，外部官方 rclone 暂不支持直接导出", dep)
+					}
 					selected[dep] = true
 					queue = append(queue, dep)
 				}
@@ -1243,6 +1313,9 @@ func (c Config) ExportINI(ctx context.Context, names []string, encryptPassword s
 		return "", errors.New("请至少选择一个要导出的存储配置")
 	}
 	var b strings.Builder
+	if len(skippedBuiltIn) > 0 {
+		fmt.Fprintf(&b, "# OpenSync 提示：已自动跳过内置驱动存储（外部官方 rclone 暂不支持）：%s\n\n", strings.Join(skippedBuiltIn, ", "))
+	}
 	for _, name := range slices.Sorted(maps.Keys(selected)) {
 		p := maps.Clone(c[name])
 		if IsWrapperType(p["type"]) {
@@ -1598,6 +1671,37 @@ func ValidateEntry(name string, p map[string]string, plainSecrets bool) error {
 	case "webdav":
 		if !validURL(p["url"]) {
 			return fmt.Errorf("%s 的 WebDAV 地址无效（请填写有效的 HTTP/HTTPS 地址）", name)
+		}
+	case "quark":
+		if !quark.ValidateCookieFormat(p["cookie"]) {
+			return fmt.Errorf("%s 需要填写有效的夸克网盘 Cookie（或使用二维码扫码登录）", name)
+		}
+		if rf := p["root_folder_id"]; rf != "" {
+			if strings.ContainsAny(rf, "/\\ \t") || rf == "." || rf == ".." || len(rf) > 128 {
+				return fmt.Errorf("%s 的根目录 ID（root_folder_id）格式无效", name)
+			}
+		}
+		if uc := p["upload_concurrency"]; uc != "" {
+			n, err := strconv.Atoi(uc)
+			if err != nil || n < 1 || n > 8 {
+				return fmt.Errorf("%s 的分片上传并发数（upload_concurrency）需为 1–8 的整数", name)
+			}
+		}
+		if tps := p["tps_limit"]; tps != "" {
+			v, err := strconv.ParseFloat(tps, 64)
+			if err != nil || v <= 0 || v > 20 {
+				return fmt.Errorf("%s 的接口限流速率（tps_limit）需为大于 0 且不超过 20 的数值", name)
+			}
+		}
+		if ps := p["part_size"]; ps != "" {
+			if err := ValidateRcloneSize(ps, false, fmt.Sprintf("%s 的分片大小（part_size）格式无效，如 10M、20M", name)); err != nil {
+				return err
+			}
+		}
+		if ua := p["user_agent"]; ua != "" {
+			if err := ValidateUserAgent(ua); err != nil {
+				return fmt.Errorf("%s：%s", name, err.Error())
+			}
 		}
 	case "http":
 		if !validURL(p["url"]) {

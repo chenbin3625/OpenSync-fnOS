@@ -1038,6 +1038,8 @@ test("guides no-engine onboarding, detects cross-job conflicts, and deduplicates
   await expect(preview.getByRole("alert")).toHaveCount(0);
 
   await dialog.getByRole("button", { name: "下一步", exact: true }).click();
+  await dialog.getByRole("combobox", { name: "调度方式", exact: true }).click();
+  await page.getByRole("option").filter({ hasText: "定时计划" }).click();
   await expect(dialog.locator(".schedule-preview-card")).toContainText("预计接下来执行");
 
   // 切换定时预设与固定间隔
@@ -1064,4 +1066,164 @@ test("guides no-engine onboarding, detects cross-job conflicts, and deduplicates
       dialogBox!.x + dialogBox!.width + 1,
     );
   }
+});
+
+test("task editor quick-enables end-to-end crypt storage for remote destination", async ({
+  page,
+}) => {
+  const remotes: Array<Record<string, unknown>> = [
+    {
+      name: "aliyun",
+      type: "webdav",
+      summary: "WebDAV · https://dav.example.com",
+      options: { url: "https://dav.example.com", vendor: "nextcloud" },
+      configuredSecrets: ["pass"],
+      usedByJobs: [],
+      usedByCrypts: [],
+    },
+  ];
+  let createdStoragePayload: Record<string, unknown> | null = null;
+
+  await page.route("**/app/opensync/svr/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const success = (data: unknown) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ code: 200, data, msg: "" }),
+      });
+
+    if (url.pathname.endsWith("/session")) {
+      return success({ uid: 1, development: false, version: "test" });
+    }
+    if (url.pathname.endsWith("/native/storage") && request.method() === "GET") {
+      return success({
+        engineId: 1,
+        enabled: true,
+        remark: "内置存储",
+        maxConcurrentJobs: 2,
+        rcloneAvailable: true,
+        localRoots: [{ id: "photos", path: "/vol1/Photos" }],
+        remotes,
+      });
+    }
+    if (url.pathname.endsWith("/native/storage") && request.method() === "POST") {
+      const body = request.postDataJSON() as Record<string, unknown>;
+      createdStoragePayload = body;
+      const name = String(body.name || "");
+      const options = (body.options || {}) as Record<string, string>;
+      remotes.push({
+        name,
+        type: options.type || "crypt",
+        summary: `底层 ${options.remote || ""}`,
+        options: { remote: options.remote || "" },
+        configuredSecrets: ["password"],
+        usedByJobs: [],
+        usedByCrypts: [],
+      });
+      return success(null);
+    }
+    if (url.pathname.endsWith("/alist") && url.searchParams.has("alistId")) {
+      const p = url.searchParams.get("path") || "/";
+      if (p === "/") {
+        return success([
+          { name: "本地" },
+          ...remotes.map((r) => ({ name: String(r.name) })),
+        ]);
+      }
+      if (p === "/本地") {
+        return success([{ name: "Photos" }]);
+      }
+      if (p === "/aliyun") {
+        return success([{ name: "backup" }]);
+      }
+      return success([]);
+    }
+    if (url.pathname.endsWith("/alist")) {
+      return success([
+        { id: 1, remark: "内置存储", url: "native://rclone", userName: "" },
+      ]);
+    }
+    if (url.pathname.endsWith("/notify")) {
+      return success([]);
+    }
+    if (url.pathname.endsWith("/system/config")) {
+      return success({});
+    }
+    if (url.pathname.endsWith("/job") && url.searchParams.get("current")) {
+      return success(null);
+    }
+    if (url.pathname.endsWith("/job")) {
+      return success({ dataList: [], count: 0 });
+    }
+    return success(null);
+  });
+
+  await page.goto("/app/opensync/tasks");
+  await page.getByRole("button", { name: "新建任务" }).first().click();
+
+  const editorDialog = page
+    .getByRole("dialog")
+    .filter({ hasText: "新建任务" })
+    .first();
+  await expect(editorDialog).toBeVisible();
+
+  const manualInput = editorDialog.getByPlaceholder("/存储名称/存储桶/子目录");
+  await manualInput.fill("/aliyun/backup");
+  await editorDialog.getByRole("button", { name: "添加到目标路径", exact: true }).click();
+
+  const cryptBanner = editorDialog.locator(".quick-crypt-banner");
+  await expect(cryptBanner).toBeVisible();
+  await expect(cryptBanner).toContainText("/aliyun/backup");
+  await cryptBanner.getByRole("button", { name: "启用端到端加密" }).click();
+
+  const cryptModal = page.locator('.quick-crypt-modal [role="dialog"]');
+  await expect(cryptModal).toBeVisible();
+  await expect(cryptModal.getByLabel("加密存储名称")).toHaveValue("aliyun-backup-crypt");
+
+  await cryptModal.getByLabel("加密子目录").fill("encrypted");
+  await expect(cryptModal.locator(".quick-crypt-mapping-preview")).toContainText(
+    "aliyun:backup/encrypted",
+  );
+  await cryptModal.getByRole("textbox", { name: "加密密码", exact: true }).fill("StrongPass#2026");
+  await cryptModal.getByRole("textbox", { name: "确认加密密码", exact: true }).fill("StrongPass#2026");
+  await cryptModal.getByRole("button", { name: "创建并启用加密" }).click();
+
+  await expect(cryptModal).toBeHidden();
+  expect(createdStoragePayload).toEqual({
+    name: "aliyun-backup-crypt",
+    options: {
+      type: "crypt",
+      remote: "aliyun:backup/encrypted",
+      password: "StrongPass#2026",
+    },
+  });
+
+  await expect(editorDialog.locator(".quick-crypt-banner.is-success")).toContainText(
+    "已启用端到端加密",
+  );
+  await expect(editorDialog.locator(".quick-crypt-banner.is-success")).toContainText(
+    "aliyun-backup-crypt",
+  );
+
+  // Add another path beneath the newly created crypt's underlying directory and
+  // verify the modal offers one-click reuse of the existing crypt storage.
+  await manualInput.fill("/aliyun/backup/encrypted/photos");
+  await editorDialog.getByRole("button", { name: "添加到目标路径", exact: true }).click();
+  await editorDialog
+    .locator(".quick-crypt-banner")
+    .getByRole("button", { name: "启用端到端加密" })
+    .click();
+  await expect(cryptModal).toBeVisible();
+  await expect(cryptModal.getByRole("region", { name: "复用已有加密存储" })).toContainText(
+    "aliyun-backup-crypt",
+  );
+  await cryptModal
+    .getByRole("region", { name: "复用已有加密存储" })
+    .getByRole("button", { name: "直接切换" })
+    .click();
+  await expect(cryptModal).toBeHidden();
+  await expect(editorDialog.locator(".quick-crypt-banner.is-success")).toContainText(
+    "aliyun-backup-crypt",
+  );
 });

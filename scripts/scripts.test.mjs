@@ -90,6 +90,18 @@ test("parseManifestVersion 与 versionProblems 兼容 CRLF 并校验 X.Y.Z 格�
     "v0.0.39",
   );
   assert.ok(bad.some((msg) => msg.includes("格式无效")));
+  assert.ok(
+    versionProblems(
+      {
+        "fnos/manifest": "0.0.39",
+        "package.json": "0.0.39",
+        "frontend/package.json": "0.0.39",
+        "README.md": "0.0.39",
+      },
+      "v",
+    ).some((msg) => msg.includes("Git tag")),
+    "裸 v 标签必须被拒绝",
+  );
 });
 
 test("withBuildLock 阻止并发打包并在异常后释放锁", () => {

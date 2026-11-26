@@ -196,6 +196,11 @@ export const createDevSupervisor = ({
         const response = await fetchFn(url, {
           signal: AbortSignal.timeout(2000),
         });
+        try {
+          await response.body?.cancel();
+        } catch {
+          /* response cleanup is best effort while the service starts */
+        }
         if (response.ok) return;
       } catch {
         /* 还没起来，继续等 */

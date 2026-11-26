@@ -238,6 +238,7 @@ func resumeDownloadFilesToLocal(
 	var (
 		completedBytes atomic.Int64
 		completedCount atomic.Int64
+		failedBytes    atomic.Int64
 		errorCount     atomic.Int64
 		activeMu       sync.Mutex
 		activeItems    = map[string]TransferItem{}
@@ -258,9 +259,9 @@ func resumeDownloadFilesToLocal(
 		activeMu.Unlock()
 		emit(Event{Stats: &Stats{
 			Bytes:          completedBytes.Load() + inFlightBytes,
-			TotalBytes:     totalBytes,
+			TotalBytes:     max(0, totalBytes-failedBytes.Load()),
 			Transfers:      completedCount.Load(),
-			TotalTransfers: int64(len(files)),
+			TotalTransfers: max(0, int64(len(files))-errorCount.Load()),
 			Errors:         errorCount.Load(),
 			Speed:          totalSpeed,
 			Transferring:   transferring,
@@ -320,6 +321,7 @@ func resumeDownloadFilesToLocal(
 						return
 					}
 					errorCount.Add(1)
+					failedBytes.Add(fm.Size)
 					errText := sanitizeRcloneError(dlErr.Error())
 					emit(Event{File: fm.Rel, Size: fm.Size, Failed: true, Error: errText})
 					errsMu.Lock()

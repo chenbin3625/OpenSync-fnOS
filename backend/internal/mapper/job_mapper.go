@@ -375,6 +375,15 @@ func DeleteJob(jobID int64) error {
 		if _, err := tx.Exec("DELETE FROM job_task WHERE jobId=?", jobID); err != nil {
 			return err
 		}
+		for _, table := range []string{"sync_file_state", "sync_state"} {
+			if exists, err := txTableExists(tx, table); err != nil {
+				return err
+			} else if exists {
+				if _, err := tx.Exec("DELETE FROM "+table+" WHERE jobId=?", jobID); err != nil {
+					return err
+				}
+			}
+		}
 		if hasApprovalTable, err := txTableExists(tx, "pending_delete_approval"); err == nil && hasApprovalTable {
 			if _, err := tx.Exec("DELETE FROM pending_delete_approval WHERE jobId=?", jobID); err != nil {
 				return err

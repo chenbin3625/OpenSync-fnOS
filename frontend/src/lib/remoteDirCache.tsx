@@ -180,13 +180,19 @@ export function createRemoteDirCache(
 
 const RemoteDirCacheContext = createContext<RemoteDirCache | null>(null);
 
-export function RemoteDirCacheProvider({ children }: { children: ReactNode }) {
+export function RemoteDirCacheProvider({
+  cache,
+  children,
+}: {
+  cache?: RemoteDirCache;
+  children: ReactNode;
+}) {
   const cacheRef = useRef<RemoteDirCache | null>(null);
-  if (!cacheRef.current) {
+  if (!cache && !cacheRef.current) {
     cacheRef.current = createRemoteDirCache();
   }
   return (
-    <RemoteDirCacheContext value={cacheRef.current}>
+    <RemoteDirCacheContext value={cache ?? cacheRef.current}>
       {children}
     </RemoteDirCacheContext>
   );

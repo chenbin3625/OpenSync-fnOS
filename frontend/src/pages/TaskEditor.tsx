@@ -22,6 +22,7 @@ import {
   IconAlertTriangle,
   IconChevronRight,
   IconInfoCircle,
+  IconLockStroked,
   IconTick,
   IconTickCircle,
 } from "@douyinfe/semi-icons";
@@ -37,11 +38,20 @@ import {
 import { BwLimitEditor } from "../components/BwLimitEditor";
 import { ExcludeTree } from "../components/ExcludeTree";
 import { FileTypeFilter } from "../components/FileTypeFilter";
+import { QuickCryptModal } from "../components/QuickCryptModal";
 import { RemotePaths } from "../components/RemotePaths";
 import { SyncPathPreview } from "../components/SyncPathPreview";
 import { useAction, useEditorForm, useResource } from "../lib/hooks";
 import { channelNames, getNotifyEndpointSummary } from "../lib/notifyForm";
-import { RemoteDirCacheProvider } from "../lib/remoteDirCache";
+import {
+  analyzeDstEncryption,
+  replaceDstPathWithEncrypted,
+} from "../lib/quickCrypt";
+import {
+  createRemoteDirCache,
+  RemoteDirCacheProvider,
+  type RemoteDirCache,
+} from "../lib/remoteDirCache";
 import {
   applyCronPresetMode,
   computeNextCronRuns,
@@ -66,6 +76,7 @@ import {
   applyTaskScenarioPreset,
   buildJobPayload,
   defaultJobForm,
+  findQuarkRemotesForPaths,
   findStandardWebDAVRemotesForPaths,
   isExcludePatternEnabled,
   jobToForm,
@@ -102,7 +113,12 @@ import {
   type FileSizeDrafts,
   type FileSizeUnit,
 } from "./Home/fileSizeUnits";
-import type { AlistItem, FilterTestResult, JobItem } from "../types";
+import type {
+  AlistItem,
+  FilterTestResult,
+  JobItem,
+  NativeRemoteItem,
+} from "../types";
 
 export { parseIntervalInput };
 export { hasPendingFileSizeDraftChange, mergeFileSizeDrafts };
@@ -193,7 +209,7 @@ export default function TaskEditor({
         ? { ...initialDraft, alistId: initialDraft.alistId || defaultEngineId }
         : job
           ? { ...jobToForm(job), alistId: job.alistId || defaultEngineId }
-          : defaultJobForm(defaultEngineId),
+          : { ...defaultJobForm(defaultEngineId), isCron: 3 },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
   );
@@ -208,6 +224,12 @@ export default function TaskEditor({
   }, [defaultEngineId, form.alistId, setForm]);
   const nativeStorage = useResource((signal) => api.nativeStorageState(signal));
   const [nativeTarget, setNativeTarget] = useState("");
+  const dirCacheRef = useRef<RemoteDirCache | null>(null);
+  if (!dirCacheRef.current) {
+    dirCacheRef.current = createRemoteDirCache();
+  }
+  const [remoteTreeEpoch, setRemoteTreeEpoch] = useState(0);
+  const [quickCryptOpen, setQuickCryptOpen] = useState(false);
   const notifications = useResource((signal) => api.notifications(signal));
   const systemSettings = useResource((signal) => api.settings(signal));
   const [bwLimitError, setBwLimitError] = useState<string | null>(null);
@@ -476,8 +498,11 @@ export default function TaskEditor({
     change("srcPath", nextPaths);
   };
 
-  const handleDstPathChange = (nextPaths: string[]) => {
-    const remotes = nativeStorage.data?.remotes;
+  const handleDstPathChange = (
+    nextPaths: string[],
+    remotesOverride?: readonly NativeRemoteItem[],
+  ) => {
+    const remotes = remotesOverride ?? nativeStorage.data?.remotes;
     const prevMatched = findStandardWebDAVRemotesForPaths(form.dstPath, remotes);
     const shouldAutoResolve =
       (isNew && !initialDraft) ||
@@ -499,6 +524,65 @@ export default function TaskEditor({
       }
     }
     change("dstPath", nextPaths);
+  };
+
+  const dstEncryption = useMemo(
+    () =>
+      analyzeDstEncryption(
+        form.dstPath,
+        nativeStorage.data?.remotes,
+        form.method,
+      ),
+    [form.dstPath, nativeStorage.data?.remotes, form.method],
+  );
+
+  const handleQuickCryptReuse = ({
+    targetSyncPath,
+    encryptedSyncPath,
+    cryptName,
+  }: {
+    targetSyncPath: string;
+    encryptedSyncPath: string;
+    cryptName: string;
+  }) => {
+    const nextDstPaths = replaceDstPathWithEncrypted(
+      form.dstPath,
+      targetSyncPath,
+      encryptedSyncPath,
+    );
+    handleDstPathChange(nextDstPaths);
+    setQuickCryptOpen(false);
+    Toast.success(`已切换为已有加密存储「${cryptName}」`);
+  };
+
+  const handleQuickCryptCreated = async ({
+    targetSyncPath,
+    encryptedSyncPath,
+    cryptName,
+  }: {
+    targetSyncPath: string;
+    encryptedSyncPath: string;
+    cryptName: string;
+  }) => {
+    let nextRemotes: readonly NativeRemoteItem[] | undefined =
+      nativeStorage.data?.remotes;
+    try {
+      const fresh = await api.nativeStorageState();
+      nativeStorage.setData(fresh);
+      nextRemotes = fresh.remotes;
+    } catch {
+      void nativeStorage.refresh(true);
+    }
+    dirCacheRef.current?.invalidateEngine(form.alistId);
+    setRemoteTreeEpoch((n) => n + 1);
+    const nextDstPaths = replaceDstPathWithEncrypted(
+      form.dstPath,
+      targetSyncPath,
+      encryptedSyncPath,
+    );
+    handleDstPathChange(nextDstPaths, nextRemotes);
+    setQuickCryptOpen(false);
+    Toast.success(`已创建加密存储「${cryptName}」并切换为任务目标`);
   };
 
   useEffect(() => {
@@ -550,6 +634,14 @@ export default function TaskEditor({
   const matchedStandardWebDAVNames = useMemo(
     () =>
       findStandardWebDAVRemotesForPaths(
+        [...form.srcPath, ...form.dstPath],
+        nativeStorage.data?.remotes,
+      ),
+    [nativeStorage.data?.remotes, form.srcPath, form.dstPath],
+  );
+  const matchedQuarkNames = useMemo(
+    () =>
+      findQuarkRemotesForPaths(
         [...form.srcPath, ...form.dstPath],
         nativeStorage.data?.remotes,
       ),
@@ -692,7 +784,7 @@ export default function TaskEditor({
   const primaryActionIsNext = isNew && step === 0;
 
   return (
-    <RemoteDirCacheProvider>
+    <RemoteDirCacheProvider cache={dirCacheRef.current}>
       <Editor
         title={job ? "编辑任务" : initialDraft ? "复制任务" : "新建任务"}
         visible
@@ -859,13 +951,14 @@ export default function TaskEditor({
                     <div className="field-group" role="group">
                       <Select
                         aria-labelledby={methodLabelId}
-                        value={form.method}
+                        value={form.isCron === 3 && form.method === 1 ? 0 : form.method}
                         optionList={methodOptions.map((method, value) => ({
                           value,
-                          label: method.name,
-                        }))}
+                          label: form.isCron === 3 && value === 0 ? "单向同步" : method.name,
+                        })).filter((o) => form.isCron !== 3 || o.value === 0 || o.value === 3)}
                         onChange={(value) => {
-                          change("method", Number(value));
+                          const method = Number(value);
+                          patch({ method, ...(method === 3 && form.method !== 3 ? { conflictPolicy: 2 } : {}) });
                         }}
                       />
                       <div
@@ -882,6 +975,40 @@ export default function TaskEditor({
                     </div>
                   </Field>
 
+                  {form.isCron === 3 && form.method !== 3 && (
+                    <>
+                    <Field label="同步方向">
+                      <Select
+                        aria-label="同步方向"
+                        value={form.extraFlags?.syncDirection || "custom"}
+                        optionList={[
+                          { value: "upload", label: "上传本地变更（本地 → 远端）" },
+                          { value: "download", label: "下载远端变更（远端 → 本地）" },
+                          { value: "custom", label: "自定义单向（源 → 目标）" },
+                        ]}
+                        onChange={(value) => {
+                          const direction = String(value);
+                          const sourceLocal = form.srcPath.some((p) => p.split("/").filter(Boolean)[0] === "本地");
+                          const targetLocal = form.dstPath.some((p) => p.split("/").filter(Boolean)[0] === "本地");
+                          const swap = direction === "upload"
+                            ? !sourceLocal && targetLocal
+                            : direction === "download" && sourceLocal && !targetLocal;
+                          patch({
+                            extraFlags: { ...form.extraFlags, syncDirection: direction },
+                            ...(swap ? { srcPath: form.dstPath, dstPath: form.srcPath } : {}),
+                          });
+                        }}
+                      />
+                    </Field>
+                    <SettingRow label="同步删除" variant="bordered" tip="开启后，源端删除会传播到目标端，并沿用删除保护和回收站；关闭则保留目标端文件。">
+                      <Switch
+                        aria-label="同步删除"
+                        checked={form.method === 1}
+                        onChange={(v) => change("method", v ? 1 : 0)}
+                      />
+                    </SettingRow>
+                    </>
+                  )}
                   <div className="form-grid">
                     <Field
                       label={form.method === 3 ? "源路径（单选）" : "源路径"}
@@ -890,7 +1017,7 @@ export default function TaskEditor({
                       fieldId="srcPath"
                     >
                       <RemotePaths
-                        key={`src-${form.alistId}-${srcMultiple ? "m" : "s"}`}
+                        key={`src-${form.alistId}-${srcMultiple ? "m" : "s"}-${remoteTreeEpoch}`}
                         engineId={form.alistId}
                         value={form.srcPath}
                         onChange={handleSrcPathChange}
@@ -910,7 +1037,7 @@ export default function TaskEditor({
                       fieldId="dstPath"
                     >
                       <RemotePaths
-                        key={`dst-${form.alistId}-${dstMultiple ? "m" : "s"}`}
+                        key={`dst-${form.alistId}-${dstMultiple ? "m" : "s"}-${remoteTreeEpoch}`}
                         engineId={form.alistId}
                         value={form.dstPath}
                         onChange={handleDstPathChange}
@@ -1030,6 +1157,53 @@ export default function TaskEditor({
                       </Button>
                     </div>
                   )}
+                  {dstEncryption.encryptable.length > 0 && (
+                    <div className="sync-method-banner quick-crypt-banner" role="status">
+                      <IconLockStroked aria-hidden="true" size="small" />
+                      <span>
+                        {dstEncryption.encryptable.length === 1 ? (
+                          <>
+                            目标目录 <code>{dstEncryption.encryptable[0].syncPath}</code>{" "}
+                            当前以明文存储在远端。可快捷创建独立 Crypt 加密存储并自动切换为加密目标。
+                          </>
+                        ) : (
+                          <>
+                            已选 {dstEncryption.encryptable.length}{" "}
+                            个未加密远端目标目录。可快捷创建独立 Crypt 加密存储并自动切换为加密目标。
+                          </>
+                        )}
+                      </span>
+                      <Button
+                        size="small"
+                        type="primary"
+                        theme="light"
+                        icon={<IconLockStroked aria-hidden="true" />}
+                        onClick={() => setQuickCryptOpen(true)}
+                      >
+                        启用端到端加密
+                      </Button>
+                    </div>
+                  )}
+                  {dstEncryption.encryptable.length === 0 &&
+                    dstEncryption.encrypted.length > 0 && (
+                      <div
+                        className="sync-method-banner is-success quick-crypt-banner"
+                        role="status"
+                      >
+                        <IconLockStroked aria-hidden="true" size="small" />
+                        <span>
+                          已启用端到端加密（目标加密存储：
+                          <strong>
+                            {Array.from(
+                              new Set(
+                                dstEncryption.encrypted.map((item) => item.remoteName),
+                              ),
+                            ).join("、")}
+                          </strong>
+                          ），文件将在上传前于本地加密。
+                        </span>
+                      </div>
+                    )}
                   <SyncPathPreview
                     srcPaths={form.srcPath}
                     dstPaths={form.dstPath}
@@ -1097,7 +1271,7 @@ export default function TaskEditor({
                               <Select
                                 value={form.conflictPolicy}
                                 optionList={conflictPolicyOptions.map((o) => ({
-                                  label: o.label,
+                                  label: form.method === 3 ? ["保留较新版本（另一版本删除）", "保留源端版本（目标版本删除）", "保留双方冲突副本（推荐）"][o.value] : o.label,
                                   value: o.value,
                                 }))}
                                 onChange={(v) =>
@@ -1181,12 +1355,16 @@ export default function TaskEditor({
                   <Field label="调度方式">
                     <Select
                       value={form.isCron}
-                      optionList={[1, 0, 2].map((value) => ({
+                      optionList={[3, 1, 0, 2].map((value) => ({
                         value,
                         label: cronTypeNames[value],
                       }))}
                       onChange={(value) => {
                         const nextIsCron = Number(value);
+                        if (nextIsCron === 3 && form.method === 2) {
+                          patch({ isCron:3, method:0 });
+                          return;
+                        }
                         if (nextIsCron === 0) {
                           const split = splitIntervalMinutes(
                             form.interval > 0 ? form.interval : 1440,
@@ -1205,6 +1383,76 @@ export default function TaskEditor({
                     />
                   </Field>
 
+                  {form.isCron === 3 && (
+                    <div className="continuous-sync-panel">
+                      {matchedQuarkNames.length > 0 &&
+                        (form.extraFlags?.syncPollIntervalSec || 60) < 300 && (
+                          <div className="inline-hint" role="note" style={{ marginBottom: 8 }}>
+                            提示：当前任务包含夸克网盘（{matchedQuarkNames.join("、")}），建议将「远端检测间隔」设为 300 秒及以上，以降低触发夸克接口限流（429）的概率。
+                          </div>
+                        )}
+                      <div className="form-grid form-grid--three">
+                        <Field
+                          label="远端检测间隔（秒）"
+                          hint="默认 60 秒（10–86400），间隔越短请求越频繁"
+                          error={showStepError(1, "interval")}
+                        >
+                          <Input
+                            aria-label="远端检测间隔（秒）"
+                            inputMode="numeric"
+                            value={String(form.extraFlags?.syncPollIntervalSec || 60)}
+                            onChange={(v) =>
+                              change("extraFlags", {
+                                ...form.extraFlags,
+                                syncPollIntervalSec: Number(v),
+                              })
+                            }
+                          />
+                        </Field>
+                        <Field
+                          label="完整核对间隔（分钟）"
+                          hint="默认 1440 分钟（每天一次），补齐遗漏变化"
+                        >
+                          <Input
+                            aria-label="完整核对间隔（分钟）"
+                            inputMode="numeric"
+                            value={String(form.extraFlags?.syncAuditIntervalMin || 1440)}
+                            onChange={(v) =>
+                              change("extraFlags", {
+                                ...form.extraFlags,
+                                syncAuditIntervalMin: Number(v),
+                              })
+                            }
+                          />
+                        </Field>
+                        <Field
+                          label="变动合并等待（秒）"
+                          hint="默认 30 秒，连续写入停止后再触发同步"
+                        >
+                          <Input
+                            aria-label="持续同步变动合并等待（秒）"
+                            inputMode="numeric"
+                            value={String(form.extraFlags?.watchDebounceSec || 30)}
+                            onChange={(v) =>
+                              change("extraFlags", {
+                                ...form.extraFlags,
+                                watchDebounceSec: Math.min(
+                                  3600,
+                                  Math.max(2, Math.trunc(Number(v) || 2)),
+                                ),
+                              })
+                            }
+                          />
+                        </Field>
+                      </div>
+                      <div className="sync-method-banner" role="status">
+                        <IconInfoCircle aria-hidden="true" size="small" />
+                        <span>
+                          本地变化自动监控，远端按间隔检测；重启及运行窗口恢复后自动补跑。普通 WebDAV 仅按大小比对可能漏掉同大小修改，需要更严格检测时请选择内容校验，会增加流量。
+                        </span>
+                      </div>
+                    </div>
+                  )}
                   {form.isCron === 0 && (
                     <Field
                       label="执行间隔"
@@ -1711,717 +1959,735 @@ export default function TaskEditor({
                     </button>
                     {advancedOpen && (
                       <div className="advanced-options-body">
-                        <Field
-                          label="一键场景预设"
-                          hint="点击自动填入推荐的断点续传、并发与重试参数，应用后仍可按需微调"
-                        >
-                          <div className="schedule-chips">
-                            {taskScenarioPresets.map((preset) => (
-                              <button
-                                key={preset.key}
-                                type="button"
-                                className="schedule-chip"
-                                title={preset.desc}
-                                onClick={() => {
-                                  if (preset.key === "cold_archive") {
-                                    setCompareModeSource("manual");
-                                  }
-                                  setForm((prev) =>
-                                    applyTaskScenarioPreset(prev, preset.key),
-                                  );
-                                  setDirty(true);
-                                  Toast.success(`已应用「${preset.label}」推荐配置`);
-                                }}
-                              >
-                                {preset.label}
-                              </button>
-                            ))}
-                          </div>
-                        </Field>
-                        <SettingRow
-                          label="开启大文件断点续传"
-                          variant="bordered"
-                          tip="支持远端到本地下载（分片续传）与本地到 S3 分片上传续传；中断后再次运行或重试将从已传字节/分片继续"
-                        >
-                          <Switch
-                            aria-label="开启大文件断点续传"
-                            checked={Boolean(form.extraFlags?.resumeEnable)}
-                            onChange={(v) =>
-                              change("extraFlags", {
-                                ...form.extraFlags,
-                                resumeEnable: v,
-                              })
-                            }
-                          />
-                        </SettingRow>
-                        {form.extraFlags?.resumeEnable && (
+                        <div className="advanced-option-group">
+                          <div className="advanced-option-group-title">场景预设与传输增强</div>
                           <Field
-                            label="断点续传最小文件阈值（MB）"
-                            hint="0 表示默认 50 MB；仅超过该大小的文件走断点续传通道，小文件继续高速并发传输"
+                            label="一键场景预设"
+                            hint="点击自动填入推荐的断点续传、并发与重试参数，应用后仍可按需微调"
                           >
-                            <Input
-                              inputMode="numeric"
-                              value={String(form.extraFlags?.resumeMinSizeMB || 0)}
-                              onChange={(v) =>
-                                change("extraFlags", {
-                                  ...form.extraFlags,
-                                  resumeMinSizeMB: Math.max(
-                                    0,
-                                    Math.min(10240, Math.trunc(Number(v) || 0)),
-                                  ),
-                                })
-                              }
-                            />
-                          </Field>
-                        )}
-                        <SettingRow
-                          label="本地目录实时监听同步（inotify）"
-                          variant="bordered"
-                          tip="当源目录包含本地授权目录时，自动监测文件新建、修改与删除，在静默防抖后自动触发增量同步"
-                        >
-                          <Switch
-                            aria-label="本地目录实时监听同步"
-                            checked={Boolean(form.extraFlags?.watchEnable)}
-                            onChange={(v) =>
-                              change("extraFlags", {
-                                ...form.extraFlags,
-                                watchEnable: v,
-                              })
-                            }
-                          />
-                        </SettingRow>
-                        {form.extraFlags?.watchEnable && (
-                          <Field
-                            label="变动防抖等待（秒）"
-                            hint="默认 30 秒（2–3600），避免文件连续写入期间频繁触发同步"
-                          >
-                            <Input
-                              inputMode="numeric"
-                              value={String(form.extraFlags?.watchDebounceSec || 30)}
-                              onChange={(v) =>
-                                change("extraFlags", {
-                                  ...form.extraFlags,
-                                  watchDebounceSec: Math.max(
-                                    0,
-                                    Math.min(3600, Math.trunc(Number(v) || 0)),
-                                  ),
-                                })
-                              }
-                            />
-                          </Field>
-                        )}
-                        <div className="form-grid form-grid--three">
-                          <Field
-                            label="弱网底层重试（--low-level-retries）"
-                            hint="0 默认 10 次（0–50）"
-                          >
-                            <Input
-                              inputMode="numeric"
-                              value={String(form.extraFlags?.lowLevelRetries || 0)}
-                              onChange={(v) =>
-                                change("extraFlags", {
-                                  ...form.extraFlags,
-                                  lowLevelRetries: Math.max(
-                                    0,
-                                    Math.min(50, Math.trunc(Number(v) || 0)),
-                                  ),
-                                })
-                              }
-                            />
-                          </Field>
-                          <Field
-                            label="重试间隔（--retries-sleep）"
-                            hint="如 5s / 30s / 1m（留空默认）"
-                          >
-                            <Input
-                              value={form.extraFlags?.retriesSleep || ""}
-                              placeholder="如 10s / 30s"
-                              showClear
-                              onChange={(v) =>
-                                change("extraFlags", {
-                                  ...form.extraFlags,
-                                  retriesSleep: v,
-                                })
-                              }
-                            />
-                          </Field>
-                          <Field
-                            label="定时一致性校验"
-                            hint="周期后台校验并在发现差异时告警"
-                          >
-                            <Select
-                              value={form.extraFlags?.checkSchedule || ""}
-                              optionList={[
-                                { label: "关闭", value: "" },
-                                { label: "每日自动校验", value: "daily" },
-                                { label: "每周自动校验", value: "weekly" },
-                                { label: "每月自动校验", value: "monthly" },
-                              ]}
-                              onChange={(v) =>
-                                change("extraFlags", {
-                                  ...form.extraFlags,
-                                  checkSchedule: String(v || ""),
-                                })
-                              }
-                            />
-                          </Field>
-                        </div>
-                        <div className="form-grid form-grid--three">
-                          <Field
-                            label="失败自动重试次数"
-                            hint="0 关闭；1–10 次，仅重跑失败项"
-                          >
-                            <Input
-                              inputMode="numeric"
-                              value={String(form.extraFlags?.autoRetryMax || 0)}
-                              onChange={(v) =>
-                                change("extraFlags", {
-                                  ...form.extraFlags,
-                                  autoRetryMax: Math.max(
-                                    0,
-                                    Math.min(10, Math.trunc(Number(v) || 0)),
-                                  ),
-                                })
-                              }
-                            />
-                          </Field>
-                          <Field
-                            label="自动重试延迟（分钟）"
-                            hint="默认 5 分钟（1–1440）"
-                          >
-                            <Input
-                              inputMode="numeric"
-                              value={String(form.extraFlags?.autoRetryDelayMin || 0)}
-                              onChange={(v) =>
-                                change("extraFlags", {
-                                  ...form.extraFlags,
-                                  autoRetryDelayMin: Math.max(
-                                    0,
-                                    Math.min(1440, Math.trunc(Number(v) || 0)),
-                                  ),
-                                })
-                              }
-                            />
-                          </Field>
-                          <Field
-                            label="成功后串联触发任务"
-                            hint="同步完成后自动执行另一个任务"
-                          >
-                            <Select
-                              value={Number(form.extraFlags?.postSyncJobId || 0)}
-                              optionList={[
-                                { label: "不串联", value: 0 },
-                                ...(existingJobs || [])
-                                  .filter((j) => j.id !== form.id)
-                                  .map((j) => ({
-                                    label: j.remark?.trim() || `任务 #${j.id}`,
-                                    value: j.id,
-                                  })),
-                              ]}
-                              onChange={(v) =>
-                                change("extraFlags", {
-                                  ...form.extraFlags,
-                                  postSyncJobId: Math.max(0, Math.trunc(Number(v) || 0)),
-                                })
-                              }
-                            />
-                          </Field>
-                        </div>
-                        <div className="native-checkbox-group">
-                          <Checkbox
-                            checked={Boolean(form.extraFlags?.missedCatchUp)}
-                            onChange={(e) =>
-                              change("extraFlags", {
-                                ...form.extraFlags,
-                                missedCatchUp: Boolean(e.target.checked),
-                              })
-                            }
-                          >
-                            NAS 关机/重启错过定时窗口时，启动后自动补跑一次
-                          </Checkbox>
-                          <Checkbox
-                            checked={Boolean(form.extraFlags?.directStream)}
-                            onChange={(e) =>
-                              change("extraFlags", {
-                                ...form.extraFlags,
-                                directStream: Boolean(e.target.checked),
-                              })
-                            }
-                          >
-                            海量文件直接流式同步（跳过前端预扫描与待传清单，大幅降低内存与扫描耗时）
-                          </Checkbox>
-                        </div>
-                        <div className="form-grid form-grid--three">
-                          <Field label="操作并发覆盖" hint="0 = 跟随全局设置 (1–100)">
-                            <Input
-                              inputMode="numeric"
-                              value={String(form.copyConcurrency)}
-                              onChange={(v) =>
-                                change(
-                                  "copyConcurrency",
-                                  Math.max(0, Math.min(100, Math.trunc(Number(v) || 0))),
-                                )
-                              }
-                            />
-                          </Field>
-                          <Field label="扫描并发覆盖" hint="0 = 跟随全局设置 (1–50)">
-                            <Input
-                              inputMode="numeric"
-                              value={String(form.scanConcurrency)}
-                              onChange={(v) =>
-                                change(
-                                  "scanConcurrency",
-                                  Math.max(0, Math.min(50, Math.trunc(Number(v) || 0))),
-                                )
-                              }
-                            />
-                          </Field>
-                          <Field label="失败重试覆盖" hint="-1 = 跟随全局 (0–10)">
-                            <Input
-                              inputMode="numeric"
-                              value={String(form.maxRetries)}
-                              onChange={(v) => {
-                                const trimmed = v.trim();
-                                if (trimmed === "-" || trimmed === "") {
-                                  change("maxRetries", -1);
-                                  return;
-                                }
-                                const n = Math.trunc(Number(trimmed));
-                                if (Number.isFinite(n)) {
-                                  change("maxRetries", Math.max(-1, Math.min(10, n)));
-                                }
-                              }}
-                            />
-                          </Field>
-                        </div>
-                        <Field
-                          label="带宽限制"
-                          fieldId="bwLimit"
-                          error={bwLimitError || showStepError(1, "bwLimit")}
-                          hint="留空跟随系统全局默认；支持单任务固定限速、定时分时段限速或强制不限速"
-                        >
-                          <BwLimitEditor
-                            allowInherit
-                            compact
-                            globalDefault={systemSettings.data?.defaultBwLimit || ""}
-                            value={form.bwLimit}
-                            onChange={(v) => change("bwLimit", v)}
-                            onValidityChange={setBwLimitError}
-                          />
-                        </Field>
-                            <div className="form-grid form-grid--two">
-                              <Field
-                                label="API 限流（--tpslimit）"
-                                hint="每秒请求上限（0–1000），0 表示不限（防云盘 429）"
-                              >
-                                <Input
-                                  inputMode="decimal"
-                                  value={String(form.tpsLimit)}
-                                  onChange={(v) => {
-                                    const n = Number(v);
-                                    change(
-                                      "tpsLimit",
-                                      Number.isFinite(n) && n >= 0 ? Math.min(1000, n) : 0,
+                            <div className="schedule-chips">
+                              {taskScenarioPresets.map((preset) => (
+                                <button
+                                  key={preset.key}
+                                  type="button"
+                                  className="schedule-chip"
+                                  title={preset.desc}
+                                  onClick={() => {
+                                    if (preset.key === "cold_archive") {
+                                      setCompareModeSource("manual");
+                                    }
+                                    setForm((prev) =>
+                                      applyTaskScenarioPreset(prev, preset.key),
                                     );
+                                    setDirty(true);
+                                    Toast.success(`已应用「${preset.label}」推荐配置`);
                                   }}
-                                />
-                              </Field>
-                              <Field
-                                label="API 突发上限（--tpslimit-burst）"
-                                hint="0–1000，0 表示使用 rclone 默认值"
-                              >
-                                <Input
-                                  inputMode="numeric"
-                                  value={String(form.tpsLimitBurst)}
-                                  onChange={(v) =>
-                                    change(
-                                      "tpsLimitBurst",
-                                      Math.max(0, Math.min(1000, Math.trunc(Number(v) || 0))),
-                                    )
-                                  }
-                                />
-                              </Field>
+                                >
+                                  {preset.label}
+                                </button>
+                              ))}
                             </div>
+                          </Field>
+                          <SettingRow
+                            label="开启大文件断点续传"
+                            variant="bordered"
+                            tip="支持远端到本地下载（分片续传）与本地到 S3 分片上传续传；中断后再次运行或重试将从已传字节/分片继续"
+                          >
+                            <Switch
+                              aria-label="开启大文件断点续传"
+                              checked={Boolean(form.extraFlags?.resumeEnable)}
+                              onChange={(v) =>
+                                change("extraFlags", {
+                                  ...form.extraFlags,
+                                  resumeEnable: v,
+                                })
+                              }
+                            />
+                          </SettingRow>
+                          {form.extraFlags?.resumeEnable && (
+                            <Field
+                              label="断点续传最小文件阈值（MB）"
+                              hint="0 表示默认 50 MB；仅超过该大小的文件走断点续传通道，小文件继续高速并发传输"
+                            >
+                              <Input
+                                inputMode="numeric"
+                                value={String(form.extraFlags?.resumeMinSizeMB || 0)}
+                                onChange={(v) =>
+                                  change("extraFlags", {
+                                    ...form.extraFlags,
+                                    resumeMinSizeMB: Math.max(
+                                      0,
+                                      Math.min(10240, Math.trunc(Number(v) || 0)),
+                                    ),
+                                  })
+                                }
+                              />
+                            </Field>
+                          )}
+                          <SettingRow
+                            label="本地目录实时监听同步（inotify）"
+                            variant="bordered"
+                            tip="当源目录包含本地授权目录时，自动监测文件新建、修改与删除，在静默防抖后自动触发增量同步"
+                          >
+                            <Switch
+                              aria-label="本地目录实时监听同步"
+                              disabled={form.isCron === 3}
+                              checked={form.isCron === 3 || Boolean(form.extraFlags?.watchEnable)}
+                              onChange={(v) =>
+                                change("extraFlags", {
+                                  ...form.extraFlags,
+                                  watchEnable: v,
+                                })
+                              }
+                            />
+                          </SettingRow>
+                          {form.extraFlags?.watchEnable && (
+                            <Field
+                              label="变动防抖等待（秒）"
+                              hint="默认 30 秒（2–3600），避免文件连续写入期间频繁触发同步"
+                            >
+                              <Input
+                                inputMode="numeric"
+                                value={String(form.extraFlags?.watchDebounceSec || 30)}
+                                onChange={(v) =>
+                                  change("extraFlags", {
+                                    ...form.extraFlags,
+                                    watchDebounceSec: Math.max(
+                                      0,
+                                      Math.min(3600, Math.trunc(Number(v) || 0)),
+                                    ),
+                                  })
+                                }
+                              />
+                            </Field>
+                          )}
+                        </div>
+
+                        <div className="advanced-option-group">
+                          <div className="advanced-option-group-title">容错重试与联动策略</div>
+                          <div className="form-grid form-grid--three">
+                            <Field
+                              label="弱网底层重试（--low-level-retries）"
+                              hint="0 默认 10 次（0–50）"
+                            >
+                              <Input
+                                inputMode="numeric"
+                                value={String(form.extraFlags?.lowLevelRetries || 0)}
+                                onChange={(v) =>
+                                  change("extraFlags", {
+                                    ...form.extraFlags,
+                                    lowLevelRetries: Math.max(
+                                      0,
+                                      Math.min(50, Math.trunc(Number(v) || 0)),
+                                    ),
+                                  })
+                                }
+                              />
+                            </Field>
+                            <Field
+                              label="重试间隔（--retries-sleep）"
+                              hint="如 5s / 30s / 1m（留空默认）"
+                            >
+                              <Input
+                                value={form.extraFlags?.retriesSleep || ""}
+                                placeholder="如 10s / 30s"
+                                showClear
+                                onChange={(v) =>
+                                  change("extraFlags", {
+                                    ...form.extraFlags,
+                                    retriesSleep: v,
+                                  })
+                                }
+                              />
+                            </Field>
+                            <Field
+                              label="定时一致性校验"
+                              hint="周期后台校验并在发现差异时告警"
+                            >
+                              <Select
+                                value={form.extraFlags?.checkSchedule || ""}
+                                optionList={[
+                                  { label: "关闭", value: "" },
+                                  { label: "每日自动校验", value: "daily" },
+                                  { label: "每周自动校验", value: "weekly" },
+                                  { label: "每月自动校验", value: "monthly" },
+                                ]}
+                                onChange={(v) =>
+                                  change("extraFlags", {
+                                    ...form.extraFlags,
+                                    checkSchedule: String(v || ""),
+                                  })
+                                }
+                              />
+                            </Field>
+                          </div>
+                          <div className="form-grid form-grid--three">
+                            <Field
+                              label="失败自动重试次数"
+                              hint="0 关闭；1–10 次，仅重跑失败项"
+                            >
+                              <Input
+                                inputMode="numeric"
+                                value={String(form.extraFlags?.autoRetryMax || 0)}
+                                onChange={(v) =>
+                                  change("extraFlags", {
+                                    ...form.extraFlags,
+                                    autoRetryMax: Math.max(
+                                      0,
+                                      Math.min(10, Math.trunc(Number(v) || 0)),
+                                    ),
+                                  })
+                                }
+                              />
+                            </Field>
+                            <Field
+                              label="自动重试延迟（分钟）"
+                              hint="默认 5 分钟（1–1440）"
+                            >
+                              <Input
+                                inputMode="numeric"
+                                value={String(form.extraFlags?.autoRetryDelayMin || 0)}
+                                onChange={(v) =>
+                                  change("extraFlags", {
+                                    ...form.extraFlags,
+                                    autoRetryDelayMin: Math.max(
+                                      0,
+                                      Math.min(1440, Math.trunc(Number(v) || 0)),
+                                    ),
+                                  })
+                                }
+                              />
+                            </Field>
+                            <Field
+                              label="成功后串联触发任务"
+                              hint="同步完成后自动执行另一个任务"
+                            >
+                              <Select
+                                value={Number(form.extraFlags?.postSyncJobId || 0)}
+                                optionList={[
+                                  { label: "不串联", value: 0 },
+                                  ...(existingJobs || [])
+                                    .filter((j) => j.id !== form.id)
+                                    .map((j) => ({
+                                      label: j.remark?.trim() || `任务 #${j.id}`,
+                                      value: j.id,
+                                    })),
+                                ]}
+                                onChange={(v) =>
+                                  change("extraFlags", {
+                                    ...form.extraFlags,
+                                    postSyncJobId: Math.max(0, Math.trunc(Number(v) || 0)),
+                                  })
+                                }
+                              />
+                            </Field>
+                          </div>
+                          <div className="native-checkbox-group">
+                            <Checkbox
+                              checked={Boolean(form.extraFlags?.missedCatchUp)}
+                              onChange={(e) =>
+                                change("extraFlags", {
+                                  ...form.extraFlags,
+                                  missedCatchUp: Boolean(e.target.checked),
+                                })
+                              }
+                            >
+                              NAS 关机/重启错过定时窗口时，启动后自动补跑一次
+                            </Checkbox>
+                            <Checkbox
+                              checked={Boolean(form.extraFlags?.directStream)}
+                              onChange={(e) =>
+                                change("extraFlags", {
+                                  ...form.extraFlags,
+                                  directStream: Boolean(e.target.checked),
+                                })
+                              }
+                            >
+                              海量文件直接流式同步（跳过前端预扫描与待传清单，大幅降低内存与扫描耗时）
+                            </Checkbox>
+                          </div>
+                        </div>
+
+                        <div className="advanced-option-group">
+                          <div className="advanced-option-group-title">并发与带宽流控</div>
+                          <div className="form-grid form-grid--three">
+                            <Field label="操作并发覆盖" hint="0 = 跟随全局设置 (1–100)">
+                              <Input
+                                inputMode="numeric"
+                                value={String(form.copyConcurrency)}
+                                onChange={(v) =>
+                                  change(
+                                    "copyConcurrency",
+                                    Math.max(0, Math.min(100, Math.trunc(Number(v) || 0))),
+                                  )
+                                }
+                              />
+                            </Field>
+                            <Field label="扫描并发覆盖" hint="0 = 跟随全局设置 (1–50)">
+                              <Input
+                                inputMode="numeric"
+                                value={String(form.scanConcurrency)}
+                                onChange={(v) =>
+                                  change(
+                                    "scanConcurrency",
+                                    Math.max(0, Math.min(50, Math.trunc(Number(v) || 0))),
+                                  )
+                                }
+                              />
+                            </Field>
+                            <Field label="失败重试覆盖" hint="-1 = 跟随全局 (0–10)">
+                              <Input
+                                inputMode="numeric"
+                                value={String(form.maxRetries)}
+                                onChange={(v) => {
+                                  const trimmed = v.trim();
+                                  if (trimmed === "-" || trimmed === "") {
+                                    change("maxRetries", -1);
+                                    return;
+                                  }
+                                  const n = Math.trunc(Number(trimmed));
+                                  if (Number.isFinite(n)) {
+                                    change("maxRetries", Math.max(-1, Math.min(10, n)));
+                                  }
+                                }}
+                              />
+                            </Field>
+                          </div>
+                          <Field
+                            label="带宽限制"
+                            fieldId="bwLimit"
+                            error={bwLimitError || showStepError(1, "bwLimit")}
+                            hint="留空跟随系统全局默认；支持单任务固定限速、定时分时段限速或强制不限速"
+                          >
+                            <BwLimitEditor
+                              allowInherit
+                              compact
+                              globalDefault={systemSettings.data?.defaultBwLimit || ""}
+                              value={form.bwLimit}
+                              onChange={(v) => change("bwLimit", v)}
+                              onValidityChange={setBwLimitError}
+                            />
+                          </Field>
+                          <div className="form-grid form-grid--two">
+                            <Field
+                              label="API 限流（--tpslimit）"
+                              hint="每秒请求上限（0–1000），0 表示不限（防云盘 429）"
+                            >
+                              <Input
+                                inputMode="decimal"
+                                value={String(form.tpsLimit)}
+                                onChange={(v) => {
+                                  const n = Number(v);
+                                  change(
+                                    "tpsLimit",
+                                    Number.isFinite(n) && n >= 0 ? Math.min(1000, n) : 0,
+                                  );
+                                }}
+                              />
+                            </Field>
+                            <Field
+                              label="API 突发上限（--tpslimit-burst）"
+                              hint="0–1000，0 表示使用 rclone 默认值"
+                            >
+                              <Input
+                                inputMode="numeric"
+                                value={String(form.tpsLimitBurst)}
+                                onChange={(v) =>
+                                  change(
+                                    "tpsLimitBurst",
+                                    Math.max(0, Math.min(1000, Math.trunc(Number(v) || 0))),
+                                  )
+                                }
+                              />
+                            </Field>
+                          </div>
+                          <div className="form-grid form-grid--two">
+                            <Field
+                              label="时间精度容差（--modify-window）"
+                              hint="留空默认；FAT32/SMB/部分网盘可填 1s 或 2s"
+                            >
+                              <Input
+                                value={form.modifyWindow}
+                                placeholder="如 1s / 2s / 1m"
+                                showClear
+                                onChange={(v) => change("modifyWindow", v)}
+                              />
+                            </Field>
+                            <Field
+                              label="单文件多线程流数（--multi-thread-streams）"
+                              hint="0 使用默认（4）；1–64，加速单一大文件传输"
+                            >
+                              <Input
+                                inputMode="numeric"
+                                value={String(form.multiThreadStreams)}
+                                onChange={(v) =>
+                                  change(
+                                    "multiThreadStreams",
+                                    Math.max(0, Math.min(64, Math.trunc(Number(v) || 0))),
+                                  )
+                                }
+                              />
+                            </Field>
+                          </div>
+                        </div>
+
+                        <div className="advanced-option-group">
+                          <div className="advanced-option-group-title">rclone 底层行为与性能调优</div>
+                          <SettingRow
+                            label="快速列表（--fast-list）"
+                            variant="bordered"
+                            tip="在支持的远端（S3 / B2 / GCS / Azure 等）批量递归列目录，大幅减少 API 事务次数，略微增加内存占用"
+                          >
+                            <Switch
+                              aria-label="快速列表"
+                              checked={form.fastList}
+                              onChange={(v) => change("fastList", v)}
+                            />
+                          </SettingRow>
+                          <SettingRow
+                            label="同步空子目录（--create-empty-src-dirs）"
+                            variant="bordered"
+                            tip="在目标端保留源目录中不含任何文件的空目录结构"
+                          >
+                            <Switch
+                              aria-label="同步空子目录"
+                              checked={form.createEmptySrcDirs}
+                              onChange={(v) => change("createEmptySrcDirs", v)}
+                            />
+                          </SettingRow>
+                          <SettingRow
+                            label="跟随本地符号链接"
+                            variant="bordered"
+                            tip="开启后跟随源端本地授权目录内指向同授权目录内部的符号链接（跨出授权目录的链接仍会被安全忽略）"
+                          >
+                            <Switch
+                              aria-label="跟随本地符号链接"
+                              checked={form.followSymlinks}
+                              onChange={(v) => change("followSymlinks", v)}
+                            />
+                          </SettingRow>
+                          <div className="native-checkbox-group">
+                            <Checkbox
+                              checked={Boolean(form.extraFlags?.noUpdateModtime)}
+                              onChange={(e) =>
+                                change("extraFlags", {
+                                  ...form.extraFlags,
+                                  noUpdateModtime: Boolean(e.target.checked),
+                                })
+                              }
+                            >
+                              跳过仅修改时间变更的元数据更新（--no-update-modtime）
+                            </Checkbox>
+                            <Checkbox
+                              checked={Boolean(form.extraFlags?.inplace)}
+                              onChange={(e) =>
+                                change("extraFlags", {
+                                  ...form.extraFlags,
+                                  inplace: Boolean(e.target.checked),
+                                })
+                              }
+                            >
+                              原地覆盖目标文件，不创建临时文件（--inplace）
+                            </Checkbox>
+                            <Checkbox
+                              checked={Boolean(form.extraFlags?.checkFirst)}
+                              onChange={(e) =>
+                                change("extraFlags", {
+                                  ...form.extraFlags,
+                                  checkFirst: Boolean(e.target.checked),
+                                })
+                              }
+                            >
+                              先完成全部差异比对再传输（--check-first）
+                            </Checkbox>
+                            <Checkbox
+                              checked={Boolean(form.extraFlags?.s3NoHead)}
+                              onChange={(e) =>
+                                change("extraFlags", {
+                                  ...form.extraFlags,
+                                  s3NoHead: Boolean(e.target.checked),
+                                })
+                              }
+                            >
+                              跳过 S3 上传后 HEAD 校验以减少 API 调用（--s3-no-head）
+                            </Checkbox>
+                            <Checkbox
+                              checked={Boolean(form.extraFlags?.ignoreSize)}
+                              onChange={(e) =>
+                                change("extraFlags", {
+                                  ...form.extraFlags,
+                                  ignoreSize: Boolean(e.target.checked),
+                                })
+                              }
+                            >
+                              仅按修改时间比对，忽略文件大小变化（--ignore-size）
+                            </Checkbox>
+                            <Checkbox
+                              checked={Boolean(form.extraFlags?.trackRenames)}
+                              disabled={form.method !== 1 && form.method !== 3}
+                              onChange={(e) =>
+                                change("extraFlags", {
+                                  ...form.extraFlags,
+                                  trackRenames: Boolean(e.target.checked),
+                                })
+                              }
+                            >
+                              启用重命名追踪，避免重命名后重传（--track-renames，仅全量镜像与双向同步生效）
+                            </Checkbox>
+                            <Checkbox
+                              checked={Boolean(form.extraFlags?.useMmap)}
+                              onChange={(e) =>
+                                change("extraFlags", {
+                                  ...form.extraFlags,
+                                  useMmap: Boolean(e.target.checked),
+                                })
+                              }
+                            >
+                              使用 mmap 零拷贝传输缓冲（--use-mmap）
+                            </Checkbox>
+                          </div>
+                          <div className="form-grid form-grid--three">
+                            <Field
+                              label="单次传输总量上限（--max-transfer）"
+                              hint="留空不限，支持如 50G / 500M"
+                            >
+                              <Input
+                                value={form.extraFlags?.maxTransfer || ""}
+                                placeholder="如 100G / 500M"
+                                showClear
+                                onChange={(v) =>
+                                  change("extraFlags", {
+                                    ...form.extraFlags,
+                                    maxTransfer: v,
+                                  })
+                                }
+                              />
+                            </Field>
+                            <Field label="达限截断模式（--cutoff-mode）">
+                              <Select
+                                value={form.extraFlags?.cutoffMode || ""}
+                                optionList={[
+                                  { label: "默认 (hard)", value: "" },
+                                  { label: "hard（立即停止）", value: "hard" },
+                                  { label: "soft（传完当前队列）", value: "soft" },
+                                  { label: "cautious（不再发起新传输）", value: "cautious" },
+                                ]}
+                                onChange={(v) =>
+                                  change("extraFlags", {
+                                    ...form.extraFlags,
+                                    cutoffMode: String(v || ""),
+                                  })
+                                }
+                              />
+                            </Field>
+                            <Field
+                              label="最大运行时长（--max-duration）"
+                              hint="超时后平滑收尾退出，如 2h"
+                            >
+                              <Input
+                                value={form.extraFlags?.maxDuration || ""}
+                                placeholder="如 2h / 30m"
+                                showClear
+                                onChange={(v) =>
+                                  change("extraFlags", {
+                                    ...form.extraFlags,
+                                    maxDuration: v,
+                                  })
+                                }
+                              />
+                            </Field>
+                          </div>
+                          <div className="form-grid form-grid--three">
+                            <Field label="传输优先级排序（--order-by）">
+                              <Select
+                                value={form.extraFlags?.orderBy || ""}
+                                optionList={[
+                                  { label: "默认顺序", value: "" },
+                                  { label: "小文件优先 (size,ascending)", value: "size,ascending" },
+                                  { label: "大文件优先 (size,descending)", value: "size,descending" },
+                                  { label: "最旧修改优先 (modtime,ascending)", value: "modtime,ascending" },
+                                  { label: "最新修改优先 (modtime,descending)", value: "modtime,descending" },
+                                  { label: "文件名升序 (name,ascending)", value: "name,ascending" },
+                                  { label: "文件名降序 (name,descending)", value: "name,descending" },
+                                ]}
+                                onChange={(v) =>
+                                  change("extraFlags", {
+                                    ...form.extraFlags,
+                                    orderBy: String(v || ""),
+                                  })
+                                }
+                              />
+                            </Field>
+                            <Field
+                              label="预扫描队列上限（--max-backlog）"
+                              hint="0 使用默认；控制内存排队数"
+                            >
+                              <Input
+                                inputMode="numeric"
+                                value={String(form.extraFlags?.maxBacklog || 0)}
+                                onChange={(v) =>
+                                  change("extraFlags", {
+                                    ...form.extraFlags,
+                                    maxBacklog: Math.max(0, Math.trunc(Number(v) || 0)),
+                                  })
+                                }
+                              />
+                            </Field>
+                            <Field
+                              label="读写缓冲区（--buffer-size）"
+                              hint="留空默认 16M，设为 0 禁用"
+                            >
+                              <Input
+                                value={form.extraFlags?.bufferSize || ""}
+                                placeholder="如 16M / 32M / 0"
+                                showClear
+                                onChange={(v) =>
+                                  change("extraFlags", {
+                                    ...form.extraFlags,
+                                    bufferSize: v,
+                                  })
+                                }
+                              />
+                            </Field>
+                          </div>
+                          <div className="form-grid form-grid--three">
+                            <Field
+                              label="多线程分流阈值（--multi-thread-cutoff）"
+                              hint="默认 250M"
+                            >
+                              <Input
+                                value={form.extraFlags?.multiThreadCutoff || ""}
+                                placeholder="如 250M / 100M"
+                                showClear
+                                onChange={(v) =>
+                                  change("extraFlags", {
+                                    ...form.extraFlags,
+                                    multiThreadCutoff: v,
+                                  })
+                                }
+                              />
+                            </Field>
+                            <Field
+                              label="多线程分块（--multi-thread-chunk-size）"
+                              hint="默认 64M"
+                            >
+                              <Input
+                                value={form.extraFlags?.multiThreadChunkSize || ""}
+                                placeholder="如 64M / 32M"
+                                showClear
+                                onChange={(v) =>
+                                  change("extraFlags", {
+                                    ...form.extraFlags,
+                                    multiThreadChunkSize: v,
+                                  })
+                                }
+                              />
+                            </Field>
+                            <Field label="User-Agent（--user-agent）">
+                              <Input
+                                value={form.extraFlags?.userAgent || ""}
+                                placeholder="可选 HTTP User-Agent"
+                                showClear
+                                onChange={(v) =>
+                                  change("extraFlags", {
+                                    ...form.extraFlags,
+                                    userAgent: v,
+                                  })
+                                }
+                              />
+                            </Field>
+                          </div>
+                          <div className="form-grid form-grid--two">
+                            <Field label="I/O 空闲超时（--timeout）" hint="默认 5m">
+                              <Input
+                                value={form.extraFlags?.ioTimeout || ""}
+                                placeholder="如 5m / 30s"
+                                showClear
+                                onChange={(v) =>
+                                  change("extraFlags", {
+                                    ...form.extraFlags,
+                                    ioTimeout: v,
+                                  })
+                                }
+                              />
+                            </Field>
+                            <Field label="连接超时（--contimeout）" hint="默认 1m">
+                              <Input
+                                value={form.extraFlags?.conTimeout || ""}
+                                placeholder="如 1m / 15s"
+                                showClear
+                                onChange={(v) =>
+                                  change("extraFlags", {
+                                    ...form.extraFlags,
+                                    conTimeout: v,
+                                  })
+                                }
+                              />
+                            </Field>
+                          </div>
+                        </div>
+
+                        {form.method === 3 && (
+                          <div className="advanced-option-group">
+                            <div className="advanced-option-group-title">双向同步保护策略</div>
                             <div className="form-grid form-grid--two">
                               <Field
-                                label="时间精度容差（--modify-window）"
-                                hint="留空默认；FAT32/SMB/部分网盘可填 1s 或 2s"
+                                label="双向基线冲突策略（--resync-mode）"
+                                hint="首次同步或重建基线 (--resync) 时生效"
                               >
-                                <Input
-                                  value={form.modifyWindow}
-                                  placeholder="如 1s / 2s / 1m"
-                                  showClear
-                                  onChange={(v) => change("modifyWindow", v)}
+                                <Select
+                                  value={form.extraFlags?.bisyncResyncMode || ""}
+                                  optionList={[
+                                    { label: "默认 (newer，保留最新修改)", value: "" },
+                                    { label: "path1（以左侧为准）", value: "path1" },
+                                    { label: "path2（以右侧为准）", value: "path2" },
+                                    { label: "newer（保留最新修改）", value: "newer" },
+                                    { label: "older（保留较旧文件）", value: "older" },
+                                    { label: "larger（保留较大文件）", value: "larger" },
+                                    { label: "smaller（保留较小文件）", value: "smaller" },
+                                  ]}
+                                  onChange={(v) =>
+                                    change("extraFlags", {
+                                      ...form.extraFlags,
+                                      bisyncResyncMode: String(v || ""),
+                                    })
+                                  }
                                 />
                               </Field>
                               <Field
-                                label="单文件多线程流数（--multi-thread-streams）"
-                                hint="0 使用默认（4）；1–64，加速单一大文件传输"
+                                label="单次删除比例上限（--max-delete，%）"
+                                hint="0 表示使用 rclone 默认值（50%），1–100 按删除占比触发安全保护"
                               >
                                 <Input
                                   inputMode="numeric"
-                                  value={String(form.multiThreadStreams)}
+                                  value={String(form.extraFlags?.bisyncMaxDelete || 0)}
                                   onChange={(v) =>
-                                    change(
-                                      "multiThreadStreams",
-                                      Math.max(0, Math.min(64, Math.trunc(Number(v) || 0))),
-                                    )
+                                    change("extraFlags", {
+                                      ...form.extraFlags,
+                                      bisyncMaxDelete: Math.max(
+                                        0,
+                                        Math.min(100, Math.trunc(Number(v) || 0)),
+                                      ),
+                                    })
                                   }
                                 />
                               </Field>
                             </div>
-                            <SettingRow
-                              label="快速列表（--fast-list）"
-                              variant="bordered"
-                              tip="在支持的远端（S3 / B2 / GCS / Azure 等）批量递归列目录，大幅减少 API 事务次数，略微增加内存占用"
-                            >
-                              <Switch
-                                aria-label="快速列表"
-                                checked={form.fastList}
-                                onChange={(v) => change("fastList", v)}
-                              />
-                            </SettingRow>
-                            <SettingRow
-                              label="同步空子目录（--create-empty-src-dirs）"
-                              variant="bordered"
-                              tip="在目标端保留源目录中不含任何文件的空目录结构"
-                            >
-                              <Switch
-                                aria-label="同步空子目录"
-                                checked={form.createEmptySrcDirs}
-                                onChange={(v) => change("createEmptySrcDirs", v)}
-                              />
-                            </SettingRow>
-                            <SettingRow
-                              label="跟随本地符号链接"
-                              variant="bordered"
-                              tip="开启后跟随源端本地授权目录内指向同授权目录内部的符号链接（跨出授权目录的链接仍会被安全忽略）"
-                            >
-                              <Switch
-                                aria-label="跟随本地符号链接"
-                                checked={form.followSymlinks}
-                                onChange={(v) => change("followSymlinks", v)}
-                              />
-                            </SettingRow>
                             <div className="native-checkbox-group">
                               <Checkbox
-                                checked={Boolean(form.extraFlags?.noUpdateModtime)}
+                                checked={Boolean(form.extraFlags?.bisyncForce)}
                                 onChange={(e) =>
                                   change("extraFlags", {
                                     ...form.extraFlags,
-                                    noUpdateModtime: Boolean(e.target.checked),
+                                    bisyncForce: Boolean(e.target.checked),
                                   })
                                 }
                               >
-                                跳过仅修改时间变更的元数据更新（--no-update-modtime）
-                              </Checkbox>
-                              <Checkbox
-                                checked={Boolean(form.extraFlags?.inplace)}
-                                onChange={(e) =>
-                                  change("extraFlags", {
-                                    ...form.extraFlags,
-                                    inplace: Boolean(e.target.checked),
-                                  })
-                                }
-                              >
-                                原地覆盖目标文件，不创建临时文件（--inplace）
-                              </Checkbox>
-                              <Checkbox
-                                checked={Boolean(form.extraFlags?.checkFirst)}
-                                onChange={(e) =>
-                                  change("extraFlags", {
-                                    ...form.extraFlags,
-                                    checkFirst: Boolean(e.target.checked),
-                                  })
-                                }
-                              >
-                                先完成全部差异比对再传输（--check-first）
-                              </Checkbox>
-                              <Checkbox
-                                checked={Boolean(form.extraFlags?.s3NoHead)}
-                                onChange={(e) =>
-                                  change("extraFlags", {
-                                    ...form.extraFlags,
-                                    s3NoHead: Boolean(e.target.checked),
-                                  })
-                                }
-                              >
-                                跳过 S3 上传后 HEAD 校验以减少 API 调用（--s3-no-head）
-                              </Checkbox>
-                              <Checkbox
-                                checked={Boolean(form.extraFlags?.ignoreSize)}
-                                onChange={(e) =>
-                                  change("extraFlags", {
-                                    ...form.extraFlags,
-                                    ignoreSize: Boolean(e.target.checked),
-                                  })
-                                }
-                              >
-                                仅按修改时间比对，忽略文件大小变化（--ignore-size）
-                              </Checkbox>
-                              <Checkbox
-                                checked={Boolean(form.extraFlags?.trackRenames)}
-                                disabled={form.method !== 1 && form.method !== 3}
-                                onChange={(e) =>
-                                  change("extraFlags", {
-                                    ...form.extraFlags,
-                                    trackRenames: Boolean(e.target.checked),
-                                  })
-                                }
-                              >
-                                启用重命名追踪，避免重命名后重传（--track-renames，仅全量镜像与双向同步生效）
-                              </Checkbox>
-                              <Checkbox
-                                checked={Boolean(form.extraFlags?.useMmap)}
-                                onChange={(e) =>
-                                  change("extraFlags", {
-                                    ...form.extraFlags,
-                                    useMmap: Boolean(e.target.checked),
-                                  })
-                                }
-                              >
-                                使用 mmap 零拷贝传输缓冲（--use-mmap）
+                                超限删除仍强制执行（--force，谨慎启用）
                               </Checkbox>
                             </div>
-                            <div className="form-grid form-grid--three">
-                              <Field
-                                label="单次传输总量上限（--max-transfer）"
-                                hint="留空不限，支持如 50G / 500M"
-                              >
-                                <Input
-                                  value={form.extraFlags?.maxTransfer || ""}
-                                  placeholder="如 100G / 500M"
-                                  showClear
-                                  onChange={(v) =>
-                                    change("extraFlags", {
-                                      ...form.extraFlags,
-                                      maxTransfer: v,
-                                    })
-                                  }
-                                />
-                              </Field>
-                              <Field label="达限截断模式（--cutoff-mode）">
-                                <Select
-                                  value={form.extraFlags?.cutoffMode || ""}
-                                  optionList={[
-                                    { label: "默认 (hard)", value: "" },
-                                    { label: "hard（立即停止）", value: "hard" },
-                                    { label: "soft（传完当前队列）", value: "soft" },
-                                    { label: "cautious（不再发起新传输）", value: "cautious" },
-                                  ]}
-                                  onChange={(v) =>
-                                    change("extraFlags", {
-                                      ...form.extraFlags,
-                                      cutoffMode: String(v || ""),
-                                    })
-                                  }
-                                />
-                              </Field>
-                              <Field
-                                label="最大运行时长（--max-duration）"
-                                hint="超时后平滑收尾退出，如 2h"
-                              >
-                                <Input
-                                  value={form.extraFlags?.maxDuration || ""}
-                                  placeholder="如 2h / 30m"
-                                  showClear
-                                  onChange={(v) =>
-                                    change("extraFlags", {
-                                      ...form.extraFlags,
-                                      maxDuration: v,
-                                    })
-                                  }
-                                />
-                              </Field>
-                            </div>
-                            <div className="form-grid form-grid--three">
-                              <Field label="传输优先级排序（--order-by）">
-                                <Select
-                                  value={form.extraFlags?.orderBy || ""}
-                                  optionList={[
-                                    { label: "默认顺序", value: "" },
-                                    { label: "小文件优先 (size,ascending)", value: "size,ascending" },
-                                    { label: "大文件优先 (size,descending)", value: "size,descending" },
-                                    { label: "最旧修改优先 (modtime,ascending)", value: "modtime,ascending" },
-                                    { label: "最新修改优先 (modtime,descending)", value: "modtime,descending" },
-                                    { label: "文件名升序 (name,ascending)", value: "name,ascending" },
-                                    { label: "文件名降序 (name,descending)", value: "name,descending" },
-                                  ]}
-                                  onChange={(v) =>
-                                    change("extraFlags", {
-                                      ...form.extraFlags,
-                                      orderBy: String(v || ""),
-                                    })
-                                  }
-                                />
-                              </Field>
-                              <Field
-                                label="预扫描队列上限（--max-backlog）"
-                                hint="0 使用默认；控制内存排队数"
-                              >
-                                <Input
-                                  inputMode="numeric"
-                                  value={String(form.extraFlags?.maxBacklog || 0)}
-                                  onChange={(v) =>
-                                    change("extraFlags", {
-                                      ...form.extraFlags,
-                                      maxBacklog: Math.max(0, Math.trunc(Number(v) || 0)),
-                                    })
-                                  }
-                                />
-                              </Field>
-                              <Field
-                                label="读写缓冲区（--buffer-size）"
-                                hint="留空默认 16M，设为 0 禁用"
-                              >
-                                <Input
-                                  value={form.extraFlags?.bufferSize || ""}
-                                  placeholder="如 16M / 32M / 0"
-                                  showClear
-                                  onChange={(v) =>
-                                    change("extraFlags", {
-                                      ...form.extraFlags,
-                                      bufferSize: v,
-                                    })
-                                  }
-                                />
-                              </Field>
-                            </div>
-                            <div className="form-grid form-grid--three">
-                              <Field
-                                label="多线程分流阈值（--multi-thread-cutoff）"
-                                hint="默认 250M"
-                              >
-                                <Input
-                                  value={form.extraFlags?.multiThreadCutoff || ""}
-                                  placeholder="如 250M / 100M"
-                                  showClear
-                                  onChange={(v) =>
-                                    change("extraFlags", {
-                                      ...form.extraFlags,
-                                      multiThreadCutoff: v,
-                                    })
-                                  }
-                                />
-                              </Field>
-                              <Field
-                                label="多线程分块（--multi-thread-chunk-size）"
-                                hint="默认 64M"
-                              >
-                                <Input
-                                  value={form.extraFlags?.multiThreadChunkSize || ""}
-                                  placeholder="如 64M / 32M"
-                                  showClear
-                                  onChange={(v) =>
-                                    change("extraFlags", {
-                                      ...form.extraFlags,
-                                      multiThreadChunkSize: v,
-                                    })
-                                  }
-                                />
-                              </Field>
-                              <Field label="User-Agent（--user-agent）">
-                                <Input
-                                  value={form.extraFlags?.userAgent || ""}
-                                  placeholder="可选 HTTP User-Agent"
-                                  showClear
-                                  onChange={(v) =>
-                                    change("extraFlags", {
-                                      ...form.extraFlags,
-                                      userAgent: v,
-                                    })
-                                  }
-                                />
-                              </Field>
-                            </div>
-                            <div className="form-grid form-grid--two">
-                              <Field label="I/O 空闲超时（--timeout）" hint="默认 5m">
-                                <Input
-                                  value={form.extraFlags?.ioTimeout || ""}
-                                  placeholder="如 5m / 30s"
-                                  showClear
-                                  onChange={(v) =>
-                                    change("extraFlags", {
-                                      ...form.extraFlags,
-                                      ioTimeout: v,
-                                    })
-                                  }
-                                />
-                              </Field>
-                              <Field label="连接超时（--contimeout）" hint="默认 1m">
-                                <Input
-                                  value={form.extraFlags?.conTimeout || ""}
-                                  placeholder="如 1m / 15s"
-                                  showClear
-                                  onChange={(v) =>
-                                    change("extraFlags", {
-                                      ...form.extraFlags,
-                                      conTimeout: v,
-                                    })
-                                  }
-                                />
-                              </Field>
-                            </div>
-                            {form.method === 3 && (
-                              <>
-                                <div className="form-grid form-grid--two">
-                                  <Field
-                                    label="双向基线冲突策略（--resync-mode）"
-                                    hint="首次同步或重建基线 (--resync) 时生效"
-                                  >
-                                    <Select
-                                      value={form.extraFlags?.bisyncResyncMode || ""}
-                                      optionList={[
-                                        { label: "默认 (newer，保留最新修改)", value: "" },
-                                        { label: "path1（以左侧为准）", value: "path1" },
-                                        { label: "path2（以右侧为准）", value: "path2" },
-                                        { label: "newer（保留最新修改）", value: "newer" },
-                                        { label: "older（保留较旧文件）", value: "older" },
-                                        { label: "larger（保留较大文件）", value: "larger" },
-                                        { label: "smaller（保留较小文件）", value: "smaller" },
-                                      ]}
-                                      onChange={(v) =>
-                                        change("extraFlags", {
-                                          ...form.extraFlags,
-                                          bisyncResyncMode: String(v || ""),
-                                        })
-                                      }
-                                    />
-                                  </Field>
-                                  <Field
-                                    label="单次删除比例上限（--max-delete，%）"
-                                    hint="0 表示使用 rclone 默认值（50%），1–100 按删除占比触发安全保护"
-                                  >
-                                    <Input
-                                      inputMode="numeric"
-                                      value={String(form.extraFlags?.bisyncMaxDelete || 0)}
-                                      onChange={(v) =>
-                                        change("extraFlags", {
-                                          ...form.extraFlags,
-                                          bisyncMaxDelete: Math.max(
-                                            0,
-                                            Math.min(100, Math.trunc(Number(v) || 0)),
-                                          ),
-                                        })
-                                      }
-                                    />
-                                  </Field>
-                                </div>
-                                <div className="native-checkbox-group">
-                                  <Checkbox
-                                    checked={Boolean(form.extraFlags?.bisyncForce)}
-                                    onChange={(e) =>
-                                      change("extraFlags", {
-                                        ...form.extraFlags,
-                                        bisyncForce: Boolean(e.target.checked),
-                                      })
-                                    }
-                                  >
-                                    超限删除仍强制执行（--force，谨慎启用）
-                                  </Checkbox>
-                                </div>
-                              </>
-                            )}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -2702,6 +2968,16 @@ export default function TaskEditor({
           </fieldset>
         </Form>
       </Editor>
+      {quickCryptOpen && dstEncryption.encryptable.length > 0 && (
+        <QuickCryptModal
+          targets={dstEncryption.encryptable}
+          remotes={nativeStorage.data?.remotes || []}
+          isEditingJob={!isNew}
+          onClose={() => setQuickCryptOpen(false)}
+          onReuseExisting={handleQuickCryptReuse}
+          onCreated={handleQuickCryptCreated}
+        />
+      )}
     </RemoteDirCacheProvider>
   );
 }

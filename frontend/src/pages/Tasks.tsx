@@ -62,8 +62,10 @@ import {
   formatDisplayPathList,
 } from "../lib/syncPathPreview";
 import {
+  buildTaskSearchParams,
   cloneJobToForm,
   isLegacyOpenListJob,
+  parseTaskTab,
   resolveJobSelection,
   resolveTaskTab,
   summarizeJobFilters,
@@ -82,6 +84,7 @@ import {
   parseJobPathList,
 } from "./Home/homeUtils";
 import { formatTimestamp } from "../utils/date";
+import { SyncStatusTag } from "../components/SyncStatus";
 import type { AlistItem, JobItem, TaskRecord } from "../types";
 
 const Realtime = lazy(() =>
@@ -106,11 +109,8 @@ export default function Tasks() {
       : Number.isInteger(parsedJobId) && (parsedJobId as number) > 0
         ? parsedJobId
         : -1;
-  const requestedTab = ["overview", "realtime", "history"].includes(
-    params.get("tab") || "",
-  )
-    ? params.get("tab")!
-    : "overview";
+  const rawTab = params.get("tab");
+  const explicitTab = parseTaskTab(rawTab);
   const jobs = useResource((signal) => api.jobMenu(signal));
   const engines = useResource((signal) => api.engines(signal));
   const [editor, setEditor] = useState<{
@@ -198,7 +198,25 @@ export default function Tasks() {
     },
     [selectedJobId],
   );
-  const hasCurrentTask = !!currentTask.data;
+  const currentTaskForSelected =
+    selectedJobId && snapshotState?.jobId === selectedJobId
+      ? currentTask.data
+      : null;
+  const hasCurrentTask = !!currentTaskForSelected;
+  const currentTaskSettled =
+    !!selectedJobId &&
+    snapshotState?.jobId === selectedJobId &&
+    snapshotState.ok &&
+    !currentTask.loading &&
+    !currentTask.error;
+  const tab = resolveTaskTab(rawTab, {
+    settled: currentTaskSettled,
+    hasCurrentTask,
+    jobRunning: Boolean(selected?.running),
+  });
+  const realtimeTab = tab === "realtime";
+  const realtimeAvailable =
+    hasCurrentTask || (!currentTaskSettled && Boolean(selected?.running));
   const activeApproval = pendingApproval.data ?? null;
   const approvalExecuting = activeApproval?.status === "executing";
   const refreshCurrentTask = currentTask.refresh;
@@ -224,14 +242,14 @@ export default function Tasks() {
   // jobs/history whenever background deletion completes.
   const prevTaskIdRef = useRef<number | null>(null);
   useEffect(() => {
-    const curId = currentTask.data?.taskId ?? null;
+    const curId = currentTaskForSelected?.taskId ?? null;
     if (prevTaskIdRef.current !== null && curId === null) {
       void refreshPendingApproval(true);
       void jobs.refresh(true);
       window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
     }
     prevTaskIdRef.current = curId;
-  }, [currentTask.data?.taskId, refreshPendingApproval, jobs.refresh]);
+  }, [currentTaskForSelected?.taskId, refreshPendingApproval, jobs.refresh]);
 
   const prevExecutingRef = useRef(false);
   useEffect(() => {
@@ -249,7 +267,6 @@ export default function Tasks() {
     }
   }, [activeApproval, approvalModalOpen]);
 
-  const realtimeTab = requestedTab === "realtime";
   const prevRealtimeTab = useRef(realtimeTab);
   useEffect(() => {
     const enteredRealtime = !prevRealtimeTab.current && realtimeTab;
@@ -275,6 +292,7 @@ export default function Tasks() {
         ) {
           void refreshCurrentTask(true);
           void refreshPendingApproval(true);
+          void jobs.refresh(true);
         }
       },
       approvalExecuting
@@ -292,33 +310,48 @@ export default function Tasks() {
     approvalExecuting,
     refreshCurrentTask,
     refreshPendingApproval,
+    jobs.refresh,
   ]);
-  const currentTaskSettled =
-    !!selectedJobId &&
-    snapshotState?.jobId === selectedJobId &&
-    snapshotState.ok &&
-    !currentTask.loading &&
-    !currentTask.error;
-  const tab = resolveTaskTab(requestedTab, {
-    settled: currentTaskSettled,
-    hasCurrentTask,
-  });
   useEffect(() => {
-    if (tab === requestedTab) return;
-    const next = new URLSearchParams(params);
-    next.set("tab", tab);
-    setParams(next, { replace: true });
-  }, [tab, requestedTab, params, setParams]);
+    if (explicitTab === "realtime" && tab !== "realtime") {
+      const next = new URLSearchParams(params);
+      next.set("tab", tab);
+      setParams(next, { replace: true });
+      return;
+    }
+    if (explicitTab === null && tab === "realtime" && hasCurrentTask) {
+      const next = new URLSearchParams(params);
+      next.set("tab", "realtime");
+      setParams(next, { replace: true });
+    }
+  }, [explicitTab, tab, hasCurrentTask, params, setParams]);
   const followUp = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(followUp.current), []);
   const update = useCallback(
-    (values: Record<string, string | number | null>) => {
-      const next = new URLSearchParams(params);
-      for (const [key, value] of Object.entries(values))
-        value === null ? next.delete(key) : next.set(key, String(value));
-      setParams(next);
+    (
+      values: Record<string, string | number | null>,
+      options?: { replace?: boolean },
+    ) => {
+      setParams((prev) => {
+        const next = new URLSearchParams(prev);
+        for (const [key, value] of Object.entries(values))
+          value === null ? next.delete(key) : next.set(key, String(value));
+        return next;
+      }, options);
     },
-    [params, setParams],
+    [setParams],
+  );
+  const selectMobileJob = useCallback(
+    (job: JobItem) => {
+      setParams((prev) =>
+        buildTaskSearchParams(job, {
+          onTasksPage: true,
+          currentSearch: prev.toString(),
+          activeJobId: selected?.id,
+        }),
+      );
+    },
+    [selected?.id, setParams],
   );
   const handleRealtimeEnded = useCallback(() => {
     void refreshPendingApproval(true);
@@ -356,6 +389,12 @@ export default function Tasks() {
       }
     });
   const triggerRunJob = (jobId: number, method: number) => {
+    const startJob = async () => {
+      await api.jobAction({ id: String(jobId) });
+      Toast.success("已提交执行");
+      update({ tab: null }, { replace: true });
+      await refreshJobs();
+    };
     if (method === 2) {
       confirmAction({
         title: "确认启动移动同步？",
@@ -365,9 +404,7 @@ export default function Tasks() {
         onOk: () =>
           actions.run(async () => {
             try {
-              await api.jobAction({ id: String(jobId) });
-              Toast.success("已提交执行");
-              await refreshJobs();
+              await startJob();
             } catch (err) {
               errorToast(err);
               throw err;
@@ -376,7 +413,13 @@ export default function Tasks() {
       });
       return;
     }
-    action(() => api.jobAction({ id: String(jobId) }), "已提交执行");
+    void actions.run(async () => {
+      try {
+        await startJob();
+      } catch (err) {
+        errorToast(err);
+      }
+    });
   };
   const emptyAction =
     !engines.loading && !engines.error && (engines.data?.length ?? 0) === 0 ? (
@@ -477,7 +520,7 @@ export default function Tasks() {
             <Tabs.TabPane tab="历史任务" itemKey="history" />
             <Tabs.TabPane
               tab={
-                !hasCurrentTask ? (
+                !realtimeAvailable ? (
                   <Tooltip content="当前没有运行中的任务" position="top">
                     <span>实时任务</span>
                   </Tooltip>
@@ -486,7 +529,7 @@ export default function Tasks() {
                 )
               }
               itemKey="realtime"
-              disabled={!hasCurrentTask}
+              disabled={!realtimeAvailable}
             />
           </Tabs>
         }
@@ -535,7 +578,7 @@ export default function Tasks() {
                     : Math.min(list.length - 1, index + 1);
             const nextJob = list[nextIndex];
             if (nextJob) {
-              update({ jobId: nextJob.id });
+              selectMobileJob(nextJob);
               window.requestAnimationFrame(() =>
                 mobileJobButtons.current[nextIndex]?.focus(),
               );
@@ -553,7 +596,7 @@ export default function Tasks() {
                 mobileJobButtons.current[index] = element;
               }}
               className={`mobile-job-chip${selected?.id === job.id ? " active" : ""}`}
-              onClick={() => update({ jobId: job.id })}
+              onClick={() => selectMobileJob(job)}
             >
               {getJobName(job)}
             </button>
@@ -591,9 +634,11 @@ export default function Tasks() {
                     job={selected}
                     engines={engines.data || []}
                     busy={actions.busy}
-                    running={!!currentTask.data}
-                    paused={Boolean(currentTask.data?.paused ?? selected.paused)}
-                    runKey={String(currentTask.data?.taskId ?? "idle")}
+                    running={!!currentTaskForSelected}
+                    paused={Boolean(
+                      currentTaskForSelected?.paused ?? selected.paused,
+                    )}
+                    runKey={String(currentTaskForSelected?.taskId ?? "idle")}
                     onRun={() => triggerRunJob(selected.id, selected.method)}
                     onDryRun={() => setDryRunOpen(true)}
                     onCheck={() => setCheckOpen(true)}
@@ -608,6 +653,7 @@ export default function Tasks() {
                             try {
                               await api.resetBisyncJob(selected.id, true);
                               Toast.success("已触发双向基线重建同步");
+                              update({ tab: null }, { replace: true });
                               await refreshJobs();
                             } catch (err) {
                               errorToast(err);
@@ -624,17 +670,17 @@ export default function Tasks() {
                       })
                     }
                     onTogglePause={() => {
-                      if (!currentTask.data) return;
-                      const { taskId } = currentTask.data;
-                      const resuming = Boolean(currentTask.data.paused);
+                      if (!currentTaskForSelected) return;
+                      const { taskId } = currentTaskForSelected;
+                      const resuming = Boolean(currentTaskForSelected.paused);
                       action(
                         () => api.taskAction(taskId, resuming ? "resume" : "pause"),
                         resuming ? "已继续传输" : "已暂停传输",
                       );
                     }}
                     onStop={() => {
-                      if (!currentTask.data) return;
-                      const { taskId } = currentTask.data;
+                      if (!currentTaskForSelected) return;
+                      const { taskId } = currentTaskForSelected;
                       confirmStopTask(() =>
                         actions.run(async () => {
                           await api.taskAction(taskId, "stop");
@@ -644,7 +690,7 @@ export default function Tasks() {
                     }}
                     onToggle={() => {
                       const pausing = selected.enable === 1;
-                      if (pausing && currentTask.data) {
+                      if (pausing && currentTaskForSelected) {
                         confirmAction({
                           title: "停用任务并中止当前执行？",
                           content:
@@ -708,7 +754,7 @@ export default function Tasks() {
                     <History
                       key={selected.id}
                       jobId={selected.id}
-                      currentTaskId={currentTask.data?.taskId}
+                      currentTaskId={currentTaskForSelected?.taskId}
                       refreshKey={historyRefreshKey}
                       disableRetry={
                         isLegacyOpenListJob(selected, engines.data) ||
@@ -741,6 +787,10 @@ export default function Tasks() {
           jobName={getJobName(selected)}
           hasCryptRemote={hasCryptRemote}
           onClose={() => setCheckOpen(false)}
+          onRepairStarted={() => {
+            update({ tab: null }, { replace: true });
+            void refreshJobs();
+          }}
         />
       )}
       {editor.open && (
@@ -762,7 +812,10 @@ export default function Tasks() {
               const createdId = result.createdId;
               if (createdId) {
                 setPendingCreatedId(createdId);
-                update({ jobId: createdId, tab: "overview" });
+                update({
+                  jobId: createdId,
+                  tab: result.runNow ? null : "overview",
+                });
               }
               void (async () => {
                 try {
@@ -1061,6 +1114,7 @@ function Overview({
                 排队等待中
               </Tag>
             )}
+            {!legacy && <SyncStatusTag status={job.syncStatus} />}
           </span>
         }
         extra={
@@ -1187,6 +1241,25 @@ function Overview({
             </Info>
             <Info label="同步方式">{methodLabel(job.method)}</Info>
             <Info label="执行计划">{formatSchedulePlan(job)}</Info>
+            {job.syncStatus && (
+              <Info label="同步状态">
+                <div className="sync-status-summary">
+                  <span>
+                    {job.syncStatus.pendingChanges < 0
+                      ? "待完整核对"
+                      : `待处理 ${job.syncStatus.pendingChanges} 个文件`}
+                    {job.syncStatus.lastSuccess > 0
+                      ? ` · 最近成功 ${formatTimestamp(job.syncStatus.lastSuccess)}`
+                      : ""}
+                  </span>
+                  {job.syncStatus.error && (
+                    <div className="inline-error" role="status">
+                      {job.syncStatus.error}
+                    </div>
+                  )}
+                </div>
+              </Info>
+            )}
             {Boolean(job.windowEnable) && (
               <Info label="运行窗口">
                 每日 {job.windowStart || "00:00"} – {job.windowEnd || "06:00"}

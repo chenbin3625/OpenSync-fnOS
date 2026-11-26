@@ -362,6 +362,24 @@ func anyJobTaskRunning() bool {
 	return false
 }
 
+// activeJobTasks includes immutable configurations still in use after an edit.
+// Keep their paths reserved until the corresponding execution has finished.
+func activeJobTasks() []*JobTask {
+	jobClientListMu.RLock()
+	clients := make([]*JobClient, 0, len(jobClientList))
+	for _, client := range jobClientList {
+		clients = append(clients, client)
+	}
+	jobClientListMu.RUnlock()
+	var tasks []*JobTask
+	for _, client := range clients {
+		if task := client.currentTask(); task != nil {
+			tasks = append(tasks, task)
+		}
+	}
+	return tasks
+}
+
 func taskRetentionCutoff(now time.Time, taskSaveDays int) (int64, bool) {
 	if taskSaveDays <= 0 {
 		return 0, false
@@ -860,8 +878,29 @@ func validateJobInput(job map[string]interface{}, rejectNestedDst bool) error {
 		}
 		isCron = parsed
 	}
-	if isCron < 0 || isCron > 2 {
+	if isCron < 0 || isCron > 3 {
 		return publicError(msg.T(msg.LostPart))
+	}
+	if isCron == 3 && method == 2 {
+		return publicError("移动任务请使用定时计划、固定间隔或手动执行")
+	}
+	if extra, _, err := parseNativeExtraFlags(job["extraFlags"]); err == nil && method != 3 {
+		isLocal := func(p string) bool {
+			name, _, _ := strings.Cut(strings.TrimPrefix(p, "/"), "/")
+			return strings.EqualFold(name, native.Local)
+		}
+		if extra.SyncDirection == "upload" || extra.SyncDirection == "download" {
+			for _, p := range srcPaths {
+				if isLocal(p) != (extra.SyncDirection == "upload") {
+					return publicError("上传请将本地目录设为源路径，下载请将远端目录设为源路径")
+				}
+			}
+			for _, p := range dstPaths {
+				if isLocal(p) != (extra.SyncDirection == "download") {
+					return publicError("上传请将远端目录设为目标路径，下载请将本地目录设为目标路径")
+				}
+			}
+		}
 	}
 	if isCron == 0 {
 		interval, ok := strictJobInt64(job["interval"])
@@ -927,6 +966,9 @@ func validateJobDestinationConflicts(job map[string]interface{}) error {
 	jobs, err := loadJobs()
 	if err != nil {
 		return fmt.Errorf("load jobs for destination conflict check: %w", err)
+	}
+	for _, task := range activeJobTasks() {
+		jobs = append(jobs, task.Job)
 	}
 	for _, other := range jobs {
 		if util.ToInt64(other["id"]) == jobID || util.ToInt64(other["alistId"]) != alistID {
@@ -1070,10 +1112,34 @@ func jobHasStandardWebDAVDst(c native.Config, job map[string]interface{}) bool {
 	if c == nil || job == nil {
 		return false
 	}
-	for _, dst := range parsePathList(job["dstPath"]) {
-		ep, err := c.Resolve(dst)
-		if err == nil && !ep.HasReliableModTime() {
-			return true
+	srcs := parsePathList(job["srcPath"])
+	dsts := parsePathList(job["dstPath"])
+	for _, dst := range dsts {
+		dstEp, err := c.Resolve(dst)
+		if err != nil || dstEp.HasReliableModTime() {
+			continue
+		}
+		// Only auto-lock compareMode=1 when default mode (0) would fall back
+		// to size-only (e.g. standard OpenList WebDAV without native MD5).
+		// Backends like Quark that expose native MD5 keep compareMode=0 so
+		// local<->quark and s3<->quark automatically use Size+MD5.
+		if len(srcs) == 0 {
+			if !dstEp.SupportsNativeMD5() {
+				return true
+			}
+			continue
+		}
+		for _, src := range srcs {
+			srcEp, srcErr := c.Resolve(src)
+			if srcErr != nil {
+				if !dstEp.SupportsNativeMD5() {
+					return true
+				}
+				continue
+			}
+			if native.EffectiveCompareMode(srcEp, dstEp, 0) == 1 {
+				return true
+			}
 		}
 	}
 	return false
@@ -1673,6 +1739,7 @@ func addJobNextRunTimes(result map[string]interface{}) {
 	jobClientListMu.RUnlock()
 	queuedSet := engineQueue.AllQueuedJobIDs()
 	latestTasks, _ := mapper.GetLatestTaskPerJob()
+	syncStates, syncStateErr := mapper.ListSyncStates()
 	legacyEngineIDs := legacyOpenListAlistIDs()
 	for _, row := range rows {
 		jobID := util.ToInt64(row["id"])
@@ -1700,6 +1767,9 @@ func addJobNextRunTimes(result map[string]interface{}) {
 		row["queued"] = !legacyOpenList && queuedSet[jobID]
 		row["pendingApproval"] = !legacyOpenList && pendingDeleteApprovals.Has(jobID)
 		row["watching"] = !legacyOpenList && jobFSWatchers.IsWatching(jobID)
+		if !legacyOpenList {
+			addSyncStatus(row, syncStates[jobID], syncStateErr, clients[jobID])
+		}
 		row["checkRunning"] = !legacyOpenList && IsJobCheckRunning(jobID)
 		if latest, ok := latestTasks[jobID]; ok {
 			row["lastStatus"] = util.ToInt(latest["status"])

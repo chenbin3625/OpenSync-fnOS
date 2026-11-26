@@ -31,7 +31,7 @@ export interface NativeStorageAuthWizardProps {
   clearSecrets?: string[];
   hasExistingAuth: boolean;
   completedSession: CompletedAuthSession | null;
-  variant?: "oauth" | "jottacloud" | "icloud" | "seafile";
+  variant?: "oauth" | "quark_qr" | "jottacloud" | "icloud" | "seafile";
   disabled?: boolean;
   onSessionActiveChange?: (activeSessionId: string | null) => void;
   onCompleted: (result: CompletedAuthSession) => void;
@@ -264,7 +264,13 @@ function summarizeCompletedAuth(
   if (completed.configuredSecrets.includes("auth_token")) {
     details.push("已获取 Seafile Auth Token");
   }
+  if (completed.configuredSecrets.includes("cookie")) {
+    details.push("已获取夸克网盘会话 Cookie（支持 __puus 自动续期）");
+  }
   const pub = completed.publicOptions || {};
+  if (remoteType === "quark" && pub.account_name) {
+    details.push(`夸克账号：${pub.account_name}`);
+  }
   if (remoteType === "onedrive" && (pub.drive_type || pub.drive_id)) {
     const parts = [pub.drive_type, pub.drive_id].filter(Boolean);
     details.push(`OneDrive 空间：${parts.join(" · ")}`);
@@ -368,22 +374,28 @@ export function NativeStorageAuthWizard({
     };
   }, []);
 
-  // Poll status while waiting for OAuth callback so same-machine localhost
-  // browser redirects advance automatically without needing manual paste.
+  // Poll status while waiting for OAuth callback or QR scan confirmation.
   useEffect(() => {
-    if (!step || step.status !== "oauth" || !step.sessionId) return;
+    if (
+      !step ||
+      (step.status !== "oauth" && step.status !== "qrcode") ||
+      !step.sessionId
+    ) {
+      return;
+    }
     let stopped = false;
     const sessionId = step.sessionId;
+    const currentStatus = step.status;
     const timer = window.setInterval(async () => {
       if (stopped) return;
       try {
         const latest = await api.getNativeStorageAuth(sessionId);
         if (stopped) return;
-        if (latest.status !== "oauth") {
+        if (latest.status !== currentStatus || latest.qrStatus !== step.qrStatus) {
           applySnapshot(latest);
         }
       } catch {
-        // Ignore transient poll errors while waiting on user browser action.
+        // Ignore transient poll errors while waiting on user action.
       }
     }, 2000);
     return () => {
@@ -496,6 +508,13 @@ export function NativeStorageAuthWizard({
   );
 
   const idleCopy = useMemo(() => {
+    if (variant === "quark_qr") {
+      return {
+        title: "夸克 App 扫码登录（推荐）",
+        desc: "使用手机夸克 App 扫一扫直接登录并获取会话 Cookie，同步期间自动续期 __puus，无需手动抓包。",
+        btn: hasExistingAuth ? "重新扫码登录" : "生成登录二维码",
+      };
+    }
     if (variant === "jottacloud") {
       return {
         title: "Jottacloud 图形化授权接入",
@@ -530,6 +549,80 @@ export function NativeStorageAuthWizard({
   }, [variant, remoteLabel, remoteType, hasExistingAuth]);
 
   const busy = disabled || starting || submitting;
+
+  // 0. Active QR code login step (e.g. Quark Drive)
+  if (step && step.status === "qrcode" && step.qrCodeImage) {
+    const expired = step.qrStatus === "expired";
+    return (
+      <div
+        className="native-auth-card is-active"
+        role="region"
+        aria-label={`${remoteLabel} 扫码登录`}
+      >
+        <div className="native-auth-head">
+          <div className="native-auth-title">
+            <IconChainStroked aria-hidden="true" size="small" />
+            <strong>扫码登录 · {remoteLabel}</strong>
+            <Tag size="small" type="light" color={expired ? "orange" : "blue"}>
+              {expired ? "已过期" : "等待扫码"}
+            </Tag>
+          </div>
+          <Button
+            size="small"
+            type="tertiary"
+            theme="borderless"
+            disabled={starting}
+            onClick={() => void handleCancel()}
+          >
+            取消
+          </Button>
+        </div>
+
+        <div className="native-auth-qr">
+          <div className="native-auth-qr-box">
+            <img
+              src={step.qrCodeImage}
+              alt={`${remoteLabel} 登录二维码`}
+              className="native-auth-qr-img"
+              width={184}
+              height={184}
+            />
+          </div>
+          <div className="native-auth-qr-info">
+            <ol className="native-auth-steps">
+              <li>
+                打开手机 <strong>夸克 App</strong>，点击「扫一扫」。
+              </li>
+              <li>扫描左侧二维码并在手机上点击确认登录。</li>
+              <li>确认后将自动获取完整 Cookie 并验证账号，无需手动粘贴。</li>
+            </ol>
+            <div className="native-auth-actions">
+              <Button
+                size="small"
+                type="primary"
+                theme="light"
+                icon={<IconRefresh aria-hidden="true" />}
+                loading={starting}
+                onClick={() => void handleStart()}
+              >
+                刷新二维码
+              </Button>
+              {step.qrCodeUrl && (
+                <Button
+                  size="small"
+                  type="tertiary"
+                  disabled={starting}
+                  onClick={() => void handleCopyAuthUrl(step.qrCodeUrl!)}
+                >
+                  复制扫码链接
+                </Button>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   // 1. Active OAuth browser login step
   if (step && step.status === "oauth" && step.authUrl) {

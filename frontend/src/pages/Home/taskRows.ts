@@ -3,6 +3,7 @@ import type {
   PageData,
   RealtimeTaskItemPage,
   TaskItem,
+  TaskNumKey,
 } from "../../types";
 
 type CurrentTaskIdentity =
@@ -136,6 +137,49 @@ export function taskProgressPercent(progress: unknown): number {
   const value = Number(progress);
   if (!Number.isFinite(value)) return 0;
   return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+export function calcTaskDisplayPercent(params: {
+  doneSize?: number | null;
+  totalSize?: number | null;
+  num?: Partial<Record<TaskNumKey, number>> | null;
+  scanFinish?: boolean;
+  fallbackPercent?: number | null;
+}): number {
+  const doneSize = Math.max(0, Number(params.doneSize || 0));
+  const totalSize = Math.max(0, Number(params.totalSize || 0));
+  const num = params.num;
+  const wait = Math.max(0, Number(num?.wait || 0));
+  const running = Math.max(0, Number(num?.running || 0));
+  const success = Math.max(0, Number(num?.success || 0));
+  const fail = Math.max(0, Number(num?.fail || 0));
+  const other = Math.max(0, Number(num?.other || 0));
+  const finishedItems = success + fail + other;
+  const totalItems = finishedItems + wait + running;
+  const hasRemainingWork =
+    params.scanFinish === false || wait > 0 || running > 0;
+
+  let raw: number;
+  if (totalSize > 0) {
+    raw = (doneSize / totalSize) * 100;
+  } else if (
+    params.fallbackPercent !== undefined &&
+    params.fallbackPercent !== null &&
+    Number.isFinite(Number(params.fallbackPercent)) &&
+    Number(params.fallbackPercent) > 0
+  ) {
+    raw = Number(params.fallbackPercent);
+  } else if (totalItems > 0) {
+    raw = (finishedItems / totalItems) * 100;
+  } else {
+    return 0;
+  }
+
+  const rounded = Math.max(0, Math.min(100, Math.round(raw)));
+  if (hasRemainingWork && rounded >= 100) {
+    return 99;
+  }
+  return rounded;
 }
 
 type ProgressSnapshot = {

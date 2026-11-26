@@ -42,6 +42,20 @@ func newCopyQueueWithCapacity(capacity int) *copyQueue {
 // itself).
 const defaultCopyQueueCapacity = 10000
 
+// tryPush is used for native progress tracking. Its caller also handles the
+// completion events that free space, so it must never wait for the queue.
+func (q *copyQueue) tryPush(item *CopyItem) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.closed || !q.hasCapacityLocked() {
+		return false
+	}
+	q.items = append(q.items, item)
+	q.addWaitStatsLocked(item)
+	q.signal()
+	return true
+}
+
 func (q *copyQueue) pushWait(ctx context.Context, item *CopyItem) bool {
 	for {
 		q.mu.Lock()

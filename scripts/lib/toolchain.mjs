@@ -1,6 +1,6 @@
 // 预览与发布脚本共用的工具：命令执行、Node 运行时定位、端口占用探测。
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { connect } from "node:net";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -57,8 +57,17 @@ const satisfies = (version, minimum) => {
 const inspectNodeDir = (dir) => {
   const nodeNames = process.platform === "win32" ? ["node.exe", "node"] : ["node"];
   const npmNames = process.platform === "win32" ? ["npm.cmd", "npm"] : ["npm"];
-  const node = nodeNames.map((name) => join(dir, name)).find(existsSync);
-  const npm = npmNames.map((name) => join(dir, name)).find(existsSync);
+  const usable = (name) => {
+    if (!existsSync(name)) return false;
+    if (process.platform === "win32") return true;
+    try {
+      return (statSync(name).mode & 0o111) !== 0;
+    } catch {
+      return false;
+    }
+  };
+  const node = nodeNames.map((name) => join(dir, name)).find(usable);
+  const npm = npmNames.map((name) => join(dir, name)).find(usable);
   // 目录里必须同时有 npm，否则前置它并不能修好 npm 的运行时。
   if (!node || !npm) return null;
   const versionResult = capture(node, ["-v"]);

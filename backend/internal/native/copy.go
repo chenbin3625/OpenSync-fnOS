@@ -191,7 +191,7 @@ func endpointSupportsNativeMD5(ep Endpoint) bool {
 		return false
 	}
 	switch ep.Backend {
-	case "local", "s3", "azureblob", "googlecloudstorage", "swift", "drive", "pcloud":
+	case "local", "s3", "azureblob", "googlecloudstorage", "swift", "drive", "pcloud", "quark":
 		return true
 	case "webdav":
 		return ep.Vendor == "owncloud" || ep.Vendor == "nextcloud"
@@ -207,7 +207,7 @@ func webdavVendorHasReliableModTime(vendor string) bool {
 }
 
 func endpointHasReliableModTime(ep Endpoint) bool {
-	if ep.UnreliableModTime {
+	if ep.UnreliableModTime || ep.Backend == "quark" {
 		return false
 	}
 	if ep.Backend != "webdav" {
@@ -217,12 +217,17 @@ func endpointHasReliableModTime(ep Endpoint) bool {
 }
 
 // EffectiveCompareMode resolves the runtime comparison mode for a transfer pair.
-// Standard WebDAV endpoints (such as OpenList / AList with vendor=other) lack
-// reliable modification times and native hashes, so default mode (0) uses
-// size-only (1) to avoid downloading remote files locally for comparison.
-// Explicit content comparison (2) still performs checksum / read-back checks.
+// Backends without reliable modification times (such as Quark Cloud Drive or
+// standard OpenList/AList WebDAV) never rely on ModTime in default mode (0):
+// when BOTH endpoints expose native MD5 without downloading files (e.g.
+// local <-> quark or s3 <-> quark), default mode automatically uses Size+MD5 (2);
+// otherwise it falls back to size-only (1) to avoid pulling files locally.
+// Explicit compareMode (1 or 2) is always honored as requested.
 func EffectiveCompareMode(srcEp, destEp Endpoint, compareMode int) int {
 	if compareMode == 0 && (!endpointHasReliableModTime(srcEp) || !endpointHasReliableModTime(destEp)) {
+		if endpointSupportsNativeMD5(srcEp) && endpointSupportsNativeMD5(destEp) {
+			return 2
+		}
 		return 1
 	}
 	return compareMode
@@ -430,7 +435,8 @@ func (c Config) Copy(ctx context.Context, src, dst string, opt CopyOptions, emit
 	var scannedDirs int64
 	var pending []PendingFile
 
-	useDirectStream := opt.DirectStream && len(opt.OnlyFiles) == 0 && !opt.ResumeEnable && !deep && !opt.DryRun && !opt.CreateEmptySrcDirs
+	useQuarkFastPath := srcEp.IsLocal && !destEp.IsLocal && destEp.Backend == "quark" && !destEp.IsCrypt && !opt.DryRun && !deep
+	useDirectStream := opt.DirectStream && !useQuarkFastPath && len(opt.OnlyFiles) == 0 && !opt.ResumeEnable && !deep && !opt.DryRun && !opt.CreateEmptySrcDirs
 	if useDirectStream {
 		emit(Event{ScanDirs: 1, ScanFiles: 0, ScanDone: true})
 	} else if len(opt.OnlyFiles) > 0 {
@@ -481,6 +487,36 @@ func (c Config) Copy(ctx context.Context, src, dst string, opt CopyOptions, emit
 			return handleEmptyDirs(ctx, s, destEp, dstSub, destArg, emptyDirs, opt, emit)
 		}
 		return nil
+	}
+
+	// Fast path: local -> Quark (non-crypt) uses pure-Go single-pass MD5+SHA1
+	// rapid upload (秒传) + concurrent Alibaba OSS multipart upload with
+	// persistent part-level resume state.
+	if useQuarkFastPath && count > 0 {
+		if qCanonical, ok := c.FindKey(dstName); ok && canUseQuarkDirectUpload(c[qCanonical]) {
+			var quarkFiles []resumeFileMeta
+			for _, rel := range slices.Sorted(func(yield func(string) bool) {
+				for k := range fileMeta {
+					if !yield(k) {
+						return
+					}
+				}
+			}) {
+				quarkFiles = append(quarkFiles, fileMeta[rel])
+			}
+			if len(quarkFiles) > 0 {
+				quarkOpt := opt
+				quarkOpt.Compare = effectiveCompare
+				upErr := directUploadFilesToQuark(ctx, srcSub, qCanonical, c[qCanonical], dstSub, quarkFiles, quarkOpt, emit)
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				if upErr == nil && opt.CreateEmptySrcDirs && len(emptyDirs) > 0 {
+					return handleEmptyDirs(ctx, s, destEp, dstSub, destArg, emptyDirs, opt, emit)
+				}
+				return upErr
+			}
+		}
 	}
 
 	// Partition large files into byte/part-level resumable transfers when enabled.

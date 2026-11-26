@@ -379,7 +379,7 @@ func (c Config) resolveEndpoint(v string, allowFile bool) (Endpoint, error) {
 		IsCrypt:           isCrypt,
 		ReadOnly:          backend == "http" || isReadOnlyWrapper,
 		AllowHashCheck:    allowHashCheck,
-		UnreliableModTime: backend == "webdav" && !webdavVendorHasReliableModTime(vendor),
+		UnreliableModTime: backend == "quark" || (backend == "webdav" && !webdavVendorHasReliableModTime(vendor)),
 	}
 
 	// Never include credentials or access keys in a path identity. Aliases of
@@ -416,6 +416,7 @@ func (c Config) resolveEndpoint(v string, allowFile bool) (Endpoint, error) {
 			return Endpoint{}, err
 		}
 		var backingIDs []string
+		allReadOnly := true
 		for _, up := range ups {
 			uRef, uSub, _ := strings.Cut(up.Target, ":")
 			targetPath := "/" + uRef
@@ -424,13 +425,19 @@ func (c Config) resolveEndpoint(v string, allowFile bool) (Endpoint, error) {
 				targetPath += "/" + combinedSub
 			}
 			if ep, err := c.Resolve(targetPath); err == nil {
+				if !ep.ReadOnly && up.Suffix != ":ro" {
+					allReadOnly = false
+				}
 				backingIDs = append(backingIDs, ep.BackingIdentity)
 				backingIDs = append(backingIDs, ep.UnionBackingIDs...)
 				if !ep.HasReliableModTime() {
 					result.UnreliableModTime = true
 				}
+			} else {
+				allReadOnly = false
 			}
 		}
+		result.ReadOnly = result.ReadOnly || allReadOnly
 		result.UnionBackingIDs = backingIDs
 	}
 	if backend == "combine" {
@@ -451,6 +458,7 @@ func (c Config) resolveEndpoint(v string, allowFile bool) (Endpoint, error) {
 				targetPath += "/" + combinedSub
 			}
 			if ep, err := c.Resolve(targetPath); err == nil {
+				result.ReadOnly = result.ReadOnly || ep.ReadOnly
 				backingIDs = append(backingIDs, ep.BackingIdentity)
 				backingIDs = append(backingIDs, ep.UnionBackingIDs...)
 				if !ep.HasReliableModTime() {
@@ -530,6 +538,15 @@ func resolveBackendLocation(backend, remoteName string, options map[string]strin
 			return strings.ToLower(u)
 		}
 		return strings.ToLower(remoteName)
+	case "quark":
+		rf := strings.TrimSpace(options["root_folder_id"])
+		if rf == "" {
+			rf = "0"
+		}
+		if acct := strings.ToLower(strings.TrimSpace(options["account_name"])); acct != "" {
+			return acct + "/root/" + rf
+		}
+		return strings.ToLower(remoteName) + "/root/" + rf
 	default:
 		return strings.ToLower(remoteName)
 	}

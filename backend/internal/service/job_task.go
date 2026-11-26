@@ -16,11 +16,13 @@ import (
 
 // JobTask represents a running sync task executed by the built-in rclone engine.
 type JobTask struct {
-	TaskID       int64
-	JobClient    *JobClient
-	Job          map[string]interface{}
+	TaskID                int64
+	JobClient             *JobClient
+	Job                   map[string]interface{}
 	nativeConfig          native.Config
 	nativeStats           atomic.Pointer[nativeProgressSnapshot]
+	nativePlannedMu       sync.Mutex
+	nativePlanned         *nativePlannedProgress
 	rcController          *native.RCController
 	bwLimitUserOverridden atomic.Bool
 	CreateTime            float64
@@ -57,6 +59,10 @@ type JobTask struct {
 	OnlyFiles         []string
 	ForceOverwrite    bool
 	ChainDepth        int
+	SyncGeneration    int64
+	SyncChangedFiles  []string
+	SyncPartial       bool
+	SyncFullScan      bool
 	releaseEngineSlot func()
 	trashDirMu        sync.Mutex
 	trashRunBucket    string

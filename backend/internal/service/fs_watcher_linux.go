@@ -29,7 +29,7 @@ func watchLocalRootsPlatform(ctx context.Context, roots []watchLocalRoot, onEven
 	defer unix.Close(fd)
 
 	const mask = unix.IN_CLOSE_WRITE | unix.IN_MOVED_TO | unix.IN_MOVED_FROM |
-		unix.IN_CREATE | unix.IN_DELETE | unix.IN_ATTRIB | unix.IN_DELETE_SELF
+		unix.IN_CREATE | unix.IN_DELETE | unix.IN_ATTRIB | unix.IN_DELETE_SELF | unix.IN_MOVE_SELF
 
 	type wdInfo struct {
 		rootAbs string
@@ -47,7 +47,7 @@ func watchLocalRootsPlatform(ctx context.Context, roots []watchLocalRoot, onEven
 		}
 		wd, wErr := unix.InotifyAddWatch(fd, dirAbs, mask)
 		if wErr != nil {
-			return true
+			return false
 		}
 		wdMap[wd] = wdInfo{rootAbs: rootAbs, dirAbs: dirAbs}
 		dirToWD[dirAbs] = wd
@@ -58,7 +58,8 @@ func watchLocalRootsPlatform(ctx context.Context, roots []watchLocalRoot, onEven
 	for _, r := range roots {
 		_ = filepath.WalkDir(r.absDir, func(p string, d fs.DirEntry, walkErr error) error {
 			if walkErr != nil {
-				return nil
+				limitExceeded = true
+				return fs.SkipAll
 			}
 			if !d.IsDir() {
 				return nil
@@ -78,7 +79,7 @@ func watchLocalRootsPlatform(ctx context.Context, roots []watchLocalRoot, onEven
 		}
 	}
 	if limitExceeded {
-		log.Printf("fs_watcher: directory count exceeded inotify cap (%d), falling back to polling", maxInotifyWatchesPerJob)
+		log.Printf("fs_watcher: incomplete inotify coverage (cap %d), falling back to polling", maxInotifyWatchesPerJob)
 		watchLocalRootsPolling(ctx, roots, onEvent)
 		return
 	}
@@ -95,6 +96,8 @@ func watchLocalRootsPlatform(ctx context.Context, roots []watchLocalRoot, onEven
 			if errors.Is(pollErr, unix.EINTR) {
 				continue
 			}
+			onEvent("", true)
+			watchLocalRootsPolling(ctx, roots, onEvent)
 			return
 		}
 		if n <= 0 {
@@ -105,6 +108,8 @@ func watchLocalRootsPlatform(ctx context.Context, roots []watchLocalRoot, onEven
 			if errors.Is(readErr, unix.EAGAIN) || errors.Is(readErr, unix.EINTR) {
 				continue
 			}
+			onEvent("", true)
+			watchLocalRootsPolling(ctx, roots, onEvent)
 			return
 		}
 		if rn < unix.SizeofInotifyEvent {
@@ -135,6 +140,11 @@ func watchLocalRootsPlatform(ctx context.Context, roots []watchLocalRoot, onEven
 				delete(wdMap, int(raw.Wd))
 				continue
 			}
+			if raw.Mask&(unix.IN_DELETE_SELF|unix.IN_MOVE_SELF|unix.IN_UNMOUNT) != 0 {
+				onEvent("", true)
+				watchLocalRootsPolling(ctx, roots, onEvent)
+				return
+			}
 			if name == "" {
 				continue
 			}
@@ -149,12 +159,17 @@ func watchLocalRootsPlatform(ctx context.Context, roots []watchLocalRoot, onEven
 						return nil
 					}
 					if !addDir(info.rootAbs, p) {
+						limitExceeded = true
 						onEvent("", true)
 						return fs.SkipAll
 					}
 					return nil
 				})
 				onEvent("", true)
+				if limitExceeded {
+					watchLocalRootsPolling(ctx, roots, onEvent)
+					return
+				}
 				continue
 			}
 			if raw.Mask&(unix.IN_DELETE|unix.IN_MOVED_FROM|unix.IN_DELETE_SELF) != 0 {

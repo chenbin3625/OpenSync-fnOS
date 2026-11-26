@@ -22,6 +22,8 @@ import (
 	"sync"
 	"time"
 	"unicode"
+
+	"opensync/internal/quark"
 )
 
 const (
@@ -62,7 +64,10 @@ var (
 		"googlecloudstorage": true,
 		"iclouddrive":        true,
 		"seafile":            true,
+		"quark":              true,
 	}
+
+	quarkQRPollInterval = 2 * time.Second
 )
 
 // IsInteractiveAuthType reports whether typ supports GUI-guided authorization
@@ -98,9 +103,12 @@ type AuthQuestion struct {
 type AuthStepSnapshot struct {
 	SessionID         string            `json:"sessionId"`
 	Type              string            `json:"type"`
-	Status            string            `json:"status"` // "oauth" | "question" | "completed" | "failed" | "cancelled"
+	Status            string            `json:"status"` // "oauth" | "qrcode" | "question" | "completed" | "failed" | "cancelled"
 	AuthURL           string            `json:"authUrl,omitempty"`
 	RedirectURI       string            `json:"redirectUri,omitempty"`
+	QRCodeURL         string            `json:"qrCodeUrl,omitempty"`
+	QRCodeImage       string            `json:"qrCodeImage,omitempty"`
+	QRStatus          string            `json:"qrStatus,omitempty"` // "waiting" | "expired"
 	Question          *AuthQuestion     `json:"question,omitempty"`
 	PublicOptions     map[string]string `json:"publicOptions,omitempty"`
 	ConfiguredSecrets []string          `json:"configuredSecrets,omitempty"`
@@ -152,6 +160,9 @@ type authSession struct {
 	status            string
 	authURL           string
 	redirectURI       string
+	qrCodeURL         string
+	qrCodeImage       string
+	qrStatus          string
 	oauthState        string
 	oauthLocalBase    string
 	oauthCancel       context.CancelFunc
@@ -204,6 +215,9 @@ func (s *authSession) snapshotLocked() *AuthStepSnapshot {
 		Status:      s.status,
 		AuthURL:     s.authURL,
 		RedirectURI: s.redirectURI,
+		QRCodeURL:   s.qrCodeURL,
+		QRCodeImage: s.qrCodeImage,
+		QRStatus:    s.qrStatus,
 		Error:       s.errMsg,
 		ExpiresAt:   s.expiresAt.Unix(),
 	}
@@ -476,9 +490,6 @@ func StartAuthSession(ctx context.Context, typ string, initialParams map[string]
 	if !IsInteractiveAuthType(typ) {
 		return nil, fmt.Errorf("存储类型 %q 不需要引导授权，请直接填写表单参数", typ)
 	}
-	if err := Available(ctx); err != nil {
-		return nil, err
-	}
 
 	raw := maps.Clone(initialParams)
 	if raw == nil {
@@ -498,6 +509,14 @@ func StartAuthSession(ctx context.Context, typ string, initialParams map[string]
 		}
 	}
 	insecureSkip := clean["insecure_skip_verify"] == "true"
+
+	if typ == "quark" {
+		return startQuarkQRAuthSession(ctx, proxyURL, insecureSkip, strings.TrimSpace(clean["user_agent"]))
+	}
+
+	if err := Available(ctx); err != nil {
+		return nil, err
+	}
 	for metaKey := range openSyncMetaFields {
 		delete(clean, metaKey)
 	}
@@ -615,6 +634,138 @@ func StartAuthSession(ctx context.Context, typ string, initialParams map[string]
 		return nil, err
 	}
 	return snap, nil
+}
+
+func startQuarkQRAuthSession(ctx context.Context, proxyURL string, insecureSkip bool, userAgent string) (*AuthStepSnapshot, error) {
+	qOpts := quark.Options{
+		Provider:           quark.ProviderQuark,
+		ProxyURL:           proxyURL,
+		InsecureSkipVerify: insecureSkip,
+		UserAgent:          userAgent,
+	}
+	applyQuarkOptionsHook(&qOpts)
+
+	startCtx, cancelStart := context.WithTimeout(ctx, 15*time.Second)
+	defer cancelStart()
+	qrSess, err := quark.StartQRAuth(startCtx, qOpts)
+	if err != nil {
+		return nil, err
+	}
+
+	sessionID, err := randomAuthSessionID()
+	if err != nil {
+		_ = qrSess.Close()
+		return nil, err
+	}
+
+	pollCtx, pollCancel := context.WithTimeout(context.Background(), authOAuthWaitTimeout)
+	doneCh := make(chan struct{})
+
+	sess := &authSession{
+		id:                 sessionID,
+		typ:                "quark",
+		proxyURL:           proxyURL,
+		insecureSkipVerify: insecureSkip,
+		status:             "qrcode",
+		qrCodeURL:          qrSess.QRCodeURL(),
+		qrCodeImage:        qrSess.QRCodeImage(),
+		qrStatus:           string(quark.QRAuthWaiting),
+		oauthCancel:        pollCancel,
+		oauthDone:          doneCh,
+		expiresAt:          time.Now().Add(authOAuthWaitTimeout),
+	}
+	globalAuthManager.register(sess)
+
+	go func() {
+		defer close(doneCh)
+		defer pollCancel()
+		defer qrSess.Close()
+
+		interval := quarkQRPollInterval
+		if interval <= 0 {
+			interval = 2 * time.Second
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		consecutiveErrs := 0
+		for {
+			select {
+			case <-pollCtx.Done():
+				sess.mu.Lock()
+				if !sess.closed && sess.status == "qrcode" {
+					sess.status = "failed"
+					sess.qrStatus = string(quark.QRAuthExpired)
+					sess.errMsg = "登录二维码已过期，请刷新二维码重新扫码"
+				}
+				sess.oauthCancel = nil
+				sess.mu.Unlock()
+				return
+			case <-ticker.C:
+				reqCtx, reqCancel := context.WithTimeout(pollCtx, 15*time.Second)
+				res, pollErr := qrSess.Poll(reqCtx)
+				reqCancel()
+				if pollErr != nil {
+					if pollCtx.Err() != nil {
+						continue
+					}
+					consecutiveErrs++
+					if consecutiveErrs >= 5 {
+						sess.mu.Lock()
+						if !sess.closed && sess.status == "qrcode" {
+							sess.status = "failed"
+							sess.errMsg = pollErr.Error()
+						}
+						sess.oauthCancel = nil
+						sess.mu.Unlock()
+						return
+					}
+					continue
+				}
+				consecutiveErrs = 0
+				switch res.State {
+				case quark.QRAuthWaiting:
+					continue
+				case quark.QRAuthExpired:
+					sess.mu.Lock()
+					if !sess.closed && sess.status == "qrcode" {
+						sess.status = "failed"
+						sess.qrStatus = string(quark.QRAuthExpired)
+						sess.errMsg = "登录二维码已过期，请刷新二维码重新扫码"
+					}
+					sess.oauthCancel = nil
+					sess.mu.Unlock()
+					return
+				case quark.QRAuthConfirmed:
+					finalParams := map[string]string{
+						"type":   "quark",
+						"cookie": res.Cookie,
+					}
+					if strings.TrimSpace(res.Nickname) != "" {
+						finalParams["account_name"] = strings.TrimSpace(res.Nickname)
+					}
+					finalParams = NormalizeParams(finalParams)
+					pub, secrets := RedactParams(finalParams)
+					sess.mu.Lock()
+					if !sess.closed {
+						sess.finalParams = finalParams
+						sess.obscuredKeys = map[string]bool{}
+						sess.publicOptions = pub
+						sess.configuredSecrets = secrets
+						sess.status = "completed"
+						sess.qrStatus = ""
+						sess.errMsg = ""
+						sess.expiresAt = time.Now().Add(authSessionCompletedTTL)
+					}
+					sess.oauthCancel = nil
+					sess.mu.Unlock()
+					return
+				}
+			}
+		}
+	}()
+
+	return sess.snapshot(), nil
 }
 
 func obscureSecret(ctx context.Context, plaintext string) (string, error) {

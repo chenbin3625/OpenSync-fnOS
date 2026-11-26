@@ -51,7 +51,10 @@ import {
   taskRecordStatusNames,
   taskTypeNames,
 } from "./Home/homeUtils";
-import { taskProgressPercent } from "./Home/taskRows";
+import {
+  calcTaskDisplayPercent,
+  taskProgressPercent,
+} from "./Home/taskRows";
 import { formatTimestamp } from "../utils/date";
 import type { TaskItem, TaskRecord } from "../types";
 
@@ -122,8 +125,18 @@ export const Realtime = memo(function Realtime({
   const tabItems = items.tabTaskList;
   const tabTotal = items.tabTaskTotal;
   const total = task.doneSize + task.remainSize;
-  const percent =
-    total > 0 ? Math.min(100, (task.doneSize / total) * 100) : 0;
+  const totalItems =
+    (task.num?.wait || 0) +
+    (task.num?.running || 0) +
+    (task.num?.success || 0) +
+    (task.num?.fail || 0) +
+    (task.num?.other || 0);
+  const percent = calcTaskDisplayPercent({
+    doneSize: task.doneSize,
+    totalSize: total,
+    num: task.num,
+    scanFinish: task.scanFinish,
+  });
   const stop = () =>
     confirmStopTask(() =>
       action.run(async () => {
@@ -177,7 +190,7 @@ export const Realtime = memo(function Realtime({
     <div className="execution-view flex-column">
       <div className="execution-top">
         <div className="execution-header">
-          <h2 style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <h2 className="execution-header-title">
             <span>
               {task.paused
                 ? "传输已暂停"
@@ -193,14 +206,14 @@ export const Realtime = memo(function Realtime({
               </Tag>
             )}
           </h2>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <div className="execution-header-actions">
             <Select
               size="small"
               aria-label="运行中动态限速"
+              className="execution-bw-select"
               value={bwSelectValue}
               optionList={effectiveBwOptions}
               disabled={action.busy}
-              style={{ width: 126 }}
               onChange={(v) => updateLiveBwLimit(String(v || "off"))}
             />
             <Button
@@ -236,6 +249,9 @@ export const Realtime = memo(function Realtime({
           <span>
             已完成 {formatSize(task.doneSize)} /{" "}
             {formatSize(task.doneSize + task.remainSize)}
+            {totalItems > 0
+              ? `（${task.num?.success || 0} / ${totalItems} 项）`
+              : ""}
           </span>
           <Divider layout="vertical" margin={8} />
           <span>已运行 {formatDuration(task.duration)}</span>
@@ -846,11 +862,11 @@ export const FileTable = memo(function FileTable({
             const hasSpeed =
               typeof record.speed === "number" && record.speed > 0;
             return (
-              <div className="file-progress" style={{ flexDirection: "column", alignItems: "stretch", gap: 3 }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, fontSize: 12 }}>
+              <div className="file-progress">
+                <div className="file-progress-head">
                   <span className="file-progress-pct">{pct}%</span>
                   {(hasDone || hasSpeed) && (
-                    <span className="muted" style={{ fontSize: 11, whiteSpace: "nowrap" }}>
+                    <span className="file-progress-meta muted">
                       {hasDone ? formatSize(record.doneBytes!) : ""}
                       {hasDone && hasSpeed ? " · " : ""}
                       {hasSpeed ? `${formatSize(record.speed!)}/s` : ""}
@@ -1212,23 +1228,8 @@ function FileDetails({
           </div>
         </div>
         {resource.data?.errorGroups && resource.data.errorGroups.length > 0 && (
-          <div
-            className="error-groups-bar"
-            style={{
-              display: "flex",
-              flexWrap: "wrap",
-              alignItems: "center",
-              gap: 6,
-              padding: "8px 12px",
-              marginBottom: 8,
-              borderRadius: 8,
-              background: "var(--semi-color-fill-0)",
-              fontSize: 12,
-            }}
-          >
-            <span className="muted" style={{ fontWeight: 500 }}>
-              失败原因聚类：
-            </span>
+          <div className="error-groups-bar">
+            <span className="error-groups-label muted">失败原因聚类：</span>
             {resource.data.errorGroups.slice(0, 8).map((g) => {
               const active = keyword === g.reason && hasError === 1;
               return (

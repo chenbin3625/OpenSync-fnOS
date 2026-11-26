@@ -141,8 +141,9 @@ type fullSyncPlan struct {
 	// planErr is the first panic captured from a concurrent compareDir branch.
 	// A partially built plan is never executed: it could not have weighed its
 	// own deletions and may treat unmatched entries as extra.
-	planErr      error
-	trackRenames bool
+	planErr          error
+	trackRenames     bool
+	forceSourcePaths map[string]bool
 }
 
 // fail records the first plan-branch panic; later panics are ignored.
@@ -394,7 +395,7 @@ func (plan *fullSyncPlan) compareDir(job map[string]interface{}, srcRelDir, dstR
 				// never compared; the source file is in range now and must
 				// replace it. Leaving it in place silently blocked the update
 				// forever, with no record saying why.
-				changed := fileChangedWithMode(metadata, dstMetadata, compareMode)
+				changed := fileChangedWithMode(metadata, dstMetadata, compareMode) || plan.forceSourcePaths[path.Join(srcDir, name)]
 				if !changed && plan.deepCheckSameSize && metadata.Size == dstMetadata.Size && !(isMD5Digest(metadata.MD5) && isMD5Digest(dstMetadata.MD5)) {
 					changed = true
 				}

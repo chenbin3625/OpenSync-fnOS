@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"os"
 	"path"
@@ -981,6 +982,39 @@ func (c Config) About(ctx context.Context, targetName string, opts SessionOption
 	if !ok {
 		return nil, fmt.Errorf("存储 %q 不存在", targetName)
 	}
+	quarkRemote := canonical
+	for c[quarkRemote] != nil && c[quarkRemote]["type"] == "alias" {
+		ref, _, cutOK := strings.Cut(c[quarkRemote]["remote"], ":")
+		if !cutOK {
+			break
+		}
+		if matched, found := c.FindKey(ref); found {
+			quarkRemote = matched
+		} else {
+			break
+		}
+	}
+	if c[quarkRemote] != nil && c[quarkRemote]["type"] == "quark" {
+		orig := maps.Clone(c[quarkRemote])
+		qClient, err := newQuarkClientFromParams(orig, opts, func(newCookie string) {
+			dispatchTokenUpdate(quarkRemote, orig, "cookie", newCookie, opts)
+		})
+		if err != nil {
+			return nil, err
+		}
+		defer qClient.Close()
+		q, err := qClient.About(ctx)
+		if err != nil {
+			return nil, err
+		}
+		total, used, free := q.Total, q.Used, q.Free
+		return &AboutInfo{
+			Supported: true,
+			Total:     &total,
+			Used:      &used,
+			Free:      &free,
+		}, nil
+	}
 	s, err := c.SessionFor([]SessionSpec{{Name: canonical, Mode: diskReadOnly}}, opts)
 	if err != nil {
 		return nil, err
@@ -1433,6 +1467,7 @@ func readLinesCapped(filePath string, limit int) (total int, items []string, tru
 
 // BisyncOptions configures a bidirectional rclone bisync run.
 type BisyncOptions struct {
+	RequireExistingState bool
 	WorkDir              string
 	ForceResync          bool
 	ResyncMode           string // newer | older | path1 | path2 | larger | smaller
@@ -1489,6 +1524,9 @@ type BisyncResult struct {
 
 // Bisync executes rclone bisync between path1 and path2 using a dedicated state workdir.
 func (c Config) Bisync(ctx context.Context, path1, path2 string, opt BisyncOptions, emit func(Event)) (*BisyncResult, error) {
+	if opt.RequireExistingState && !BisyncStateAvailable(opt.WorkDir) && !opt.ForceResync && !bisyncHasPendingResyncMarker(opt.WorkDir) {
+		return nil, errors.New("双向同步基线缺失，已停止自动同步；请明确执行重建双向基线后重试")
+	}
 	if emit == nil {
 		emit = func(Event) {}
 	}
@@ -1802,6 +1840,40 @@ func bisyncHasListingState(workDir string) bool {
 	}
 	return false
 }
+
+// BisyncStateAvailable requires both sides' listings, rather than accepting a
+// lone leftover listing as a complete, safe baseline.
+func BisyncStateAvailable(workDir string) bool {
+	entries, err := os.ReadDir(workDir)
+	if err != nil {
+		return false
+	}
+	pairs := make(map[string]uint8)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := strings.ToLower(e.Name())
+		if strings.HasSuffix(name, ".path1.lst") {
+			pairs[strings.TrimSuffix(name, ".path1.lst")] |= 1
+		}
+		if strings.HasSuffix(name, ".path2.lst") {
+			pairs[strings.TrimSuffix(name, ".path2.lst")] |= 2
+		}
+	}
+	for _, sides := range pairs {
+		if sides == 3 {
+			return true
+		}
+	}
+	return false
+}
+
+func BisyncNeedsRebuild(workDir string) bool {
+	return !BisyncStateAvailable(workDir) && !bisyncHasPendingResyncMarker(workDir)
+}
+
+func BisyncResyncRequested(workDir string) bool { return bisyncHasPendingResyncMarker(workDir) }
 
 // SizeInfo reports recursive object count and byte total for a virtual path.
 type SizeInfo struct {

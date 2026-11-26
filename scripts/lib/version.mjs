@@ -32,7 +32,9 @@ export const versionProblems = (versions, tag) => {
   } else if (!SEMVER_PATTERN.test(versions["fnos/manifest"])) {
     problems.push(`fnos/manifest 版本格式无效 (${versions["fnos/manifest"]})，应为 X.Y.Z`);
   }
-  if (tag && expected && !SEMVER_PATTERN.test(expected)) {
+  if (tag && !expected) {
+    problems.push(`Git tag (${tag}) 版本格式无效，应为 vX.Y.Z 或 X.Y.Z`);
+  } else if (tag && !SEMVER_PATTERN.test(expected)) {
     problems.push(`Git tag (${tag}) 版本格式无效，应为 vX.Y.Z 或 X.Y.Z`);
   }
   for (const [source, value] of Object.entries(versions)) {

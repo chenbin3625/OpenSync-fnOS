@@ -8,6 +8,46 @@ import (
 	"testing"
 )
 
+func TestCompositeEndpointPreservesReadOnlyCapabilities(t *testing.T) {
+	cfg := Config{
+		"http":       {"type": "http", "url": "https://files.example.test"},
+		"dav":        {"type": "webdav", "url": "https://dav.example.test"},
+		"archive":    {"type": "archive", "remote": "dav:backup.zip"},
+		"combo":      {"type": "combine", "upstreams": "public=http: archives=archive: private=dav:data"},
+		"nested":     {"type": "alias", "remote": "combo:public"},
+		"roUnion":    {"type": "union", "upstreams": "http: dav:data:ro"},
+		"mixedUnion": {"type": "union", "upstreams": "http: dav:data"},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		path     string
+		readOnly bool
+	}{
+		{"/combo/public", true},
+		{"/combo/public/sub", true},
+		{"/combo/archives/sub", true},
+		{"/combo/private", false},
+		{"/combo", true},
+		{"/nested/sub", true},
+		{"/roUnion/sub", true},
+		{"/mixedUnion/sub", false},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			ep, err := cfg.Resolve(tc.path)
+			if err != nil || ep.ReadOnly != tc.readOnly {
+				t.Fatalf("ReadOnly=%v, want %v, err=%v", ep.ReadOnly, tc.readOnly, err)
+			}
+			if tc.readOnly {
+				if _, _, err := cfg.Pair("/dav/source", tc.path); err == nil {
+					t.Fatal("read-only target accepted")
+				}
+			}
+		})
+	}
+}
+
 func TestWrapperOverLocalAndCombineEndpointConflicts(t *testing.T) {
 	tmp := t.TempDir()
 	rootDir := filepath.Join(tmp, "nas")

@@ -62,6 +62,7 @@ import type {
 type RemoteFormType =
   | "s3"
   | "webdav"
+  | "quark"
   | "sftp"
   | "smb"
   | "ftp"
@@ -116,6 +117,7 @@ type PanelView = NativeEditorMode;
 export const remoteTypeLabels: Record<string, string> = {
   s3: "S3 兼容存储",
   webdav: "WebDAV",
+  quark: "夸克网盘",
   sftp: "SFTP",
   smb: "SMB",
   ftp: "FTP / FTPS",
@@ -148,7 +150,7 @@ export const remoteTypeLabels: Record<string, string> = {
   fichier: "1Fichier",
   gofile: "Gofile",
   pixeldrain: "Pixeldrain",
-  crypt: "Crypt 加密",
+  crypt: "加密存储",
   chunker: "Chunker 分片",
   compress: "Compress 压缩",
   hasher: "Hasher 哈希缓存",
@@ -159,9 +161,77 @@ export const remoteTypeLabels: Record<string, string> = {
   local: "本地目录别名",
 };
 
+export interface RemoteTypeGroup {
+  key: string;
+  label: string;
+  types: readonly RemoteFormType[];
+}
+
+// Only genuine, writable remote storage backends are exposed when adding a new
+// remote storage. Virtual/meta wrappers, read-only sources, and temporary file
+// hosts remain in `formTypes` so existing or imported rclone.conf entries stay
+// fully editable and compatible.
+export const remoteTypeGroups: readonly RemoteTypeGroup[] = [
+  {
+    key: "protocols",
+    label: "常用协议与自建存储",
+    types: ["s3", "webdav", "sftp", "smb", "ftp", "seafile"],
+  },
+  {
+    key: "cloud_drives",
+    label: "公有网盘",
+    types: [
+      "quark",
+      "onedrive",
+      "drive",
+      "dropbox",
+      "iclouddrive",
+      "huaweidrive",
+      "box",
+      "pcloud",
+      "mega",
+      "pikpak",
+      "protondrive",
+      "yandex",
+      "koofr",
+      "jottacloud",
+      "filen",
+      "hidrive",
+      "mailru",
+    ],
+  },
+  {
+    key: "object_storage",
+    label: "对象存储与云存储",
+    types: [
+      "b2",
+      "azureblob",
+      "azurefiles",
+      "googlecloudstorage",
+      "swift",
+      "oracleobjectstorage",
+      "qingstor",
+      "storj",
+    ],
+  },
+];
+
+export const creatableRemoteTypes: RemoteFormType[] = remoteTypeGroups.flatMap(
+  (group) => [...group.types],
+);
+
+const creatableRemoteTypeSet = new Set<RemoteFormType>(creatableRemoteTypes);
+
+const remoteTypeGroupLabelByType = new Map<RemoteFormType, string>(
+  remoteTypeGroups.flatMap((group) =>
+    group.types.map((t) => [t, group.label] as const),
+  ),
+);
+
 const formTypes: RemoteFormType[] = [
   "s3",
   "webdav",
+  "quark",
   "sftp",
   "smb",
   "ftp",
@@ -228,6 +298,7 @@ const wrapperTypes = new Set<RemoteFormType>([
 const proxyCapableTypes = new Set<RemoteFormType>([
   "s3",
   "webdav",
+  "quark",
   "http",
   "b2",
   "onedrive",
@@ -262,6 +333,7 @@ const proxyCapableTypes = new Set<RemoteFormType>([
 const tlsSkipCapableTypes = new Set<RemoteFormType>([
   "s3",
   "webdav",
+  "quark",
   "ftp",
   "http",
   "b2",
@@ -322,6 +394,7 @@ const allSecretKeys = new Set([
   "client_salted_key_pass",
   "trust_token",
   "cookies",
+  "cookie",
   "master_keys",
   "private_key",
   "file_password",
@@ -619,6 +692,24 @@ export function validateRemoteDraft(
     }
   } else if (draft.type === "webdav") {
     checkHttpUrl(draft.options.url, "url", " WebDAV 地址");
+  } else if (draft.type === "quark") {
+    if (!hasSecret("cookie")) {
+      errs.cookie = "请使用上方夸克 App 扫码登录，或粘贴夸克网盘 Cookie";
+    }
+    const conc = (draft.options.upload_concurrency || "").trim();
+    if (conc) {
+      const n = Number(conc);
+      if (!/^\d+$/.test(conc) || !Number.isInteger(n) || n < 1 || n > 8) {
+        errs.upload_concurrency = "分片上传并发数需为 1–8 的整数";
+      }
+    }
+    const tps = (draft.options.tps_limit || "").trim();
+    if (tps) {
+      const v = Number(tps);
+      if (!Number.isFinite(v) || v <= 0 || v > 20) {
+        errs.tps_limit = "接口限流速率需为大于 0 且不超过 20 的数值";
+      }
+    }
   } else if (draft.type === "http") {
     checkHttpUrl(draft.options.url, "url", " HTTP 源地址");
   } else if (draft.type === "sftp") {
@@ -945,6 +1036,8 @@ export function NativeStorageEditor({
   const [browseData, setBrowseData] = useState<NativeBrowseResult | null>(null);
   const [browsing, setBrowsing] = useState(false);
   const [browseError, setBrowseError] = useState("");
+  const browseRequestRef = useRef(0);
+  const browseAbortRef = useRef<AbortController | null>(null);
   const [restoreEntry, setRestoreEntry] = useState<NativeDirEntry | null>(null);
   const [restoreLocalRoot, setRestoreLocalRoot] = useState("");
   const [restoreSubPath, setRestoreSubPath] = useState("");
@@ -992,6 +1085,8 @@ export function NativeStorageEditor({
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const [transfers, setTransfers] = useState<NativeTransferTask[]>([]);
   const [transfersOpen, setTransfersOpen] = useState(false);
+  const transferRequestRef = useRef(0);
+  const transferAbortRef = useRef<AbortController | null>(null);
   const [trashOpen, setTrashOpen] = useState(false);
   const [trashLoading, setTrashLoading] = useState(false);
   const [trashItems, setTrashItems] = useState<NativeTrashItem[]>([]);
@@ -1205,6 +1300,10 @@ export function NativeStorageEditor({
   };
 
   const loadBrowse = useCallback(async (targetPath: string) => {
+    const requestId = ++browseRequestRef.current;
+    browseAbortRef.current?.abort();
+    const controller = new AbortController();
+    browseAbortRef.current = controller;
     setBrowsing(true);
     setBrowseError("");
     setBrowsePath(targetPath);
@@ -1212,14 +1311,16 @@ export function NativeStorageEditor({
     setSizeInfo(null);
     setLinkResult(null);
     try {
-      const res = await api.browseNativeStorage(targetPath);
+      const res = await api.browseNativeStorage(targetPath, controller.signal);
+      if (controller.signal.aborted || requestId !== browseRequestRef.current) return;
       setBrowseData(res);
       setBrowsePath(res.path || targetPath);
     } catch (err) {
+      if (controller.signal.aborted || requestId !== browseRequestRef.current) return;
       setBrowseData(null);
       setBrowseError(err instanceof Error ? err.message : "读取目录失败");
     } finally {
-      setBrowsing(false);
+      if (requestId === browseRequestRef.current) setBrowsing(false);
     }
   }, []);
 
@@ -1366,12 +1467,26 @@ export function NativeStorageEditor({
   };
 
   const refreshTransfers = useCallback(async () => {
+    const requestId = ++transferRequestRef.current;
+    transferAbortRef.current?.abort();
+    const controller = new AbortController();
     try {
-      const list = await api.listNativeTransfers();
+      const list = await api.listNativeTransfers(controller.signal);
+      if (controller.signal.aborted || requestId !== transferRequestRef.current) return;
       setTransfers(list || []);
     } catch {
       /* transient transfer list refresh error ignored */
     }
+    if (transferAbortRef.current === controller) transferAbortRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      browseRequestRef.current += 1;
+      browseAbortRef.current?.abort();
+      transferRequestRef.current += 1;
+      transferAbortRef.current?.abort();
+    };
   }, []);
 
   useEffect(() => {
@@ -1380,8 +1495,18 @@ export function NativeStorageEditor({
     const timer = window.setInterval(() => {
       void refreshTransfers();
     }, 2000);
-    return () => window.clearInterval(timer);
+    return () => {
+      window.clearInterval(timer);
+      transferRequestRef.current += 1;
+      transferAbortRef.current?.abort();
+    };
   }, [view, refreshTransfers]);
+
+  useEffect(() => {
+    if (view === "browse") return;
+    browseRequestRef.current += 1;
+    browseAbortRef.current?.abort();
+  }, [view]);
 
   useEffect(() => {
     setSelectedBrowsePaths([]);
@@ -1778,8 +1903,15 @@ export function NativeStorageEditor({
 
   const handleDeleteRemote = (item: NativeRemoteItem) => {
     if (item.usedByCrypts.length > 0) {
+      const refs = item.usedByCrypts;
+      const allCrypt = refs.every(
+        (name) =>
+          (state?.remotes || []).find((r) => r.name === name)?.type === "crypt",
+      );
       Toast.warning(
-        `存储「${item.name}」正被复合存储（${item.usedByCrypts.join("、")}）引用，请先删除或修改对应存储`,
+        allCrypt
+          ? `存储「${item.name}」正被加密存储（${refs.join("、")}）引用，请先删除或修改对应加密存储`
+          : `存储「${item.name}」正被其他存储（${refs.join("、")}）引用，请先删除或修改对应存储`,
       );
       return;
     }
@@ -1888,6 +2020,7 @@ export function NativeStorageEditor({
     setFieldErrors((prev) => {
       const next = { ...prev };
       delete next.token;
+      delete next.cookie;
       delete next.service_account_credentials;
       delete next.pass;
       return next;
@@ -2104,9 +2237,55 @@ export function NativeStorageEditor({
     importPreview?.items.some((i) => i.status === "conflict" && i.canReplace),
   );
 
+  const builtInDriverRemotes = useMemo(() => {
+    const remotes = state?.remotes || [];
+    const byLower = new Map<string, NativeRemoteItem>();
+    for (const r of remotes) byLower.set(r.name.toLowerCase(), r);
+    const memo = new Map<string, boolean>();
+    const check = (name: string, stack = new Set<string>()): boolean => {
+      const lower = name.toLowerCase();
+      if (memo.has(lower)) return memo.get(lower)!;
+      if (stack.has(lower)) return false;
+      const cur = byLower.get(lower);
+      if (!cur) return false;
+      if (cur.type === "quark") {
+        memo.set(lower, true);
+        return true;
+      }
+      stack.add(lower);
+      let hit = false;
+      if (wrapperTypes.has(cur.type as RemoteFormType)) {
+        const ref = (cur.options?.remote || "").split(":")[0]?.trim();
+        if (ref && ref !== "本地") hit = check(ref, stack);
+      } else if (cur.type === "union" || cur.type === "combine") {
+        const raw = cur.options?.upstreams || "";
+        for (const tok of raw.split(/\s+/).filter(Boolean)) {
+          const clean = cur.type === "combine" ? tok.slice(tok.indexOf("=") + 1) : tok;
+          const ref = clean.replace(/^"|"$/g, "").split(":")[0]?.trim();
+          if (ref && ref !== "本地" && check(ref, stack)) {
+            hit = true;
+            break;
+          }
+        }
+      }
+      stack.delete(lower);
+      memo.set(lower, hit);
+      return hit;
+    };
+    return remotes.filter((r) => check(r.name));
+  }, [state]);
+
+  const builtInDriverNames = useMemo(
+    () => new Set(builtInDriverRemotes.map((r) => r.name)),
+    [builtInDriverRemotes],
+  );
+
   const exportableRemotes = useMemo(
-    () => (state?.remotes || []).filter((r) => r.type !== "local"),
-    [state],
+    () =>
+      (state?.remotes || []).filter(
+        (r) => r.type !== "local" && !builtInDriverNames.has(r.name),
+      ),
+    [state, builtInDriverNames],
   );
 
   const renderAboutSummary = (info?: NativeAboutInfo) => {
@@ -2625,7 +2804,7 @@ export function NativeStorageEditor({
                 <div className="sync-method-banner">
                   <IconInfoCircle aria-hidden="true" size="small" />
                   <span>
-                    尚未配置远端存储。支持 20+ 种协议与网盘（S3、WebDAV、SFTP、SMB、FTP、B2、OneDrive、Google Drive、Dropbox、Azure、GCS、Crypt 加密、Chunker、Union 等），可直接添加或导入 rclone.conf。
+                    尚未配置远端存储。支持 30 种常见协议、公有网盘与对象存储（S3、WebDAV、SFTP、SMB、FTP、OneDrive、Google Drive、Dropbox、Backblaze B2、Azure、GCS 等），可直接添加或导入 rclone.conf。
                   </span>
                 </div>
               ) : (
@@ -2635,9 +2814,18 @@ export function NativeStorageEditor({
                     const aboutRes = aboutResults[item.name];
                     const isLocked =
                       item.usedByJobs.length > 0 || item.usedByCrypts.length > 0;
+                    const allRefsAreCrypt =
+                      item.usedByCrypts.length > 0 &&
+                      item.usedByCrypts.every(
+                        (name) =>
+                          state.remotes.find((r) => r.name === name)?.type ===
+                          "crypt",
+                      );
                     const lockHint =
                       item.usedByCrypts.length > 0
-                        ? `正被复合存储 ${item.usedByCrypts.join("、")} 引用`
+                        ? allRefsAreCrypt
+                          ? `正被加密存储 ${item.usedByCrypts.join("、")} 引用`
+                          : `正被其他存储 ${item.usedByCrypts.join("、")} 引用`
                         : item.usedByJobs.length > 0
                           ? `正被任务 ${item.usedByJobs.join("、")} 使用`
                           : "";
@@ -2646,7 +2834,11 @@ export function NativeStorageEditor({
                         <div className="native-remote-info">
                           <span className="native-remote-head">
                             <strong>{item.name}</strong>
-                            <Tag size="small" type="light" color="blue">
+                            <Tag
+                              size="small"
+                              type="light"
+                              color={item.type === "crypt" ? "violet" : "blue"}
+                            >
                               {remoteTypeLabels[item.type] || item.type}
                             </Tag>
                             {item.usedByJobs.length > 0 && (
@@ -2656,7 +2848,7 @@ export function NativeStorageEditor({
                             )}
                             {item.usedByCrypts.length > 0 && (
                               <Tag size="small" type="light" color="violet">
-                                被复合存储引用
+                                {allRefsAreCrypt ? "已关联加密存储" : "被其他存储引用"}
                               </Tag>
                             )}
                           </span>
@@ -2799,6 +2991,10 @@ export function NativeStorageEditor({
                       },
                     },
                     {
+                      label: "夸克网盘",
+                      apply: () => handleFormTypeChange("quark"),
+                    },
+                    {
                       label: "阿里云 OSS (S3)",
                       apply: () => {
                         setDraft((prev) => ({
@@ -2862,13 +3058,49 @@ export function NativeStorageEditor({
                   aria-label="存储类型"
                   value={draft.type}
                   disabled={draft.editing}
-                  filter
-                  optionList={formTypes.map((t) => ({
-                    value: t,
-                    label: remoteTypeLabels[t],
-                  }))}
+                  filter={(input, option) => {
+                    const query = input.trim().toLowerCase();
+                    if (!query) return true;
+                    const label = String(option.label ?? "").toLowerCase();
+                    const val = String(option.value ?? "").toLowerCase();
+                    const groupLabel = (
+                      remoteTypeGroupLabelByType.get(
+                        option.value as RemoteFormType,
+                      ) || ""
+                    ).toLowerCase();
+                    return (
+                      label.includes(query) ||
+                      val.includes(query) ||
+                      groupLabel.includes(query)
+                    );
+                  }}
                   onChange={(v) => handleFormTypeChange(v as RemoteFormType)}
-                />
+                >
+                  {draft.editing && !creatableRemoteTypeSet.has(draft.type) && (
+                    <Select.OptGroup key="existing" label="已配置类型">
+                      <Select.Option
+                        key={draft.type}
+                        value={draft.type}
+                        label={remoteTypeLabels[draft.type] || draft.type}
+                      >
+                        {remoteTypeLabels[draft.type] || draft.type}
+                      </Select.Option>
+                    </Select.OptGroup>
+                  )}
+                  {remoteTypeGroups.map((group) => (
+                    <Select.OptGroup key={group.key} label={group.label}>
+                      {group.types.map((t) => (
+                        <Select.Option
+                          key={t}
+                          value={t}
+                          label={remoteTypeLabels[t]}
+                        >
+                          {remoteTypeLabels[t]}
+                        </Select.Option>
+                      ))}
+                    </Select.OptGroup>
+                  ))}
+                </Select>
               </Field>
               <Field
                 label="存储名称"
@@ -3079,6 +3311,83 @@ export function NativeStorageEditor({
                     清除已保存的密码（改用无密码访问）
                   </Checkbox>
                 )}
+              </>
+            )}
+
+            {draft.type === "quark" && (
+              <>
+                <NativeStorageAuthWizard
+                  remoteType="quark"
+                  remoteLabel={remoteTypeLabels.quark}
+                  remoteName={draft.name.trim()}
+                  editing={draft.editing}
+                  draftOptions={buildRemoteOptions(draft)}
+                  clearSecrets={draft.clearSecrets}
+                  hasExistingAuth={
+                    Boolean(draft.options.cookie) ||
+                    (draft.editing &&
+                      draft.configuredSecrets.includes("cookie") &&
+                      !draft.clearSecrets.includes("cookie"))
+                  }
+                  completedSession={
+                    draft.authSessionId
+                      ? {
+                          sessionId: draft.authSessionId,
+                          publicOptions: draft.authPublicOptions || {},
+                          configuredSecrets: draft.authConfiguredSecrets || [],
+                        }
+                      : null
+                  }
+                  variant="quark_qr"
+                  disabled={savingForm || testingForm}
+                  onCompleted={handleAuthCompleted}
+                />
+
+                <Field
+                  label="手动粘贴 Cookie（与上方扫码登录二选一）"
+                  error={fieldErrors.cookie}
+                  hint={
+                    draft.editing &&
+                    draft.configuredSecrets.includes("cookie") &&
+                    !draft.clearSecrets.includes("cookie")
+                      ? "已保存夸克网盘 Cookie；留空保留当前登录态，重新扫码或粘贴新 Cookie 将覆盖（同步期间自动续期 __puus）"
+                      : "也可在浏览器登录 pan.quark.cn 后从开发者工具网络请求头复制 Cookie 粘贴到此处，同步期间自动续期 __puus"
+                  }
+                >
+                  <TextArea
+                    aria-label="夸克网盘 Cookie"
+                    autosize={{ minRows: 2, maxRows: 4 }}
+                    value={draft.options.cookie || ""}
+                    onChange={(v) => updateDraftOption("cookie", v)}
+                    placeholder={secretPlaceholder(
+                      "cookie",
+                      "例如 __pus=...; __puus=...（扫码登录后无需手动填写）",
+                    )}
+                  />
+                </Field>
+
+                <div className="form-grid form-grid--two">
+                  <Field
+                    label="根目录 ID（root_folder_id，可选）"
+                    hint="留空默认为 0（网盘根目录）；可填入子目录 FID 仅同步该目录"
+                  >
+                    <Input
+                      value={draft.options.root_folder_id || ""}
+                      onChange={(v) => updateDraftOption("root_folder_id", v)}
+                      placeholder="默认 0（网盘根目录）"
+                    />
+                  </Field>
+                  <Field
+                    label="账号昵称 / 备注（可选）"
+                    hint="扫码登录后自动填入，仅用于列表展示"
+                  >
+                    <Input
+                      value={draft.options.account_name || ""}
+                      onChange={(v) => updateDraftOption("account_name", v)}
+                      placeholder="例如 个人夸克网盘"
+                    />
+                  </Field>
+                </div>
               </>
             )}
 
@@ -5234,6 +5543,60 @@ export function NativeStorageEditor({
                     </>
                   )}
 
+                  {draft.type === "quark" && (
+                    <>
+                      <div className="form-grid form-grid--two">
+                        <Field
+                          label="分片上传并发数（upload_concurrency）"
+                          error={fieldErrors.upload_concurrency}
+                          hint="单文件分片直传并发数，支持 1–8，默认 4"
+                        >
+                          <Input
+                            inputMode="numeric"
+                            value={draft.options.upload_concurrency || ""}
+                            onChange={(v) =>
+                              updateDraftOption("upload_concurrency", v)
+                            }
+                            placeholder="默认 4（1–8）"
+                          />
+                        </Field>
+                        <Field
+                          label="接口限流速率（tps_limit）"
+                          error={fieldErrors.tps_limit}
+                          hint="夸克元数据接口每秒最大请求数，默认 3.5（建议不超过 5）"
+                        >
+                          <Input
+                            value={draft.options.tps_limit || ""}
+                            onChange={(v) => updateDraftOption("tps_limit", v)}
+                            placeholder="默认 3.5"
+                          />
+                        </Field>
+                      </div>
+                      <div className="form-grid form-grid--two">
+                        <Field
+                          label="分片大小上限（part_size，可选）"
+                          hint="留空自动使用夸克服务端建议的分片大小"
+                        >
+                          <Input
+                            value={draft.options.part_size || ""}
+                            onChange={(v) => updateDraftOption("part_size", v)}
+                            placeholder="例如 10M"
+                          />
+                        </Field>
+                        <Field
+                          label="自定义 User-Agent（可选）"
+                          hint="留空使用内置夸克桌面客户端 UA"
+                        >
+                          <Input
+                            value={draft.options.user_agent || ""}
+                            onChange={(v) => updateDraftOption("user_agent", v)}
+                            placeholder="留空默认"
+                          />
+                        </Field>
+                      </div>
+                    </>
+                  )}
+
                   {draft.type === "sftp" && (
                     <>
                       <div className="form-grid form-grid--three">
@@ -6006,6 +6369,14 @@ export function NativeStorageEditor({
             </Field>
 
             <div className="native-import-section">
+              {builtInDriverRemotes.length > 0 && (
+                <div className="native-test-banner" role="note">
+                  <IconInfoCircle aria-hidden="true" size="small" />
+                  <span>
+                    已自动排除 OpenSync 内置驱动存储（{builtInDriverRemotes.map((r) => r.name).join("、")}），外部官方 rclone 暂不支持此类配置。
+                  </span>
+                </div>
+              )}
               <div className="native-section-head">
                 <div className="native-section-title">
                   <h3>选择要导出的存储</h3>
@@ -6071,20 +6442,47 @@ export function NativeStorageEditor({
         ) : view === "browse" ? (
           <div className="editor-form">
             <div className="native-browse-bar">
-              <Button
-                size="small"
-                type="tertiary"
-                icon={<IconArrowUp aria-hidden="true" />}
-                disabled={!browseParentPath || browsing || restoring}
-                onClick={() => browseParentPath && void loadBrowse(browseParentPath)}
-              >
-                上一级
-              </Button>
-              <span className="native-browse-path mono" title={browsePath}>
-                {browsePath}
-              </span>
+              <div className="native-browse-header">
+                <Button
+                  size="small"
+                  type="tertiary"
+                  icon={<IconArrowUp aria-hidden="true" />}
+                  disabled={!browseParentPath || browsing || restoring}
+                  onClick={() => browseParentPath && void loadBrowse(browseParentPath)}
+                >
+                  上一级
+                </Button>
+                <span className="native-browse-path mono" title={browsePath}>
+                  {browsePath}
+                </span>
+                <div className="native-browse-header-actions">
+                  <Button
+                    size="small"
+                    type={activeTransferCount > 0 ? "primary" : "tertiary"}
+                    theme={activeTransferCount > 0 ? "light" : undefined}
+                    onClick={() => setTransfersOpen((v) => !v)}
+                  >
+                    传输队列
+                    {activeTransferCount > 0
+                      ? ` (${activeTransferCount})`
+                      : transfers.length > 0
+                        ? ` (${transfers.length})`
+                        : ""}
+                  </Button>
+                  <Button
+                    size="small"
+                    type="tertiary"
+                    icon={<IconRefresh aria-hidden="true" />}
+                    loading={browsing}
+                    disabled={restoring}
+                    onClick={() => void loadBrowse(browsePath)}
+                  >
+                    刷新
+                  </Button>
+                </div>
+              </div>
               {browsePath !== "/" && (
-                <>
+                <div className="native-browse-toolbar">
                   <Button
                     size="small"
                     type="tertiary"
@@ -6100,7 +6498,8 @@ export function NativeStorageEditor({
                   <input
                     ref={uploadInputRef}
                     type="file"
-                    style={{ display: "none" }}
+                    className="sr-only"
+                    tabIndex={-1}
                     onChange={(e) =>
                       void handleUploadFileChange(e.target.files?.[0])
                     }
@@ -6159,33 +6558,15 @@ export function NativeStorageEditor({
                   >
                     去重
                   </Button>
-                </>
+                </div>
               )}
-              <Button
-                size="small"
-                type={activeTransferCount > 0 ? "primary" : "tertiary"}
-                theme={activeTransferCount > 0 ? "light" : undefined}
-                onClick={() => setTransfersOpen((v) => !v)}
-              >
-                传输队列{activeTransferCount > 0 ? ` (${activeTransferCount})` : transfers.length > 0 ? ` (${transfers.length})` : ""}
-              </Button>
-              <Button
-                size="small"
-                type="tertiary"
-                icon={<IconRefresh aria-hidden="true" />}
-                loading={browsing}
-                disabled={restoring}
-                onClick={() => void loadBrowse(browsePath)}
-              >
-                刷新
-              </Button>
             </div>
 
             {browsePath !== "/" && !trashOpen && (
-              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+              <div className="native-browse-filter-bar">
                 <Input
                   size="small"
-                  style={{ flex: "1 1 180px" }}
+                  className="native-browse-search"
                   placeholder="搜索当前目录文件/文件夹…"
                   value={browseSearch}
                   showClear
@@ -6193,7 +6574,7 @@ export function NativeStorageEditor({
                 />
                 <Select
                   size="small"
-                  style={{ width: 150 }}
+                  className="native-browse-sort"
                   value={browseSort}
                   optionList={[
                     { label: "名称 A→Z", value: "name_asc" },
@@ -6208,7 +6589,7 @@ export function NativeStorageEditor({
                   }
                 />
                 {selectedBrowsePaths.length > 0 && (
-                  <>
+                  <div className="native-browse-batch-actions">
                     <Button
                       size="small"
                       type="primary"
@@ -6241,7 +6622,7 @@ export function NativeStorageEditor({
                     >
                       批量删除 ({selectedBrowsePaths.length})
                     </Button>
-                  </>
+                  </div>
                 )}
               </div>
             )}
@@ -6278,28 +6659,18 @@ export function NativeStorageEditor({
                   </div>
                 </div>
                 {transfers.length === 0 ? (
-                  <div className="muted" style={{ fontSize: 12 }}>
+                  <div className="muted native-transfer-empty">
                     暂无后台传输任务；恢复、URL 离线下载或批量操作均会自动在此展示实时进度。
                   </div>
                 ) : (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 200, overflowY: "auto" }}>
+                  <div className="native-transfer-list">
                     {transfers.map((t) => (
-                      <div
-                        key={t.id}
-                        style={{
-                          padding: "8px 10px",
-                          borderRadius: 6,
-                          background: "var(--semi-color-fill-0)",
-                          display: "flex",
-                          flexDirection: "column",
-                          gap: 4,
-                        }}
-                      >
-                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                          <span style={{ fontSize: 12, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      <div key={t.id} className="native-transfer-item">
+                        <div className="native-transfer-head">
+                          <span className="native-transfer-name" title={t.label}>
                             {t.label}
                           </span>
-                          <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                          <div className="native-transfer-status">
                             <Tag
                               size="small"
                               type="light"
@@ -6347,7 +6718,7 @@ export function NativeStorageEditor({
                             stroke="var(--semi-color-primary)"
                           />
                         )}
-                        <div className="muted" style={{ fontSize: 11, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        <div className="muted native-transfer-meta">
                           {t.totalBytes > 0 && (
                             <span>
                               {formatSize(t.doneBytes)} / {formatSize(t.totalBytes)}
@@ -6893,7 +7264,7 @@ export function NativeStorageEditor({
             <Field
               label="新存储名称"
               required
-              hint="重命名将自动级联更新所有复合存储（Crypt/Chunker/Union 等）及关联同步任务的源/目标路径"
+              hint="重命名将自动级联更新关联的加密存储及同步任务的源/目标路径"
             >
               <Input
                 value={renameNewName}

@@ -54,6 +54,7 @@ export function serializeParams(params: Record<string, unknown>) {
 }
 
 export const requestTimeoutMs = 90000;
+export const uploadTimeoutMs = 30 * 60 * 1000;
 export const timeoutMessage = "请求超时，请重试";
 export const sessionExpiredEvent = "opensync:session-expired";
 export const sessionExpiredMessage = "登录已失效，请从飞牛桌面重新打开应用";
@@ -515,25 +516,40 @@ export const api = {
     signal?: AbortSignal,
   ): Promise<{ fileName: string; size: number }> => {
     const query = serializeParams({ dir, fileName: file.name });
-    const response = await fetch(`${apiBase}/native/storage/upload?${query}`, {
-      method: "POST",
-      credentials: "same-origin",
-      signal,
-      headers: { "Content-Type": "application/octet-stream" },
-      body: file,
-    });
-    if (response.status === 401) {
-      window.dispatchEvent(new CustomEvent(sessionExpiredEvent));
-      throw new Error(sessionExpiredMessage);
+    const timeout = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      timeout.abort();
+    }, uploadTimeoutMs);
+    const combined = combineSignals([signal, timeout.signal]);
+    try {
+      const response = await fetch(`${apiBase}/native/storage/upload?${query}`, {
+        method: "POST",
+        credentials: "same-origin",
+        signal: combined.signal,
+        headers: { "Content-Type": "application/octet-stream" },
+        body: file,
+      });
+      if (response.status === 401) {
+        window.dispatchEvent(new CustomEvent(sessionExpiredEvent));
+        throw new Error(sessionExpiredMessage);
+      }
+      const result = (await response.json().catch(() => null)) as ApiResponse<{
+        fileName: string;
+        size: number;
+      }> | null;
+      if (!result || !response.ok || result.code !== 200) {
+        throw new Error(result?.msg || `上传失败（HTTP ${response.status}）`);
+      }
+      return result.data;
+    } catch (err) {
+      if (timedOut && !signal?.aborted) throw new Error(timeoutMessage);
+      throw err;
+    } finally {
+      clearTimeout(timer);
+      combined.cleanup();
     }
-    const result = (await response.json().catch(() => null)) as ApiResponse<{
-      fileName: string;
-      size: number;
-    }> | null;
-    if (!result || !response.ok || result.code !== 200) {
-      throw new Error(result?.msg || `上传失败（HTTP ${response.status}）`);
-    }
-    return result.data;
   },
   previewNativeImport: (data: { config: string; configPassword?: string }) =>
     request<NativeImportPreview>("/native/storage/import/preview", {

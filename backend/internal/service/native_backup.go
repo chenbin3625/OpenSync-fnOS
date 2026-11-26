@@ -26,7 +26,7 @@ func init() {
 
 // persistRefreshedNativeTokens atomically writes rclone-refreshed OAuth/session
 // tokens back into encrypted SQLite storage without logging secret values.
-func persistRefreshedNativeTokens(updates map[string]map[string]string) {
+func persistRefreshedNativeTokens(updates map[string]native.TokenUpdate) {
 	if len(updates) == 0 {
 		return
 	}
@@ -38,14 +38,16 @@ func persistRefreshedNativeTokens(updates map[string]map[string]string) {
 		return
 	}
 	var updatedNames []string
-	for name, fields := range updates {
+	for name, update := range updates {
 		canonical, ok := c.FindKey(name)
-		if !ok || c[canonical] == nil {
+		// Compare the entire original remote, including account, backend and
+		// token fields. Apply a multi-field refresh atomically or skip it all.
+		if !ok || update.Original == nil || !maps.Equal(c[canonical], update.Original) {
 			continue
 		}
 		changed := false
-		for k, v := range fields {
-			if k != "token" && k != "client_access_token" && k != "client_refresh_token" {
+		for k, v := range update.Fields {
+			if k != "token" && k != "client_access_token" && k != "client_refresh_token" && k != "cookie" {
 				continue
 			}
 			if v != "" && c[canonical][k] != v {
@@ -161,12 +163,12 @@ type NativeStorageState struct {
 	LocalMaxConcurrentJobs int                    `json:"localMaxConcurrentJobs"`
 	LocalActiveJobs        int                    `json:"localActiveJobs"`
 	LocalQueuedJobs        int                    `json:"localQueuedJobs"`
-	RcloneAvailable   bool                   `json:"rcloneAvailable"`
-	RcloneVersion     string                 `json:"rcloneVersion,omitempty"`
-	RcloneError       string                 `json:"rcloneError,omitempty"`
-	SupportedTypes    []string               `json:"supportedTypes"`
-	LocalRoots        []native.LocalRootInfo `json:"localRoots"`
-	Remotes           []NativeRemoteItem     `json:"remotes"`
+	RcloneAvailable        bool                   `json:"rcloneAvailable"`
+	RcloneVersion          string                 `json:"rcloneVersion,omitempty"`
+	RcloneError            string                 `json:"rcloneError,omitempty"`
+	SupportedTypes         []string               `json:"supportedTypes"`
+	LocalRoots             []native.LocalRootInfo `json:"localRoots"`
+	Remotes                []NativeRemoteItem     `json:"remotes"`
 }
 
 type nativeTransferringItem struct {
@@ -1012,12 +1014,8 @@ func validateExistingNativeJobs(alistID int64, c native.Config, changedRemotes [
 		}
 	}
 	for _, job := range affectedJobs {
-		for _, src := range parsePathList(job["srcPath"]) {
-			for _, dst := range parsePathList(job["dstPath"]) {
-				if _, _, err := c.Pair(src, jobDstForSrc(job, src, dst)); err != nil {
-					return publicError(fmt.Sprintf("替换配置后任务「%s」路径失效：%s", jobDisplayName(job), err.Error()))
-				}
-			}
+		if err := validateNativeSyncPaths(c, job); err != nil {
+			return publicError(fmt.Sprintf("替换配置后任务「%s」路径失效：%s", jobDisplayName(job), err.Error()))
 		}
 		for _, v := range writablePathsForJob(job) {
 			ep, err := c.Resolve(v)
@@ -1157,6 +1155,15 @@ func validateNativeJob(job, row map[string]interface{}) error {
 	if c == nil || e != nil {
 		return e
 	}
+	if err := validateNativeSyncPaths(c, job); err != nil {
+		return err
+	}
+	return validateNativeDestinations(c, job)
+}
+
+// Compare all resolved sources with all final destinations, including paths
+// reached through different remote names for the same physical storage.
+func validateNativeSyncPaths(c native.Config, job map[string]interface{}) error {
 	method := util.ToInt(job["method"])
 	if method < 0 || method > 3 {
 		return publicError("不支持的同步方式")
@@ -1166,21 +1173,35 @@ func validateNativeJob(job, row map[string]interface{}) error {
 	if method == 3 && (len(srcPaths) != 1 || len(dstPaths) != 1) {
 		return publicError("双向同步仅支持单个源目录与单个目标目录")
 	}
+	sources := make([]native.Endpoint, 0, len(srcPaths))
 	for _, src := range srcPaths {
-		for _, dst := range dstPaths {
-			epSrc, epDst, err := c.Pair(src, jobDstForSrc(job, src, dst))
-			if err != nil {
-				return publicError(err.Error())
-			}
-			if method == 3 && (epSrc.ReadOnly || epDst.ReadOnly) {
-				return publicError("双向同步的两端均需支持读写，不能使用只读存储（如 HTTP / Archive）")
-			}
-			if method == 2 && epSrc.ReadOnly {
-				return publicError("移动模式需要删除源文件，不能使用只读存储（如 HTTP / Archive）作为源")
+		ep, err := c.Resolve(src)
+		if err != nil {
+			return publicError(err.Error())
+		}
+		if method == 3 && ep.ReadOnly {
+			return publicError("双向同步的两端均需支持读写，不能使用只读存储（如 HTTP / Archive）")
+		}
+		if method == 2 && ep.ReadOnly {
+			return publicError("移动模式需要删除源文件，不能使用只读存储（如 HTTP / Archive）作为源")
+		}
+		sources = append(sources, ep)
+	}
+	for _, dst := range resolvedDstPathsForJob(job) {
+		ep, err := c.Resolve(dst)
+		if err != nil {
+			return publicError(err.Error())
+		}
+		if ep.ReadOnly {
+			return publicError("只读存储（如 HTTP / Archive）不能作为同步目标")
+		}
+		for _, src := range sources {
+			if native.EndpointsConflict(src, ep) {
+				return publicError("同步源与目标实际目录重叠")
 			}
 		}
 	}
-	return validateNativeDestinations(c, job)
+	return nil
 }
 
 // validateNativeDestinations runs under alistRefMu with the ordinary job path checks.
@@ -1200,6 +1221,20 @@ func validateNativeDestinations(c native.Config, job map[string]interface{}) err
 		}
 		for _, v := range writablePathsForJob(other) {
 			if ep, e := c.Resolve(v); e == nil {
+				targets = append(targets, target{v, ep})
+			}
+		}
+	}
+	for _, task := range activeJobTasks() {
+		if util.ToInt64(task.Job["id"]) == util.ToInt64(job["id"]) || util.ToInt64(task.Job["alistId"]) != util.ToInt64(job["alistId"]) {
+			continue
+		}
+		cfg := task.nativeConfig
+		if cfg == nil {
+			cfg = c
+		}
+		for _, v := range writablePathsForJob(task.Job) {
+			if ep, err := cfg.Resolve(v); err == nil {
 				targets = append(targets, target{v, ep})
 			}
 		}
@@ -1361,10 +1396,14 @@ type nativePairsOutcome struct {
 }
 
 func runNativePairs(ctx context.Context, c native.Config, job map[string]interface{}, dry bool, selected *nativeRetryFilter, onEvent func(string, string, native.Event)) nativePairsOutcome {
-	return runNativePairsWithTask(ctx, nil, c, job, dry, selected, onEvent)
+	return runNativePairsWithCallbacks(ctx, nil, c, job, dry, selected, onEvent, nil)
 }
 
 func runNativePairsWithTask(ctx context.Context, jt *JobTask, c native.Config, job map[string]interface{}, dry bool, selected *nativeRetryFilter, onEvent func(string, string, native.Event)) nativePairsOutcome {
+	return runNativePairsWithCallbacks(ctx, jt, c, job, dry, selected, onEvent, nil)
+}
+
+func runNativePairsWithCallbacks(ctx context.Context, jt *JobTask, c native.Config, job map[string]interface{}, dry bool, selected *nativeRetryFilter, onEvent func(string, string, native.Event), onPairDone func(string, string, error)) nativePairsOutcome {
 	backupDir := ""
 	if !dry {
 		backupDir = nativeTrashBackupSubdir(jt, job)
@@ -1372,7 +1411,7 @@ func runNativePairsWithTask(ctx context.Context, jt *JobTask, c native.Config, j
 	baseOpts := buildNativeCopyOptions(job, dry, backupDir)
 	if jt != nil {
 		baseOpts.Controller = jt.controller()
-		if jt.ForceOverwrite {
+		if jt.ForceOverwrite || jt.SyncPartial {
 			baseOpts.ForceOverwrite = true
 		}
 		if len(jt.OnlyFiles) > 0 {
@@ -1404,7 +1443,28 @@ func runNativePairsWithTask(ctx context.Context, jt *JobTask, c native.Config, j
 		eventMu sync.Mutex
 	)
 
-	runOne := func(pt pairTarget) error {
+	runOne := func(pt pairTarget) (runErr error) {
+		pairFileFailed := false
+		defer func() {
+			if onPairDone != nil {
+				eventMu.Lock()
+				onPairDone(pt.src, pt.dst, runErr)
+				eventMu.Unlock()
+			}
+			if runErr != nil && ctx.Err() == nil {
+				if jt != nil && jt.SyncPartial && !jt.SyncFullScan && util.ToInt(job["method"]) == 1 {
+					if err := mapper.EnqueueSyncChanges(util.ToInt64(job["id"]), nil, true); err != nil {
+						runErr = errors.Join(runErr, err)
+					}
+				}
+				mu.Lock()
+				errs = append(errs, runErr)
+				if !pairFileFailed {
+					out.untrackedPairFailure = true
+				}
+				mu.Unlock()
+			}
+		}()
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -1412,6 +1472,65 @@ func runNativePairsWithTask(ctx context.Context, jt *JobTask, c native.Config, j
 			return err
 		}
 		pairOptions := baseOpts
+		if jt != nil && jt.SyncPartial {
+			pairOptions.OnlyFiles = nil
+			prefix := strings.TrimRight(pt.src, "/") + "/"
+			for _, changed := range jt.SyncChangedFiles {
+				if strings.HasPrefix(changed, prefix) {
+					rel := strings.TrimPrefix(changed, prefix)
+					if rel != "" {
+						pairOptions.OnlyFiles = append(pairOptions.OnlyFiles, native.PendingFile{Path: rel})
+					}
+				}
+			}
+			if len(pairOptions.OnlyFiles) == 0 {
+				return nil
+			}
+		}
+		if jt != nil && jt.SyncPartial && len(pairOptions.OnlyFiles) > 0 {
+			// Refresh only affected parent directories. This keeps selective runs
+			// subject to the same filters and source metadata checks as a full scan.
+			dirs := make(map[string]map[string]native.DirEntry)
+			var files []native.PendingFile
+			for _, pf := range pairOptions.OnlyFiles {
+				dir := path.Dir(pf.Path)
+				entries, loaded := dirs[dir]
+				if !loaded {
+					listed, _, err := c.ListDirEntries(ctx, path.Join(pt.src, dir), native.SessionOptions{ProxyURL: globalNativeProxyURL()})
+					if err != nil {
+						return err
+					}
+					entries = make(map[string]native.DirEntry, len(listed))
+					for _, e := range listed {
+						entries[e.Name] = e
+					}
+					dirs[dir] = entries
+				}
+				e, exists := entries[path.Base(pf.Path)]
+				if !exists || e.IsDir {
+					if !jt.SyncFullScan {
+						if err := mapper.EnqueueSyncChanges(util.ToInt64(job["id"]), nil, true); err != nil {
+							return err
+						}
+					}
+					continue
+				}
+				if exclude := buildJobExcludeMatcher(job); exclude != nil && exclude.matchesListed(pf.Path, false) {
+					continue
+				}
+				if include := buildJobIncludeMatcher(job); include != nil && !include.matchesListed(pf.Path) {
+					continue
+				}
+				if !jobAllowsFileMeta(job, FileMetadata{Size: e.Size, Modified: e.ModTime}, time.Now()) {
+					continue
+				}
+				files = append(files, native.PendingFile{Path: pf.Path, Size: e.Size})
+			}
+			if len(files) == 0 {
+				return nil
+			}
+			pairOptions.OnlyFiles = files
+		}
 		if selected != nil {
 			selected.markPairMatch(pt.src, pt.dst)
 			pairOptions.Include = func(p string, st os.FileInfo) bool {
@@ -1424,7 +1543,6 @@ func runNativePairsWithTask(ctx context.Context, jt *JobTask, c native.Config, j
 				return selected.matchesAndConsume(path.Join(pt.src, p), path.Join(pt.dst, p))
 			}
 		}
-		pairFileFailed := false
 		e := c.Copy(ctx, pt.src, pt.dst, pairOptions, func(v native.Event) {
 			if v.Failed {
 				pairFileFailed = true
@@ -1440,12 +1558,6 @@ func runNativePairsWithTask(ctx context.Context, jt *JobTask, c native.Config, j
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			mu.Lock()
-			errs = append(errs, e)
-			if !pairFileFailed {
-				out.untrackedPairFailure = true
-			}
-			mu.Unlock()
 			return e
 		}
 		return nil
@@ -1541,8 +1653,17 @@ func (jt *JobTask) runNative() {
 			jt.finishFailedTask("原生备份执行异常")
 		}
 	}()
-	if err := validateNativeDestinations(jt.nativeConfig, jt.Job); err != nil {
-		jt.finishFailedTask(err.Error())
+	// A newly published task must not validate between another request's
+	// conflict check and row insertion. Otherwise both could claim the same
+	// old target while an edit and task startup are crossing.
+	alistRefMu.Lock()
+	validationErr := validateNativeSyncPaths(jt.nativeConfig, jt.Job)
+	if validationErr == nil {
+		validationErr = validateNativeDestinations(jt.nativeConfig, jt.Job)
+	}
+	alistRefMu.Unlock()
+	if validationErr != nil {
+		jt.finishFailedTask(validationErr.Error())
 		return
 	}
 	if err := checkDestinationFreeSpace(jt.context(), jt.nativeConfig, jt.Job); err != nil {
@@ -1571,6 +1692,22 @@ func (jt *JobTask) runNative() {
 	}
 
 	method := util.ToInt(jt.Job["method"])
+	if jt.SyncFullScan && method == 0 && len(jt.SyncChangedFiles) > 0 {
+		jt.SyncPartial = true
+		err := jt.copyContinuousChanges()
+		jt.SyncPartial = false
+		if err != nil {
+			if jt.context().Err() == nil {
+				jt.setFatalError(err.Error())
+			}
+			jt.ScanFinish.Store(true)
+			jt.finishSubmittedTask(jt.persistRemainingTaskItems())
+			return
+		}
+	}
+	if jt.SyncPartial {
+		method = 0
+	}
 	// Targeted repair runs (from consistency check one-click repair) always copy
 	// only the differing/missing files without running destructive mirror/move phases.
 	if len(jt.OnlyFiles) > 0 && jt.ForceOverwrite {
@@ -1636,15 +1773,20 @@ func (jt *JobTask) runNative() {
 		transfers    int64
 		totalTrans   int64
 		speed        float64
+		scanDone     bool
+		done         bool
+		completed    map[string]struct{}
 		transferring []native.TransferItem
 		src, dst     string
 	}
+	totalPairs := len(parsePathList(jt.Job["srcPath"])) * len(parsePathList(jt.Job["dstPath"]))
+	extraFlags, _, _ := parseNativeExtraFlags(jt.Job["extraFlags"])
 	pairState := map[nativeItemKey]*pairProgress{}
 	getPair := func(src, dst string) *pairProgress {
 		k := nativeItemKey{src, dst}
 		ps := pairState[k]
 		if ps == nil {
-			ps = &pairProgress{src: src, dst: dst}
+			ps = &pairProgress{src: src, dst: dst, completed: make(map[string]struct{})}
 			pairState[k] = ps
 		}
 		return ps
@@ -1653,6 +1795,7 @@ func (jt *JobTask) runNative() {
 		var agg native.Stats
 		var totalDirs, totalFiles, totalChecked int64
 		var transferring []nativeTransferringItem
+		finishedCheckPairs := 0
 		for _, ps := range pairState {
 			totalDirs += ps.scannedDirs
 			totalFiles += ps.scannedFiles
@@ -1670,6 +1813,14 @@ func (jt *JobTask) runNative() {
 					dstBase:      ps.dst,
 				})
 			}
+			pairCheckDone := ps.done ||
+				(ps.scanDone && !extraFlags.DirectStream && (ps.scannedFiles == 0 || ps.checkedFiles >= ps.scannedFiles || ps.totalTrans >= ps.scannedFiles))
+			if pairCheckDone {
+				finishedCheckPairs++
+			}
+		}
+		if totalPairs > 0 && finishedCheckPairs >= totalPairs {
+			jt.ScanFinish.Store(true)
 		}
 		jt.ScanTotalDirs.Store(totalDirs)
 		jt.ScanDoneDirs.Store(totalDirs)
@@ -1684,7 +1835,7 @@ func (jt *JobTask) runNative() {
 		jt.notifyProgressChange()
 	}
 
-	outcome := runNativePairsWithTask(jt.context(), jt, jt.nativeConfig, jt.Job, false, selected, func(src, dst string, v native.Event) {
+	outcome := runNativePairsWithCallbacks(jt.context(), jt, jt.nativeConfig, jt.Job, false, selected, func(src, dst string, v native.Event) {
 		ps := getPair(src, dst)
 		if len(v.PendingFiles) > 0 {
 			jt.populateNativeWaiting(src, dst, v.PendingFiles)
@@ -1695,6 +1846,9 @@ func (jt *JobTask) runNative() {
 			}
 			if v.ScanFiles > ps.scannedFiles {
 				ps.scannedFiles = v.ScanFiles
+			}
+			if v.ScanDone {
+				ps.scanDone = true
 			}
 			publishAggregateStats(src, dst)
 			return
@@ -1715,7 +1869,7 @@ func (jt *JobTask) runNative() {
 			ps.transfers = v.Stats.Transfers
 			ps.totalTrans = v.Stats.TotalTransfers
 			ps.speed = v.Stats.Speed
-			ps.transferring = v.Stats.Transferring
+			ps.transferring = filterCompletedTransferring(v.Stats.Transferring, ps.completed)
 			publishAggregateStats(src, dst)
 			return
 		}
@@ -1723,9 +1877,18 @@ func (jt *JobTask) runNative() {
 			return
 		}
 		jt.FirstSync.CompareAndSwap(0, time.Now().Unix())
-		srcDir := path.Join(src, path.Dir(v.File))
-		dstDir := path.Join(dst, path.Dir(v.File))
-		base := path.Base(v.File)
+		rel := path.Clean(v.File)
+		ps.completed[rel] = struct{}{}
+		if len(ps.transferring) > 0 {
+			filtered := filterCompletedTransferring(ps.transferring, ps.completed)
+			if len(filtered) != len(ps.transferring) {
+				ps.transferring = filtered
+				publishAggregateStats(src, dst)
+			}
+		}
+		srcDir := path.Join(src, path.Dir(rel))
+		dstDir := path.Join(dst, path.Dir(rel))
+		base := path.Base(rel)
 		jt.Waiting.removeMatching(srcDir, dstDir, base)
 		status := taskStatusSuccess
 		var itemErr *string
@@ -1738,6 +1901,24 @@ func (jt *JobTask) runNative() {
 			status = taskStatusFailed
 		}
 		jt.appendFinish(NewCopyJobTaskItem(jt.TaskID, srcDir, dstDir, base, v.Size, "", status, itemErr, taskItemFile, taskItemTypeCopy, time.Now().Unix()))
+	}, func(src, dst string, pairErr error) {
+		ps := getPair(src, dst)
+		ps.done = true
+		ps.scanDone = true
+		ps.speed = 0
+		ps.transferring = nil
+		if ps.scannedFiles > ps.checkedFiles {
+			ps.checkedFiles = ps.scannedFiles
+		}
+		if pairErr == nil {
+			if ps.totalBytes > ps.bytes {
+				ps.bytes = ps.totalBytes
+			}
+			if ps.totalTrans > ps.transfers {
+				ps.transfers = ps.totalTrans
+			}
+		}
+		publishAggregateStats(src, dst)
 	})
 	if jt.context().Err() == nil {
 		cleanupNativeExpiredTrash(jt.context(), jt.nativeConfig, jt.TaskID, jt.Job)
@@ -1762,6 +1943,40 @@ func (jt *JobTask) runNative() {
 		return
 	}
 	jt.finishSubmittedTask(persist)
+}
+
+// copyContinuousChanges preserves known source edits even when a directory
+// event or audit also requires a complete mirror plan. In particular, size-only
+// WebDAV comparison must not discard a file known to have changed locally.
+func (jt *JobTask) copyContinuousChanges() error {
+	out := runNativePairsWithTask(jt.context(), jt, jt.nativeConfig, jt.Job, false, nil, func(src, dst string, v native.Event) {
+		if v.Stats != nil {
+			stats := *v.Stats
+			jt.nativeStats.Store(&nativeProgressSnapshot{src: src, dst: dst, stats: &stats})
+			jt.notifyProgressChange()
+			return
+		}
+		if v.File == "" || v.Skipped {
+			return
+		}
+		jt.FirstSync.CompareAndSwap(0, time.Now().Unix())
+		status := taskStatusSuccess
+		var itemErr *string
+		if v.Failed {
+			status = taskStatusFailed
+			message := v.Error
+			itemErr = &message
+		}
+		jt.appendFinish(NewCopyJobTaskItem(jt.TaskID, path.Join(src, path.Dir(v.File)), path.Join(dst, path.Dir(v.File)), path.Base(v.File), v.Size, "", status, itemErr, taskItemFile, taskItemTypeCopy, time.Now().Unix()))
+	})
+	jt.nativeStats.Store(nil)
+	if out.err != nil {
+		return out.err
+	}
+	if out.hadFileFailure {
+		return errors.New("部分已变更文件传输失败，已保留待同步记录")
+	}
+	return nil
 }
 
 func decorateNative(row map[string]interface{}) {

@@ -19,12 +19,19 @@ import (
 
 var (
 	tokenUpdateHookMu sync.RWMutex
-	tokenUpdateHook   func(updates map[string]map[string]string)
+	tokenUpdateHook   func(updates map[string]TokenUpdate)
 )
+
+// TokenUpdate carries the saved configuration a refreshed token came from so
+// persistence can reject stale sessions after edits or a newer refresh.
+type TokenUpdate struct {
+	Original map[string]string
+	Fields   map[string]string
+}
 
 // RegisterTokenUpdateHook registers a process-wide callback invoked whenever
 // rclone refreshes an OAuth/session token in a writable session config file.
-func RegisterTokenUpdateHook(fn func(updates map[string]map[string]string)) {
+func RegisterTokenUpdateHook(fn func(updates map[string]TokenUpdate)) {
 	tokenUpdateHookMu.Lock()
 	tokenUpdateHook = fn
 	tokenUpdateHookMu.Unlock()
@@ -36,6 +43,8 @@ func tokenRefreshableFields(typ string) []string {
 		return []string{"token"}
 	case "protondrive":
 		return []string{"client_access_token", "client_refresh_token"}
+	case "quark":
+		return []string{"cookie"}
 	default:
 		return nil
 	}
@@ -202,7 +211,15 @@ func classifyRcloneError(backendType, stderr string) error {
 		strings.Contains(low, "unauthorized") || strings.Contains(low, "logon_failure") ||
 		strings.Contains(low, "bad password") || strings.Contains(low, "authentication failed") ||
 		strings.Contains(low, "invalid_grant") || strings.Contains(low, "token expired"):
+		if backendType == "quark" {
+			return errors.New("夸克网盘登录状态已失效（Cookie 过期），请在存储管理中重新扫码或更新 Cookie")
+		}
 		return errors.New("认证失败，请检查账号、密码、OAuth Token 或访问密钥是否正确")
+	case strings.Contains(low, "429") || strings.Contains(low, "too many requests"):
+		if backendType == "quark" {
+			return errors.New("夸克网盘接口触发限流（429），请降低并发数或稍后重试")
+		}
+		return errors.New("远端存储接口触发限流（429），请降低并发或稍后重试")
 	case strings.Contains(low, "accessdenied") || strings.Contains(low, "403") || strings.Contains(low, "forbidden") || strings.Contains(low, "permission denied"):
 		if backendType == "s3" {
 			return errors.New("无列桶权限（403）；如为单桶密钥，可先勾选“不检查存储桶”保存并在任务中输入 /存储名/存储桶/目录")
@@ -235,7 +252,7 @@ type SessionOptions struct {
 	InsecureSkipVerify    bool
 	PreserveCryptChecksum bool
 	DisableTokenPersist   bool
-	OnTokenUpdate         func(updates map[string]map[string]string)
+	OnTokenUpdate         func(updates map[string]TokenUpdate)
 }
 
 type Session struct {
@@ -243,11 +260,55 @@ type Session struct {
 	closers             []func()
 	configFile          *os.File
 	configPath          string
-	initialTokens       map[string]map[string]string
-	onTokenUpdate       func(updates map[string]map[string]string)
+	initialRemotes      Config
+	inProcessMu         sync.Mutex
+	inProcessUpdates    map[string]map[string]string
+	onTokenUpdate       func(updates map[string]TokenUpdate)
 	disableTokenPersist bool
 	proxyURL            string
 	insecureSkipVerify  bool
+}
+
+func (s *Session) recordInProcessTokenUpdate(remoteName, field, value string) {
+	value = strings.TrimSpace(value)
+	if remoteName == "" || field == "" || value == "" {
+		return
+	}
+	s.inProcessMu.Lock()
+	if s.inProcessUpdates == nil {
+		s.inProcessUpdates = map[string]map[string]string{}
+	}
+	if s.inProcessUpdates[remoteName] == nil {
+		s.inProcessUpdates[remoteName] = map[string]string{}
+	}
+	s.inProcessUpdates[remoteName][field] = value
+	s.inProcessMu.Unlock()
+}
+
+func dispatchTokenUpdate(remoteName string, original map[string]string, field, value string, opts SessionOptions) {
+	value = strings.TrimSpace(value)
+	if remoteName == "" || original == nil || field == "" || value == "" || value == strings.TrimSpace(original[field]) {
+		return
+	}
+	updates := map[string]TokenUpdate{
+		remoteName: {
+			Original: maps.Clone(original),
+			Fields:   map[string]string{field: value},
+		},
+	}
+	if opts.OnTokenUpdate != nil {
+		opts.OnTokenUpdate(updates)
+		return
+	}
+	if opts.DisableTokenPersist {
+		return
+	}
+	tokenUpdateHookMu.RLock()
+	hook := tokenUpdateHook
+	tokenUpdateHookMu.RUnlock()
+	if hook != nil {
+		hook(updates)
+	}
 }
 
 func (s *Session) Close() {
@@ -263,37 +324,63 @@ func (s *Session) Close() {
 }
 
 func (s *Session) flushRefreshedTokens() {
-	if s.configPath == "" || len(s.initialTokens) == 0 {
+	if len(s.initialRemotes) == 0 {
 		return
 	}
-	data, err := os.ReadFile(s.configPath)
-	if err != nil || len(data) == 0 {
-		return
+	updates := map[string]TokenUpdate{}
+	if s.configPath != "" {
+		if data, err := os.ReadFile(s.configPath); err == nil && len(data) > 0 {
+			if parsed, err := parseRawINI(string(data)); err == nil {
+				for remoteName, original := range s.initialRemotes {
+					sec, ok := parsed[remoteName]
+					if !ok {
+						continue
+					}
+					refFields := map[string]string{}
+					for _, field := range tokenRefreshableFields(original["type"]) {
+						cur := strings.TrimSpace(sec[field])
+						if cur == "" || cur == strings.TrimSpace(original[field]) {
+							continue
+						}
+						if field == "token" && !validateOAuthTokenJSON(cur) {
+							continue
+						}
+						refFields[field] = cur
+					}
+					if len(refFields) > 0 {
+						updates[remoteName] = TokenUpdate{Original: maps.Clone(original), Fields: refFields}
+					}
+				}
+			}
+		}
 	}
-	parsed, err := parseRawINI(string(data))
-	if err != nil {
-		return
-	}
-	updates := map[string]map[string]string{}
-	for remoteName, tracked := range s.initialTokens {
-		sec, ok := parsed[remoteName]
+
+	s.inProcessMu.Lock()
+	inProc := s.inProcessUpdates
+	s.inProcessUpdates = nil
+	s.inProcessMu.Unlock()
+	for remoteName, fieldMap := range inProc {
+		original, ok := s.initialRemotes[remoteName]
 		if !ok {
 			continue
 		}
-		for field, orig := range tracked {
-			cur := strings.TrimSpace(sec[field])
-			if cur == "" || cur == orig {
+		allowed := tokenRefreshableFields(original["type"])
+		refFields := map[string]string{}
+		if prev, exists := updates[remoteName]; exists {
+			refFields = prev.Fields
+		}
+		for _, field := range allowed {
+			cur := strings.TrimSpace(fieldMap[field])
+			if cur == "" || cur == strings.TrimSpace(original[field]) {
 				continue
 			}
-			if field == "token" && !validateOAuthTokenJSON(cur) {
-				continue
-			}
-			if updates[remoteName] == nil {
-				updates[remoteName] = map[string]string{}
-			}
-			updates[remoteName][field] = cur
+			refFields[field] = cur
+		}
+		if len(refFields) > 0 {
+			updates[remoteName] = TokenUpdate{Original: maps.Clone(original), Fields: refFields}
 		}
 	}
+
 	if len(updates) == 0 {
 		return
 	}
@@ -484,25 +571,31 @@ func (c Config) SessionFor(specs []SessionSpec, opts SessionOptions) (*Session, 
 
 	// Keep a private 0600 config file inside the 0700 temp dir when any remote
 	// uses OAuth/session tokens that rclone refreshes by rewriting its config.
-	initialTokens := map[string]map[string]string{}
+	// Built-in in-process drivers (like quark) record refreshes in memory and
+	// never require writing secrets to disk.
+	initialRemotes := Config{}
+	needsWritableConfig := false
 	for _, n := range queue {
 		p := c[n]
 		if p == nil {
 			continue
 		}
 		if tracked := tokenRefreshableFields(p["type"]); len(tracked) > 0 {
-			m := map[string]string{}
 			for _, field := range tracked {
 				if val := strings.TrimSpace(p[field]); val != "" {
-					m[field] = val
+					initialRemotes[n] = maps.Clone(p)
+					if p["type"] != "quark" {
+						needsWritableConfig = true
+					}
+					break
 				}
-			}
-			if len(m) > 0 {
-				initialTokens[n] = m
 			}
 		}
 	}
-	if len(initialTokens) > 0 {
+	if len(initialRemotes) > 0 {
+		s.initialRemotes = initialRemotes
+	}
+	if needsWritableConfig {
 		configPath := filepath.Join(dir, "rclone.conf")
 		f, err := os.OpenFile(configPath, os.O_CREATE|os.O_RDWR|os.O_EXCL, 0600)
 		if err != nil {
@@ -510,7 +603,6 @@ func (c Config) SessionFor(specs []SessionSpec, opts SessionOptions) (*Session, 
 		}
 		s.configFile = f
 		s.configPath = configPath
-		s.initialTokens = initialTokens
 	} else {
 		f, err := os.CreateTemp(dir, "config-")
 		if err != nil {
@@ -534,6 +626,24 @@ func (c Config) SessionFor(specs []SessionSpec, opts SessionOptions) (*Session, 
 		}
 		curMode := modeByRemote[n]
 		curChecksum := checksumByRemote[n]
+
+		if p["type"] == "quark" {
+			remoteName := n
+			qClient, err := newQuarkClientFromParams(p, opts, func(newCookie string) {
+				s.recordInProcessTokenUpdate(remoteName, "cookie", newCookie)
+			})
+			if err != nil {
+				return nil, err
+			}
+			// Always expose Quark's zero-cost native MD5 via <oc:checksums>
+			// because /file/sort returns md5 in the listing response itself.
+			davURL, err := s.mountBridgeDAV(&quarkBridgeFS{client: qClient}, curMode, true)
+			if err != nil {
+				return nil, err
+			}
+			fmt.Fprintf(&conf, "[%s]\ntype = webdav\nvendor = owncloud\nnextcloud_chunk_size = 0\nurl = %s\n\n", n, davURL)
+			continue
+		}
 		isComposite := IsWrapperType(p["type"]) || p["type"] == "union" || p["type"] == "combine"
 		if !isComposite {
 			leafNetRemotes = append(leafNetRemotes, n)

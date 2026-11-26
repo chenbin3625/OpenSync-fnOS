@@ -1,11 +1,11 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"context"
 	"opensync/internal/config"
 	"opensync/internal/mapper"
 	"opensync/internal/model"
@@ -120,6 +120,17 @@ func TestUpdateSystemConfigValidatesMergedSettings(t *testing.T) {
 	}
 	if got := config.GetSystemSettings().ScanConcurrency; got != 16 {
 		t.Fatalf("scanConcurrency = %d after rejected update, want 16", got)
+	}
+}
+
+func TestUpdateSystemConfigRejectsLocaleWithoutApplyingOtherFields(t *testing.T) {
+	useSystemConfig(t, t.TempDir())
+	w := putSystemConfig(t, `{"copyConcurrency":8,"locale":"xx"}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for an invalid locale", w.Code)
+	}
+	if got := config.GetSystemSettings().CopyConcurrency; got != 5 {
+		t.Fatalf("copyConcurrency = %d after rejected locale, want 5", got)
 	}
 }
 

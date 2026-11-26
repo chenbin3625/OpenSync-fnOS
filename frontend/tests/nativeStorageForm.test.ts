@@ -15,8 +15,11 @@ vi.mock("../src/components/common", () => ({}));
 import {
   buildRemoteOptions,
   changeStorageAuthMode,
+  creatableRemoteTypes,
   draftFromRemote,
   emptyDraft,
+  remoteTypeGroups,
+  remoteTypeLabels,
   validateRemoteDraft,
 } from "../src/components/NativeStorageEditor";
 
@@ -144,5 +147,153 @@ describe("原生存储认证表单", () => {
     );
     expect(src).not.toContain("rclone authorize");
     expect(src).not.toContain("rclone config");
+  });
+
+  it("添加远程存储仅按分组暴露真实可写存储，不包含虚拟/只读/临时分享类型", () => {
+    expect(remoteTypeGroups.map((g) => g.key)).toEqual([
+      "protocols",
+      "cloud_drives",
+      "object_storage",
+    ]);
+    expect(new Set(creatableRemoteTypes).size).toBe(creatableRemoteTypes.length);
+    expect(creatableRemoteTypes).toHaveLength(31);
+    expect(creatableRemoteTypes).toContain("quark");
+    expect(remoteTypeLabels.quark).toBe("夸克网盘");
+    for (const typ of creatableRemoteTypes) {
+      expect(remoteTypeLabels[typ]).toBeTruthy();
+    }
+
+    // Virtual wrappers, composites, read-only sources, and temporary file hosts
+    // must stay out of the "添加远程存储" selector.
+    for (const excluded of [
+      "crypt",
+      "chunker",
+      "compress",
+      "hasher",
+      "alias",
+      "archive",
+      "union",
+      "combine",
+      "http",
+      "fichier",
+      "gofile",
+      "pixeldrain",
+    ]) {
+      expect(creatableRemoteTypes).not.toContain(excluded);
+    }
+  });
+
+  it("编辑已有或导入的加密/复合/只读配置时保持原类型兼容", () => {
+    const legacyRemotes: Array<{
+      name: string;
+      type: string;
+      options: Record<string, string>;
+      configuredSecrets: string[];
+    }> = [
+      {
+        name: "vault",
+        type: "crypt",
+        options: { remote: "archive:bucket/enc" },
+        configuredSecrets: ["password"],
+      },
+      {
+        name: "merged",
+        type: "union",
+        options: { upstreams: "s3a:bucket s3b:bucket" },
+        configuredSecrets: [],
+      },
+      {
+        name: "mirror",
+        type: "http",
+        options: { url: "https://mirrors.example.com/files/" },
+        configuredSecrets: [],
+      },
+      {
+        name: "chunked",
+        type: "chunker",
+        options: { remote: "archive:bucket" },
+        configuredSecrets: [],
+      },
+    ];
+    for (const item of legacyRemotes) {
+      const draft = draftFromRemote({
+        ...item,
+        summary: "",
+        usedByJobs: [],
+        usedByCrypts: [],
+      });
+      expect(draft.editing).toBe(true);
+      expect(draft.type).toBe(item.type);
+      expect(validateRemoteDraft(draft, true)).toEqual({});
+      expect(buildRemoteOptions(draft).type).toBe(item.type);
+    }
+  });
+
+  it("夸克网盘支持扫码登录会话、手动 Cookie 与编辑保留原 Cookie，并校验并发和限流参数", () => {
+    const emptyQuark = { ...emptyDraft("quark"), name: "我的夸克" };
+    expect(validateRemoteDraft(emptyQuark, true)).toHaveProperty("cookie");
+
+    // Completed QR login session passes without manually typing cookie.
+    const qrLoggedIn = {
+      ...emptyQuark,
+      authSessionId: "qr-sess-1",
+      authConfiguredSecrets: ["cookie"],
+      options: { account_name: "夸克测试号" },
+    };
+    expect(validateRemoteDraft(qrLoggedIn, true)).toEqual({});
+    expect(buildRemoteOptions(qrLoggedIn)).toEqual({
+      type: "quark",
+      account_name: "夸克测试号",
+    });
+
+    // Manual cookie with valid concurrency & TPS passes.
+    const manualQuark = {
+      ...emptyQuark,
+      options: {
+        cookie: "__pus=abc; __puus=def",
+        root_folder_id: "0",
+        upload_concurrency: "4",
+        tps_limit: "3.5",
+      },
+    };
+    expect(validateRemoteDraft(manualQuark, true)).toEqual({});
+    const built = buildRemoteOptions(manualQuark);
+    expect(built.type).toBe("quark");
+    expect(built.cookie).toBe("__pus=abc; __puus=def");
+    expect(built.upload_concurrency).toBe("4");
+
+    // Out-of-range upload_concurrency and tps_limit fail validation.
+    expect(
+      validateRemoteDraft(
+        {
+          ...manualQuark,
+          options: { ...manualQuark.options, upload_concurrency: "12" },
+        },
+        true,
+      ),
+    ).toHaveProperty("upload_concurrency");
+    expect(
+      validateRemoteDraft(
+        {
+          ...manualQuark,
+          options: { ...manualQuark.options, tps_limit: "50" },
+        },
+        true,
+      ),
+    ).toHaveProperty("tps_limit");
+
+    // Editing an existing Quark remote preserves saved cookie without re-entering.
+    const existing = draftFromRemote({
+      name: "我的夸克",
+      type: "quark",
+      summary: "夸克网盘 · 夸克测试号",
+      options: { root_folder_id: "0", account_name: "夸克测试号" },
+      configuredSecrets: ["cookie"],
+      usedByJobs: [],
+      usedByCrypts: [],
+    });
+    expect(existing.editing).toBe(true);
+    expect(existing.type).toBe("quark");
+    expect(validateRemoteDraft(existing, true)).toEqual({});
   });
 });

@@ -3,6 +3,7 @@ package handler
 import (
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"opensync/internal/msg"
@@ -396,8 +397,6 @@ func DownloadNativeStorageFile(c *gin.Context) {
 		respondServiceError(c, err)
 		return
 	}
-	defer rc.Close()
-
 	safeASCII := strings.Map(func(r rune) rune {
 		if r >= 0x20 && r <= 0x7e && r != '"' && r != '\\' && r != ';' {
 			return r
@@ -413,8 +412,29 @@ func DownloadNativeStorageFile(c *gin.Context) {
 	if size >= 0 {
 		c.Header("Content-Length", strconv.FormatInt(size, 10))
 	}
-	c.Status(http.StatusOK)
-	_, _ = io.Copy(c.Writer, rc)
+	written, streamErr := io.Copy(c.Writer, rc)
+	if closeErr := rc.Close(); streamErr == nil {
+		streamErr = closeErr
+	}
+	if streamErr == nil && size >= 0 && written != size {
+		streamErr = io.ErrUnexpectedEOF
+	}
+	if streamErr == nil {
+		if !c.Writer.Written() {
+			c.Status(http.StatusOK)
+		}
+		return
+	}
+	if !c.Writer.Written() {
+		c.Writer.Header().Del("Content-Disposition")
+		c.Writer.Header().Del("Content-Length")
+		c.Writer.Header().Del("Content-Type")
+		respondInternalError(c, streamErr)
+		return
+	}
+	log.Printf("native download stream failed: %v", streamErr)
+	// Let net/http abort the response so a partial download is not accepted.
+	panic(http.ErrAbortHandler)
 }
 
 func UploadNativeStorageFile(c *gin.Context) {

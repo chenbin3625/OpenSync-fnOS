@@ -2,39 +2,11 @@
 set -eu
 umask 077
 
-fail() {
-    # 磁盘写满时 TRIM_TEMP_LOGFILE 也可能写不进去，仍要把原因输出到 stderr。
-    if [ -n "${TRIM_TEMP_LOGFILE:-}" ]; then { printf '%s\n' "$1" > "$TRIM_TEMP_LOGFILE"; } 2>/dev/null || true; fi
-    printf '%s\n' "$1" >&2
-    exit 1
-}
-# 下面会对备份目录执行 rm -rf，先在本脚本内确认路径变量有效，不依赖 main 的校验。
-for name in TRIM_PKGVAR TRIM_PKGETC; do
-    value="${!name:-}"
-    [ -n "$value" ] && [ "${value:0:1}" = / ] && [ "$value" != / ] || fail "缺少有效的应用目录变量：$name"
-done
-CMD_DIR="$(cd "$(dirname "$0")" && pwd)"
-# 停止服务后立即持有生命周期锁，防止升级备份期间并发 main start 重新拉起服务并写入数据库。
-if command -v flock >/dev/null 2>&1 && [ -n "${TRIM_PKGTMP:-}" ]; then
-    mkdir -p "$TRIM_PKGTMP"
-    LIFECYCLE_LOCK="${TRIM_PKGTMP}/lifecycle.lock"
-    LOCK_ACQUIRED=0
-    for _attempt in 1 2 3; do
-        "${CMD_DIR}/main" stop
-        exec 9>>"$LIFECYCLE_LOCK" || fail '无法创建应用运行锁，请检查临时目录权限'
-        flock -w 90 9 || fail '应用正在启动或停止，请稍后重试'
-        if "${CMD_DIR}/main" status >/dev/null 2>&1; then
-            exec 9>&-
-            continue
-        fi
-        LOCK_ACQUIRED=1
-        break
-    done
-    [ "$LOCK_ACQUIRED" = 1 ] || fail '无法确认应用已停止，已中止升级以保护数据'
-else
-    "${CMD_DIR}/main" stop
+# main 验证目录、持锁停止服务，再载入本脚本，锁一直保留到备份退出。
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    exec "$(dirname "$0")/main" upgrade-backup
 fi
-if [ -n "${TRIM_APPDEST:-}" ] && [ -f "${TRIM_APPDEST}/.app.lock" ] && command -v flock >/dev/null 2>&1; then
+if [ "$FLOCK_HELD" = 1 ] && [ -f "${TRIM_APPDEST}/.app.lock" ]; then
     exec 8<"${TRIM_APPDEST}/.app.lock" || fail '无法检查应用运行锁，已中止升级'
     flock -n 8 || fail '应用进程仍在运行，已中止升级以保护数据'
 fi
@@ -160,7 +132,7 @@ cleanup_backup() {
     rm -f "${LAST_BACKUP_FILE}.tmp"
     if [ "$BACKUP_DONE" != 1 ] && [ -n "$BACKUP" ] && is_backup_dir "$BACKUP"; then rm -rf -- "$BACKUP"; fi
 }
-trap cleanup_backup EXIT
+trap 'cleanup_backup || true; release_lifecycle_lock' EXIT
 BACKUP="$(mktemp -d "${BACKUP_ROOT}/upgrade.XXXXXXXX")" || fail '升级备份失败：无法创建备份目录，已中止升级（请检查磁盘空间）'
 is_backup_dir "$BACKUP" || fail "升级备份失败：备份目录异常：$BACKUP"
 copy_file() {

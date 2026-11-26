@@ -1,5 +1,5 @@
 appname=opensync
-version=0.0.50
+version=0.0.51
 display_name=OpenSync
 desc=<div><p><strong>OpenSync</strong> 是运行在飞牛 fnOS 上的文件同步与备份工具，可作为群晖 Cloud Sync 的替代方案。</p><p>内置 rclone 引擎，开箱即可在本地授权目录与其他磁盘、S3（阿里云 OSS / 腾讯云 COS / Cloudflare R2 / MinIO 等）、WebDAV（兼容自建 OpenList / AList）、SFTP、SMB、OneDrive、Google Drive、Dropbox、Crypt 加密存储等之间自动同步文件。</p><ul><li>支持增量同步、全量同步、移动与双向同步，满足备份、镜像、搬家与多端同步场景。</li><li>支持 Cron、固定间隔和手动触发，并提供只读模拟运行与数据一致性校验。</li><li>支持文件名、文件后缀、文件目录、系统目录过滤和文件大小/时间限制。</li><li>提供实时进度、执行历史、失败重试、目标端回收站与任务超时控制。</li><li>支持钉钉、企业微信、飞书、Telegram、SMTP 邮件、Server酱、Bark、ntfy、Gotify、PushPlus 与自定义 Webhook 通知。</li></ul><p>开源地址：<a href="https://github.com/chenbin3625/OpenSync-fnOS">https://github.com/chenbin3625/OpenSync-fnOS</a></p></div>
 platform=x86
@@ -16,4 +16,4 @@ ctl_stop=true
 install_type=
 checkport=false
 disable_authorization_path=false
-changelog=v0.0.50 原生引擎能力增强：新增任务与作业暂停/恢复、本地目录实时监听触发同步、全局与任务级分时段带宽限速、大文件断点续传与 MD5 缓存；新增网盘 OAuth 授权向导、一致性校验异常告警与每日/每周汇总摘要通知；标准 WebDAV 目标默认仅按文件大小比对，并修复同步、存储管理与前端交互问题。
+changelog=v0.0.51 新增原生夸克网盘驱动（支持夸克 App 扫码登录与手动 Cookie、__puus 自动续期、本地→夸克秒传与 OSS 并发分片直传、自动大小+MD5 比对及 BridgeFS 通用桥接）；新增持续同步模式与同步状态看板、快捷加密存储向导、仪表盘实时指标与任务编辑体验升级，并完善发布与生命周期校验。

@@ -14,6 +14,7 @@ import {
   IconEditStroked,
   IconFolderStroked,
   IconInfoCircle,
+  IconLockStroked,
   IconPlusStroked,
   IconRefresh,
   IconSettingStroked,
@@ -26,6 +27,7 @@ import {
   validateRemoteName,
   type NativeEditorMode,
 } from "../components/NativeStorageEditor";
+import { QuickCryptModal } from "../components/QuickCryptModal";
 import {
   Field,
   Header,
@@ -38,6 +40,10 @@ import {
   errorToast,
 } from "../components/common";
 import { useResource } from "../lib/hooks";
+import {
+  buildStorageCryptTarget,
+  canCreateCryptFromRemote,
+} from "../lib/quickCrypt";
 import { formatSize } from "./Home/homeUtils";
 import { formatTimestamp } from "../utils/date";
 import type {
@@ -66,6 +72,8 @@ export default function Engines() {
   const engines = useResource((signal) => api.engines(signal));
 
   const [modal, setModal] = useState<StorageModalState | null>(null);
+  const [cryptSourceRemote, setCryptSourceRemote] =
+    useState<NativeRemoteItem | null>(null);
   const [checkingAll, setCheckingAll] = useState(false);
   const [testingName, setTestingName] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<
@@ -188,8 +196,14 @@ export default function Engines() {
 
   const handleDeleteRemote = (item: NativeRemoteItem) => {
     if (item.usedByCrypts.length > 0) {
+      const allCrypt = item.usedByCrypts.every(
+        (name) =>
+          (state?.remotes || []).find((r) => r.name === name)?.type === "crypt",
+      );
       Toast.warning(
-        `存储「${item.name}」正被复合存储（${item.usedByCrypts.join("、")}）引用，请先删除或修改对应存储`,
+        allCrypt
+          ? `存储「${item.name}」正被加密存储（${item.usedByCrypts.join("、")}）引用，请先删除或修改对应加密存储`
+          : `存储「${item.name}」正被其他存储（${item.usedByCrypts.join("、")}）引用，请先删除或修改对应存储`,
       );
       return;
     }
@@ -476,12 +490,21 @@ export default function Engines() {
               const queuedJobs = Number(item.queuedJobs || 0);
               const isLocked =
                 item.usedByJobs.length > 0 || item.usedByCrypts.length > 0;
+              const allRefsAreCrypt =
+                item.usedByCrypts.length > 0 &&
+                item.usedByCrypts.every(
+                  (name) =>
+                    state.remotes.find((r) => r.name === name)?.type === "crypt",
+                );
               const lockHint =
                 item.usedByCrypts.length > 0
-                  ? `正被复合存储 ${item.usedByCrypts.join("、")} 引用`
+                  ? allRefsAreCrypt
+                    ? `正被加密存储 ${item.usedByCrypts.join("、")} 引用`
+                    : `正被其他存储 ${item.usedByCrypts.join("、")} 引用`
                   : item.usedByJobs.length > 0
                     ? `正被任务 ${item.usedByJobs.join("、")} 使用`
                     : "";
+              const canEncrypt = canCreateCryptFromRemote(item, state.remotes);
 
               return (
                 <ResourceCard
@@ -490,8 +513,19 @@ export default function Engines() {
                   title={
                     <span className="engine-title-row">
                       <span>{item.name}</span>
-                      <Tag size="small" type="light" color="blue">
-                        {remoteTypeLabels[item.type] || item.type}
+                      <Tag
+                        size="small"
+                        type="light"
+                        color={item.type === "crypt" ? "violet" : "blue"}
+                      >
+                        {item.type === "crypt" ? (
+                          <span className="storage-type-tag-inner">
+                            <IconLockStroked aria-hidden="true" size="extra-small" />
+                            <span>{remoteTypeLabels[item.type] || item.type}</span>
+                          </span>
+                        ) : (
+                          remoteTypeLabels[item.type] || item.type
+                        )}
                       </Tag>
                       {testRes ? (
                         <Tag
@@ -527,9 +561,9 @@ export default function Engines() {
                           size="small"
                           type="light"
                           color="cyan"
-                          style={{ cursor: "pointer" }}
+                          className="engine-clickable-tag"
                           onClick={() =>
-                            navigate(`/?storage=${encodeURIComponent(item.name)}`)
+                            navigate(`/dashboard?storage=${encodeURIComponent(item.name)}`)
                           }
                         >
                           {item.usedByJobs.length} 个任务
@@ -542,7 +576,7 @@ export default function Engines() {
                       )}
                       {item.usedByCrypts.length > 0 && (
                         <Tag size="small" type="light" color="violet">
-                          被复合存储引用
+                          {allRefsAreCrypt ? "已关联加密存储" : "被其他存储引用"}
                         </Tag>
                       )}
                       {(activeJobs > 0 || queuedJobs > 0) && (
@@ -556,7 +590,7 @@ export default function Engines() {
                   subtitle={item.summary || (remoteTypeLabels[item.type] || item.type)}
                   meta={
                     <div className="engine-meta-stack">
-                      {health?.lastCheckedAt && (
+                      {health && health.lastCheckedAt > 0 && (
                         <div className="item-meta">
                           挂载路径 /{item.name} · 最近检测{" "}
                           {formatTimestamp(health.lastCheckedAt, true)}
@@ -623,6 +657,14 @@ export default function Engines() {
                         ariaBusy={aboutLoadingName === item.name}
                         onClick={() => void handleAboutStorage(item.name)}
                       />
+                      {canEncrypt && (
+                        <IconButton
+                          label={`基于 ${item.name} 创建加密存储`}
+                          icon={<IconLockStroked aria-hidden="true" />}
+                          disabled={anyBusy}
+                          onClick={() => setCryptSourceRemote(item)}
+                        />
+                      )}
                       {item.type !== "local" && (
                         <IconButton
                           label={
@@ -677,7 +719,7 @@ export default function Engines() {
               <div className="sync-method-banner">
                 <IconInfoCircle aria-hidden="true" size="small" />
                 <span>
-                  尚未添加远程存储。可直接在不同本地授权目录之间同步，或点击右上角「添加远程存储」/「导入配置」接入 S3、WebDAV（含 OpenList / AList）、SFTP、SMB、OneDrive、Google Drive、Crypt 加密存储等。
+                  尚未添加远程存储。可直接在不同本地授权目录之间同步，或点击右上角「添加远程存储」/「导入配置」接入 S3、WebDAV（含 OpenList / AList）、SFTP、SMB、OneDrive、Google Drive 等常见云盘与对象存储。
                 </span>
               </div>
             )}
@@ -700,6 +742,34 @@ export default function Engines() {
         />
       )}
 
+      {cryptSourceRemote && state && (() => {
+        const target = buildStorageCryptTarget(cryptSourceRemote, state.remotes);
+        return (
+          <QuickCryptModal
+            mode="storage"
+            targets={[target]}
+            remotes={state.remotes}
+            requireSubDir={target.requiresSubDir}
+            remoteTypeLabel={
+              remoteTypeLabels[cryptSourceRemote.type] || cryptSourceRemote.type
+            }
+            subDirPlaceholder={
+              target.leafBackend === "smb"
+                ? "例如 share/encrypted"
+                : target.requiresSubDir
+                  ? "例如 my-bucket/encrypted"
+                  : "例如 encrypted"
+            }
+            onClose={() => setCryptSourceRemote(null)}
+            onCreated={async ({ cryptName }) => {
+              Toast.success(`已创建加密存储「${cryptName}」`);
+              setCryptSourceRemote(null);
+              await refreshAll(true);
+            }}
+          />
+        );
+      })()}
+
       {renameTarget && (
         <Modal
           visible
@@ -717,7 +787,7 @@ export default function Engines() {
             <Field
               label="新存储名称"
               required
-              hint="重命名将自动级联更新所有复合存储（Crypt / Chunker / Union 等）及关联同步任务的源/目标路径"
+              hint="重命名将自动级联更新关联的加密存储及同步任务的源/目标路径"
             >
               <Input
                 value={renameNewName}

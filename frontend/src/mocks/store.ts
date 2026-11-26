@@ -118,6 +118,12 @@ function mockNativeSummary(params: Record<string, string>): string {
         .join(" · ");
     case "webdav":
       return [params.url, params.user].filter(Boolean).join(" · ");
+    case "quark":
+      if (params.account_name) return `夸克网盘 · ${params.account_name}`;
+      if (params.root_folder_id && params.root_folder_id !== "0") {
+        return `夸克网盘 · 目录 ${params.root_folder_id}`;
+      }
+      return "夸克网盘";
     case "sftp":
     case "smb": {
       const addr = params.port ? `${params.host}:${params.port}` : params.host || "";
@@ -826,11 +832,13 @@ export class MockStore {
       "file_password",
       "folder_password",
       "access_token",
+      "cookie",
     ]);
     const supportedTypes = [
       "local",
       "s3",
       "webdav",
+      "quark",
       "sftp",
       "smb",
       "ftp",
@@ -1114,6 +1122,7 @@ export class MockStore {
       "googlecloudstorage",
       "iclouddrive",
       "seafile",
+      "quark",
     ]);
     if (!interactive.has(typ)) {
       return `存储类型 "${typ}" 不需要引导授权，请直接填写表单参数`;
@@ -1127,6 +1136,30 @@ export class MockStore {
     const sessionId = `mock-auth-${this.nextAuthSessionSeq++}`;
     const oauthState = `mock-state-${sessionId}`;
     const expiresAt = Math.floor(Date.now() / 1000) + 600;
+
+    if (typ === "quark") {
+      const mockSvg =
+        "data:image/svg+xml;base64," +
+        btoa(
+          `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 29 29" shape-rendering="crispEdges"><rect width="29" height="29" fill="#fff"/><path fill="#000" d="M4 4h7v7H4zm1 1v5h5V5zm1 1h3v3H6zm12-2h7v7h-7zm1 1v5h5V5zm1 1h3v3h-3zM4 18h7v7H4zm1 1v5h5v-5zm1 1h3v3H6zm8-6h3v3h-3zm5 5h4v4h-4z"/></svg>`,
+        );
+      const snapshot: NativeAuthStepSnapshot = {
+        sessionId,
+        type: typ,
+        status: "qrcode",
+        qrCodeUrl: `https://su.quark.cn/4_eMHBJ?token=mock-${sessionId}&client_id=532`,
+        qrCodeImage: mockSvg,
+        qrStatus: "waiting",
+        expiresAt,
+      };
+      this.nativeAuthSessions.set(sessionId, {
+        snapshot,
+        oauthState,
+        secrets: {},
+        publicOptions: {},
+      });
+      return snapshot;
+    }
 
     if (typ === "jottacloud") {
       const snapshot: NativeAuthStepSnapshot = {
@@ -1226,6 +1259,17 @@ export class MockStore {
   getNativeStorageAuth(sessionId: string): NativeAuthStepSnapshot | string {
     const sess = this.nativeAuthSessions.get(sessionId);
     if (!sess) return "授权会话不存在或已过期，请重新发起授权";
+    if (sess.snapshot.type === "quark" && sess.snapshot.status === "qrcode") {
+      sess.secrets.cookie = `__pus=mock_pus_${sessionId}; __puus=mock_puus_${sessionId}`;
+      sess.publicOptions.account_name = "夸克演示账号";
+      sess.snapshot = {
+        ...sess.snapshot,
+        status: "completed",
+        qrStatus: undefined,
+        publicOptions: { ...sess.publicOptions },
+        configuredSecrets: ["cookie"],
+      };
+    }
     return sess.snapshot;
   }
 
@@ -1792,23 +1836,39 @@ export class MockStore {
         ? names
         : [...this.nativeRemotes.keys()].sort((a, b) => a.localeCompare(b));
     const blocks: string[] = [];
+    const skippedBuiltIn: string[] = [];
     for (const name of selected) {
       const actual = [...this.nativeRemotes.keys()].find(
         (k) => k.toLowerCase() === name.toLowerCase(),
       );
       if (!actual) continue;
       const params = this.nativeRemotes.get(actual)!;
+      if (params.type === "quark") {
+        if (names && names.length > 0) {
+          return `存储 "${actual}" 使用 OpenSync 内置夸克网盘驱动，外部官方 rclone 暂不支持直接导出`;
+        }
+        skippedBuiltIn.push(actual);
+        continue;
+      }
       const lines = [`[${actual}]`];
       for (const [k, v] of Object.entries(params)) {
         lines.push(`${k} = ${v}`);
       }
       blocks.push(lines.join("\n"));
     }
-    if (blocks.length === 0) return "没有可导出的远端存储配置";
+    if (blocks.length === 0) {
+      return skippedBuiltIn.length > 0
+        ? "当前仅包含 OpenSync 内置网盘驱动（如夸克网盘），暂不支持导出到外部官方 rclone"
+        : "没有可导出的远端存储配置";
+    }
+    const header =
+      skippedBuiltIn.length > 0
+        ? `# OpenSync 提示：已自动跳过内置驱动存储（外部官方 rclone 暂不支持）：${skippedBuiltIn.join(", ")}\n\n`
+        : "";
     return {
       content: password
-        ? `# Encrypted rclone configuration\n# RCLONE_ENCRYPT_V0:\n${btoa(blocks.join("\n\n"))}\n`
-        : `${blocks.join("\n\n")}\n`,
+        ? `# Encrypted rclone configuration\n# RCLONE_ENCRYPT_V0:\n${btoa(header + blocks.join("\n\n"))}\n`
+        : `${header}${blocks.join("\n\n")}\n`,
       encrypted: Boolean(password),
       filename: "rclone-export.conf",
     };
@@ -2501,7 +2561,13 @@ export class MockStore {
   getDashboard(): DashboardOverview {
     const pendingApprovals: DashboardOverview["pendingApprovals"] = [];
     let runningJobs = 0;
+    let activeJobs = 0;
+    let pausedJobs = 0;
     let enabledJobs = 0;
+    let totalSpeed = 0;
+    let totalSpeedAvg = 0;
+    let totalDoneBytes = 0;
+    let totalRemainBytes = 0;
     const jobSummaries = this.jobs.map((job) => {
       if (job.enable === 1) enabledJobs += 1;
       const current = this.currentTasks.get(job.id);
@@ -2525,7 +2591,23 @@ export class MockStore {
       const engine = this.engines.find((e) => e.id === job.alistId);
       const latest = (this.histories.get(job.id) || [])[0];
       const done = current?.doneSize ?? 0;
-      const total = done + (current?.remainSize ?? 0);
+      const remain = current?.remainSize ?? 0;
+      const total = done + remain;
+      const paused = Boolean(current?.paused);
+      const liveSpeed = current && !paused ? (current.speed ?? 0) : 0;
+      const liveSpeedAvg = current ? (current.speedAvg ?? 0) : 0;
+      const liveRemainTime = current && !paused ? (current.remainTime ?? 0) : 0;
+      if (current) {
+        if (paused) {
+          pausedJobs += 1;
+        } else {
+          activeJobs += 1;
+          totalSpeed += liveSpeed;
+          totalSpeedAvg += liveSpeedAvg;
+          totalDoneBytes += done;
+          totalRemainBytes += remain;
+        }
+      }
       return {
         id: job.id,
         remark: job.remark,
@@ -2538,12 +2620,20 @@ export class MockStore {
         srcPath: job.srcPath,
         dstPath: job.dstPath,
         running: Boolean(current),
-        paused: Boolean(current?.paused),
+        paused,
         queued: false,
         currentTaskId: current?.taskId ?? 0,
         pendingApproval: approval,
         liveNum: current?.num ?? null,
         liveProgress: total > 0 ? (done * 100) / total : 0,
+        liveDoneSize: done,
+        liveTotalSize: total,
+        liveSpeed,
+        liveSpeedAvg,
+        liveRemainTime,
+        liveBwLimit: current?.liveBwLimit ?? "",
+        liveScanFinish: current ? current.scanFinish : true,
+        liveScan: current?.scan ?? null,
         nextRunTime: job.nextRunTime ?? 0,
         windowEnable: Number(job.windowEnable ?? 0),
         windowStart: job.windowStart ?? "00:00",
@@ -2580,6 +2670,15 @@ export class MockStore {
         totalBytes += rec.sumSize ?? 0;
       }
     }
+    const sampledAt = now();
+    const rate =
+      totalSpeed > 0 && totalSpeedAvg > 0
+        ? 0.6 * totalSpeed + 0.4 * totalSpeedAvg
+        : totalSpeed || totalSpeedAvg;
+    const estimatedRemainTime =
+      activeJobs > 0 && totalRemainBytes > 0 && rate > 0
+        ? Math.ceil(totalRemainBytes / rate)
+        : 0;
     return {
       kpi: {
         totalJobs: this.jobs.length,
@@ -2590,6 +2689,20 @@ export class MockStore {
         totalEngines: this.engines.length,
         onlineEngines: healths.filter((h) => h.status === "online").length,
         offlineEngines: healths.filter((h) => h.status === "offline").length,
+      },
+      realtime: {
+        totalSpeed,
+        totalSpeedAvg,
+        peakSpeed: totalSpeed,
+        activeJobs,
+        pausedJobs,
+        activeTransfers: 0,
+        totalDoneBytes,
+        totalRemainBytes,
+        estimatedRemainTime,
+        globalBwLimit: this.settings.defaultBwLimit || "",
+        sampledAt,
+        speedHistory: [{ ts: sampledAt, speed: totalSpeed }],
       },
       recent7d: {
         totalRuns,

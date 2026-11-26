@@ -596,9 +596,9 @@ export default function Settings() {
         ) : "kind" in field && field.kind === "select" ? (
           <Select
             aria-label={field.label}
+            className="select-setting"
             value={form![field.key]}
             disabled={action.busy}
-            style={{ width: 180 }}
             optionList={[...field.options]}
             onChange={(value) => {
               setForm((f) => f && { ...f, [field.key]: String(value ?? "") });
@@ -720,8 +720,8 @@ export default function Settings() {
               <div className="settings-backup-controls">
                 <Select
                   aria-label="同名配置冲突处理方式"
+                  className="settings-conflict-select"
                   value={conflictMode}
-                  style={{ width: 148 }}
                   optionList={[
                     { label: "跳过已存在项", value: "skip" },
                     { label: "覆盖已存在项", value: "overwrite" },
@@ -732,7 +732,8 @@ export default function Settings() {
                   ref={fileInputRef}
                   type="file"
                   accept=".json,application/json"
-                  style={{ display: "none" }}
+                  className="sr-only"
+                  tabIndex={-1}
                   onChange={(e) => void handleImportFile(e)}
                 />
                 <Button
@@ -768,8 +769,8 @@ export default function Settings() {
           <div className="settings-log-toolbar">
             <Select
               aria-label="日志级别"
+              className="settings-log-select"
               value={logLevel}
-              style={{ width: 120 }}
               optionList={[
                 { label: "全部级别", value: "all" },
                 { label: "仅错误", value: "error" },
@@ -780,8 +781,8 @@ export default function Settings() {
             />
             <Select
               aria-label="显示行数"
+              className="settings-log-select"
               value={logLines}
-              style={{ width: 120 }}
               optionList={[100, 200, 500, 1000].map((n) => ({
                 label: `最近 ${n} 行`,
                 value: n,

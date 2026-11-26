@@ -156,7 +156,7 @@ export function FullSyncApprovalModal({
       onCancel={onClose}
       title={jobName ? `确认删除目标端文件 · ${jobName}` : "确认删除目标端多余文件"}
       footer={
-        <div className="editor-actions" style={{ flexWrap: "wrap", gap: 8 }}>
+        <div className="editor-actions editor-actions--wrap">
           <Button
             type="tertiary"
             className="editor-actions-start"
@@ -227,7 +227,7 @@ export function FullSyncApprovalModal({
         ) : (
           <>
             {visiblePaths.length > 1 && (
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+              <div className="full-sync-approval-select-all">
                 <Checkbox
                   checked={allSelected}
                   indeterminate={partialSelection}

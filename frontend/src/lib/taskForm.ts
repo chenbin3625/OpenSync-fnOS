@@ -77,6 +77,9 @@ function emptyNativeExtraFlags(): Required<NativeExtraFlags> {
     resumeMinSizeMB: 0,
     watchEnable: false,
     watchDebounceSec: 0,
+    syncPollIntervalSec: 0,
+    syncAuditIntervalMin: 0,
+    syncDirection: "",
     autoRetryMax: 0,
     autoRetryDelayMin: 0,
     postSyncJobId: 0,
@@ -139,6 +142,9 @@ function parseNativeExtraFlags(value: unknown): Required<NativeExtraFlags> {
     resumeMinSizeMB: Math.min(10240, num("resumeMinSizeMB")),
     watchEnable: Boolean(obj.watchEnable),
     watchDebounceSec: Math.min(3600, num("watchDebounceSec")),
+    syncPollIntervalSec: num("syncPollIntervalSec"),
+    syncAuditIntervalMin: num("syncAuditIntervalMin"),
+    syncDirection: str("syncDirection"),
     autoRetryMax: Math.min(10, num("autoRetryMax")),
     autoRetryDelayMin: Math.min(1440, num("autoRetryDelayMin")),
     postSyncJobId: num("postSyncJobId"),
@@ -182,6 +188,9 @@ function serializeNativeExtraFlags(flags: NativeExtraFlags | undefined): string 
   if (Number(flags.resumeMinSizeMB || 0) > 0)
     out.resumeMinSizeMB = Math.min(10240, Math.trunc(Number(flags.resumeMinSizeMB)));
   if (flags.watchEnable) out.watchEnable = true;
+  if (flags.syncPollIntervalSec) out.syncPollIntervalSec = Math.trunc(flags.syncPollIntervalSec);
+  if (flags.syncAuditIntervalMin) out.syncAuditIntervalMin = Math.trunc(flags.syncAuditIntervalMin);
+  if (flags.syncDirection) out.syncDirection = flags.syncDirection;
   if (Number(flags.watchDebounceSec || 0) > 0)
     out.watchDebounceSec = Math.min(3600, Math.trunc(Number(flags.watchDebounceSec)));
   if (Number(flags.autoRetryMax || 0) > 0)
@@ -414,17 +423,86 @@ export function findBatchMoveJobs<
   return [];
 }
 
+export type TaskTab = "overview" | "realtime" | "history";
+
+export function parseTaskTab(raw: string | null | undefined): TaskTab | null {
+  if (raw === "overview" || raw === "realtime" || raw === "history") {
+    return raw;
+  }
+  return null;
+}
+
 /**
- * The tab actually rendered. The realtime tab is disabled without a running
- * task, so a deep link or sidebar link carrying tab=realtime must not leave a
- * disabled tab active over an empty pane once the current-task check settles.
+ * The tab actually rendered for a task.
+ *
+ * - An explicit `tab=realtime` falls back to `overview` once the current-task
+ *   check settles without a running task (the realtime tab is disabled then).
+ * - Explicit `tab=overview` or `tab=history` is respected so direct links and
+ *   manual tab clicks are never overridden.
+ * - When no explicit `tab` is requested, prioritize `realtime` whenever the
+ *   task has a running realtime task.
  */
 export function resolveTaskTab(
-  tab: string,
-  { settled, hasCurrentTask }: { settled: boolean; hasCurrentTask: boolean },
-): string {
-  if (tab === "realtime" && settled && !hasCurrentTask) return "overview";
-  return tab;
+  tab: string | null | undefined,
+  {
+    settled,
+    hasCurrentTask,
+    jobRunning = false,
+  }: {
+    settled: boolean;
+    hasCurrentTask: boolean;
+    jobRunning?: boolean;
+  },
+): TaskTab {
+  const explicit = parseTaskTab(tab);
+  if (explicit === "realtime") {
+    return settled && !hasCurrentTask ? "overview" : "realtime";
+  }
+  if (explicit) {
+    return explicit;
+  }
+  if (hasCurrentTask || (!settled && jobRunning)) {
+    return "realtime";
+  }
+  return "overview";
+}
+
+/**
+ * Builds the query string for navigating to a task from the sidebar or mobile
+ * job switcher. Switching to a running task prioritizes the realtime tab;
+ * switching to a different idle task drops stale overview/realtime tabs so the
+ * destination page can still auto-switch if a realtime task just started.
+ */
+export function buildTaskSearchParams(
+  job: { id: number; running?: boolean },
+  options?: {
+    onTasksPage?: boolean;
+    currentSearch?: string;
+    activeJobId?: number | string | null;
+  },
+): URLSearchParams {
+  const onTasksPage = Boolean(options?.onTasksPage);
+  const current = new URLSearchParams(
+    onTasksPage ? (options?.currentSearch ?? "") : "",
+  );
+  const sameJob =
+    onTasksPage &&
+    options?.activeJobId != null &&
+    String(options.activeJobId) === String(job.id);
+
+  if (sameJob) {
+    current.set("jobId", String(job.id));
+    return current;
+  }
+
+  const next = new URLSearchParams();
+  next.set("jobId", String(job.id));
+  if (job.running) {
+    next.set("tab", "realtime");
+  } else if (onTasksPage && parseTaskTab(current.get("tab")) === "history") {
+    next.set("tab", "history");
+  }
+  return next;
 }
 export function jobToForm(job: JobItem): JobForm {
   const min = splitBytesToFileSize(job.minFileSize),
@@ -523,6 +601,7 @@ export function buildJobPayload(form: JobForm) {
     checkRunning?: unknown;
     lastStatus?: unknown;
     nextRunTime?: unknown;
+    syncStatus?: unknown;
   };
   delete runtimeStripped.legacyOpenList;
   delete runtimeStripped.running;
@@ -533,6 +612,7 @@ export function buildJobPayload(form: JobForm) {
   delete runtimeStripped.checkRunning;
   delete runtimeStripped.lastStatus;
   delete runtimeStripped.nextRunTime;
+  delete runtimeStripped.syncStatus;
   return {
     ...runtimeStripped,
     remark: form.remark.trim() || null,
@@ -636,6 +716,7 @@ export interface ResolvedRemoteChain {
   readOnly: boolean;
   accumulatedPrefix: string;
   isStandardWebDAV: boolean;
+  hasQuark?: boolean;
 }
 
 export function resolveRemoteChain(
@@ -659,6 +740,7 @@ export function resolveRemoteChain(
       readOnly: false,
       accumulatedPrefix: "",
       isStandardWebDAV: false,
+      hasQuark: false,
     };
   }
 
@@ -670,6 +752,7 @@ export function resolveRemoteChain(
   let leafBackend = start.type;
   let leafVendor = "";
   let isStandardWebDAV = false;
+  let hasQuark = false;
 
   while (cur) {
     const lower = cur.name.toLowerCase();
@@ -678,6 +761,7 @@ export function resolveRemoteChain(
 
     leafBackend = cur.type;
     if (cur.type === "crypt") hasCrypt = true;
+    if (cur.type === "quark") hasQuark = true;
     if (cur.type === "archive" || cur.type === "http") readOnly = true;
 
     if (wrapperRemoteTypes.has(cur.type)) {
@@ -708,11 +792,13 @@ export function resolveRemoteChain(
 
     if (cur.type === "union" || cur.type === "combine") {
       const tokens = splitCompositeUpstreams(cur.options?.upstreams || "");
+      let allReadOnly = tokens.length > 0;
       const restSegs = restPath ? restPath.split("/").filter(Boolean) : [];
       const mountName = cur.type === "combine" ? (restSegs[0] ?? "") : "";
       const mountSub = cur.type === "combine" ? restSegs.slice(1).join("/") : restPath;
       for (const tok of tokens) {
         let target = tok;
+        const upstreamReadOnly = cur.type === "union" && target.endsWith(":ro");
         if (cur.type === "combine") {
           const eqIdx = target.indexOf("=");
           if (eqIdx <= 0) continue;
@@ -726,12 +812,19 @@ export function resolveRemoteChain(
         if (colonIdx <= 0) continue;
         const ref = target.slice(0, colonIdx).trim();
         const upPrefix = target.slice(colonIdx + 1).replace(/^\/+|\/+$/g, "");
-        if (!ref || ref === "本地") continue;
+        if (!ref || ref === "本地") {
+          if (!ref || !upstreamReadOnly) allReadOnly = false;
+          continue;
+        }
         const childSub = [upPrefix, mountSub].filter(Boolean).join("/");
         const child = resolveRemoteChain(ref, remotes, new Set(visited), childSub);
         if (child.hasCrypt) hasCrypt = true;
         if (child.isStandardWebDAV) isStandardWebDAV = true;
+        if (child.hasQuark) hasQuark = true;
+        if (cur.type === "combine" && child.readOnly) readOnly = true;
+        if (!child.found || (!child.readOnly && !upstreamReadOnly)) allReadOnly = false;
       }
+      if (cur.type === "union" && allReadOnly) readOnly = true;
       break;
     }
     break;
@@ -746,7 +839,27 @@ export function resolveRemoteChain(
     readOnly,
     accumulatedPrefix,
     isStandardWebDAV,
+    hasQuark,
   };
+}
+
+export function findQuarkRemotesForPaths(
+  paths: readonly string[],
+  remotes?: readonly NativeRemoteItem[],
+): string[] {
+  if (!remotes?.length) return [];
+  const hits = new Set<string>();
+  for (const raw of paths) {
+    const segs = raw.replace(/^\/+/, "").split("/").filter(Boolean);
+    const seg = segs[0]?.trim();
+    if (!seg || seg === "本地") continue;
+    const subPath = segs.slice(1).join("/");
+    const info = resolveRemoteChain(seg, remotes, new Set(), subPath);
+    if (info.found && info.hasQuark) {
+      hits.add(info.canonicalName);
+    }
+  }
+  return Array.from(hits);
 }
 
 export function findStandardWebDAVRemotesForPaths(
@@ -866,7 +979,7 @@ export function validateManualSyncPath(
       return { error: "请选择「/本地」下的具体飞牛授权目录", normalized: "" };
     }
   } else if (remotes !== undefined) {
-    const info = resolveRemoteChain(canonicalFirst, remotes);
+    const info = resolveRemoteChain(canonicalFirst, remotes, new Set(), rawSegs.slice(1).join("/"));
     if (!info.found) {
       return {
         error: `存储「${canonicalFirst}」不存在；本地目录请使用 /本地/...，远端目录请先在存储管理中添加`,
@@ -1068,6 +1181,25 @@ export function validateJobFormFields(
 
   // Step 1: 执行计划（固定间隔 / Cron / 仅手动 / 时间窗口 / 通知绑定）
   const step1Errors: string[] = [];
+  if (form.isCron === 3 && form.method === 2) {
+    fields.interval = "移动任务请使用定时计划、固定间隔或手动执行";
+    step1Errors.push(fields.interval);
+  }
+  const poll = Number(form.extraFlags?.syncPollIntervalSec || 0);
+  const audit = Number(form.extraFlags?.syncAuditIntervalMin || 0);
+  if ((poll !== 0 && (!Number.isInteger(poll) || poll < 10 || poll > 86400)) ||
+      (audit !== 0 && (!Number.isInteger(audit) || audit < 1 || audit > 10080))) {
+    fields.interval = "远端检测间隔需为 10–86400 秒，完整核对间隔需为 1–10080 分钟";
+    step1Errors.push(fields.interval);
+  }
+  if (form.method !== 3 && ["upload", "download"].includes(form.extraFlags?.syncDirection || "")) {
+    const upload = form.extraFlags?.syncDirection === "upload";
+    const local = (p: string) => p.split("/").filter(Boolean)[0] === "本地";
+    if (form.srcPath.some((p) => local(p) !== upload) || form.dstPath.some((p) => local(p) === upload)) {
+      fields.srcPath = "上传：本地目录 → 远端目录；下载：远端目录 → 本地目录";
+      step0Errors.push(fields.srcPath);
+    }
+  }
   if (form.isCron === 0) {
     if (!Number.isInteger(form.interval) || form.interval < 1) {
       fields.interval = "执行间隔必须是大于 0 的整数";

@@ -206,6 +206,9 @@ export interface NativeExtraFlags {
   resumeMinSizeMB?: number;
   watchEnable?: boolean;
   watchDebounceSec?: number;
+  syncPollIntervalSec?: number;
+  syncAuditIntervalMin?: number;
+  syncDirection?: string;
   autoRetryMax?: number;
   autoRetryDelayMin?: number;
   postSyncJobId?: number;
@@ -215,6 +218,16 @@ export interface NativeExtraFlags {
   bisyncResyncMode?: string;
   bisyncMaxDelete?: number;
   bisyncForce?: boolean;
+}
+
+export interface SyncStatus {
+  state: "monitoring" | "pending" | "scanning" | "syncing" | "synced" | "waiting_window" | "waiting_approval" | "paused" | "error" | "needs_rebuild";
+  pendingChanges: number;
+  lastSuccess: number;
+  lastPoll: number;
+  nextPoll: number;
+  error: string;
+  failures: number;
 }
 
 export interface JobCheckResult {
@@ -293,9 +306,19 @@ export interface NativeAuthQuestion {
 export interface NativeAuthStepSnapshot {
   sessionId: string;
   type: string;
-  status: "oauth" | "question" | "completed" | "failed" | "cancelled" | string;
+  status:
+    | "oauth"
+    | "qrcode"
+    | "question"
+    | "completed"
+    | "failed"
+    | "cancelled"
+    | string;
   authUrl?: string;
   redirectUri?: string;
+  qrCodeUrl?: string;
+  qrCodeImage?: string;
+  qrStatus?: "waiting" | "expired" | string;
   question?: NativeAuthQuestion;
   publicOptions?: Record<string, string>;
   configuredSecrets?: string[];
@@ -374,6 +397,7 @@ export interface JobItem {
   followSymlinks?: number | boolean;
   extraFlags?: string | NativeExtraFlags | null;
   // Runtime decorations returned by GET /svr/job
+  syncStatus?: SyncStatus;
   legacyOpenList?: boolean;
   running?: boolean;
   paused?: boolean;
@@ -544,6 +568,7 @@ export interface DashboardPendingApproval {
 }
 
 export interface DashboardJobItem {
+  syncStatus?: SyncStatus;
   id: number;
   remark?: string | null;
   enable: number;
@@ -564,6 +589,14 @@ export interface DashboardJobItem {
   pendingApproval?: FullSyncApproval | null;
   liveNum?: Record<TaskNumKey, number> | null;
   liveProgress: number;
+  liveDoneSize?: number;
+  liveTotalSize?: number;
+  liveSpeed?: number;
+  liveSpeedAvg?: number;
+  liveRemainTime?: number;
+  liveBwLimit?: string;
+  liveScanFinish?: boolean;
+  liveScan?: ScanProgress | null;
   nextRunTime: number;
   windowEnable?: number;
   windowStart?: string | null;
@@ -601,8 +634,29 @@ export interface DashboardQuotaItem {
   message?: string;
 }
 
+export interface DashboardSpeedSample {
+  ts: number;
+  speed: number;
+}
+
+export interface DashboardRealtime {
+  totalSpeed: number;
+  totalSpeedAvg: number;
+  peakSpeed: number;
+  activeJobs: number;
+  pausedJobs: number;
+  activeTransfers: number;
+  totalDoneBytes: number;
+  totalRemainBytes: number;
+  estimatedRemainTime: number;
+  globalBwLimit?: string;
+  sampledAt: number;
+  speedHistory: DashboardSpeedSample[];
+}
+
 export interface DashboardOverview {
   kpi: DashboardKPI;
+  realtime?: DashboardRealtime;
   recent7d: DashboardRecent7d;
   pendingApprovals: DashboardPendingApproval[];
   jobs: DashboardJobItem[];

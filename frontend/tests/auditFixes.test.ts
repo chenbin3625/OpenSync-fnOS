@@ -23,6 +23,7 @@ import {
   defaultJobForm,
   findStandardWebDAVRemotesForPaths,
   isPathDisabledInPicker,
+  resolveRemoteChain,
   resolveAutoCompareModeForDst,
   validateJobFormFields,
   validateManualSyncPath,
@@ -101,6 +102,33 @@ const sampleRemotes: NativeRemoteItem[] = [
 ];
 
 describe("全流程审计修复回归测试", () => {
+  it("按具体组合挂载继承只读能力，并允许写入可写的同级挂载", () => {
+    const definitions: Array<Pick<NativeRemoteItem, "name" | "type" | "options">> = [
+      { name: "archive", type: "archive", options: { remote: "nextcloudDav:backup.zip" } },
+      { name: "mixed", type: "combine", options: { upstreams: "public=mirrorHttp: archives=archive: private=nextcloudDav:data" } },
+      { name: "nested", type: "alias", options: { remote: "mixed:public" } },
+      { name: "roUnion", type: "union", options: { upstreams: "mirrorHttp: nextcloudDav:data:ro" } },
+      { name: "roLocalUnion", type: "union", options: { upstreams: "mirrorHttp: 本地:grant:ro" } },
+      { name: "mixedUnion", type: "union", options: { upstreams: "mirrorHttp: nextcloudDav:data" } },
+    ];
+    const composites: NativeRemoteItem[] = definitions.map((item) => ({
+      summary: "", configuredSecrets: [], usedByJobs: [], usedByCrypts: [], ...item,
+    }));
+    const remotes = [...sampleRemotes, ...composites];
+    for (const path of ["/mixed/public", "/mixed/public/sub", "/mixed/archives/sub", "/nested/sub", "/roUnion/sub", "/roLocalUnion/sub"]) {
+      expect(validateManualSyncPath(path, remotes, { role: "dst", method: 0 }).error).toContain("只读");
+      for (const method of [2, 3]) {
+        expect(validateManualSyncPath(path, remotes, { role: "src", method }).error).toContain("只读");
+      }
+      expect(validateManualSyncPath(path, remotes, { role: "src", method: 0 }).error).toBe("");
+    }
+    for (const path of ["/mixed/private", "/mixed/private/sub", "/mixedUnion/sub"]) {
+      expect(validateManualSyncPath(path, remotes, { role: "dst", method: 0 }).error).toBe("");
+    }
+    expect(resolveRemoteChain("mixed", remotes).readOnly).toBe(true);
+    expect(resolveRemoteChain("mixed", remotes, new Set(), "private").readOnly).toBe(false);
+  });
+
   it("S3 编辑缺少 provider 时默认 Other 而非静默改成 Alibaba，且 SFTP 不再下发冲突 shell_type (#8, #9)", () => {
     const s3Draft = draftFromRemote({
       name: "generic_s3",

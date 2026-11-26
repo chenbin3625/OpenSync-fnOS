@@ -109,7 +109,7 @@ export const methodLabel = (method?: number | null) => {
   }
   return methodNames[index];
 };
-export const cronTypeNames = ["固定间隔", "定时计划", "仅手动"];
+export const cronTypeNames = ["固定间隔", "定时计划", "仅手动", "持续同步"];
 export const cronFields = [
   { name: "second", label: "秒", placeholder: "0" },
   { name: "minute", label: "分", placeholder: "*" },
@@ -280,6 +280,7 @@ const describeCronPlan = (values?: ScheduleValues | null) => {
 
 export const formatSchedulePlan = (values?: ScheduleValues | null) => {
   if (!values) return "不自动执行，只能手动触发";
+  if (values.isCron === 3) return "持续监控本地变化、定期检测远端，并自动补齐未完成变更";
   if (values.isCron === 0) {
     const mins = Number(values.interval);
     return `每 ${Number.isFinite(mins) && mins >= 0 ? mins : 0} 分钟执行一次`;
@@ -361,6 +362,7 @@ export const getJobName = (job: JobItem) => job.remark || `同步任务 #${job.i
 
 export const formatNextRun = (job?: JobItem | null) => {
   if (!job) return "—";
+  if (job.isCron === 3) return job.enable === 1 ? "持续同步中" : "持续同步已暂停";
   if (job.isCron === 2) return "仅手动触发";
   const nextRun = Number(job.nextRunTime);
   if (!Number.isFinite(nextRun) || nextRun <= 0) return formatSchedule(job);
@@ -371,6 +373,7 @@ export const formatNextRun = (job?: JobItem | null) => {
 
 export const formatSchedule = (job?: JobItem | null) => {
   if (!job) return "—";
+  if (job.isCron === 3) return "持续同步";
   if (job.isCron === 0) {
     const mins = Number(job.interval);
     return `每 ${Number.isFinite(mins) && mins >= 0 ? mins : 0} 分钟`;

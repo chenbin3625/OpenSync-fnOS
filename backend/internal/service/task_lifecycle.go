@@ -67,6 +67,7 @@ func (jt *JobTask) finishSuccessfulTask() {
 		return
 	}
 	enqueue := queueTaskNotification
+	jt.completeContinuousRun(status, "")
 	jt.releaseSlotNow()
 	// Mark the job idle after the DB update succeeds, before notification
 	// delivery is handed off, so the next run is never gated on it.
@@ -91,7 +92,9 @@ func (jt *JobTask) finishSuccessfulTask() {
 				}
 			}
 		case taskStatusFailed, taskStatusPartialFail, taskStatusTimeout:
-			jt.JobClient.scheduleAutoRetry(jt.TaskID)
+			if jt.SyncGeneration == 0 {
+				jt.JobClient.scheduleAutoRetry(jt.TaskID)
+			}
 		}
 	}
 }
@@ -133,6 +136,7 @@ func (jt *JobTask) finishFailedTask(errMsg string) {
 	duration := taskDuration(jt.CreateTime)
 	taskNum["duration"] = duration
 	enqueue := queueTaskNotification
+	jt.completeContinuousRun(taskStatusSystemFailed, errMsg)
 	jt.releaseSlotNow()
 	if jt.JobClient != nil {
 		jt.JobClient.markDone()
@@ -140,8 +144,20 @@ func (jt *JobTask) finishFailedTask(errMsg string) {
 		jt.notifyProgressNow()
 	}
 	enqueue(jt.TaskID, taskStatusSystemFailed.Int(), taskNum, duration, jt.CreateTime)
-	if jt.JobClient != nil && !jt.isBreak() {
+	if jt.JobClient != nil && !jt.isBreak() && jt.SyncGeneration == 0 {
 		jt.JobClient.scheduleAutoRetry(jt.TaskID)
+	}
+}
+
+func (jt *JobTask) completeContinuousRun(status taskStatus, message string) {
+	if jt.SyncGeneration <= 0 {
+		return
+	}
+	if status != taskStatusSuccess && status != taskStatusNoSync && message == "" {
+		message = "本轮同步未全部完成，待处理变更已保留，将自动重试"
+	}
+	if err := mapper.CompleteSyncRun(util.ToInt64(jt.Job["id"]), jt.SyncGeneration, message); err != nil {
+		log.Printf("Task %d failed to checkpoint continuous sync: %v", jt.TaskID, err)
 	}
 }
 

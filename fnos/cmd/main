@@ -33,10 +33,10 @@ LOG_CHECK_INTERVAL="${OPENSYNC_LOG_CHECK_INTERVAL:-300}"
 LOG_ROTATOR_PID_FILE="${TRIM_PKGVAR}/log-rotator.pid"
 # 等待服务创建 Socket 的最长秒数；期间持续确认进程仍存活。
 START_TIMEOUT=60
-# 本脚本的规范路径，用于确认启动锁的持有者仍是本应用的 `main start|stop`。
+# 本脚本的规范路径，用于确认持锁进程仍在执行本应用的生命周期操作。
 SELF="$(readlink -f "$0" 2>/dev/null || true)"
 SELF="${SELF:-$0}"
-# start / stop 共用的生命周期锁。有 flock 时用它做内核级互斥（进程退出即释放，
+# start / stop / 升级备份共用的生命周期锁。有 flock 时用它做内核级互斥（进程退出即释放，
 # 不存在“建锁到写 PID 之间”的空窗）；start.lock 目录 + pid 仍在 flock 保护下维护，
 # 兼容旧版脚本并作为缺少 flock 时的回退。
 LIFECYCLE_LOCK="${TRIM_PKGTMP}/lifecycle.lock"
@@ -151,7 +151,7 @@ is_self_path() {
     real="$(readlink -f "$path" 2>/dev/null || true)"
     [ "$real" = "$SELF" ]
 }
-# 锁里的 PID 可能已被无关的长驻进程复用：只有它仍在执行本脚本的 start 或 stop 才
+# 锁里的 PID 可能已被无关的长驻进程复用：只有它仍在执行本脚本的生命周期操作才
 # 视为锁仍被持有，否则按残留锁处理，避免启动被永久阻塞。
 is_lifecycle_script() {
     local pid="$1" arg prev='' cmdline
@@ -160,14 +160,14 @@ is_lifecycle_script() {
         # 读不到命令行时无法确认身份，保守地沿用 kill -0 的结论。
         [ -r "/proc/$pid/cmdline" ] || return 0
         while IFS= read -r arg || [ -n "$arg" ]; do
-            case "$arg" in start|stop) if is_self_path "$prev"; then return 0; fi ;; esac
+            case "$arg" in start|stop|upgrade-backup) if is_self_path "$prev"; then return 0; fi ;; esac
             prev="$arg"
         done < <({ tr '\0' '\n' < "/proc/$pid/cmdline"; } 2>/dev/null || true)
         return 1
     fi
     cmdline="$(ps -p "$pid" -o command= 2>/dev/null || true)"
     if [ -n "$cmdline" ]; then
-        case " $cmdline " in *[/\ ]main\ start\ *|*[/\ ]main\ stop\ *) return 0 ;; *) return 1 ;; esac
+        case " $cmdline " in *[/\ ]main\ start\ *|*[/\ ]main\ stop\ *|*[/\ ]main\ upgrade-backup\ *) return 0 ;; *) return 1 ;; esac
     fi
     # 没有 /proc 且 ps 给不出命令行时无法确认身份，保守地沿用 kill -0 的结论。
     kill -0 "$pid" 2>/dev/null
@@ -510,6 +510,10 @@ start_app() {
 case "${1:-}" in
     start) start_app ;;
     stop) stop_app ;;
+    upgrade-backup)
+        stop_app
+        source "$(dirname "$SELF")/upgrade_init"
+        ;;
     status) if status_app; then exit 0; else exit 3; fi ;;
     *) fail '不支持的运行操作' ;;
 esac

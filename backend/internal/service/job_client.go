@@ -522,13 +522,16 @@ func NewJobClient(job map[string]interface{}, isInit bool) (*JobClient, error) {
 }
 
 type markedJobRunOptions struct {
-	sourceTaskID   int64
-	statuses       []taskStatus
-	itemIDs        []int64
-	manual         bool
-	onlyFiles      []string
-	forceOverwrite bool
-	chainDepth     int
+	sourceTaskID     int64
+	statuses         []taskStatus
+	itemIDs          []int64
+	manual           bool
+	onlyFiles        []string
+	forceOverwrite   bool
+	chainDepth       int
+	syncGeneration   int64
+	syncChangedFiles []string
+	syncPartial      bool
 }
 
 func (jc *JobClient) runMarkedJob() {
@@ -552,15 +555,37 @@ func (jc *JobClient) runMarkedJobConfig(sourceTaskID int64, statuses []taskStatu
 }
 
 func (jc *JobClient) runMarkedJobWithOptions(opts markedJobRunOptions) {
+	// A manual or scheduled full run can drain the same durable inbox. Repair
+	// and historical retries must never acknowledge unrelated pending changes.
+	if opts.syncGeneration == 0 && opts.sourceTaskID == 0 && len(opts.onlyFiles) == 0 {
+		job := jc.jobSnapshot()
+		extra, _, _ := parseNativeExtraFlags(job["extraFlags"])
+		if util.ToInt(job["isCron"]) == 3 || extra.WatchEnable {
+			if state, err := mapper.GetSyncState(jc.idSnapshot()); err == nil {
+				opts.syncGeneration = state.Generation
+				opts.syncChangedFiles = state.Paths
+			}
+		}
+	}
+	started := false
+	defer func() {
+		if opts.syncGeneration > 0 && !started {
+			_ = mapper.RecordSyncError(jc.idSnapshot(), "同步启动中断，待处理变更已保留，将自动重试")
+		}
+	}()
 	sourceTaskID := opts.sourceTaskID
 	statuses := opts.statuses
 	itemIDs := opts.itemIDs
 	manual := opts.manual
 	taskID := int64(0)
+	var task *JobTask
 	var releaseSlot func()
 	defer func() {
 		if r := recover(); r != nil {
-			if releaseSlot != nil {
+			if task != nil {
+				task.requestBreak()
+				task.cancelTaskRuntime()
+			} else if releaseSlot != nil {
 				releaseSlot()
 			}
 			jc.markDone()
@@ -636,7 +661,7 @@ func (jc *JobClient) runMarkedJobWithOptions(opts markedJobRunOptions) {
 		jc.markDone()
 		return
 	}
-	task, err := newJobTask(taskID, jc)
+	task, err = newJobTask(taskID, jc)
 	if err != nil {
 		errMsg := err.Error()
 		log.Printf("Failed to init task for job %d: %v", jc.idSnapshot(), err)
@@ -661,6 +686,10 @@ func (jc *JobClient) runMarkedJobWithOptions(opts markedJobRunOptions) {
 	}
 	task.ForceOverwrite = opts.forceOverwrite
 	task.ChainDepth = opts.chainDepth
+	task.SyncGeneration = opts.syncGeneration
+	task.SyncChangedFiles = append([]string(nil), opts.syncChangedFiles...)
+	task.SyncPartial = opts.syncPartial
+	task.SyncFullScan = opts.syncGeneration > 0 && !opts.syncPartial
 	task.RequireFullSyncApproval = manual ||
 		(sourceTaskID == 0 && config.GetConfig().Server.ScheduledFullSyncConfirm == 1)
 	if !jc.trySetCurrentTaskIfActive(task) {
@@ -671,13 +700,14 @@ func (jc *JobClient) runMarkedJobWithOptions(opts markedJobRunOptions) {
 			log.Printf("Failed to mark closing/paused task %d as stopped: %v", taskID, err)
 		}
 		task.requestBreak()
-		task.releaseSlotNow()
+		task.cancelTaskRuntime()
 		jc.markDone()
 		return
 	}
 	if !manual && util.ToInt(task.Job["windowEnable"]) == 1 && util.ToInt(task.Job["windowStopOutside"]) == 1 {
 		go watchTaskTimeWindow(task)
 	}
+	started = true
 	task.Start()
 }
 

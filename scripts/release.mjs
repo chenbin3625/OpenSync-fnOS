@@ -2,7 +2,8 @@
 // 一键发布：校验 → 全量测试 → 前端构建一次 → 双架构打包 → 校验和与产物清单。
 // 用法：node scripts/release.mjs [--skip-tests]
 // GitHub 推送与 Release 由 CI（.github/workflows/release.yml）完成。
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import {
   capture,
@@ -23,6 +24,7 @@ import {
   withBuildLock,
   writeChecksums,
 } from "./lib/package.mjs";
+import { bundleRclone } from "./lib/rclone.mjs";
 import { collectVersions, versionProblems } from "./lib/version.mjs";
 
 const argv = process.argv.slice(2);
@@ -31,10 +33,10 @@ if (argv.includes("--help") || argv.includes("-h")) {
 
   node scripts/release.mjs [--skip-tests] [--allow-dirty]
 
-依次执行：工作区与版本一致性检查 → 前端类型检查与单元测试 → go vet 与
-go test -race → 前端构建 → 交叉编译 amd64 / arm64 → fnpack 打包 → 输出校验和。
+依次执行：工作区与版本一致性检查 → 前后端、脚本及 Linux 生命周期测试 →
+前端构建 → 交叉编译 amd64 / arm64 → fnpack 打包 → 输出校验和。
 
-  --skip-tests    跳过前后端测试（仅构建，出包更快）
+  --skip-tests    跳过测试（仅构建，出包更快）
   --allow-dirty   允许在有未提交改动的工作区打包（默认报错退出）
 GitHub 推送与 Release 由 CI 完成。
 `);
@@ -91,23 +93,51 @@ console.log(`Node ${node.text}（${node.dir}，已前置 PATH）`);
 requireNodeModules(node.dir);
 
 // ── 3. 测试 ──────────────────────────────────────────────────────────────
-step(3, TOTAL, runTests ? "运行前后端测试" : "跳过测试（--skip-tests）");
+step(3, TOTAL, runTests ? "运行前后端、脚本和生命周期测试" : "跳过测试（--skip-tests）");
 if (runTests) {
-  // 只做类型检查与单测；Vite 只剥离类型不检查，所以 tsc 必须单独跑。
+  const nodeEnv = envWithNode(node.dir);
+  const frontend = join(root, "frontend");
+  const backend = join(root, "backend");
   console.log("· 前端：tsc --noEmit");
-  run("npx", ["tsc", "--noEmit"], {
-    cwd: join(root, "frontend"),
-    env: envWithNode(node.dir),
+  run("npm", ["exec", "--", "tsc", "--noEmit"], {
+    cwd: frontend,
+    env: nodeEnv,
   });
   console.log("· 前端：vitest");
-  run("npm", ["test"], {
-    cwd: join(root, "frontend"),
-    env: envWithNode(node.dir),
-  });
+  run("npm", ["test"], { cwd: frontend, env: nodeEnv });
+  console.log("· 脚本：test:scripts");
+  run("npm", ["run", "test:scripts"], { env: nodeEnv });
   console.log("· Go：go vet ./...");
-  run("go", ["vet", "./..."], { cwd: join(root, "backend") });
-  console.log("· Go：go test -race ./...");
-  run("go", ["test", "-race", "./..."], { cwd: join(root, "backend") });
+  run("go", ["vet", "./..."], { cwd: backend });
+
+  const testDir = mkdtempSync(join(tmpdir(), "opensync-release-"));
+  try {
+    let rcloneBinary = process.env.OPENSYNC_RCLONE_BIN;
+    if (!rcloneBinary) {
+      const arch = { x64: "amd64", arm64: "arm64" }[process.arch];
+      if (process.platform !== "linux" || !arch)
+        throw new Error("请通过 OPENSYNC_RCLONE_BIN 指定当前平台的 rclone 绝对路径，用于 Go 集成测试");
+      bundleRclone(arch, testDir);
+      rcloneBinary = join(testDir, "rclone");
+    }
+    console.log("· Go：go test -race ./...");
+    run("go", ["test", "-race", "./..."], {
+      cwd: backend,
+      env: { OPENSYNC_RCLONE_BIN: rcloneBinary },
+    });
+    if (process.platform === "linux") {
+      const lifecycleBinary = join(testDir, "opensync");
+      console.log("· Linux 生命周期：test:lifecycle");
+      run("go", ["build", "-o", lifecycleBinary, "./cmd/server"], { cwd: backend });
+      run("npm", ["run", "test:lifecycle"], {
+        env: { ...nodeEnv, OPENSYNC_TEST_BINARY: lifecycleBinary },
+      });
+    } else {
+      console.log("· 生命周期测试需要 Linux，已跳过。");
+    }
+  } finally {
+    rmSync(testDir, { recursive: true, force: true });
+  }
 }
 
 const version = readVersion();

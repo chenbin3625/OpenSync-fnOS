@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import {
   calcRealtimeProgress,
+  calcTaskDisplayPercent,
   mergeTaskItemPatches,
   normalizeTaskItemPage,
   taskProgressPercent,
@@ -234,5 +235,60 @@ describe("realtime progress calculation", () => {
     expect(result.doneSize).toBe(140);
     expect(result.remainSize).toBe(130);
     expect(result.remainTime).toBe(0);
+  });
+});
+
+describe("calcTaskDisplayPercent", () => {
+  it("uses byte progress when totalSize is positive", () => {
+    expect(
+      calcTaskDisplayPercent({
+        doneSize: 610,
+        totalSize: 1000,
+        num: { wait: 70, running: 6, success: 196, fail: 0, other: 0 },
+        scanFinish: true,
+      }),
+    ).toBe(61);
+  });
+
+  it("caps at 99% while remaining items or scan are still active", () => {
+    expect(
+      calcTaskDisplayPercent({
+        doneSize: 999,
+        totalSize: 1000,
+        num: { wait: 1, running: 1, success: 98, fail: 0, other: 0 },
+        scanFinish: true,
+      }),
+    ).toBe(99);
+    expect(
+      calcTaskDisplayPercent({
+        doneSize: 1000,
+        totalSize: 1000,
+        num: { wait: 0, running: 0, success: 10, fail: 0, other: 0 },
+        scanFinish: false,
+      }),
+    ).toBe(99);
+  });
+
+  it("falls back to item count for zero-byte workloads", () => {
+    expect(
+      calcTaskDisplayPercent({
+        doneSize: 0,
+        totalSize: 0,
+        num: { wait: 3, running: 1, success: 6, fail: 0, other: 0 },
+        scanFinish: true,
+      }),
+    ).toBe(60);
+  });
+
+  it("honors fallbackPercent when size is omitted (legacy dashboard fixtures)", () => {
+    expect(
+      calcTaskDisplayPercent({
+        doneSize: 0,
+        totalSize: 0,
+        num: { wait: 12, running: 3, success: 35, fail: 0, other: 0 },
+        scanFinish: true,
+        fallbackPercent: 72.4,
+      }),
+    ).toBe(72);
   });
 });

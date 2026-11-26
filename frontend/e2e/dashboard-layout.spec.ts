@@ -13,6 +13,29 @@ const richDashboardFixture = {
     onlineEngines: 2,
     offlineEngines: 1,
   },
+  realtime: {
+    totalSpeed: 38.4 * 1024 * 1024,
+    totalSpeedAvg: 32.1 * 1024 * 1024,
+    peakSpeed: 46.8 * 1024 * 1024,
+    activeJobs: 2,
+    pausedJobs: 0,
+    activeTransfers: 0,
+    totalDoneBytes: 1.8 * 1024 * 1024 * 1024,
+    totalRemainBytes: 0.9 * 1024 * 1024 * 1024,
+    estimatedRemainTime: 26,
+    globalBwLimit: "50M",
+    sampledAt: now,
+    speedHistory: [
+      { ts: now - 14, speed: 18.2 * 1024 * 1024 },
+      { ts: now - 12, speed: 24.6 * 1024 * 1024 },
+      { ts: now - 10, speed: 31.5 * 1024 * 1024 },
+      { ts: now - 8, speed: 46.8 * 1024 * 1024 },
+      { ts: now - 6, speed: 41.2 * 1024 * 1024 },
+      { ts: now - 4, speed: 35.9 * 1024 * 1024 },
+      { ts: now - 2, speed: 37.1 * 1024 * 1024 },
+      { ts: now, speed: 38.4 * 1024 * 1024 },
+    ],
+  },
   recent7d: {
     totalRuns: 18,
     successRuns: 14,
@@ -21,6 +44,32 @@ const richDashboardFixture = {
     totalFiles: 1246,
     totalBytes: 28 * 1024 * 1024 * 1024 + 420 * 1024 * 1024,
   },
+  dailyTrend: Array.from({ length: 7 }, (_, i) => ({
+    date: `2026-11-${String(20 + i).padStart(2, "0")}`,
+    runs: 2 + (i % 3),
+    successRuns: i === 5 ? 1 : 2 + (i % 3),
+    failRuns: i === 5 ? 1 : 0,
+    files: 120 + i * 35,
+    bytes: (2 + (i % 4)) * 1024 * 1024 * 1024,
+  })),
+  storageQuotas: [
+    {
+      name: "本地",
+      type: "local",
+      supported: true,
+      total: 4 * 1024 * 1024 * 1024 * 1024,
+      used: 3.3 * 1024 * 1024 * 1024 * 1024,
+      free: 0.7 * 1024 * 1024 * 1024 * 1024,
+    },
+    {
+      name: "AliyunDrive",
+      type: "s3",
+      supported: true,
+      total: 2 * 1024 * 1024 * 1024 * 1024,
+      used: 0.9 * 1024 * 1024 * 1024 * 1024,
+      free: 1.1 * 1024 * 1024 * 1024 * 1024,
+    },
+  ],
   pendingApprovals: [
     {
       jobId: 2,
@@ -49,6 +98,10 @@ const richDashboardFixture = {
       pendingApproval: null,
       liveNum: { wait: 12, running: 3, success: 35, fail: 0, other: 0 },
       liveProgress: 72.4,
+      liveDoneSize: 1.2 * 1024 * 1024 * 1024,
+      liveTotalSize: 1.65 * 1024 * 1024 * 1024,
+      liveSpeed: 24.6 * 1024 * 1024,
+      liveRemainTime: 19,
       nextRunTime: now + 3600 * 6,
       windowEnable: 1,
       windowStart: "22:00",
@@ -76,7 +129,11 @@ const richDashboardFixture = {
         paths: [],
       },
       liveNum: null,
-      liveProgress: 0,
+      liveProgress: 56,
+      liveDoneSize: 0.6 * 1024 * 1024 * 1024,
+      liveTotalSize: 1.05 * 1024 * 1024 * 1024,
+      liveSpeed: 13.8 * 1024 * 1024,
+      liveRemainTime: 34,
       nextRunTime: now + 86400,
       windowEnable: 0,
       lastTask: null,
@@ -221,8 +278,20 @@ test("dashboard renders KPI cards, padded section header, status filters and zer
   await page.goto("/app/opensync/dashboard");
 
   await expect(page.locator(".dashboard-kpi-card")).toHaveCount(4);
+  await expect(page.locator(".dashboard-kpi-card").first()).toContainText("38.40");
+  await expect(page.locator(".dashboard-kpi-card").first()).toContainText("MB/s");
+  await expect(page.locator(".dashboard-live-card")).toBeVisible();
+  await expect(page.locator(".dashboard-speed-chart")).toBeVisible();
+  await expect(page.locator(".dashboard-live-task-row")).toHaveCount(2);
+  await expect(page.locator(".dashboard-job-speed").first()).toContainText("24.60 MB/s");
   await expect(page.locator(".approval-alert-banner")).toBeVisible();
   await expect(page.locator(".dashboard-job-row")).toHaveCount(5);
+
+  // Switch between Sync Trend and Storage Quota insights
+  await page.getByRole("tab", { name: /存储配额/ }).click();
+  await expect(page.locator(".dashboard-quota-item")).toHaveCount(2);
+  await page.getByRole("tab", { name: "同步趋势" }).click();
+  await expect(page.locator(".dashboard-trend-chart")).toBeVisible();
 
   // Section card header must have explicit padding & flex layout (no unstyled header regression)
   const cardHead = page.locator(".dashboard-jobs-card .section-card-head");

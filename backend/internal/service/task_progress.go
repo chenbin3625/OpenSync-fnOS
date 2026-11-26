@@ -138,6 +138,176 @@ func (item streamDoingItem) transferredSize() int64 {
 	return int64(float64(item.countableSize()) * item.Progress / 100.0)
 }
 
+type nativePlannedProgress struct {
+	active       bool
+	totalFiles   int64
+	totalBytes   int64
+	doneFiles    int64
+	doneBytes    int64
+	successBytes int64
+}
+
+func (jt *JobTask) initNativePlanned(totalFiles, totalBytes int64) {
+	if jt == nil {
+		return
+	}
+	jt.nativePlannedMu.Lock()
+	jt.nativePlanned = &nativePlannedProgress{
+		active:     true,
+		totalFiles: max(0, totalFiles),
+		totalBytes: max(0, totalBytes),
+	}
+	jt.nativePlannedMu.Unlock()
+}
+
+func (jt *JobTask) adjustNativePlanned(deltaFiles, deltaBytes int64) {
+	if jt == nil {
+		return
+	}
+	jt.nativePlannedMu.Lock()
+	if jt.nativePlanned != nil {
+		jt.nativePlanned.totalFiles = max(jt.nativePlanned.doneFiles, jt.nativePlanned.totalFiles+deltaFiles)
+		jt.nativePlanned.totalBytes = max(jt.nativePlanned.doneBytes, jt.nativePlanned.totalBytes+deltaBytes)
+	}
+	jt.nativePlannedMu.Unlock()
+}
+
+func (jt *JobTask) recordNativePlannedFileDone(size int64, succeeded bool) {
+	if jt == nil {
+		return
+	}
+	sz := max(0, size)
+	jt.nativePlannedMu.Lock()
+	if jt.nativePlanned != nil {
+		jt.nativePlanned.doneFiles++
+		jt.nativePlanned.doneBytes += sz
+		if succeeded {
+			jt.nativePlanned.successBytes += sz
+		}
+		if jt.nativePlanned.doneFiles > jt.nativePlanned.totalFiles {
+			jt.nativePlanned.totalFiles = jt.nativePlanned.doneFiles
+		}
+		if jt.nativePlanned.doneBytes > jt.nativePlanned.totalBytes {
+			jt.nativePlanned.totalBytes = jt.nativePlanned.doneBytes
+		}
+	}
+	jt.nativePlannedMu.Unlock()
+}
+
+func (jt *JobTask) recordNativePlannedFileCopied(size int64, succeeded bool) {
+	if jt == nil {
+		return
+	}
+	sz := max(0, size)
+	jt.nativePlannedMu.Lock()
+	if jt.nativePlanned != nil {
+		jt.nativePlanned.doneBytes += sz
+		if succeeded {
+			jt.nativePlanned.successBytes += sz
+		} else {
+			jt.nativePlanned.doneFiles++
+		}
+		if jt.nativePlanned.doneFiles > jt.nativePlanned.totalFiles {
+			jt.nativePlanned.totalFiles = jt.nativePlanned.doneFiles
+		}
+		if jt.nativePlanned.doneBytes > jt.nativePlanned.totalBytes {
+			jt.nativePlanned.totalBytes = jt.nativePlanned.doneBytes
+		}
+	}
+	jt.nativePlannedMu.Unlock()
+}
+
+func (jt *JobTask) recordNativePlannedFileVerified() {
+	if jt == nil {
+		return
+	}
+	jt.nativePlannedMu.Lock()
+	if jt.nativePlanned != nil {
+		jt.nativePlanned.doneFiles++
+		if jt.nativePlanned.doneFiles > jt.nativePlanned.totalFiles {
+			jt.nativePlanned.totalFiles = jt.nativePlanned.doneFiles
+		}
+	}
+	jt.nativePlannedMu.Unlock()
+}
+
+func (jt *JobTask) reconcileNativePlannedPair(unemittedFiles, unemittedBytes int64) {
+	if jt == nil || (unemittedFiles <= 0 && unemittedBytes <= 0) {
+		return
+	}
+	jt.nativePlannedMu.Lock()
+	if jt.nativePlanned != nil {
+		if unemittedFiles > 0 {
+			jt.nativePlanned.totalFiles = max(jt.nativePlanned.doneFiles, jt.nativePlanned.totalFiles-unemittedFiles)
+		}
+		if unemittedBytes > 0 {
+			jt.nativePlanned.totalBytes = max(jt.nativePlanned.doneBytes, jt.nativePlanned.totalBytes-unemittedBytes)
+		}
+	}
+	jt.nativePlannedMu.Unlock()
+}
+
+func (jt *JobTask) clearNativePlanned() {
+	if jt == nil {
+		return
+	}
+	jt.nativePlannedMu.Lock()
+	jt.nativePlanned = nil
+	jt.nativePlannedMu.Unlock()
+}
+
+func (jt *JobTask) nativePlannedSnapshot() nativePlannedProgress {
+	if jt == nil {
+		return nativePlannedProgress{}
+	}
+	jt.nativePlannedMu.Lock()
+	defer jt.nativePlannedMu.Unlock()
+	if jt.nativePlanned == nil {
+		return nativePlannedProgress{}
+	}
+	return *jt.nativePlanned
+}
+
+func clampInt64(v, low, high int64) int64 {
+	if v < low {
+		return low
+	}
+	if high >= low && v > high {
+		return high
+	}
+	return v
+}
+
+// calcTaskProgressPercent computes a consistent 0..100 progress percentage for
+// a running task, preferring byte progress when size is known, falling back to
+// item counts for 0-byte workloads, and capping below 100% while work remains.
+func calcTaskProgressPercent(payload jobCurrentPayload) float64 {
+	totalSize := payload.DoneSize + payload.RemainSize
+	finishedItems := payload.Num.Success + payload.Num.Fail + payload.Num.Other
+	totalItems := finishedItems + payload.Num.Wait + payload.Num.Running
+	hasRemainingWork := !payload.ScanFinish || payload.Num.Wait > 0 || payload.Num.Running > 0
+
+	var pct float64
+	switch {
+	case totalSize > 0:
+		pct = float64(payload.DoneSize) * 100.0 / float64(totalSize)
+	case totalItems > 0:
+		pct = float64(finishedItems) * 100.0 / float64(totalItems)
+	default:
+		return 0
+	}
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	if hasRemainingWork && pct >= 99.5 {
+		pct = 99
+	}
+	return pct
+}
+
 // GetCurrent returns real-time task progress
 func (jt *JobTask) getCurrentPayload() jobCurrentPayload {
 	jt.initRuntime()
@@ -164,25 +334,31 @@ func (jt *JobTask) getCurrentPayload() jobCurrentPayload {
 
 	paused := jt.isPaused()
 	var nativeSpeed float64
-	if snap := jt.nativeStats.Load(); snap != nil && snap.stats != nil {
-		stats := snap.stats
-		if !paused {
-			nativeSpeed = stats.Speed
+	planned := jt.nativePlannedSnapshot()
+	snap := jt.nativeStats.Load()
+
+	var (
+		inFlightBytes int64
+		runningRemain int64
+	)
+	if snap != nil {
+		if snap.stats != nil && !paused {
+			nativeSpeed = snap.stats.Speed
 		}
-		remainSize = max(0, stats.TotalBytes-stats.Bytes)
-		doneSize = max(doneSize, stats.Bytes)
-		if stats.TotalTransfers > 0 {
-			waitCount = max(0, int(stats.TotalTransfers-stats.Transfers))
-		}
-		runningRemain := int64(0)
 		activeItems := snap.activeTransferring()
 		if len(activeItems) > 0 {
 			doing = make([]streamDoingItem, 0, len(activeItems))
 			runningSize = 0
 			for _, item := range activeItems {
 				rel := path.Clean(item.Name)
-				runningSize += item.Size
-				if rem := item.Size - item.Bytes; rem > 0 {
+				itemSize := max(0, item.Size)
+				itemDone := clampInt64(item.Bytes, 0, itemSize)
+				if itemSize == 0 && item.Bytes > 0 {
+					itemDone = item.Bytes
+				}
+				runningSize += itemSize
+				inFlightBytes += itemDone
+				if rem := itemSize - itemDone; rem > 0 {
 					runningRemain += rem
 				}
 				srcBase := item.srcBase
@@ -195,8 +371,8 @@ func (jt *JobTask) getCurrentPayload() jobCurrentPayload {
 					FileName:   path.Base(rel),
 					SrcPath:    path.Join(srcBase, path.Dir(rel)),
 					DstPath:    path.Join(dstBase, path.Dir(rel)),
-					FileSize:   item.Size,
-					DoneBytes:  item.Bytes,
+					FileSize:   itemSize,
+					DoneBytes:  itemDone,
 					Speed:      itemSpeed,
 					Type:       taskItemTypeCopy.Int(),
 					Status:     taskStatusRunning.Int(),
@@ -204,10 +380,33 @@ func (jt *JobTask) getCurrentPayload() jobCurrentPayload {
 					CreateTime: now,
 				})
 			}
-			waitCount = max(0, waitCount-len(doing))
 		}
-		if stats.TotalBytes > 0 {
+	}
+
+	if planned.active {
+		remainingBeforeInFlight := max(0, planned.totalBytes-planned.doneBytes)
+		effectiveInFlight := min(inFlightBytes, remainingBeforeInFlight)
+		doneSize = max(successSize, planned.successBytes) + effectiveInFlight
+		remainSize = max(runningRemain, max(0, remainingBeforeInFlight-effectiveInFlight))
+		waitCount = max(0, int(planned.totalFiles-planned.doneFiles)-len(doing))
+		waitSize = max(0, remainSize-runningRemain)
+	} else if snap != nil && snap.stats != nil {
+		stats := snap.stats
+		if stats.TotalBytes > 0 && stats.Bytes > stats.TotalBytes {
+			// rclone's stats.Bytes includes retried wire bytes and can exceed
+			// TotalBytes on retries. Fall back to completed + active bytes so
+			// remainSize never prematurely drops to 0 while files still transfer.
+			doneSize = successSize + inFlightBytes
+			remainSize = max(runningRemain, max(0, stats.TotalBytes-min(stats.TotalBytes, doneSize)))
+		} else {
+			remainSize = max(runningRemain, max(0, stats.TotalBytes-stats.Bytes))
+			doneSize = max(successSize+inFlightBytes, stats.Bytes)
+		}
+		waitCount = max(0, int(stats.TotalTransfers-stats.Transfers)-len(doing))
+		if stats.TotalBytes > 0 || remainSize > 0 {
 			waitSize = max(0, remainSize-runningRemain)
+		} else {
+			waitSize = 0
 		}
 	}
 

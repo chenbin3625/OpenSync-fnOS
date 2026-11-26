@@ -43,6 +43,7 @@ import {
 import { applyTheme, connectHost } from "./lib/host";
 import { useResource } from "./lib/hooks";
 import { createGuardedRefresh } from "./lib/sessionGuard";
+import { buildTaskSearchParams } from "./lib/taskForm";
 import { getJobName } from "./pages/Home/homeUtils";
 import type { JobItem } from "./types";
 
@@ -121,9 +122,12 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
     (pathname.startsWith("/tasks") && taskItems[0]
       ? String(taskItems[0].id)
       : null);
-  const taskHref = (jobId: number) => {
-    const next = new URLSearchParams(pathname.startsWith("/tasks") ? search : "");
-    next.set("jobId", String(jobId));
+  const taskHref = (job: Pick<JobItem, "id" | "running">) => {
+    const next = buildTaskSearchParams(job, {
+      onTasksPage: pathname.startsWith("/tasks"),
+      currentSearch: search,
+      activeJobId: activeTaskId,
+    });
     return `/tasks?${next.toString()}`;
   };
   useEffect(() => {
@@ -284,7 +288,7 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
                   setTaskMenuTouched(true);
                   if (!pathname.startsWith("/tasks")) {
                     setTaskMenuOpen(true);
-                    navigate(taskHref(taskItems[0].id));
+                    navigate(taskHref(taskItems[0]));
                     return;
                   }
                   setTaskMenuOpen((open) => !open);
@@ -331,7 +335,7 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
                     // /tasks?jobId=… entry was marked aria-current="page".
                     <Link
                       key={job.id}
-                      to={taskHref(job.id)}
+                      to={taskHref(job)}
                       className={`task-sub-link${activeTaskId === String(job.id) ? " selected" : ""}`}
                       aria-current={
                         activeTaskId === String(job.id) ? "page" : undefined
@@ -469,7 +473,7 @@ function Workspace() {
           <Route path="/storages" element={<Engines />} />
           <Route path="/notifications" element={<Notifications />} />
           <Route path="/settings" element={<Settings />} />
-          <Route path="*" element={<Navigate to="/tasks" replace />} />
+          <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>
       </Shell>
     </SessionContext>

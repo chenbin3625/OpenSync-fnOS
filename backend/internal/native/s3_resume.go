@@ -600,6 +600,7 @@ func resumeUploadFilesToS3(
 	var (
 		completedBytes atomic.Int64
 		completedCount atomic.Int64
+		failedBytes    atomic.Int64
 		errorCount     atomic.Int64
 		activeMu       sync.Mutex
 		activeItems    = map[string]TransferItem{}
@@ -619,9 +620,9 @@ func resumeUploadFilesToS3(
 		activeMu.Unlock()
 		emit(Event{Stats: &Stats{
 			Bytes:          completedBytes.Load() + inFlight,
-			TotalBytes:     totalBytes,
+			TotalBytes:     max(0, totalBytes-failedBytes.Load()),
 			Transfers:      completedCount.Load(),
-			TotalTransfers: int64(len(files)),
+			TotalTransfers: max(0, int64(len(files))-errorCount.Load()),
 			Errors:         errorCount.Load(),
 			Speed:          speedSum,
 			Transferring:   transferring,
@@ -685,6 +686,7 @@ func resumeUploadFilesToS3(
 				return ctx.Err()
 			}
 			errorCount.Add(1)
+			failedBytes.Add(fm.Size)
 			errText := sanitizeRcloneError(upErr.Error())
 			emit(Event{File: fm.Rel, Size: fm.Size, Failed: true, Error: errText})
 			errsMu.Lock()

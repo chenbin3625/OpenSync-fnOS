@@ -25,11 +25,13 @@ export function CheckModal({
   jobName,
   hasCryptRemote = false,
   onClose,
+  onRepairStarted,
 }: {
   jobId: number;
   jobName: string;
   hasCryptRemote?: boolean;
   onClose: () => void;
+  onRepairStarted?: () => void;
 }) {
   const [checkMode, setCheckMode] = useState<"check" | "download" | "cryptcheck">("check");
   const [result, setResult] = useState<JobCheckResult | null>(null);
@@ -192,6 +194,7 @@ export function CheckModal({
           const res = await api.repairJobCheck(jobId);
           Toast.success(`已提交定向修复（共 ${res.repairCount} 个文件），请在实时任务查看进度`);
           window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
+          onRepairStarted?.();
           handleDismiss();
         } catch (err) {
           errorToast(err);
@@ -241,7 +244,7 @@ export function CheckModal({
       title={`数据一致性校验 · ${jobName}`}
       onCancel={handleDismiss}
       footer={
-        <div className="editor-actions" style={{ flexWrap: "wrap", gap: 8 }}>
+        <div className="editor-actions editor-actions--wrap">
           <Button
             type="tertiary"
             className="editor-actions-start"

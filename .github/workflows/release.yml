@@ -78,7 +78,7 @@ jobs:
           install -m 0755 /tmp/fnpack /usr/local/bin/fnpack
 
       - name: Build release artifacts
-        run: node scripts/release.mjs --skip-tests
+        run: node scripts/release.mjs
         env:
           FNPACK: /usr/local/bin/fnpack
 

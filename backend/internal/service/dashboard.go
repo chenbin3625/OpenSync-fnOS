@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/csv"
 	"fmt"
+	"math"
 	"opensync/internal/mapper"
 	"opensync/internal/msg"
 	"opensync/internal/native"
@@ -15,6 +16,71 @@ import (
 	"sync"
 	"time"
 )
+
+type dashboardSpeedSample struct {
+	Timestamp int64   `json:"ts"`
+	Speed     float64 `json:"speed"`
+}
+
+const (
+	dashboardSpeedHistoryMax    = 30
+	dashboardSpeedHistoryMaxAge = 180
+)
+
+var (
+	dashboardSpeedHistoryMu sync.Mutex
+	dashboardSpeedHistory   []dashboardSpeedSample
+)
+
+func sanitizeSpeed(v float64) float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+		return 0
+	}
+	return v
+}
+
+func resetDashboardSpeedHistory() {
+	dashboardSpeedHistoryMu.Lock()
+	dashboardSpeedHistory = nil
+	dashboardSpeedHistoryMu.Unlock()
+}
+
+func recordDashboardSpeedSample(nowUnix int64, speed float64) ([]dashboardSpeedSample, float64) {
+	speed = sanitizeSpeed(speed)
+	dashboardSpeedHistoryMu.Lock()
+	defer dashboardSpeedHistoryMu.Unlock()
+
+	cutoff := nowUnix - dashboardSpeedHistoryMaxAge
+	kept := dashboardSpeedHistory[:0]
+	for _, s := range dashboardSpeedHistory {
+		if s.Timestamp >= cutoff && s.Timestamp <= nowUnix+5 {
+			kept = append(kept, s)
+		}
+	}
+	dashboardSpeedHistory = kept
+
+	if n := len(dashboardSpeedHistory); n > 0 && dashboardSpeedHistory[n-1].Timestamp >= nowUnix {
+		dashboardSpeedHistory[n-1].Speed = speed
+	} else {
+		dashboardSpeedHistory = append(dashboardSpeedHistory, dashboardSpeedSample{
+			Timestamp: nowUnix,
+			Speed:     speed,
+		})
+	}
+	if len(dashboardSpeedHistory) > dashboardSpeedHistoryMax {
+		dashboardSpeedHistory = append([]dashboardSpeedSample(nil), dashboardSpeedHistory[len(dashboardSpeedHistory)-dashboardSpeedHistoryMax:]...)
+	}
+
+	peak := speed
+	out := make([]dashboardSpeedSample, len(dashboardSpeedHistory))
+	for i, s := range dashboardSpeedHistory {
+		out[i] = s
+		if s.Speed > peak {
+			peak = s.Speed
+		}
+	}
+	return out, peak
+}
 
 type dashboardQuotaItem struct {
 	Name      string `json:"name"`
@@ -198,6 +264,7 @@ func GetDashboardOverview() (map[string]interface{}, error) {
 	}
 
 	queuedSet := engineQueue.AllQueuedJobIDs()
+	syncStates, syncStateErr := mapper.ListSyncStates()
 	legacyEngineIDs := legacyOpenListAlistIDs()
 	jobClientListMu.RLock()
 	clientsCopy := make(map[int64]*JobClient, len(jobClientList))
@@ -208,7 +275,13 @@ func GetDashboardOverview() (map[string]interface{}, error) {
 
 	enabledJobs := 0
 	runningJobs := 0
+	pausedJobs := 0
+	activeNonPausedJobs := 0
 	queuedJobs := 0
+	totalSpeed := 0.0
+	totalSpeedAvg := 0.0
+	totalDoneBytes := int64(0)
+	totalRemainBytes := int64(0)
 	pendingApprovals := make([]map[string]interface{}, 0)
 	jobSummaries := make([]map[string]interface{}, 0, len(jobs))
 
@@ -231,6 +304,14 @@ func GetDashboardOverview() (map[string]interface{}, error) {
 		approval := pendingDeleteApprovals.GetByJobID(jobID)
 		var liveNum *taskNumStats
 		liveProgress := 0.0
+		liveDoneSize := int64(0)
+		liveTotalSize := int64(0)
+		liveSpeed := 0.0
+		liveSpeedAvg := 0.0
+		liveRemainTime := 0
+		liveBwLimit := ""
+		liveScanFinish := true
+		var liveScan *scanProgressPayload
 
 		if client := clientsCopy[jobID]; client != nil {
 			if nextTime, ok := client.nextRunTime(); ok {
@@ -244,9 +325,26 @@ func GetDashboardOverview() (map[string]interface{}, error) {
 				paused = payload.Paused
 				numCopy := payload.Num
 				liveNum = &numCopy
-				total := payload.DoneSize + payload.RemainSize
-				if total > 0 {
-					liveProgress = float64(payload.DoneSize) * 100.0 / float64(total)
+				liveDoneSize = max(0, payload.DoneSize)
+				remainSize := max(0, payload.RemainSize)
+				liveTotalSize = liveDoneSize + remainSize
+				liveSpeed = sanitizeSpeed(payload.Speed)
+				liveSpeedAvg = sanitizeSpeed(payload.SpeedAvg)
+				liveRemainTime = max(0, payload.RemainTime)
+				liveBwLimit = strings.TrimSpace(payload.LiveBwLimit)
+				liveScanFinish = payload.ScanFinish
+				liveScan = payload.Scan
+				liveProgress = calcTaskProgressPercent(payload)
+				if paused {
+					pausedJobs++
+					liveSpeed = 0
+					liveRemainTime = 0
+				} else {
+					activeNonPausedJobs++
+					totalSpeed += liveSpeed
+					totalSpeedAvg += liveSpeedAvg
+					totalDoneBytes += liveDoneSize
+					totalRemainBytes += remainSize
 				}
 			}
 		}
@@ -321,9 +419,52 @@ func GetDashboardOverview() (map[string]interface{}, error) {
 			"pendingApproval": approval,
 			"liveNum":         liveNum,
 			"liveProgress":    liveProgress,
+			"liveDoneSize":    liveDoneSize,
+			"liveTotalSize":   liveTotalSize,
+			"liveSpeed":       liveSpeed,
+			"liveSpeedAvg":    liveSpeedAvg,
+			"liveRemainTime":  liveRemainTime,
+			"liveBwLimit":     liveBwLimit,
+			"liveScanFinish":  liveScanFinish,
+			"liveScan":        liveScan,
 			"lastTask":        lastTaskSummary,
 		})
+		if !legacyOpenList {
+			statusRow := cloneJobConfig(job)
+			addSyncStatus(statusRow, syncStates[jobID], syncStateErr, clientsCopy[jobID])
+			jobSummaries[len(jobSummaries)-1]["syncStatus"] = statusRow["syncStatus"]
+		}
 	}
+
+	activeTransfers := 0
+	for _, tr := range ListNativeTransfers() {
+		if tr.Status != "running" {
+			continue
+		}
+		activeTransfers++
+		if sp := sanitizeSpeed(tr.Speed); sp > 0 {
+			totalSpeed += sp
+		}
+		if tr.TotalBytes > 0 {
+			done := clampInt64(tr.DoneBytes, 0, tr.TotalBytes)
+			totalDoneBytes += done
+			totalRemainBytes += tr.TotalBytes - done
+		}
+	}
+
+	estimatedRemainTime := 0
+	if (activeNonPausedJobs > 0 || activeTransfers > 0) && totalRemainBytes > 0 {
+		rate := totalSpeedAvg
+		if totalSpeed > 0 && totalSpeedAvg > 0 {
+			rate = 0.6*totalSpeed + 0.4*totalSpeedAvg
+		} else if totalSpeed > 0 {
+			rate = totalSpeed
+		}
+		if rate > 0 {
+			estimatedRemainTime = int(math.Ceil(float64(totalRemainBytes) / rate))
+		}
+	}
+	speedHistory, peakSpeed := recordDashboardSpeedSample(now.Unix(), totalSpeed)
 
 	return map[string]interface{}{
 		"kpi": map[string]interface{}{
@@ -335,6 +476,20 @@ func GetDashboardOverview() (map[string]interface{}, error) {
 			"totalEngines":     len(engines),
 			"onlineEngines":    onlineEngines,
 			"offlineEngines":   offlineEngines,
+		},
+		"realtime": map[string]interface{}{
+			"totalSpeed":          totalSpeed,
+			"totalSpeedAvg":       totalSpeedAvg,
+			"peakSpeed":           peakSpeed,
+			"activeJobs":          activeNonPausedJobs,
+			"pausedJobs":          pausedJobs,
+			"activeTransfers":     activeTransfers,
+			"totalDoneBytes":      totalDoneBytes,
+			"totalRemainBytes":    totalRemainBytes,
+			"estimatedRemainTime": estimatedRemainTime,
+			"globalBwLimit":       globalDefaultBwLimit(),
+			"sampledAt":           now.Unix(),
+			"speedHistory":        speedHistory,
 		},
 		"recent7d": map[string]interface{}{
 			"totalRuns":   totalRuns,

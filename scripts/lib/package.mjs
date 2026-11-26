@@ -174,10 +174,15 @@ const copyTemplate = (from, to) => {
 
 export const requireNodeModules = (nodeDir, { install = true } = {}) => {
   const directory = join(root, "frontend", "node_modules");
-  if (existsSync(directory)) return false;
+  const binSuffix = process.platform === "win32" ? ".cmd" : "";
+  const requiredBins = [
+    join(directory, ".bin", `vite${binSuffix}`),
+    join(directory, ".bin", `tsc${binSuffix}`),
+  ];
+  if (existsSync(directory) && requiredBins.every(existsSync)) return false;
   if (!install)
-    throw new Error("frontend/node_modules 不存在，请先运行 npm ci");
-  console.log("frontend/node_modules 不存在，先执行 npm ci…");
+    throw new Error("frontend/node_modules 不完整，请先运行 npm ci");
+  console.log("frontend/node_modules 不存在或不完整，先执行 npm ci…");
   run("npm", ["ci"], {
     cwd: join(root, "frontend"),
     env: envWithNode(nodeDir),

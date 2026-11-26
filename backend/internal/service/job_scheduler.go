@@ -136,7 +136,7 @@ func (s *Scheduler) AddJob(isCron int, jobData map[string]interface{}, fn func()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if isCron == 2 {
+	if isCron == 2 || isCron == 3 {
 		// Manual only, no scheduling
 		return nil
 	}
@@ -175,7 +175,7 @@ func (s *Scheduler) Resume(isCron int, jobData map[string]interface{}, fn func()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if isCron == 2 {
+	if isCron == 2 || isCron == 3 {
 		return nil
 	}
 	if s.cron == nil {

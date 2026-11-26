@@ -112,7 +112,7 @@ func UpdateSystemConfig(c *gin.Context) {
 	// The merge runs inside the config lock: reading the current settings here
 	// and writing later would let two concurrent partial updates each restore
 	// the other's fields to their old values.
-	if err := config.UpdateSystemSettingsWith(patch.applyTo); err != nil {
+	if err := config.UpdateSystemSettingsWithLocale(patch.applyTo, patch.Locale); err != nil {
 		if errors.Is(err, config.ErrConfigWrite) {
 			// The cause names the config path and the OS error; keep that in the
 			// service log rather than handing it to the browser.
@@ -122,17 +122,6 @@ func UpdateSystemConfig(c *gin.Context) {
 		}
 		respondError(c, err.Error())
 		return
-	}
-	if patch.Locale != nil {
-		if err := config.UpdateLocale(*patch.Locale); err != nil {
-			if errors.Is(err, config.ErrConfigWrite) {
-				log.Printf("save system locale failed: %v", err)
-				c.JSON(500, model.Error(msg.T(msg.ConfigSaveFail)))
-				return
-			}
-			respondError(c, err.Error())
-			return
-		}
 	}
 	// Applying the new retention window can delete a large backlog and VACUUM
 	// the database. That must not hold the config response open, and nothing in

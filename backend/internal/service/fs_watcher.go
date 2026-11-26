@@ -3,23 +3,19 @@ package service
 import (
 	"context"
 	"io/fs"
-	"log"
 	"os"
-	"path"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"opensync/internal/native"
-	"opensync/pkg/util"
 )
 
 const (
 	defaultWatchDebounceSec = 30
 	minWatchDebounceSec     = 2
-	maxWatchChangedPaths    = 200
 	watchPollingInterval    = 5 * time.Second
 )
 
@@ -29,15 +25,16 @@ type watchLocalRoot struct {
 }
 
 type jobWatcher struct {
-	jobID   int64
-	cancel  context.CancelFunc
-	done    chan struct{}
-	roots   []watchLocalRoot
-	pending bool
-	mu      sync.Mutex
-	timer   *time.Timer
-	changed map[string]struct{}
-	overflow bool
+	jobID            int64
+	cancel           context.CancelFunc
+	done             chan struct{}
+	roots            []watchLocalRoot
+	mu               sync.Mutex
+	wake             chan struct{}
+	scanning         atomic.Bool
+	persistenceError string
+	failedPaths      map[string]struct{}
+	failedFullScan   bool
 }
 
 type fsWatcherManager struct {
@@ -124,172 +121,12 @@ func (m *fsWatcherManager) ResetForTest() {
 	m.mu.Unlock()
 }
 
-// SyncJob starts, restarts, or stops the filesystem watcher for jc based on its
-// current configuration and enabled state.
+// SyncJob applies the durable watcher and continuous-sync lifecycle.
 func (m *fsWatcherManager) SyncJob(jc *JobClient) {
-	if jc == nil {
-		return
-	}
-	jobID := jc.idSnapshot()
-	if jobID <= 0 {
-		return
-	}
-	job := jc.jobSnapshot()
-	if job == nil || !jc.enabled() || jc.isClosing() {
-		m.Stop(jobID)
-		return
-	}
-	extra, _, err := parseNativeExtraFlags(job["extraFlags"])
-	if err != nil || !extra.WatchEnable {
-		m.Stop(jobID)
-		return
-	}
-	srcPaths := parsePathList(job["srcPath"])
-	roots := resolveLocalWatchRoots(srcPaths)
-	if len(roots) == 0 {
-		m.Stop(jobID)
-		return
-	}
-	debounceSec := extra.WatchDebounceSec
-	if debounceSec <= 0 {
-		debounceSec = defaultWatchDebounceSec
-	}
-	if debounceSec < minWatchDebounceSec {
-		debounceSec = minWatchDebounceSec
-	}
-
-	m.mu.Lock()
-	if m.stopped {
-		m.mu.Unlock()
-		return
-	}
-	old := m.watchers[jobID]
-	delete(m.watchers, jobID)
-	ctx, cancel := context.WithCancel(context.Background())
-	w := &jobWatcher{
-		jobID:   jobID,
-		cancel:  cancel,
-		done:    make(chan struct{}),
-		roots:   roots,
-		changed: make(map[string]struct{}),
-	}
-	m.watchers[jobID] = w
-	m.mu.Unlock()
-
-	if old != nil {
-		old.stop()
-	}
-
-	excludeM := buildJobExcludeMatcher(job)
-	includeM := buildJobIncludeMatcher(job)
-	multiRoot := len(srcPaths) > 1
-	method := util.ToInt(job["method"])
-
-	go func() {
-		defer close(w.done)
-		debounceDur := time.Duration(debounceSec) * time.Second
-		onEvent := func(relPath string, overflow bool) {
-			if ctx.Err() != nil {
-				return
-			}
-			if relPath != "" {
-				relPath = strings.TrimPrefix(path.Clean("/"+relPath), "/")
-				if relPath == "" || relPath == "." || strings.HasPrefix(relPath, "../") {
-					return
-				}
-				if excludeM != nil && excludeM.matchesListed(relPath, false) {
-					return
-				}
-				if includeM != nil && !includeM.matchesListed(relPath) {
-					return
-				}
-			}
-			w.mu.Lock()
-			if overflow || multiRoot || method != 0 || relPath == "" {
-				w.overflow = true
-			} else if len(w.changed) >= maxWatchChangedPaths {
-				w.overflow = true
-			} else {
-				w.changed[relPath] = struct{}{}
-			}
-			w.pending = true
-			if w.timer != nil {
-				w.timer.Reset(debounceDur)
-			} else {
-				w.timer = time.AfterFunc(debounceDur, func() {
-					w.flushTrigger(ctx, jc, debounceDur)
-				})
-			}
-			w.mu.Unlock()
-		}
-		watchLocalRootsPlatform(ctx, roots, onEvent)
-	}()
-	log.Printf("fs_watcher: started watching %d local root(s) for job %d (debounce=%ds)", len(roots), jobID, debounceSec)
-}
-
-func (w *jobWatcher) flushTrigger(ctx context.Context, jc *JobClient, debounceDur time.Duration) {
-	if ctx.Err() != nil {
-		return
-	}
-	w.mu.Lock()
-	if !w.pending {
-		w.timer = nil
-		w.mu.Unlock()
-		return
-	}
-	overflow := w.overflow
-	var paths []string
-	if !overflow && len(w.changed) > 0 {
-		paths = make([]string, 0, len(w.changed))
-		for p := range w.changed {
-			paths = append(paths, p)
-		}
-		sort.Strings(paths)
-	}
-	w.changed = make(map[string]struct{})
-	w.overflow = false
-	w.pending = false
-	w.timer = nil
-	w.mu.Unlock()
-
-	if !jc.enabled() || jc.isClosing() {
-		return
-	}
-	if !JobInTimeWindow(jc.jobSnapshot(), time.Now()) {
-		return
-	}
-	if !jc.DoWatchSync(paths) {
-		// Job is busy right now: requeue a follow-up trigger after debounceDur so
-		// edits made during an active run are not lost.
-		w.mu.Lock()
-		w.pending = true
-		if overflow || len(paths) == 0 {
-			w.overflow = true
-		} else {
-			for _, p := range paths {
-				if len(w.changed) >= maxWatchChangedPaths {
-					w.overflow = true
-					break
-				}
-				w.changed[p] = struct{}{}
-			}
-		}
-		if w.timer == nil && ctx.Err() == nil {
-			w.timer = time.AfterFunc(debounceDur, func() {
-				w.flushTrigger(ctx, jc, debounceDur)
-			})
-		}
-		w.mu.Unlock()
-	}
+	m.startSyncJob(jc)
 }
 
 func (w *jobWatcher) stop() {
-	w.mu.Lock()
-	if w.timer != nil {
-		w.timer.Stop()
-		w.timer = nil
-	}
-	w.mu.Unlock()
 	if w.cancel != nil {
 		w.cancel()
 	}

@@ -708,14 +708,9 @@ func GetEffectiveLocale() string {
 // UpdateLocale sets the active backend locale ("zh" or "en") and persists it
 // to config.ini without disturbing other settings or comments.
 func UpdateLocale(raw string) error {
-	trimmed := strings.ToLower(strings.TrimSpace(raw))
-	switch trimmed {
-	case "zh", "zh-cn", "zh_cn":
-		trimmed = "zh"
-	case "en", "en-us", "en_us":
-		trimmed = "en"
-	default:
-		return errors.New("仅支持简体中文（zh）或英文（en）")
+	trimmed, err := normalizeLocale(raw)
+	if err != nil {
+		return err
 	}
 	GetConfig()
 	configMu.Lock()
@@ -729,6 +724,19 @@ func UpdateLocale(raw string) error {
 	nextServer.Locale = msg.Locale()
 	sysConfig = &Config{DB: sysConfig.DB, Server: nextServer}
 	return nil
+}
+
+func normalizeLocale(raw string) (string, error) {
+	trimmed := strings.ToLower(strings.TrimSpace(raw))
+	switch trimmed {
+	case "zh", "zh-cn", "zh_cn":
+		trimmed = "zh"
+	case "en", "en-us", "en_us":
+		trimmed = "en"
+	default:
+		return "", errors.New("仅支持简体中文（zh）或英文（en）")
+	}
+	return trimmed, nil
 }
 
 func writeSingleKeyToConfigFile(targetKey, targetVal string) error {
@@ -860,6 +868,25 @@ func UpdateSystemSettings(settings SystemSettings) error {
 // updates (PUT with a subset of fields) cannot overwrite each other's fields
 // with a stale read.
 func UpdateSystemSettingsWith(update func(current SystemSettings) SystemSettings) error {
+	return updateSystemSettingsWithLocale(update, nil)
+}
+
+// UpdateSystemSettingsWithLocale validates and persists settings and locale in
+// one config-file replacement. A failed locale validation or write therefore
+// cannot leave the other fields applied.
+func UpdateSystemSettingsWithLocale(update func(current SystemSettings) SystemSettings, rawLocale *string) error {
+	var locale *string
+	if rawLocale != nil {
+		normalized, err := normalizeLocale(*rawLocale)
+		if err != nil {
+			return err
+		}
+		locale = &normalized
+	}
+	return updateSystemSettingsWithLocale(update, locale)
+}
+
+func updateSystemSettingsWithLocale(update func(current SystemSettings) SystemSettings, locale *string) error {
 	GetConfig()
 	configMu.Lock()
 	defer configMu.Unlock()
@@ -887,8 +914,17 @@ func UpdateSystemSettingsWith(update func(current SystemSettings) SystemSettings
 	nextServer.DigestSchedule = strings.ToLower(strings.TrimSpace(settings.DigestSchedule))
 	nextServer.DigestHour = settings.DigestHour
 	nextServer.DigestWeekday = settings.DigestWeekday
+	if locale != nil {
+		nextServer.Locale = *locale
+	}
 
-	if err := writeConfigFile(nextServer, cfg.Server); err != nil {
+	var writeErr error
+	if locale == nil {
+		writeErr = writeConfigFile(nextServer, cfg.Server)
+	} else {
+		writeErr = writeConfigFile(nextServer, cfg.Server, *locale)
+	}
+	if err := writeErr; err != nil {
 		var conflict *configConflictError
 		if errors.As(err, &conflict) {
 			// User-actionable conflict, not an opaque OS write failure.
@@ -899,6 +935,11 @@ func UpdateSystemSettingsWith(update func(current SystemSettings) SystemSettings
 	sysConfig = &Config{
 		DB:     cfg.DB,
 		Server: nextServer,
+	}
+	if locale != nil {
+		msg.SetLocale(*locale)
+		nextServer.Locale = msg.Locale()
+		sysConfig = &Config{DB: cfg.DB, Server: nextServer}
 	}
 	return nil
 }
@@ -1002,11 +1043,16 @@ func configManagedValues(sCfg ServerConfig) map[string]string {
 // snapshot match again). Values that are not valid integers on disk are
 // ignored for the conflict check because startup already clamps or defaults
 // them (e.g. copy_concurrency=99999).
-func writeConfigFile(sCfg ServerConfig, before ServerConfig) error {
+func writeConfigFile(sCfg ServerConfig, before ServerConfig, localeOverride ...string) error {
 	if err := os.MkdirAll(ConfigDir(), 0700); err != nil {
 		return err
 	}
 	values := configManagedValues(sCfg)
+	keys := append([]string(nil), configManagedKeys...)
+	if len(localeOverride) > 0 {
+		values["locale"] = localeOverride[0]
+		keys = append(keys, "locale")
+	}
 	for key, value := range values {
 		if !validConfigValue(value) {
 			return fmt.Errorf("拒绝写入非法的配置值 %s=%q", key, value)
@@ -1024,7 +1070,7 @@ func writeConfigFile(sCfg ServerConfig, before ServerConfig) error {
 	// at EOF) instead of being appended under a second [opensync] header.
 	sawOpensync := false
 	flushPending := func() {
-		for _, key := range configManagedKeys {
+		for _, key := range keys {
 			if v, ok := pending[key]; ok {
 				out = append(out, key+"="+v)
 				delete(pending, key)
@@ -1094,7 +1140,7 @@ func writeConfigFile(sCfg ServerConfig, before ServerConfig) error {
 			out = append(out, "")
 		}
 		out = append(out, "[opensync]")
-		for _, key := range configManagedKeys {
+		for _, key := range keys {
 			if v, ok := pending[key]; ok {
 				out = append(out, key+"="+v)
 			}

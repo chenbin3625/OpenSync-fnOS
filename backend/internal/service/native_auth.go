@@ -181,7 +181,7 @@ func mergeAuthSessionIntoParams(authSessionID string, incoming map[string]string
 		// Secrets acquired by the fresh auth session should replace omitted
 		// form values AND take precedence over older stored tokens when editing.
 		if native.IsSecretField(k) {
-			if out[k] == "" || k == "token" || k == "trust_token" || k == "cookies" || k == "auth_token" {
+			if out[k] == "" || k == "token" || k == "trust_token" || k == "cookies" || k == "cookie" || k == "auth_token" {
 				out[k] = v
 				if completed.ObscuredKeys[k] {
 					skipObscure[k] = true

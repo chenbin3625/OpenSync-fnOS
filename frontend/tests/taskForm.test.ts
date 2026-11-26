@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildJobPayload,
+  buildTaskSearchParams,
   defaultJobForm,
   fileTypeFilterGroups,
   findBatchMoveJobs,
@@ -8,6 +9,7 @@ import {
   jobToForm,
   normalizeCustomFileTypePattern,
   parseExcludeFolders,
+  parseTaskTab,
   resolveJobSelection,
   resolveTaskTab,
   selectJob,
@@ -423,6 +425,108 @@ describe("existing synchronization contracts", () => {
       "realtime",
     );
     expect(resolveTaskTab("history", idle)).toBe("history");
+  });
+
+  it("prioritizes the realtime tab when no explicit tab is requested and a task is running", () => {
+    expect(parseTaskTab(null)).toBeNull();
+    expect(parseTaskTab("invalid")).toBeNull();
+    expect(parseTaskTab("realtime")).toBe("realtime");
+
+    // Unspecified tab switches to realtime as soon as a running task is known
+    // (either from currentTask or from jobRunning before currentTask settles).
+    expect(
+      resolveTaskTab(null, { settled: true, hasCurrentTask: true }),
+    ).toBe("realtime");
+    expect(
+      resolveTaskTab(null, {
+        settled: false,
+        hasCurrentTask: false,
+        jobRunning: true,
+      }),
+    ).toBe("realtime");
+    // Falls back cleanly to overview if the snapshot settles with no running task.
+    expect(
+      resolveTaskTab(null, {
+        settled: true,
+        hasCurrentTask: false,
+        jobRunning: true,
+      }),
+    ).toBe("overview");
+    expect(
+      resolveTaskTab(null, { settled: true, hasCurrentTask: false }),
+    ).toBe("overview");
+    // Explicit overview/history tabs are never overridden even when running.
+    expect(
+      resolveTaskTab("overview", {
+        settled: true,
+        hasCurrentTask: true,
+        jobRunning: true,
+      }),
+    ).toBe("overview");
+    expect(
+      resolveTaskTab("history", {
+        settled: true,
+        hasCurrentTask: true,
+        jobRunning: true,
+      }),
+    ).toBe("history");
+  });
+
+  it("builds task navigation params that prioritize realtime for running jobs", () => {
+    // Entering from another page
+    expect(
+      buildTaskSearchParams({ id: 2, running: true }, { onTasksPage: false }).toString(),
+    ).toBe("jobId=2&tab=realtime");
+    expect(
+      buildTaskSearchParams({ id: 2, running: false }, { onTasksPage: false }).toString(),
+    ).toBe("jobId=2");
+
+    // Switching from an idle job on overview to a running job prioritizes realtime
+    expect(
+      buildTaskSearchParams(
+        { id: 2, running: true },
+        { onTasksPage: true, currentSearch: "jobId=1&tab=overview", activeJobId: 1 },
+      ).toString(),
+    ).toBe("jobId=2&tab=realtime");
+
+    // Switching from history to a running job still prioritizes realtime
+    expect(
+      buildTaskSearchParams(
+        { id: 2, running: true },
+        { onTasksPage: true, currentSearch: "jobId=1&tab=history", activeJobId: 1 },
+      ).toString(),
+    ).toBe("jobId=2&tab=realtime");
+
+    // Switching from history to another idle job keeps history
+    expect(
+      buildTaskSearchParams(
+        { id: 2, running: false },
+        { onTasksPage: true, currentSearch: "jobId=1&tab=history", activeJobId: 1 },
+      ).toString(),
+    ).toBe("jobId=2&tab=history");
+
+    // Switching from overview or realtime to another idle job clears stale tab
+    // so Tasks can auto-switch if the target job just started running
+    expect(
+      buildTaskSearchParams(
+        { id: 2, running: false },
+        { onTasksPage: true, currentSearch: "jobId=1&tab=overview", activeJobId: 1 },
+      ).toString(),
+    ).toBe("jobId=2");
+    expect(
+      buildTaskSearchParams(
+        { id: 2, running: false },
+        { onTasksPage: true, currentSearch: "jobId=1&tab=realtime", activeJobId: 1 },
+      ).toString(),
+    ).toBe("jobId=2");
+
+    // Re-clicking the currently selected job keeps the user's chosen tab
+    expect(
+      buildTaskSearchParams(
+        { id: 1, running: true },
+        { onTasksPage: true, currentSearch: "jobId=1&tab=overview", activeJobId: 1 },
+      ).toString(),
+    ).toBe("jobId=1&tab=overview");
   });
 
   it("updates generated folder exclude rules without changing manual rules", () => {

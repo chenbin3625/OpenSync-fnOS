@@ -60,6 +60,9 @@ func newRouterWithVersionChecker(development bool, allowedOrigins []string, chec
 	r.Use(gin.Logger(), func(c *gin.Context) {
 		defer func() {
 			if value := recover(); value != nil {
+				if value == http.ErrAbortHandler {
+					panic(value)
+				}
 				log.Printf("unexpected panic (safety net): %v", value)
 				if c.Writer.Written() {
 					c.Abort()

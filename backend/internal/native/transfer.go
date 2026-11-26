@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path"
 	"strings"
+	"sync"
 )
 
 // StreamDownload opens virtualPath for streaming download directly to an HTTP client.
@@ -67,19 +69,24 @@ func (c Config) StreamDownload(ctx context.Context, virtualPath string, opts Ses
 	if err != nil {
 		return nil, "", 0, err
 	}
-	cmd, err := s.Cmd(ctx, "cat", "--", ep.Path)
+	streamCtx, cancel := context.WithCancel(ctx)
+	cmd, err := s.Cmd(streamCtx, "cat", "--", ep.Path)
 	if err != nil {
+		cancel()
 		s.Close()
 		return nil, "", 0, err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		cancel()
 		s.Close()
 		return nil, "", 0, err
 	}
 	errBuf := &tailBuffer{limit: maxStderrCapture}
 	cmd.Stderr = errBuf
 	if err := cmd.Start(); err != nil {
+		cancel()
+		_ = stdout.Close()
 		s.Close()
 		return nil, "", 0, err
 	}
@@ -89,6 +96,7 @@ func (c Config) StreamDownload(ctx context.Context, virtualPath string, opts Ses
 		session: s,
 		errBuf:  errBuf,
 		backend: ep.Backend,
+		cancel:  cancel,
 	}, fileName, -1, nil
 }
 
@@ -107,30 +115,47 @@ func (r *rootFileCloser) Close() error {
 }
 
 type rcloneStreamReader struct {
-	rc      io.ReadCloser
-	cmd     interface{ Wait() error }
-	session *Session
-	errBuf  *tailBuffer
-	backend string
-	closed  bool
+	rc        io.ReadCloser
+	cmd       *exec.Cmd
+	session   *Session
+	errBuf    *tailBuffer
+	backend   string
+	cancel    context.CancelFunc
+	finish    sync.Once
+	finishErr error
 }
 
 func (r *rcloneStreamReader) Read(p []byte) (int, error) {
-	return r.rc.Read(p)
+	n, err := r.rc.Read(p)
+	if err == io.EOF {
+		if finishErr := r.finishCommand(); finishErr != nil {
+			return n, finishErr
+		}
+	}
+	return n, err
 }
 
 func (r *rcloneStreamReader) Close() error {
-	if r.closed {
-		return nil
-	}
-	r.closed = true
+	r.cancel()
 	_ = r.rc.Close()
-	waitErr := r.cmd.Wait()
-	r.session.Close()
-	if waitErr != nil && strings.TrimSpace(r.errBuf.String()) != "" {
-		return classifyRcloneError(r.backend, r.errBuf.String())
-	}
-	return nil
+	return r.finishCommand()
+}
+
+func (r *rcloneStreamReader) finishCommand() error {
+	r.finish.Do(func() {
+		waitErr := r.cmd.Wait()
+		r.cancel()
+		r.session.Close()
+		if waitErr == nil {
+			return
+		}
+		if detail := strings.TrimSpace(r.errBuf.String()); detail != "" {
+			r.finishErr = classifyRcloneError(r.backend, detail)
+			return
+		}
+		r.finishErr = fmt.Errorf("远端下载进程失败：%w", waitErr)
+	})
+	return r.finishErr
 }
 
 // StreamUpload streams a single file upload from reader into dirVirtualPath/fileName.

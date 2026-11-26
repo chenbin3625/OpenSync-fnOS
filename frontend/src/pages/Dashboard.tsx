@@ -1,4 +1,12 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useState,
+} from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Checkbox from "@douyinfe/semi-ui/lib/es/checkbox";
@@ -23,6 +31,7 @@ import {
   IconRefresh,
   IconServerStroked,
   IconStop,
+  IconTickCircle,
 } from "@douyinfe/semi-icons";
 import dayjs from "dayjs";
 import { api } from "../api/client";
@@ -42,6 +51,18 @@ import {
 } from "../components/common";
 import { DryRunModal } from "../components/DryRunModal";
 import { FullSyncApprovalModal } from "../components/FullSyncApprovalModal";
+import {
+  buildSpeedChartGeometry,
+  deriveDashboardRealtime,
+  findNextScheduledJob,
+  formatAxisSpeed,
+  formatMbps,
+  formatSpeed,
+  mergeSpeedHistory,
+  safeSpeed,
+  sortStorageQuotas,
+  splitSpeedParts,
+} from "../lib/dashboardMetrics";
 import { useAction, useResource } from "../lib/hooks";
 import { formatDisplayPathList } from "../lib/syncPathPreview";
 import {
@@ -50,13 +71,21 @@ import {
   isLegacyOpenListJob,
 } from "../lib/taskForm";
 import {
+  formatDuration,
   formatSize,
   methodLabel,
   parseJobPathList,
   taskRecordStatusNames,
 } from "./Home/homeUtils";
+import { calcTaskDisplayPercent } from "./Home/taskRows";
 import { formatTimestamp } from "../utils/date";
-import type { DashboardJobItem, FullSyncApproval, JobItem } from "../types";
+import type {
+  DashboardJobItem,
+  DashboardSpeedSample,
+  FullSyncApproval,
+  JobItem,
+} from "../types";
+import { SyncStatusTag } from "../components/SyncStatus";
 import type { TaskEditorSavedResult } from "./TaskEditor";
 
 const JobEditor = lazy(() => import("./TaskEditor"));
@@ -69,7 +98,11 @@ type StatusFilter =
   | "failed"
   | "disabled";
 
+type InsightTab = "trend" | "quota";
+
 const FAILED_STATUSES = [3, 5, 6, 7];
+const SPEED_CHART_WIDTH = 600;
+const SPEED_CHART_HEIGHT = 104;
 
 function isJobFailed(job: DashboardJobItem): boolean {
   return Boolean(job.lastTask && FAILED_STATUSES.includes(job.lastTask.status));
@@ -103,7 +136,14 @@ function formatShortTime(seconds?: number | null): string {
   return d.format(sameYear ? "MM-DD HH:mm" : "YYYY-MM-DD HH:mm");
 }
 
+function formatSampleClock(seconds?: number | null): string {
+  const ts = Number(seconds || 0);
+  if (ts <= 0) return "--:--:--";
+  return dayjs.unix(ts).format("HH:mm:ss");
+}
+
 function formatScheduleHint(job: DashboardJobItem): string {
+  if (job.isCron === 3) return job.enable === 1 ? "持续同步" : "持续同步已暂停";
   if (job.nextRunTime > 0) return `下次 ${formatShortTime(job.nextRunTime)}`;
   if (job.enable !== 1) return "已停用";
   if (job.isCron === 2) return "仅手动触发";
@@ -111,9 +151,66 @@ function formatScheduleHint(job: DashboardJobItem): string {
   return "定时计划";
 }
 
+function computeJobLiveMetrics(job: DashboardJobItem) {
+  const liveDoneSize = Math.max(0, Number(job.liveDoneSize || 0));
+  const liveTotalSize = Math.max(0, Number(job.liveTotalSize || 0));
+  const liveScanFinish = job.liveScanFinish !== false;
+  const liveScan = job.liveScan ?? null;
+  const liveSpeed = job.paused ? 0 : safeSpeed(job.liveSpeed);
+  const liveRemainTime = job.paused
+    ? 0
+    : Math.max(0, Number(job.liveRemainTime || 0));
+  const liveTotal = job.liveNum
+    ? (job.liveNum.wait || 0) +
+      (job.liveNum.running || 0) +
+      (job.liveNum.success || 0) +
+      (job.liveNum.fail || 0) +
+      (job.liveNum.other || 0)
+    : 0;
+  const scanTotalFiles = Number(liveScan?.totalFiles || 0);
+  const scanCheckedFiles = Number(liveScan?.checkedFiles || 0);
+  const isScanningOnly =
+    !liveScanFinish && liveTotal === 0 && liveTotalSize === 0;
+  const livePct = isScanningOnly
+    ? scanTotalFiles > 0 && scanCheckedFiles > 0
+      ? Math.min(99, Math.round((scanCheckedFiles / scanTotalFiles) * 100))
+      : 0
+    : calcTaskDisplayPercent({
+        doneSize: liveDoneSize,
+        totalSize: liveTotalSize,
+        num: job.liveNum,
+        scanFinish: liveScanFinish,
+        fallbackPercent: job.liveProgress,
+      });
+  const progressLabel = job.paused
+    ? "传输已暂停"
+    : isScanningOnly
+      ? scanTotalFiles > 0 && scanCheckedFiles > 0
+        ? "正在核对文件"
+        : "正在扫描目录"
+      : !liveScanFinish
+        ? "正在同步（扫描中）"
+        : "正在同步";
+  return {
+    liveDoneSize,
+    liveTotalSize,
+    liveScanFinish,
+    liveScan,
+    liveSpeed,
+    liveRemainTime,
+    liveTotal,
+    scanTotalFiles,
+    scanCheckedFiles,
+    isScanningOnly,
+    livePct,
+    progressLabel,
+  };
+}
+
 export default function Dashboard() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+  const chartGradientId = useId();
   const dashboard = useResource((signal) => api.dashboard(signal));
   const jobsList = useResource((signal) => api.jobMenu(signal));
   const engines = useResource((signal) => api.engines(signal));
@@ -125,10 +222,19 @@ export default function Dashboard() {
     () => searchParams.get("storage") || "all",
   );
   const [trendRange, setTrendRange] = useState<7 | 30>(7);
+  const [insightTab, setInsightTab] = useState<InsightTab>("trend");
+  const [hoveredSampleIndex, setHoveredSampleIndex] = useState<number | null>(
+    null,
+  );
+  const [localSpeedHistory, setLocalSpeedHistory] = useState<
+    DashboardSpeedSample[]
+  >([]);
+
   useEffect(() => {
     const sp = searchParams.get("storage");
-    if (sp) setStorageFilter(sp);
+    setStorageFilter(sp || "all");
   }, [searchParams]);
+
   const [methodFilter, setMethodFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
@@ -159,18 +265,79 @@ export default function Dashboard() {
     [dashboard.refresh, jobsList.refresh, engines.refresh],
   );
 
-  // Periodic background refresh when page is visible
+  const data = dashboard.data;
+  const allJobs = data?.jobs || [];
+
+  // Record rolling speed history on each dashboard snapshot so the live curve
+  // works smoothly with both server-side history and legacy fixtures.
   useEffect(() => {
+    if (!data) return;
+    const rt = data.realtime;
+    const fallbackSpeed = (data.jobs || []).reduce(
+      (sum, j) => sum + (j.running && !j.paused ? safeSpeed(j.liveSpeed) : 0),
+      0,
+    );
+    const currentSpeed = rt ? safeSpeed(rt.totalSpeed) : fallbackSpeed;
+    const sampleTs = rt?.sampledAt || Math.floor(Date.now() / 1000);
+    setLocalSpeedHistory((prev) =>
+      mergeSpeedHistory(prev, rt?.speedHistory, sampleTs, currentSpeed),
+    );
+  }, [data]);
+
+  const hasLiveActivity =
+    (data?.kpi?.runningJobs || 0) > 0 ||
+    (data?.realtime?.activeTransfers || 0) > 0;
+
+  // Adaptive background refresh: 2s while transferring for live rate updates,
+  // 5s when idle to stay light on NAS resources.
+  useEffect(() => {
+    const pollMs = hasLiveActivity ? 2000 : 5000;
     const timer = window.setInterval(() => {
       if (document.visibilityState === "visible") {
         void dashboard.refresh(true);
       }
-    }, 5000);
+    }, pollMs);
     return () => window.clearInterval(timer);
-  }, [dashboard.refresh]);
+  }, [dashboard.refresh, hasLiveActivity]);
 
-  const data = dashboard.data;
-  const allJobs = data?.jobs || [];
+  const realtime = useMemo(
+    () => deriveDashboardRealtime(data, localSpeedHistory),
+    [data, localSpeedHistory],
+  );
+
+  const speedChart = useMemo(
+    () =>
+      buildSpeedChartGeometry(
+        realtime.speedHistory,
+        SPEED_CHART_WIDTH,
+        SPEED_CHART_HEIGHT,
+      ),
+    [realtime.speedHistory],
+  );
+
+  const runningJobsList = useMemo(
+    () =>
+      allJobs
+        .filter((j) => j.running && !isLegacyOpenListJob(j, engines.data))
+        .sort((a, b) => {
+          if (Boolean(a.paused) !== Boolean(b.paused)) {
+            return a.paused ? 1 : -1;
+          }
+          return safeSpeed(b.liveSpeed) - safeSpeed(a.liveSpeed);
+        }),
+    [allJobs, engines.data],
+  );
+
+  const nextScheduledJob = useMemo(
+    () => findNextScheduledJob(allJobs),
+    [allJobs],
+  );
+
+  const watchingCount = useMemo(
+    () => allJobs.filter((j) => j.watching && j.enable === 1).length,
+    [allJobs],
+  );
+
   const fullJobMap = useMemo(() => {
     const map = new Map<number, JobItem>();
     for (const j of jobsList.data?.dataList || []) map.set(j.id, j);
@@ -208,7 +375,10 @@ export default function Dashboard() {
       }
     }
     for (const job of allJobs) {
-      for (const p of [...parseJobPathList(job.srcPath), ...parseJobPathList(job.dstPath)]) {
+      for (const p of [
+        ...parseJobPathList(job.srcPath),
+        ...parseJobPathList(job.dstPath),
+      ]) {
         const seg = p.replace(/^\/+/, "").split("/")[0];
         if (seg) names.add(seg);
       }
@@ -216,8 +386,13 @@ export default function Dashboard() {
     return [
       { label: "全部存储", value: "all" },
       ...[...names]
-        .sort((a, b) => (a === "本地" ? -1 : b === "本地" ? 1 : a.localeCompare(b)))
-        .map((name) => ({ label: name === "本地" ? "本地目录" : name, value: name })),
+        .sort((a, b) =>
+          a === "本地" ? -1 : b === "本地" ? 1 : a.localeCompare(b),
+        )
+        .map((name) => ({
+          label: name === "本地" ? "本地目录" : name,
+          value: name,
+        })),
     ];
   }, [engines.data, allJobs]);
 
@@ -230,7 +405,9 @@ export default function Dashboard() {
           ...parseJobPathList(job.dstPath),
         ];
         const usesStorage = paths.some(
-          (p) => p.replace(/^\/+/, "").split("/")[0]?.toLowerCase() === storageFilter.toLowerCase(),
+          (p) =>
+            p.replace(/^\/+/, "").split("/")[0]?.toLowerCase() ===
+            storageFilter.toLowerCase(),
         );
         if (!usesStorage) return false;
       }
@@ -242,7 +419,8 @@ export default function Dashboard() {
       if (statusFilter === "failed" && !isJobFailed(job)) return false;
       if (statusFilter === "disabled" && job.enable === 1) return false;
       if (kw) {
-        const hay = `${job.remark || ""} #${job.id} ${job.srcPath} ${job.dstPath}`.toLowerCase();
+        const hay =
+          `${job.remark || ""} #${job.id} ${job.srcPath} ${job.dstPath}`.toLowerCase();
         if (!hay.includes(kw)) return false;
       }
       return true;
@@ -265,8 +443,7 @@ export default function Dashboard() {
 
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const legacyJobCount = useMemo(
-    () =>
-      allJobs.filter((j) => isLegacyOpenListJob(j, engines.data)).length,
+    () => allJobs.filter((j) => isLegacyOpenListJob(j, engines.data)).length,
     [allJobs, engines.data],
   );
   const selectableVisibleJobs = useMemo(
@@ -531,22 +708,7 @@ export default function Dashboard() {
     kpi && kpi.totalJobs > 0
       ? Math.round((kpi.enabledJobs / kpi.totalJobs) * 100)
       : 0;
-  const activeRunningCount = kpi ? kpi.runningJobs : 0;
-  const liveRunPct =
-    kpi && kpi.totalJobs > 0
-      ? Math.min(100, (activeRunningCount / kpi.totalJobs) * 100)
-      : 0;
-  const liveApprovalPct =
-    kpi && kpi.totalJobs > 0
-      ? Math.min(100 - liveRunPct, (kpi.pendingApprovals / kpi.totalJobs) * 100)
-      : 0;
-  const liveQueuedPct =
-    kpi && kpi.totalJobs > 0
-      ? Math.min(
-          100 - liveRunPct - liveApprovalPct,
-          (kpi.queuedJobs / kpi.totalJobs) * 100,
-        )
-      : 0;
+
   const primaryEngine = engines.data?.[0];
   const storageHealthList = primaryEngine?.health?.storagesKnown
     ? primaryEngine.health.storages || []
@@ -589,14 +751,61 @@ export default function Dashboard() {
     recent && recent.totalRuns > 0
       ? (recent.stoppedRuns / recent.totalRuns) * 100
       : 0;
+  const recentSuccessRate =
+    recent && recent.totalRuns > 0
+      ? Math.round((recent.successRuns / recent.totalRuns) * 100)
+      : 0;
 
-  const liveCardTargetFilter: StatusFilter = kpi?.pendingApprovals
-    ? "approval"
-    : kpi?.runningJobs
-      ? "running"
-      : kpi?.queuedJobs
-        ? "queued"
+  const sortedQuotas = useMemo(
+    () => sortStorageQuotas(data?.storageQuotas),
+    [data?.storageQuotas],
+  );
+  const hasTrendData = Boolean(data?.dailyTrend && data.dailyTrend.length > 0);
+  const hasQuotaData = sortedQuotas.length > 0;
+  const hasRightInsight = hasTrendData || hasQuotaData;
+  const effectiveInsightTab: InsightTab =
+    insightTab === "quota" && hasQuotaData
+      ? "quota"
+      : hasTrendData
+        ? "trend"
+        : "quota";
+  const highestQuotaPercent = sortedQuotas[0]?.percent ?? 0;
+
+  const speedParts = splitSpeedParts(realtime.totalSpeed);
+  const mbpsLabel = formatMbps(realtime.totalSpeed);
+
+  const liveCardTargetFilter: StatusFilter = kpi?.runningJobs
+    ? "running"
+    : kpi?.queuedJobs
+      ? "queued"
+      : kpi?.pendingApprovals
+        ? "approval"
         : "running";
+
+  const liveBarPct = realtime.isTransferring
+    ? realtime.overallPercent > 0
+      ? realtime.overallPercent
+      : kpi && kpi.totalJobs > 0
+        ? Math.min(100, Math.round((kpi.runningJobs / kpi.totalJobs) * 100))
+        : 100
+    : realtime.isAllPaused
+      ? realtime.overallPercent > 0
+        ? realtime.overallPercent
+        : 100
+      : kpi && kpi.totalJobs > 0 && kpi.queuedJobs > 0
+        ? Math.min(100, Math.round((kpi.queuedJobs / kpi.totalJobs) * 100))
+        : 0;
+
+  const hoveredPoint =
+    hoveredSampleIndex !== null &&
+    hoveredSampleIndex >= 0 &&
+    hoveredSampleIndex < speedChart.points.length
+      ? speedChart.points[hoveredSampleIndex]
+      : null;
+  const latestPoint =
+    speedChart.points.length > 0
+      ? speedChart.points[speedChart.points.length - 1]
+      : null;
 
   const emptyJobAction =
     !engines.loading && !engines.error && (engines.data?.length ?? 0) === 0 ? (
@@ -643,7 +852,9 @@ export default function Dashboard() {
               type="tertiary"
               icon={<IconPlay aria-hidden="true" />}
               disabled={action.busy || !allJobs.length}
-              onClick={() => runBatch("run_all", undefined, "运行全部已启用任务")}
+              onClick={() =>
+                runBatch("run_all", undefined, "运行全部已启用任务")
+              }
             >
               全部运行
             </Button>
@@ -655,7 +866,9 @@ export default function Dashboard() {
                 action.busy ||
                 !((kpi?.runningJobs || 0) + (kpi?.queuedJobs || 0))
               }
-              onClick={() => runBatch("stop_all", undefined, "停止全部运行中任务")}
+              onClick={() =>
+                runBatch("stop_all", undefined, "停止全部运行中任务")
+              }
             >
               全部停止
             </Button>
@@ -687,6 +900,7 @@ export default function Dashboard() {
                 message={`检测到 ${legacyJobCount} 个旧版 OpenList 同步任务已自动停用。当前版本已移除 OpenList 引擎，请删除旧任务后在「存储管理」接入对应存储并重新创建。`}
               />
             )}
+
             {data.pendingApprovals.length > 0 && (
               <div className="approval-alert-banner" role="alert">
                 <div className="approval-alert-head">
@@ -695,7 +909,8 @@ export default function Dashboard() {
                   </span>
                   <div className="approval-alert-copy">
                     <strong>
-                      有 {data.pendingApprovals.length} 个全量同步任务存在待确认删除项
+                      有 {data.pendingApprovals.length}{" "}
+                      个全量同步任务存在待确认删除项
                     </strong>
                     <span className="approval-alert-sub">
                       文件同步已完成且不受阻塞，目标端多余文件将保留至您确认后再执行清理。
@@ -706,27 +921,29 @@ export default function Dashboard() {
                   {data.pendingApprovals.map((item) => {
                     const matchedJob = allJobs.find((j) => j.id === item.jobId);
                     const executing = item.status === "executing";
-                    const seedApproval: FullSyncApproval = matchedJob?.pendingApproval
-                      ? {
-                          ...matchedJob.pendingApproval,
-                          jobId: item.jobId,
-                          jobName: item.jobName,
-                          taskId: matchedJob.pendingApproval.taskId || item.taskId,
-                        }
-                      : {
-                          jobId: item.jobId,
-                          jobName: item.jobName,
-                          taskId: item.taskId,
-                          deleteCount: item.deleteCount,
-                          deleteSize: item.deleteSize,
-                          pathCount: item.pathCount,
-                          paths: [],
-                          status: item.status,
-                          createdAt: item.createdAt,
-                          expiresAt: item.expiresAt,
-                          planChanged: item.planChanged,
-                          lastError: item.lastError,
-                        };
+                    const seedApproval: FullSyncApproval =
+                      matchedJob?.pendingApproval
+                        ? {
+                            ...matchedJob.pendingApproval,
+                            jobId: item.jobId,
+                            jobName: item.jobName,
+                            taskId:
+                              matchedJob.pendingApproval.taskId || item.taskId,
+                          }
+                        : {
+                            jobId: item.jobId,
+                            jobName: item.jobName,
+                            taskId: item.taskId,
+                            deleteCount: item.deleteCount,
+                            deleteSize: item.deleteSize,
+                            pathCount: item.pathCount,
+                            paths: [],
+                            status: item.status,
+                            createdAt: item.createdAt,
+                            expiresAt: item.expiresAt,
+                            planChanged: item.planChanged,
+                            lastError: item.lastError,
+                          };
                     return (
                       <div
                         key={`${item.jobId}-${item.taskId}`}
@@ -772,66 +989,33 @@ export default function Dashboard() {
               </div>
             )}
 
+            {/* 4 Core KPI Cards */}
             <div className="dashboard-kpi-grid">
-              <button
-                type="button"
-                className="dashboard-kpi-card"
-                onClick={() => setStatusFilter("all")}
-              >
-                <div className="dashboard-kpi-head">
-                  <span className="dashboard-kpi-label">同步任务</span>
-                  <span
-                    className="dashboard-kpi-icon dashboard-kpi-icon--primary"
-                    aria-hidden="true"
-                  >
-                    <IconCloudStroked />
-                  </span>
-                </div>
-                <div className="dashboard-kpi-value-row">
-                  <span className="dashboard-kpi-value">{kpi.totalJobs}</span>
-                </div>
-                {kpi.totalJobs > 0 && (
-                  <div className="dashboard-kpi-bar" aria-hidden="true">
-                    <span
-                      className="dashboard-kpi-bar-seg dashboard-kpi-bar-seg--primary"
-                      style={{ width: `${enabledPct}%` }}
-                    />
-                  </div>
-                )}
-                <div className="dashboard-kpi-foot">
-                  <span className="dashboard-kpi-stat">
-                    <span className="kpi-dot kpi-dot--primary" aria-hidden="true" />
-                    已启用 {kpi.enabledJobs}
-                  </span>
-                  <span className="dashboard-kpi-stat">
-                    <span className="kpi-dot" aria-hidden="true" />
-                    已停用 {disabledJobsCount}
-                  </span>
-                </div>
-              </button>
-
+              {/* Card 1: Real-time Speed */}
               <button
                 type="button"
                 className={[
                   "dashboard-kpi-card",
-                  kpi.pendingApprovals > 0 ? "is-warning" : "",
+                  realtime.isAllPaused ? "is-warning" : "",
                   statusFilter === liveCardTargetFilter ? "is-active" : "",
                 ]
                   .filter(Boolean)
                   .join(" ")}
                 onClick={() =>
                   setStatusFilter((prev) =>
-                    prev === liveCardTargetFilter ? "all" : liveCardTargetFilter,
+                    prev === liveCardTargetFilter
+                      ? "all"
+                      : liveCardTargetFilter,
                   )
                 }
               >
                 <div className="dashboard-kpi-head">
-                  <span className="dashboard-kpi-label">实时执行</span>
+                  <span className="dashboard-kpi-label">实时速率</span>
                   <span
                     className={`dashboard-kpi-icon ${
-                      kpi.pendingApprovals > 0
+                      realtime.isAllPaused
                         ? "dashboard-kpi-icon--warning"
-                        : kpi.runningJobs > 0
+                        : realtime.isTransferring
                           ? "dashboard-kpi-icon--primary"
                           : ""
                     }`}
@@ -841,51 +1025,61 @@ export default function Dashboard() {
                   </span>
                 </div>
                 <div className="dashboard-kpi-value-row">
-                  <span className="dashboard-kpi-value">{kpi.runningJobs}</span>
-                  {kpi.queuedJobs > 0 && (
+                  <span className="dashboard-kpi-value">
+                    {speedParts.value}
+                  </span>
+                  <span className="dashboard-kpi-unit">{speedParts.unit}</span>
+                  {realtime.isTransferring ? (
+                    <span className="dashboard-kpi-pill">
+                      运行 {kpi.runningJobs + realtime.activeTransfers}
+                    </span>
+                  ) : realtime.isAllPaused ? (
+                    <span className="dashboard-kpi-pill is-warning">
+                      已暂停 {realtime.pausedJobs}
+                    </span>
+                  ) : kpi.queuedJobs > 0 ? (
                     <span className="dashboard-kpi-pill">
                       排队 {kpi.queuedJobs}
                     </span>
+                  ) : null}
+                </div>
+                <div className="dashboard-kpi-bar" aria-hidden="true">
+                  {liveBarPct > 0 && (
+                    <span
+                      className={`dashboard-kpi-bar-seg ${
+                        realtime.isAllPaused
+                          ? "dashboard-kpi-bar-seg--warning"
+                          : realtime.isTransferring
+                            ? "dashboard-kpi-bar-seg--primary"
+                            : "dashboard-kpi-bar-seg--muted"
+                      }`}
+                      style={{ width: `${liveBarPct}%` }}
+                    />
                   )}
                 </div>
-                {kpi.totalJobs > 0 && (
-                  <div className="dashboard-kpi-bar" aria-hidden="true">
-                    {liveRunPct > 0 && (
-                      <span
-                        className="dashboard-kpi-bar-seg dashboard-kpi-bar-seg--primary"
-                        style={{ width: `${liveRunPct}%` }}
-                      />
-                    )}
-                    {liveApprovalPct > 0 && (
-                      <span
-                        className="dashboard-kpi-bar-seg dashboard-kpi-bar-seg--warning"
-                        style={{ width: `${liveApprovalPct}%` }}
-                      />
-                    )}
-                    {liveQueuedPct > 0 && (
-                      <span
-                        className="dashboard-kpi-bar-seg dashboard-kpi-bar-seg--muted"
-                        style={{ width: `${liveQueuedPct}%` }}
-                      />
-                    )}
-                  </div>
-                )}
                 <div className="dashboard-kpi-foot">
-                  {kpi.pendingApprovals > 0 ? (
+                  {realtime.isTransferring ? (
+                    <>
+                      <span className="dashboard-kpi-stat is-primary">
+                        <span
+                          className="kpi-dot kpi-dot--primary kpi-dot--pulse"
+                          aria-hidden="true"
+                        />
+                        峰值 {formatSpeed(realtime.peakSpeed)}
+                      </span>
+                      {realtime.estimatedRemainTime > 0 && (
+                        <span>
+                          剩余 {formatDuration(realtime.estimatedRemainTime)}
+                        </span>
+                      )}
+                    </>
+                  ) : realtime.isAllPaused ? (
                     <span className="dashboard-kpi-stat is-warning">
                       <span
                         className="kpi-dot kpi-dot--warning"
                         aria-hidden="true"
                       />
-                      {kpi.pendingApprovals} 个待审批
-                    </span>
-                  ) : kpi.runningJobs > 0 ? (
-                    <span className="dashboard-kpi-stat is-primary">
-                      <span
-                        className="kpi-dot kpi-dot--primary kpi-dot--pulse"
-                        aria-hidden="true"
-                      />
-                      正在同步 · 无待审批
+                      已暂停 {realtime.pausedJobs} 个任务
                     </span>
                   ) : kpi.queuedJobs > 0 ? (
                     <span className="dashboard-kpi-stat is-primary">
@@ -898,12 +1092,77 @@ export default function Dashboard() {
                   ) : (
                     <span className="dashboard-kpi-stat">
                       <span className="kpi-dot" aria-hidden="true" />
-                      当前空闲 · 无待审批
+                      当前空闲
+                      {realtime.globalBwLimit
+                        ? ` · 限速 ${realtime.globalBwLimit}`
+                        : " · 无活跃传输"}
                     </span>
                   )}
                 </div>
               </button>
 
+              {/* Card 2: Sync Jobs Inventory */}
+              <button
+                type="button"
+                className={[
+                  "dashboard-kpi-card",
+                  statusFilter === "all" && !hasActiveFilters ? "" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                onClick={() => setStatusFilter("all")}
+              >
+                <div className="dashboard-kpi-head">
+                  <span className="dashboard-kpi-label">同步任务</span>
+                  <span
+                    className="dashboard-kpi-icon dashboard-kpi-icon--primary"
+                    aria-hidden="true"
+                  >
+                    <IconCloudStroked />
+                  </span>
+                </div>
+                <div className="dashboard-kpi-value-row">
+                  <span className="dashboard-kpi-value">
+                    {kpi.enabledJobs}
+                  </span>
+                  <span className="dashboard-kpi-denom">
+                    / {kpi.totalJobs}
+                  </span>
+                  {kpi.pendingApprovals > 0 && (
+                    <span className="dashboard-kpi-pill is-warning">
+                      待审批 {kpi.pendingApprovals}
+                    </span>
+                  )}
+                </div>
+                {kpi.totalJobs > 0 && (
+                  <div className="dashboard-kpi-bar" aria-hidden="true">
+                    <span
+                      className="dashboard-kpi-bar-seg dashboard-kpi-bar-seg--primary"
+                      style={{ width: `${enabledPct}%` }}
+                    />
+                  </div>
+                )}
+                <div className="dashboard-kpi-foot">
+                  <span className="dashboard-kpi-stat">
+                    <span
+                      className="kpi-dot kpi-dot--primary"
+                      aria-hidden="true"
+                    />
+                    已启用 {kpi.enabledJobs}
+                  </span>
+                  <span className="dashboard-kpi-stat">
+                    <span className="kpi-dot" aria-hidden="true" />
+                    已停用 {disabledJobsCount}
+                  </span>
+                  {statusCounts.failed > 0 && (
+                    <span className="dashboard-kpi-stat is-danger">
+                      失败 {statusCounts.failed}
+                    </span>
+                  )}
+                </div>
+              </button>
+
+              {/* Card 3: Storage Health */}
               <button
                 type="button"
                 className={[
@@ -916,7 +1175,7 @@ export default function Dashboard() {
               >
                 <div className="dashboard-kpi-head">
                   <span className="dashboard-kpi-label">
-                    存储健康状态
+                    存储健康
                     <IconChevronRight
                       size="small"
                       className="dashboard-kpi-link-arrow"
@@ -927,7 +1186,8 @@ export default function Dashboard() {
                     className={`dashboard-kpi-icon ${
                       unhealthyStorages > 0
                         ? "dashboard-kpi-icon--danger"
-                        : totalStorages > 0 && healthyStorages === totalStorages
+                        : totalStorages > 0 &&
+                            healthyStorages === totalStorages
                           ? "dashboard-kpi-icon--success"
                           : ""
                     }`}
@@ -991,6 +1251,7 @@ export default function Dashboard() {
                 </div>
               </button>
 
+              {/* Card 4: Recent 7d Volume & Success */}
               {(() => {
                 const recentCardBody = (
                   <>
@@ -1007,6 +1268,13 @@ export default function Dashboard() {
                       <span className="dashboard-kpi-value">
                         {formatSize(recent.totalBytes)}
                       </span>
+                      {recent.totalRuns > 0 && (
+                        <span
+                          className={`dashboard-kpi-pill${recent.failRuns > 0 ? " is-warning" : " is-success"}`}
+                        >
+                          成功率 {recentSuccessRate}%
+                        </span>
+                      )}
                     </div>
                     {recent.totalRuns > 0 && (
                       <div className="dashboard-kpi-bar" aria-hidden="true">
@@ -1032,18 +1300,13 @@ export default function Dashboard() {
                     )}
                     <div className="dashboard-kpi-foot">
                       <span>执行 {recent.totalRuns} 次</span>
-                      <span
-                        className={
-                          recent.failRuns > 0
-                            ? "dashboard-kpi-stat is-success"
-                            : undefined
-                        }
-                      >
-                        成功 {recent.successRuns}
-                      </span>
-                      {recent.failRuns > 0 && (
+                      {recent.failRuns > 0 ? (
                         <span className="dashboard-kpi-stat is-danger">
                           异常 {recent.failRuns}
+                        </span>
+                      ) : (
+                        <span className="dashboard-kpi-stat is-success">
+                          成功 {recent.successRuns}
                         </span>
                       )}
                       <span>{recent.totalFiles} 文件</span>
@@ -1073,190 +1336,703 @@ export default function Dashboard() {
               })()}
             </div>
 
-            {((data.dailyTrend && data.dailyTrend.length > 0) ||
-              (data.storageQuotas && data.storageQuotas.some((q) => q.supported))) && (
-              <div
-                className="dashboard-insights-grid"
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))",
-                  gap: 12,
-                }}
-              >
-                {data.dailyTrend && data.dailyTrend.length > 0 && (() => {
-                  const series = data.dailyTrend.slice(-trendRange);
-                  const maxBytes = Math.max(1, ...series.map((d) => d.bytes || 0));
-                  const maxRuns = Math.max(1, ...series.map((d) => d.runs || 0));
-                  const useBytes = series.some((d) => d.bytes > 0);
-                  const totalPeriodBytes = series.reduce((s, d) => s + (d.bytes || 0), 0);
-                  const totalPeriodRuns = series.reduce((s, d) => s + (d.runs || 0), 0);
-                  return (
-                    <SectionCard
-                      title={`近 ${trendRange} 天同步趋势`}
-                      extra={
-                        <div style={{ display: "flex", gap: 4 }}>
-                          {([7, 30] as const).map((days) => (
-                            <button
-                              key={days}
-                              type="button"
-                              className={`schedule-chip${trendRange === days ? " is-active" : ""}`}
-                              onClick={() => setTrendRange(days)}
-                            >
-                              {days} 天
-                            </button>
-                          ))}
-                        </div>
-                      }
+            {/* Core Live Speed Monitor + Key Insights */}
+            <div
+              className={`dashboard-monitor-grid${hasRightInsight ? "" : " is-single"}`}
+            >
+              {/* Left: Real-time Speed Monitor */}
+              <SectionCard
+                className="dashboard-live-card"
+                bodyClassName="dashboard-live-body"
+                title={
+                  <div className="dashboard-live-title">
+                    <h2>实时传输速率</h2>
+                    <span
+                      className={`dashboard-live-badge${
+                        realtime.isTransferring
+                          ? " is-active"
+                          : realtime.isAllPaused
+                            ? " is-paused"
+                            : ""
+                      }`}
                     >
-                      <div
-                        style={{
-                          display: "flex",
-                          justifyContent: "space-between",
-                          fontSize: 12,
-                          marginBottom: 8,
-                        }}
-                        className="muted"
-                      >
-                        <span>
-                          合计 {totalPeriodRuns} 次执行 · {formatSize(totalPeriodBytes)}
+                      <span
+                        className={`kpi-dot ${
+                          realtime.isTransferring
+                            ? "kpi-dot--primary kpi-dot--pulse"
+                            : realtime.isAllPaused
+                              ? "kpi-dot--warning"
+                              : ""
+                        }`}
+                        aria-hidden="true"
+                      />
+                      {realtime.isTransferring
+                        ? "实时监测"
+                        : realtime.isAllPaused
+                          ? "已暂停"
+                          : "当前空闲"}
+                    </span>
+                  </div>
+                }
+                extra={
+                  <div className="dashboard-live-head-extra">
+                    {hoveredPoint ? (
+                      <span className="dashboard-live-hover-readout">
+                        {formatSampleClock(hoveredPoint.ts)} ·{" "}
+                        <strong>{formatSpeed(hoveredPoint.speed)}</strong>
+                      </span>
+                    ) : (
+                      <>
+                        {realtime.activeTransfers > 0 && (
+                          <Tag size="small" type="light" color="blue">
+                            后台传输 {realtime.activeTransfers}
+                          </Tag>
+                        )}
+                        <span className="dashboard-live-bw-chip">
+                          {realtime.globalBwLimit
+                            ? `全局限速 ${realtime.globalBwLimit}`
+                            : "全局不限速"}
                         </span>
-                        <span>{useBytes ? "按传输量" : "按执行次数"}</span>
-                      </div>
-                      <div
-                        style={{
-                          display: "flex",
-                          alignItems: "flex-end",
-                          gap: trendRange === 30 ? 2 : 6,
-                          height: 84,
-                          padding: "4px 2px 0",
-                        }}
-                        role="img"
-                        aria-label={`近 ${trendRange} 天同步趋势图`}
-                      >
-                        {series.map((day) => {
-                          const rawVal = useBytes ? day.bytes : day.runs;
-                          const maxVal = useBytes ? maxBytes : maxRuns;
-                          const pct =
-                            rawVal > 0
-                              ? Math.max(8, Math.round((rawVal / maxVal) * 100))
-                              : 3;
-                          const barColor =
-                            day.failRuns > 0
-                              ? "var(--semi-color-danger)"
-                              : day.runs > 0
-                                ? "var(--semi-color-primary)"
-                                : "var(--semi-color-fill-2)";
-                          return (
-                            <div
-                              key={day.date}
-                              title={`${day.date}：${day.runs} 次（成功 ${day.successRuns} / 异常 ${day.failRuns}），${day.files} 文件，${formatSize(day.bytes)}`}
-                              style={{
-                                flex: 1,
-                                display: "flex",
-                                flexDirection: "column",
-                                alignItems: "center",
-                                justifyContent: "flex-end",
-                                height: "100%",
-                                minWidth: 0,
-                              }}
-                            >
-                              <div
-                                style={{
-                                  width: "100%",
-                                  height: `${pct}%`,
-                                  background: barColor,
-                                  borderRadius: "3px 3px 0 0",
-                                  transition: "height 0.2s ease",
-                                }}
-                              />
-                              {(trendRange === 7 ||
-                                day === series[0] ||
-                                day === series[series.length - 1]) && (
-                                <span
-                                  className="muted"
-                                  style={{
-                                    fontSize: 10,
-                                    marginTop: 4,
-                                    whiteSpace: "nowrap",
-                                  }}
-                                >
-                                  {day.date.slice(5)}
-                                </span>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </SectionCard>
-                  );
-                })()}
+                      </>
+                    )}
+                  </div>
+                }
+              >
+                {/* Hero Speed Readout + 3 Key Metrics */}
+                <div className="dashboard-live-hero">
+                  <div className="dashboard-live-speed-main">
+                    <div className="dashboard-live-speed-value">
+                      <span className="dashboard-live-speed-num">
+                        {speedParts.value}
+                      </span>
+                      <span className="dashboard-live-speed-unit">
+                        {speedParts.unit}
+                      </span>
+                    </div>
+                    <div className="dashboard-live-speed-sub muted">
+                      {mbpsLabel ? (
+                        <>
+                          <span>≈ {mbpsLabel}</span>
+                          {realtime.totalSpeedAvg > 0 && (
+                            <span>
+                              · 均速 {formatSpeed(realtime.totalSpeedAvg)}
+                            </span>
+                          )}
+                        </>
+                      ) : realtime.isTransferring ? (
+                        <span>正在建立连接或扫描目录…</span>
+                      ) : realtime.isAllPaused ? (
+                        <span>所有活跃同步任务均已暂停</span>
+                      ) : (
+                        <span>有任务运行时自动切换为 2 秒高频采样</span>
+                      )}
+                    </div>
+                  </div>
 
-                {data.storageQuotas &&
-                  data.storageQuotas.some((q) => q.supported && (q.total || 0) > 0) && (
-                    <SectionCard
-                      title="存储空间配额"
-                      extra={
+                  <div className="dashboard-live-stats">
+                    <div className="dashboard-live-stat-box">
+                      <span className="dashboard-live-stat-label muted">
+                        窗口峰值
+                      </span>
+                      <strong className="dashboard-live-stat-val">
+                        {formatSpeed(realtime.peakSpeed)}
+                      </strong>
+                    </div>
+                    <div className="dashboard-live-stat-box">
+                      <span className="dashboard-live-stat-label muted">
+                        {realtime.isTransferring || realtime.isAllPaused
+                          ? "本次传输"
+                          : "下次计划"}
+                      </span>
+                      <strong className="dashboard-live-stat-val">
+                        {realtime.isTransferring || realtime.isAllPaused
+                          ? realtime.totalBytes > 0
+                            ? `${formatSize(realtime.totalDoneBytes)} / ${formatSize(realtime.totalBytes)}`
+                            : "扫描统计中"
+                          : nextScheduledJob
+                            ? formatShortTime(nextScheduledJob.nextRunTime)
+                            : "无定时计划"}
+                      </strong>
+                    </div>
+                    <div className="dashboard-live-stat-box">
+                      <span className="dashboard-live-stat-label muted">
+                        {realtime.isTransferring || realtime.isAllPaused
+                          ? "预计剩余"
+                          : "持续监听"}
+                      </span>
+                      <strong className="dashboard-live-stat-val">
+                        {realtime.isTransferring
+                          ? realtime.estimatedRemainTime > 0
+                            ? formatDuration(realtime.estimatedRemainTime)
+                            : "计算中"
+                          : realtime.isAllPaused
+                            ? "已暂停"
+                            : watchingCount > 0
+                              ? `${watchingCount} 个任务`
+                              : "未开启"}
+                      </strong>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Live SVG Throughput Waveform */}
+                <div
+                  className="dashboard-speed-chart"
+                  role="img"
+                  aria-label={`实时传输速率波形图，当前速率 ${formatSpeed(realtime.totalSpeed)}`}
+                  onMouseLeave={() => setHoveredSampleIndex(null)}
+                >
+                  <div className="dashboard-speed-yaxis" aria-hidden="true">
+                    <span>{formatAxisSpeed(speedChart.yMax)}</span>
+                    <span>{formatAxisSpeed(speedChart.yMid)}</span>
+                    <span>0</span>
+                  </div>
+                  <div className="dashboard-speed-canvas">
+                    <svg
+                      viewBox={`0 0 ${SPEED_CHART_WIDTH} ${SPEED_CHART_HEIGHT}`}
+                      preserveAspectRatio="none"
+                      className="dashboard-speed-svg"
+                      aria-hidden="true"
+                    >
+                      <defs>
+                        <linearGradient
+                          id={chartGradientId}
+                          x1="0"
+                          y1="0"
+                          x2="0"
+                          y2="1"
+                        >
+                          <stop
+                            offset="0%"
+                            stopColor="var(--semi-color-primary)"
+                            stopOpacity="0.28"
+                          />
+                          <stop
+                            offset="100%"
+                            stopColor="var(--semi-color-primary)"
+                            stopOpacity="0.02"
+                          />
+                        </linearGradient>
+                      </defs>
+                      <line
+                        x1="0"
+                        y1="10"
+                        x2={SPEED_CHART_WIDTH}
+                        y2="10"
+                        className="dashboard-speed-gridline"
+                        vectorEffect="non-scaling-stroke"
+                      />
+                      <line
+                        x1="0"
+                        y1={SPEED_CHART_HEIGHT / 2}
+                        x2={SPEED_CHART_WIDTH}
+                        y2={SPEED_CHART_HEIGHT / 2}
+                        className="dashboard-speed-gridline"
+                        vectorEffect="non-scaling-stroke"
+                      />
+                      <line
+                        x1="0"
+                        y1={SPEED_CHART_HEIGHT - 6}
+                        x2={SPEED_CHART_WIDTH}
+                        y2={SPEED_CHART_HEIGHT - 6}
+                        className="dashboard-speed-baseline"
+                        vectorEffect="non-scaling-stroke"
+                      />
+                      {speedChart.areaPath && (
+                        <path
+                          d={speedChart.areaPath}
+                          fill={`url(#${chartGradientId})`}
+                        />
+                      )}
+                      {speedChart.linePath && (
+                        <path
+                          d={speedChart.linePath}
+                          fill="none"
+                          stroke={
+                            realtime.isAllPaused
+                              ? "var(--semi-color-warning)"
+                              : "var(--semi-color-primary)"
+                          }
+                          strokeWidth="2"
+                          strokeLinejoin="round"
+                          strokeLinecap="round"
+                          vectorEffect="non-scaling-stroke"
+                        />
+                      )}
+                    </svg>
+
+                    {/* Crisp non-distorted live & hover indicator dots */}
+                    {latestPoint && speedChart.hasSignal && (
+                      <span
+                        className={`dashboard-speed-dot${realtime.isTransferring ? " is-live" : ""}`}
+                        style={{
+                          left: `${(latestPoint.x / SPEED_CHART_WIDTH) * 100}%`,
+                          top: `${(latestPoint.y / SPEED_CHART_HEIGHT) * 100}%`,
+                        }}
+                        aria-hidden="true"
+                      />
+                    )}
+                    {hoveredPoint && (
+                      <span
+                        className="dashboard-speed-dot is-hover"
+                        style={{
+                          left: `${(hoveredPoint.x / SPEED_CHART_WIDTH) * 100}%`,
+                          top: `${(hoveredPoint.y / SPEED_CHART_HEIGHT) * 100}%`,
+                        }}
+                        aria-hidden="true"
+                      />
+                    )}
+
+                    {/* Interactive hover hit zones */}
+                    {speedChart.points.length > 0 && (
+                      <div className="dashboard-speed-hitlayer">
+                        {speedChart.points.map((pt, idx) => (
+                          <span
+                            key={`${pt.ts}-${idx}`}
+                            className="dashboard-speed-hit"
+                            style={{
+                              left: `${(pt.x / SPEED_CHART_WIDTH) * 100}%`,
+                            }}
+                            onMouseEnter={() => setHoveredSampleIndex(idx)}
+                          />
+                        ))}
+                      </div>
+                    )}
+
+                    {!speedChart.hasSignal && !realtime.isTransferring && (
+                      <div className="dashboard-speed-idle-pill">
+                        当前无活跃传输
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Active Tasks Breakdown OR Idle Operational Summary */}
+                {runningJobsList.length > 0 ? (
+                  <div className="dashboard-live-tasks">
+                    <div className="dashboard-live-tasks-head">
+                      <span className="muted">
+                        活跃同步任务（{runningJobsList.length}）
+                      </span>
+                      {runningJobsList.length > 4 && (
                         <Button
                           size="small"
                           theme="borderless"
-                          onClick={() => navigate("/engines")}
+                          onClick={() => setStatusFilter("running")}
                         >
-                          存储管理
+                          查看全部
                         </Button>
-                      }
-                    >
-                      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                        {data.storageQuotas
-                          .filter((q) => q.supported && (q.total || 0) > 0)
-                          .slice(0, 5)
-                          .map((q) => {
-                            const total = q.total || 0;
-                            const used =
-                              q.used !== undefined
-                                ? q.used
-                                : q.free !== undefined
-                                  ? Math.max(0, total - q.free)
-                                  : 0;
-                            const pct =
-                              total > 0
-                                ? Math.min(100, Math.round((used / total) * 100))
-                                : 0;
-                            const stroke =
-                              pct >= 90
-                                ? "var(--semi-color-danger)"
-                                : pct >= 75
-                                  ? "var(--semi-color-warning)"
-                                  : "var(--semi-color-primary)";
-                            return (
-                              <div key={q.name} style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                      )}
+                    </div>
+                    <div className="dashboard-live-task-list">
+                      {runningJobsList.slice(0, 4).map((job) => {
+                        const jobName = job.remark || `同步任务 #${job.id}`;
+                        const m = computeJobLiveMetrics(job);
+                        return (
+                          <div key={job.id} className="dashboard-live-task-row">
+                            <div
+                              className="dashboard-live-task-main"
+                              onClick={() => openJobDetail(job)}
+                            >
+                              <div className="dashboard-live-task-top">
+                                <span className="dashboard-live-task-name-wrap">
+                                  <span
+                                    className={jobDotTone(job)}
+                                    aria-hidden="true"
+                                  />
+                                  <button
+                                    type="button"
+                                    className="dashboard-live-task-name"
+                                    title={jobName}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      openJobDetail(job);
+                                    }}
+                                  >
+                                    {jobName}
+                                  </button>
+                                </span>
+                                <span className="dashboard-live-task-metrics">
+                                  <strong
+                                    className={`dashboard-live-task-speed${
+                                      job.paused ? " is-paused" : ""
+                                    }`}
+                                  >
+                                    {job.paused
+                                      ? "已暂停"
+                                      : m.liveSpeed > 0
+                                        ? formatSpeed(m.liveSpeed)
+                                        : m.isScanningOnly
+                                          ? "扫描中"
+                                          : "0 B/s"}
+                                  </strong>
+                                  <span className="dashboard-live-task-pct">
+                                    {m.livePct}%
+                                  </span>
+                                  {m.liveRemainTime > 0 && !job.paused && (
+                                    <span className="muted">
+                                      剩余 {formatDuration(m.liveRemainTime)}
+                                    </span>
+                                  )}
+                                </span>
+                              </div>
+                              <Progress
+                                percent={m.livePct}
+                                showInfo={false}
+                                stroke={
+                                  job.paused
+                                    ? "var(--semi-color-warning)"
+                                    : "var(--semi-color-primary)"
+                                }
+                              />
+                            </div>
+                            <div className="dashboard-live-task-actions">
+                              {job.currentTaskId > 0 && (
+                                <IconButton
+                                  size="small"
+                                  label={job.paused ? "继续传输" : "暂停传输"}
+                                  icon={
+                                    job.paused ? (
+                                      <IconPlay aria-hidden="true" />
+                                    ) : (
+                                      <IconPause aria-hidden="true" />
+                                    )
+                                  }
+                                  disabled={action.busy}
+                                  onClick={() => handleTogglePauseOne(job)}
+                                />
+                              )}
+                              <IconButton
+                                size="small"
+                                label="停止任务"
+                                danger
+                                icon={<IconStop aria-hidden="true" />}
+                                disabled={action.busy}
+                                onClick={() => handleStopOne(job)}
+                              />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="dashboard-live-idle-foot">
+                    <div className="dashboard-live-idle-item">
+                      <IconClockStroked
+                        size="small"
+                        className="muted"
+                        aria-hidden="true"
+                      />
+                      {nextScheduledJob ? (
+                        <button
+                          type="button"
+                          className="dashboard-live-idle-link"
+                          onClick={() => openJobDetail(nextScheduledJob)}
+                        >
+                          <span>
+                            下次计划：
+                            <strong>
+                              {nextScheduledJob.remark ||
+                                `同步任务 #${nextScheduledJob.id}`}
+                            </strong>
+                          </span>
+                          <span className="muted">
+                            {formatShortTime(nextScheduledJob.nextRunTime)}
+                          </span>
+                        </button>
+                      ) : (
+                        <span className="muted">
+                          暂无待触发的定时计划，可点击「全部运行」或单任务启动
+                        </span>
+                      )}
+                    </div>
+                    <div className="dashboard-live-idle-item">
+                      {statusCounts.failed > 0 ? (
+                        <button
+                          type="button"
+                          className="dashboard-live-idle-alert is-danger"
+                          onClick={() => setStatusFilter("failed")}
+                        >
+                          <IconAlertTriangle size="small" aria-hidden="true" />
+                          <span>
+                            {statusCounts.failed} 个任务最近执行异常，点击排查
+                          </span>
+                        </button>
+                      ) : (
+                        <span className="dashboard-live-idle-ok">
+                          <IconTickCircle size="small" aria-hidden="true" />
+                          <span>所有已启用任务运行健康</span>
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </SectionCard>
+
+              {/* Right: Trend / Storage Quota Insight Card */}
+              {hasRightInsight && (
+                <SectionCard
+                  className="dashboard-insight-card"
+                  bodyClassName="dashboard-insight-body"
+                  title={
+                    hasTrendData && hasQuotaData ? (
+                      <div
+                        className="dashboard-insight-switcher"
+                        role="tablist"
+                        aria-label="看板洞察视图"
+                      >
+                        <button
+                          type="button"
+                          role="tab"
+                          aria-selected={effectiveInsightTab === "trend"}
+                          className={`dashboard-insight-tab${
+                            effectiveInsightTab === "trend" ? " is-active" : ""
+                          }`}
+                          onClick={() => setInsightTab("trend")}
+                        >
+                          同步趋势
+                        </button>
+                        <button
+                          type="button"
+                          role="tab"
+                          aria-selected={effectiveInsightTab === "quota"}
+                          className={`dashboard-insight-tab${
+                            effectiveInsightTab === "quota" ? " is-active" : ""
+                          }`}
+                          onClick={() => setInsightTab("quota")}
+                        >
+                          <span>存储配额</span>
+                          {highestQuotaPercent >= 80 && (
+                            <span
+                              className={`kpi-dot ${
+                                highestQuotaPercent >= 90
+                                  ? "kpi-dot--danger"
+                                  : "kpi-dot--warning"
+                              }`}
+                              aria-hidden="true"
+                            />
+                          )}
+                        </button>
+                      </div>
+                    ) : effectiveInsightTab === "trend" ? (
+                      `近 ${trendRange} 天同步趋势`
+                    ) : (
+                      "存储空间配额"
+                    )
+                  }
+                  extra={
+                    effectiveInsightTab === "trend" ? (
+                      <div
+                        className="dashboard-trend-tabs"
+                        role="group"
+                        aria-label="趋势时间范围"
+                      >
+                        {([7, 30] as const).map((days) => (
+                          <button
+                            key={days}
+                            type="button"
+                            aria-pressed={trendRange === days}
+                            className={`dashboard-trend-tab${
+                              trendRange === days ? " is-active" : ""
+                            }`}
+                            onClick={() => setTrendRange(days)}
+                          >
+                            {days} 天
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <Button
+                        size="small"
+                        theme="borderless"
+                        onClick={() => navigate("/engines")}
+                      >
+                        存储管理
+                      </Button>
+                    )
+                  }
+                >
+                  {effectiveInsightTab === "trend" &&
+                    data.dailyTrend &&
+                    (() => {
+                      const series = data.dailyTrend.slice(-trendRange);
+                      const maxBytes = Math.max(
+                        1,
+                        ...series.map((d) => d.bytes || 0),
+                      );
+                      const maxRuns = Math.max(
+                        1,
+                        ...series.map((d) => d.runs || 0),
+                      );
+                      const useBytes = series.some((d) => d.bytes > 0);
+                      const totalPeriodBytes = series.reduce(
+                        (s, d) => s + (d.bytes || 0),
+                        0,
+                      );
+                      const totalPeriodRuns = series.reduce(
+                        (s, d) => s + (d.runs || 0),
+                        0,
+                      );
+                      const totalPeriodSuccess = series.reduce(
+                        (s, d) => s + (d.successRuns || 0),
+                        0,
+                      );
+                      const totalPeriodFail = series.reduce(
+                        (s, d) => s + (d.failRuns || 0),
+                        0,
+                      );
+                      const periodSuccessRate =
+                        totalPeriodRuns > 0
+                          ? Math.round(
+                              (totalPeriodSuccess / totalPeriodRuns) * 100,
+                            )
+                          : 0;
+                      return (
+                        <>
+                          <div className="dashboard-trend-summary">
+                            <div className="dashboard-trend-stat">
+                              <span className="muted">近 {trendRange} 天传输</span>
+                              <strong>{formatSize(totalPeriodBytes)}</strong>
+                            </div>
+                            <div className="dashboard-trend-stat">
+                              <span className="muted">执行 / 成功率</span>
+                              <strong>
+                                {totalPeriodRuns} 次
+                                {totalPeriodRuns > 0
+                                  ? ` · ${periodSuccessRate}%`
+                                  : ""}
+                              </strong>
+                            </div>
+                            {totalPeriodFail > 0 && (
+                              <div className="dashboard-trend-stat">
+                                <span className="muted">异常次数</span>
+                                <strong className="inline-error">
+                                  {totalPeriodFail} 次
+                                </strong>
+                              </div>
+                            )}
+                          </div>
+                          <div
+                            className={`dashboard-trend-chart${
+                              trendRange === 30 ? " is-dense" : ""
+                            }`}
+                            role="img"
+                            aria-label={`近 ${trendRange} 天同步趋势图`}
+                          >
+                            {series.map((day, idx) => {
+                              const rawVal = useBytes ? day.bytes : day.runs;
+                              const maxVal = useBytes ? maxBytes : maxRuns;
+                              const pct =
+                                rawVal > 0
+                                  ? Math.max(
+                                      10,
+                                      Math.round((rawVal / maxVal) * 100),
+                                    )
+                                  : 4;
+                              const tone =
+                                day.failRuns > 0
+                                  ? "is-danger"
+                                  : day.runs > 0
+                                    ? "is-primary"
+                                    : "is-idle";
+                              const showLabel =
+                                trendRange === 7 ||
+                                idx === 0 ||
+                                idx === series.length - 1;
+                              return (
                                 <div
-                                  style={{
-                                    display: "flex",
-                                    justifyContent: "space-between",
-                                    fontSize: 12,
-                                    gap: 8,
-                                  }}
+                                  key={day.date}
+                                  className="dashboard-trend-col"
+                                  title={`${day.date}：${day.runs} 次（成功 ${day.successRuns} / 异常 ${day.failRuns}），${day.files} 文件，${formatSize(day.bytes)}`}
                                 >
-                                  <strong>{q.name}</strong>
-                                  <span className="muted">
-                                    已用 {formatSize(used)} / {formatSize(total)}
-                                    {q.free !== undefined ? `（剩余 ${formatSize(q.free)}）` : ""}
+                                  <div className="dashboard-trend-track">
+                                    <div
+                                      className={`dashboard-trend-bar ${tone}`}
+                                      style={{ height: `${pct}%` }}
+                                    />
+                                  </div>
+                                  <span
+                                    className={`dashboard-trend-label muted${
+                                      showLabel ? "" : " is-hidden"
+                                    }`}
+                                    aria-hidden={!showLabel}
+                                  >
+                                    {day.date.slice(5)}
                                   </span>
                                 </div>
-                                <Progress
-                                  percent={pct}
-                                  showInfo={false}
-                                  stroke={stroke}
+                              );
+                            })}
+                          </div>
+                          <div className="dashboard-trend-meta muted">
+                            <span className="dashboard-trend-legend">
+                              <span className="dashboard-kpi-stat">
+                                <span
+                                  className="kpi-dot kpi-dot--primary"
+                                  aria-hidden="true"
                                 />
-                              </div>
-                            );
-                          })}
-                      </div>
-                    </SectionCard>
-                  )}
-              </div>
-            )}
+                                正常
+                              </span>
+                              <span className="dashboard-kpi-stat">
+                                <span
+                                  className="kpi-dot kpi-dot--danger"
+                                  aria-hidden="true"
+                                />
+                                含异常
+                              </span>
+                            </span>
+                            <span>
+                              {useBytes ? "柱高按传输量" : "柱高按执行次数"}
+                            </span>
+                          </div>
+                        </>
+                      );
+                    })()}
 
+                  {effectiveInsightTab === "quota" && hasQuotaData && (
+                    <div className="dashboard-quota-list">
+                      {sortedQuotas.slice(0, 5).map((q) => {
+                        const stroke =
+                          q.percent >= 90
+                            ? "var(--semi-color-danger)"
+                            : q.percent >= 75
+                              ? "var(--semi-color-warning)"
+                              : "var(--semi-color-primary)";
+                        return (
+                          <div key={q.name} className="dashboard-quota-item">
+                            <div className="dashboard-quota-head">
+                              <strong
+                                className="dashboard-quota-name"
+                                title={q.name}
+                              >
+                                {q.name}
+                              </strong>
+                              <span className="dashboard-quota-usage muted">
+                                <strong className="dashboard-quota-pct">
+                                  {q.percent}%
+                                </strong>{" "}
+                                · {formatSize(q.usedBytes)} /{" "}
+                                {formatSize(q.totalBytes)}
+                                {q.free !== undefined
+                                  ? `（剩 ${formatSize(q.free)}）`
+                                  : ""}
+                              </span>
+                            </div>
+                            <Progress
+                              percent={q.percent}
+                              showInfo={false}
+                              stroke={stroke}
+                            />
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </SectionCard>
+              )}
+            </div>
+
+            {/* All Sync Tasks List */}
             <SectionCard
               className="dashboard-jobs-card"
               title={
@@ -1388,7 +2164,9 @@ export default function Dashboard() {
                       size="small"
                       type="tertiary"
                       disabled={action.busy}
-                      onClick={() => runBatch("enable", selectedIds, "批量启用")}
+                      onClick={() =>
+                        runBatch("enable", selectedIds, "批量启用")
+                      }
                     >
                       批量启用
                     </Button>
@@ -1396,7 +2174,9 @@ export default function Dashboard() {
                       size="small"
                       type="tertiary"
                       disabled={action.busy}
-                      onClick={() => runBatch("disable", selectedIds, "批量停用")}
+                      onClick={() =>
+                        runBatch("disable", selectedIds, "批量停用")
+                      }
                     >
                       批量停用
                     </Button>
@@ -1449,17 +2229,7 @@ export default function Dashboard() {
                     const isSelected = selectedSet.has(job.id);
                     const legacy = isLegacyOpenListJob(job, engines.data);
                     const failed = isJobFailed(job);
-                    const livePct = Math.min(
-                      100,
-                      Math.max(0, Math.round(job.liveProgress || 0)),
-                    );
-                    const liveTotal = job.liveNum
-                      ? (job.liveNum.wait || 0) +
-                        (job.liveNum.running || 0) +
-                        (job.liveNum.success || 0) +
-                        (job.liveNum.fail || 0) +
-                        (job.liveNum.other || 0)
-                      : 0;
+                    const m = computeJobLiveMetrics(job);
 
                     const rowClassName = [
                       "dashboard-job-row",
@@ -1473,7 +2243,7 @@ export default function Dashboard() {
                             : failed
                               ? "is-failed"
                               : "",
-                      (legacy || (job.enable !== 1 && !job.running))
+                      legacy || (job.enable !== 1 && !job.running)
                         ? "is-disabled"
                         : "",
                     ]
@@ -1548,7 +2318,10 @@ export default function Dashboard() {
                                 排队等待中
                               </Tag>
                             )}
-                            {!legacy && job.watching && (
+                            {!legacy && job.syncStatus && (
+                              <SyncStatusTag status={job.syncStatus} />
+                            )}
+                            {!legacy && !job.syncStatus && job.watching && (
                               <Tag size="small" type="light" color="green">
                                 实时监听中
                               </Tag>
@@ -1619,14 +2392,21 @@ export default function Dashboard() {
                             <div className="dashboard-job-progress">
                               <div className="dashboard-job-progress-head">
                                 <span className="dashboard-job-progress-label">
-                                  {job.paused ? "传输已暂停" : "正在同步"}
+                                  {m.progressLabel}
                                 </span>
-                                <span className="dashboard-job-progress-pct">
-                                  {livePct}%
+                                <span className="dashboard-job-progress-right">
+                                  {!job.paused && m.liveSpeed > 0 && (
+                                    <span className="dashboard-job-speed">
+                                      {formatSpeed(m.liveSpeed)}
+                                    </span>
+                                  )}
+                                  <span className="dashboard-job-progress-pct">
+                                    {m.livePct}%
+                                  </span>
                                 </span>
                               </div>
                               <Progress
-                                percent={livePct}
+                                percent={m.livePct}
                                 showInfo={false}
                                 stroke={
                                   job.paused
@@ -1635,18 +2415,50 @@ export default function Dashboard() {
                                 }
                               />
                               <div className="dashboard-job-progress-sub">
-                                {liveTotal > 0 ? (
+                                {m.liveTotal > 0 || m.liveTotalSize > 0 ? (
                                   <>
-                                    <span>
-                                      已完成 {job.liveNum?.success ?? 0} /{" "}
-                                      {liveTotal} 项
-                                    </span>
+                                    {m.liveTotalSize > 0 && (
+                                      <span>
+                                        {formatSize(m.liveDoneSize)} /{" "}
+                                        {formatSize(m.liveTotalSize)}
+                                      </span>
+                                    )}
+                                    {m.liveTotal > 0 && (
+                                      <span>
+                                        已完成 {job.liveNum?.success ?? 0} /{" "}
+                                        {m.liveTotal} 项
+                                      </span>
+                                    )}
+                                    {!job.paused && m.liveRemainTime > 0 && (
+                                      <span>
+                                        剩余 {formatDuration(m.liveRemainTime)}
+                                      </span>
+                                    )}
+                                    {!m.liveScanFinish &&
+                                      m.scanTotalFiles > 0 &&
+                                      m.scanCheckedFiles > 0 && (
+                                        <span>
+                                          已核对 {m.scanCheckedFiles} /{" "}
+                                          {m.scanTotalFiles}
+                                        </span>
+                                      )}
                                     {(job.liveNum?.fail ?? 0) > 0 && (
                                       <span className="inline-error">
                                         失败 {job.liveNum?.fail}
                                       </span>
                                     )}
                                   </>
+                                ) : !m.liveScanFinish && m.liveScan ? (
+                                  <span>
+                                    {m.scanTotalFiles > 0 &&
+                                    m.scanCheckedFiles > 0
+                                      ? `已核对 ${m.scanCheckedFiles} / ${m.scanTotalFiles} 个文件`
+                                      : `已扫描 ${m.liveScan.scannedDirs} 个目录${
+                                          m.scanTotalFiles > 0
+                                            ? ` · ${m.scanTotalFiles} 个文件`
+                                            : ""
+                                        }`}
+                                  </span>
                                 ) : (
                                   <span>正在扫描文件列表…</span>
                                 )}
@@ -1750,7 +2562,9 @@ export default function Dashboard() {
                             <>
                               <IconButton
                                 label="模拟运行预览"
-                                icon={<IconEyeOpenedStroked aria-hidden="true" />}
+                                icon={
+                                  <IconEyeOpenedStroked aria-hidden="true" />
+                                }
                                 disabled={action.busy}
                                 onClick={() =>
                                   setDryRunJob({ id: job.id, name: jobName })
@@ -1772,7 +2586,9 @@ export default function Dashboard() {
                               )}
                               <IconButton
                                 label={
-                                  job.running || job.queued ? "停止任务" : "启动任务"
+                                  job.running || job.queued
+                                    ? "停止任务"
+                                    : "启动任务"
                                 }
                                 icon={
                                   job.running || job.queued ? (
@@ -1784,7 +2600,9 @@ export default function Dashboard() {
                                 danger={job.running || job.queued}
                                 disabled={
                                   action.busy ||
-                                  (!job.running && !job.queued && job.enable !== 1)
+                                  (!job.running &&
+                                    !job.queued &&
+                                    job.enable !== 1)
                                 }
                                 onClick={() =>
                                   job.running || job.queued
@@ -1853,7 +2671,10 @@ export default function Dashboard() {
               const taskId = approvalModal.approval.taskId;
               if (!taskId || !selectedPaths.length) return;
               try {
-                const res = await api.excludeApprovalPaths(taskId, selectedPaths);
+                const res = await api.excludeApprovalPaths(
+                  taskId,
+                  selectedPaths,
+                );
                 setApprovalModal(null);
                 Toast.success(`已将 ${res.excludedCount} 项加入任务排除规则`);
                 await refreshAll(true);

@@ -35,9 +35,9 @@ func TestSessionTokenWritebackAndDisableFlag(t *testing.T) {
 	}
 
 	// 1. Updated valid OAuth JSON token triggers OnTokenUpdate and config file has 0600 mode.
-	var received map[string]map[string]string
+	var received map[string]TokenUpdate
 	s, err := cfg.SessionFor([]SessionSpec{{Name: "od", Mode: diskReadOnly}}, SessionOptions{
-		OnTokenUpdate: func(updates map[string]map[string]string) {
+		OnTokenUpdate: func(updates map[string]TokenUpdate) {
 			received = updates
 		},
 	})
@@ -57,6 +57,9 @@ func TestSessionTokenWritebackAndDisableFlag(t *testing.T) {
 		s.Close()
 		t.Fatalf("expected 0600 permissions on rclone.conf, got %o", perm)
 	}
+	// The original configuration must be owned by the session, even if the
+	// caller subsequently edits the map used to create it.
+	cfg["od"]["drive_id"] = "changed-after-session-start"
 	updatedINI := "[od]\ntype = onedrive\ntoken = " + newToken + "\n"
 	if err := os.WriteFile(s.configPath, []byte(updatedINI), 0600); err != nil {
 		s.Close()
@@ -68,13 +71,16 @@ func TestSessionTokenWritebackAndDisableFlag(t *testing.T) {
 	if _, err := os.Stat(confPath); !os.IsNotExist(err) {
 		t.Fatalf("expected session config dir to be cleaned up on Close()")
 	}
-	if received["od"]["token"] != newToken {
+	if received["od"].Fields["token"] != newToken || received["od"].Original["token"] != origToken || received["od"].Original["type"] != "onedrive" {
 		t.Fatalf("expected refreshed token callback, got: %#v", received)
+	}
+	if received["od"].Original["drive_id"] != "" {
+		t.Fatal("session's original configuration changed with its caller's map")
 	}
 
 	// 2. DisableTokenPersist suppresses process-wide hook and keeps fd-only config.
 	var hookCalled atomic.Bool
-	RegisterTokenUpdateHook(func(updates map[string]map[string]string) {
+	RegisterTokenUpdateHook(func(updates map[string]TokenUpdate) {
 		hookCalled.Store(true)
 	})
 	defer RegisterTokenUpdateHook(nil)

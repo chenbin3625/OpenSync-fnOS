@@ -276,6 +276,7 @@ func TestExportJobCheckReportAndCSVFormulaSanitization(t *testing.T) {
 }
 
 func TestFSWatcherRootConfinementAndLifecycle(t *testing.T) {
+	defer setupNativeTestDB(t)()
 	jobFSWatchers.ResetForTest()
 	defer jobFSWatchers.ResetForTest()
 
@@ -300,10 +301,18 @@ func TestFSWatcherRootConfinementAndLifecycle(t *testing.T) {
 		t.Fatalf("expected only authorized local root %q, got %#v", allowed, roots)
 	}
 
+	engineID, err := EnsureNativeEngine()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mapper.ExecuteUpdate("INSERT INTO job(id,enable,alistId,srcPath,dstPath,method,extraFlags) VALUES(88801,1,?,?,'/oss/backup',0,?)", engineID, allowedV, `{"watchEnable":true,"watchDebounceSec":2}`); err != nil {
+		t.Fatal(err)
+	}
 	jc := &JobClient{
 		JobID: 88801,
 		Job: map[string]interface{}{
 			"id":         int64(88801),
+			"alistId":    engineID,
 			"enable":     1,
 			"method":     0,
 			"srcPath":    allowedV,
