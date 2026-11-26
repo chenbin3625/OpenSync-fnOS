@@ -60,7 +60,7 @@ test("connects a first WebDAV account inline and reuses it from the sync home", 
   await expect(dialog.getByRole("status").filter({ hasText: "文件夹访问权限" })).toBeVisible();
   localAuthorized = true;
   await dialog.getByRole("button", { name: "刷新目录" }).click();
-  await dialog.getByRole("radio", { name: /仅上传本地更改/ }).click();
+  await expect(dialog.getByRole("radio", { name: /^单向同步/, checked: true })).toBeVisible();
 
   const picker = dialog.locator(".remote-paths");
   await picker.nth(0).getByRole("combobox").click();
@@ -90,7 +90,7 @@ test("connects a first WebDAV account inline and reuses it from the sync home", 
   await expect(page.locator('.remote-paths-dropdown [role="treeitem"][data-key="/PhotoCloud/Backup"]')).toBeVisible();
 });
 
-test("edits Cloud Sync continuous direction, deletion policy and polling without persisting runtime state", async ({ page }) => {
+test("edits a legacy upload as one-way sync and updates deletion policy and polling", async ({ page }) => {
   let saved: Record<string, unknown> | undefined;
   let enabled = true;
   let previews = 0;
@@ -131,10 +131,11 @@ test("edits Cloud Sync continuous direction, deletion policy and polling without
   await expect(page.locator(".continuous-status-card")).toContainText("已同步");
   await expect(page.locator(".overview-card").getByRole("button", { name: "暂停同步", exact: true })).toBeVisible();
   await expect(page.locator(".overview-card").getByRole("button", { name: "立即同步", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "模拟运行预览（只读）", exact: true })).toHaveCount(0);
 
   await page.locator(".overview-card").getByRole("button", { name: "编辑任务", exact: true }).click();
   const dialog = page.getByRole("dialog");
-  await dialog.getByRole("radio", { name: /仅下载远端更改/ }).click();
+  await expect(dialog.getByRole("radio", { name: /^单向同步/, checked: true })).toBeVisible();
   await dialog.getByRole("switch", { name: "镜像对齐", exact: true }).click();
   await dialog.getByRole("tab", { name: "同步设置", exact: true }).click();
   await dialog.getByRole("textbox", { name: "远端检测间隔（秒）", exact: true }).fill("15");
@@ -142,8 +143,10 @@ test("edits Cloud Sync continuous direction, deletion policy and polling without
   expect(await dialog.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
   await dialog.getByRole("button", { name: "保存", exact: true }).click();
   await expect(dialog.getByRole("button", { name: "确认并启动镜像", exact: true })).toBeVisible();
-  expect(saved).toMatchObject({ enable: 0, isCron: 3, method: 1, srcPath: ["/Cloud/target"], dstPath: ["/本地/root/source"] });
-  expect(JSON.parse(String(saved?.extraFlags))).toMatchObject({ syncDirection: "download", syncPollIntervalSec: 15, syncAuditIntervalMin: 60 });
+  expect(saved).toMatchObject({ enable: 0, isCron: 3, method: 1, srcPath: ["/本地/root/source"], dstPath: ["/Cloud/target"] });
+  const savedFlags = JSON.parse(String(saved?.extraFlags));
+  expect(savedFlags).toMatchObject({ syncPollIntervalSec: 15, syncAuditIntervalMin: 60 });
+  expect(savedFlags).not.toHaveProperty("syncDirection");
   expect(saved).not.toHaveProperty("syncStatus");
   expect(previews).toBe(1);
   await dialog.getByRole("button", { name: "确认并启动镜像", exact: true }).click();

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,6 +109,16 @@ func TestNativeFullSyncMoveBisyncDryRunCheckRenameAndRedaction(t *testing.T) {
 	// --- 1. Native Full Sync (method=1) + Trash (direct deletion without secondary approval) ---
 	_ = os.WriteFile(filepath.Join(srcFull, "keep.txt"), []byte("keep-v1"), 0644)
 	_ = os.WriteFile(filepath.Join(dstFull, "stale.txt"), []byte("stale-to-delete"), 0644)
+	staleDir := filepath.Join(dstFull, "stale-dir")
+	if err := os.Mkdir(staleDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// This directory alone accounts for more than half the destination entries.
+	for i := 0; i < 100; i++ {
+		if err := os.WriteFile(filepath.Join(staleDir, fmt.Sprintf("stale-%d.txt", i)), []byte("stale"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	fullJobID, err := CreateJobClient(map[string]interface{}{
 		"remark":             "原生全量同步",
@@ -137,7 +148,7 @@ func TestNativeFullSyncMoveBisyncDryRunCheckRenameAndRedaction(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 		dryRes, _ = GetDryRun(fullJobID)
 	}
-	if dryRes.Status != "completed" || dryRes.CopyCount != 1 || dryRes.DeleteCount != 1 {
+	if dryRes.Status != "completed" || dryRes.CopyCount != 1 || dryRes.DeleteCount != 2 {
 		t.Fatalf("unexpected full sync dry-run: %+v", dryRes)
 	}
 
@@ -156,14 +167,20 @@ func TestNativeFullSyncMoveBisyncDryRunCheckRenameAndRedaction(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dstFull, "stale.txt")); err != nil {
 		t.Fatalf("legacy deletion guard failed to preserve destination: %v", err)
 	}
+	if _, err := os.Stat(staleDir); err != nil {
+		t.Fatalf("legacy deletion guard failed to preserve destination directory: %v", err)
+	}
 
-	// Explicitly allowing direct deletion lets the mirror move stale.txt into trash.
+	// Allowing direct deletion lets the mirror trash the stale file and directory.
 	runAndWait(fullJobID)
 	if _, err := os.ReadFile(filepath.Join(dstFull, "keep.txt")); err != nil {
 		t.Fatalf("keep.txt not copied during full sync: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dstFull, "stale.txt")); err == nil {
 		t.Fatalf("stale.txt should have been deleted/trashed directly during full sync")
+	}
+	if _, err := os.Stat(staleDir); !os.IsNotExist(err) {
+		t.Fatalf("stale directory should have been trashed during full sync: %v", err)
 	}
 	foundInTrash := false
 	_ = filepath.Walk(filepath.Join(dstFull, ".opensync-trash"), func(p string, info os.FileInfo, e error) error {

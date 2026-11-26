@@ -116,6 +116,7 @@ type NativeEngineInput struct {
 
 type NativeRemoteEditInput struct {
 	Name          string            `json:"name"`
+	NewName       string            `json:"newName,omitempty"`
 	Options       map[string]string `json:"options"`
 	ClearSecrets  []string          `json:"clearSecrets,omitempty"`
 	AuthSessionID string            `json:"authSessionId,omitempty"`
@@ -673,7 +674,7 @@ func SaveNativeStorage(ctx context.Context, in NativeStorageInput) error {
 	return e
 }
 
-// UpdateNativeStorage edits an existing named remote in place while preserving
+// UpdateNativeStorage edits and optionally renames an existing remote, preserving
 // omitted secret fields and re-validating dependent jobs.
 func UpdateNativeStorage(ctx context.Context, in NativeRemoteEditInput) error {
 	name := strings.TrimSpace(in.Name)
@@ -705,6 +706,16 @@ func UpdateNativeStorage(ctx context.Context, in NativeRemoteEditInput) error {
 	skipObscure := map[string]map[string]bool{canonicalName: skipFields}
 	if err := native.PrepareWithSkipObscure(ctx, existingSnapshot, additions, true, skipObscure); err != nil {
 		return publicError(err.Error())
+	}
+
+	if newName := strings.TrimSpace(in.NewName); newName != "" && newName != canonicalName {
+		if _, err := renameNativeStorage(NativeRenameInput{OldName: canonicalName, NewName: newName}, existingSnapshot[canonicalName], additions[canonicalName]); err != nil {
+			return err
+		}
+		if authSessionID != "" {
+			native.ConsumeAuthSession(authSessionID)
+		}
+		return nil
 	}
 
 	alistRefMu.Lock()
@@ -1732,7 +1743,7 @@ func (jt *JobTask) runNative() {
 			return
 		}
 	}
-	if jt.SyncPartial {
+	if jt.SyncPartial && method == 1 {
 		method = 0
 	}
 	// Targeted repair runs (from consistency check one-click repair) always copy

@@ -36,10 +36,8 @@ const statusOptions = [
 
 const directionOptions = [
   { label: "全部方向", value: "all" },
+  { label: "单向同步", value: "oneway" },
   { label: "双向同步", value: "bidirectional" },
-  { label: "单向上传", value: "upload" },
-  { label: "单向下载", value: "download" },
-  { label: "自定义单向", value: "custom" },
   { label: "已开同步删除", value: "sync_delete" },
 ];
 

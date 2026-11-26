@@ -338,6 +338,34 @@ func TestThreeWayBisyncEndToEndConflictTrashAndPolicyEdit(t *testing.T) {
 	if err != nil || len(entries) < 3 {
 		t.Fatalf("expected SQLite bisync_entry populated, got %d (%v)", len(entries), err)
 	}
+
+	// A change on B must use the two-way baseline and leave unrelated paths alone.
+	deltaFile := "queued_on_b.txt"
+	if err := os.WriteFile(filepath.Join(dirB, deltaFile), []byte("from B"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	unrelatedFile := "not_queued.txt"
+	if err := os.WriteFile(filepath.Join(dirA, unrelatedFile), []byte("from A"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	jc, err := GetJobClientByID(jobID)
+	if err != nil || !jc.tryMarkDoing() {
+		t.Fatalf("could not start partial bisync: %v", err)
+	}
+	jc.runMarkedJobWithOptions(markedJobRunOptions{syncPartial: true, syncChangedFiles: []string{vB + "/" + deltaFile}})
+	if !jc.waitUntilIdle(30 * time.Second) {
+		t.Fatal("partial bisync timed out")
+	}
+	if b, err := os.ReadFile(filepath.Join(dirA, deltaFile)); err != nil || string(b) != "from B" {
+		t.Fatalf("queued change on B missing on A: %q (%v)", b, err)
+	}
+	if _, err := os.Stat(filepath.Join(dirB, unrelatedFile)); !os.IsNotExist(err) {
+		t.Fatalf("partial bisync should leave the unrelated file alone: %v", err)
+	}
+	if err := os.Remove(filepath.Join(dirA, unrelatedFile)); err != nil {
+		t.Fatal(err)
+	}
+
 	beforeRename, err := os.Stat(filepath.Join(dirB, "only_b.txt"))
 	if err != nil {
 		t.Fatal(err)

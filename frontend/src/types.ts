@@ -192,7 +192,6 @@ export interface NativeExtraFlags {
   watchDebounceSec?: number;
   syncPollIntervalSec?: number;
   syncAuditIntervalMin?: number;
-  syncDirection?: string;
   autoRetryMax?: number;
   autoRetryDelayMin?: number;
   postSyncJobId?: number;

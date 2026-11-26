@@ -22,13 +22,11 @@ import {
   IconAlertTriangle,
   IconArrowRight,
   IconChevronRight,
-  IconDownload,
   IconInfoCircle,
   IconLockStroked,
   IconRefresh,
   IconTick,
   IconTickCircle,
-  IconUpload,
 } from "@douyinfe/semi-icons";
 import { api } from "../api/client";
 import {
@@ -147,62 +145,22 @@ const fileSizeFilterDefaults = {
   }
 >;
 
-const directionCards: Array<{
-  key: SyncDirectionKey;
-  title: string;
-  route: string;
-  desc: string;
-  icon: "upload" | "download" | "bidirectional" | "custom";
-}> = [
+const directionCards = [
   {
-    key: "upload",
-    title: "仅上传本地更改",
-    route: "本地 → 远端",
-    desc: "本地目录变更实时上传至远端，适合 NAS 备份上云",
-    icon: "upload",
-  },
-  {
-    key: "download",
-    title: "仅下载远端更改",
-    route: "远端 → 本地",
-    desc: "远端目录变更按周期拉取到本地，适合云盘归档回本地",
-    icon: "download",
+    key: "oneway",
+    title: "单向同步",
+    route: "源目录 → 目标目录",
+    desc: "将源目录的新增和修改同步到目标目录，支持本地和远端自由组合",
+    icon: IconArrowRight,
   },
   {
     key: "bidirectional",
     title: "双向同步",
     route: "目录 A ⇄ 目录 B",
     desc: "双端的新增、修改和删除会互相同步，检测到冲突时可在冲突中心处理",
-    icon: "bidirectional",
+    icon: IconRefresh,
   },
-  {
-    key: "custom",
-    title: "自定义单向",
-    route: "源目录 → 目标目录",
-    desc: "任意存储单向持续同步（支持云盘到云盘、本地到本地）",
-    icon: "custom",
-  },
-];
-
-function DirectionCardIcon({ kind }: { kind: "upload" | "download" | "bidirectional" | "custom" }) {
-  switch (kind) {
-    case "upload":
-      return <IconUpload aria-hidden="true" />;
-    case "download":
-      return <IconDownload aria-hidden="true" />;
-    case "bidirectional":
-      return <IconRefresh aria-hidden="true" />;
-    case "custom":
-      return <IconArrowRight aria-hidden="true" />;
-  }
-}
-
-function activeDirectionFromForm(form: JobForm): SyncDirectionKey {
-  if (form.method === 3) return "bidirectional";
-  const dir = (form.extraFlags?.syncDirection || "").trim();
-  if (dir === "upload" || dir === "download") return dir;
-  return "custom";
-}
+] as const;
 
 function parsePositiveIntDraft(raw: string): number {
   const trimmed = raw.trim();
@@ -552,30 +510,15 @@ export default function TaskEditor({
   };
 
   const handleDirectionSelect = (direction: SyncDirectionKey) => {
+    if (direction === activeDirection) return;
     if (direction === "bidirectional") {
       patch({
         method: 3,
-        conflictPolicy: form.method !== 3 && form.conflictPolicy === 0 ? 2 : form.conflictPolicy,
-        extraFlags: { ...form.extraFlags, syncDirection: "" },
+        conflictPolicy: form.conflictPolicy === 0 ? 2 : form.conflictPolicy,
       });
       return;
     }
-    const nextMethod = form.method === 3 ? 0 : form.method;
-    const sourceLocal = form.srcPath.some(
-      (p) => p.split("/").filter(Boolean)[0] === "本地",
-    );
-    const targetLocal = form.dstPath.some(
-      (p) => p.split("/").filter(Boolean)[0] === "本地",
-    );
-    const swap =
-      direction === "upload"
-        ? !sourceLocal && targetLocal
-        : direction === "download" && sourceLocal && !targetLocal;
-    patch({
-      method: nextMethod,
-      extraFlags: { ...form.extraFlags, syncDirection: direction },
-      ...(swap ? { srcPath: form.dstPath, dstPath: form.srcPath } : {}),
-    });
+    change("method", 0);
   };
 
   const handleSrcPathChange = (nextPaths: string[]) => {
@@ -737,7 +680,7 @@ export default function TaskEditor({
     [nativeStorage.data?.remotes, form.srcPath, form.dstPath],
   );
 
-  const activeDirection = activeDirectionFromForm(form);
+  const activeDirection = form.method === 3 ? "bidirectional" : "oneway";
   const preferredRoot = preferredRemote ? `/${preferredRemote}` : undefined;
   const refreshFolders = () => {
     dirCacheRef.current?.invalidateEngine(form.alistId);
@@ -750,21 +693,9 @@ export default function TaskEditor({
   const isDestructiveDirection = form.method !== 0;
 
   const srcFieldLabel =
-    activeDirection === "bidirectional"
-      ? "左侧同步目录（单选）"
-      : activeDirection === "upload"
-        ? "本地源目录"
-        : activeDirection === "download"
-          ? "远端源目录"
-          : "源目录";
+    activeDirection === "bidirectional" ? "左侧同步目录（单选）" : "源目录";
   const dstFieldLabel =
-    activeDirection === "bidirectional"
-      ? "右侧同步目录（单选）"
-      : activeDirection === "upload"
-        ? "远端目标目录"
-        : activeDirection === "download"
-          ? "本地目标目录"
-          : "目标目录";
+    activeDirection === "bidirectional" ? "右侧同步目录（单选）" : "目标目录";
 
   const directionSummaryText =
     activeDirection === "bidirectional"
@@ -772,7 +703,7 @@ export default function TaskEditor({
       : form.method === 2
         ? "此任务会在文件移动到目标目录后删除源文件。"
         : form.method === 1
-        ? "镜像会清理目标端独有的文件，包括任务创建前已存在的文件。首次开启镜像时先查看模拟运行，再确认启动。"
+        ? "镜像会清理目标端独有的文件，包括任务创建前已存在的文件。首次开启镜像时先查看镜像影响预览，再确认启动。"
         : "单向持续增量：源端新增与修改的文件会持续同步至目标端，不会删除目标端已有文件，适合安全备份。";
 
   const effectivePollSec = form.extraFlags?.syncPollIntervalSec || 60;
@@ -1070,7 +1001,7 @@ export default function TaskEditor({
                             >
                               <div className="sync-direction-card-head">
                                 <span className="sync-direction-card-icon">
-                                  <DirectionCardIcon kind={card.icon} />
+                                  <card.icon aria-hidden="true" />
                                 </span>
                                 <span className="sync-direction-card-title">
                                   {card.title}
@@ -1127,7 +1058,7 @@ export default function TaskEditor({
                         value={form.srcPath}
                         onChange={handleSrcPathChange}
                         multiple={srcMultiple}
-                        initialExpandedRoot={activeDirection === "download" ? preferredRoot : activeDirection === "upload" ? "/本地" : undefined}
+                        initialExpandedRoot={nativeStorage.data?.localRoots?.length ? "/本地" : undefined}
                         remotes={nativeStorage.data?.remotes}
                         ariaLabel="选择源目录"
                       />
@@ -1144,7 +1075,7 @@ export default function TaskEditor({
                         value={form.dstPath}
                         onChange={handleDstPathChange}
                         multiple={dstMultiple}
-                        initialExpandedRoot={activeDirection === "download" ? "/本地" : preferredRoot}
+                        initialExpandedRoot={preferredRoot}
                         remotes={nativeStorage.data?.remotes}
                         ariaLabel="选择目标目录"
                       />

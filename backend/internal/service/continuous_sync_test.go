@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -114,6 +115,12 @@ func TestContinuousSourceChangeCopiesSameSizeAndReconcilesAfterPause(t *testing.
 	}
 	waitFor("initial sync", func() bool { return content("data.txt", "aaaa") })
 	waitFor("initial checkpoint", func() bool { s, _ := mapper.GetSyncState(jobID); return !s.Pending && s.LastSuccess > 0 })
+	if runtime.GOOS == "linux" {
+		s, err := mapper.GetSyncState(jobID)
+		if err != nil || s.LastPoll != 0 {
+			t.Fatalf("the watched source should not need a polling scan: %+v (%v)", s, err)
+		}
+	}
 	// Keep both sides' size and timestamp identical, so only the watcher-driven
 	// source-change flag can discover this content update.
 	old, err := os.Stat(filepath.Join(source, "data.txt"))

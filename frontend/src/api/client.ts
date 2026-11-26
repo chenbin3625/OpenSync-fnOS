@@ -286,6 +286,7 @@ export const api = {
     request("/native/storage", { method: "POST", data }),
   updateNativeStorage: (data: {
     name: string;
+    newName?: string;
     options: Record<string, string>;
     clearSecrets?: string[];
     authSessionId?: string;

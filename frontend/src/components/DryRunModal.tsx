@@ -8,7 +8,6 @@ import Tag from "@douyinfe/semi-ui/lib/es/tag";
 import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
 import {
   IconAlertTriangle,
-  IconPlay,
   IconRefresh,
   IconTickCircle,
 } from "@douyinfe/semi-icons";
@@ -34,14 +33,12 @@ export function DryRunModal({
   jobId,
   jobName,
   onClose,
-  onRunReal,
   onEnableMirror,
 }: {
   jobId: number;
   jobName: string;
   onClose: () => void;
-  onRunReal?: () => void;
-  onEnableMirror?: () => Promise<void>;
+  onEnableMirror: () => Promise<void>;
 }) {
   const [result, setResult] = useState<DryRunResult | null>(null);
   const [starting, setStarting] = useState(true);
@@ -125,7 +122,7 @@ export function DryRunModal({
         return;
       }
       setStarting(false);
-      setError(err instanceof Error ? err.message : "启动模拟运行失败");
+      setError(err instanceof Error ? err.message : "启动镜像预览失败");
     }
   };
 
@@ -183,7 +180,7 @@ export function DryRunModal({
       width={780}
       centered
       className="editor-modal dry-run-modal"
-      title={`${onEnableMirror ? "镜像影响预览" : "模拟运行预览"} · ${jobName}`}
+      title={`镜像影响预览 · ${jobName}`}
       maskClosable={!enabling}
       closable={!enabling}
       onCancel={() => void handleCancel()}
@@ -201,20 +198,7 @@ export function DryRunModal({
           <Button type="tertiary" onClick={() => void handleCancel()} disabled={enabling}>
             {isRunning ? "中止预览" : "关闭"}
           </Button>
-          {onRunReal && result?.status === "completed" && (
-            <Button
-              type="primary"
-              theme="solid"
-              icon={<IconPlay aria-hidden="true" />}
-              onClick={() => {
-                onClose();
-                onRunReal();
-              }}
-            >
-              确认并立即正式执行
-            </Button>
-          )}
-          {onEnableMirror && !isRunning && result?.status === "completed" && !error && (
+          {!isRunning && result?.status === "completed" && !error && (
             <Button
               type="danger"
               theme="solid"
@@ -238,9 +222,7 @@ export function DryRunModal({
     >
       <div className="dry-run-body">
         <div className="dry-run-note">
-          {onEnableMirror
-            ? "预览期间任务保持暂停。启动后会重新检查目录，并清理目标端独有的文件。"
-            : "只读扫描对比源目录与目标目录，不会对任何文件执行复制、移动、重命名或删除操作。（使用内容比对或普通 WebDAV 目标时，预演需读取目标内容进行校验）"}
+          预览期间任务保持暂停。启动后会重新检查目录，并清理目标端独有的文件。
         </div>
 
         {error && (
@@ -266,7 +248,7 @@ export function DryRunModal({
           <InlineNotice
             role="alert"
             icon={<IconAlertTriangle aria-hidden="true" size="small" />}
-            message={`模拟运行失败：${result.error}`}
+            message={`镜像预览失败：${result.error}`}
           />
         )}
 

@@ -10,6 +10,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"opensync/internal/mapper"
@@ -89,10 +90,11 @@ func (m *fsWatcherManager) startSyncJob(jc *JobClient) {
 		log.Printf("sync: initialize job %d: %v", id, err)
 		return
 	}
-	// Every start reconciles downtime and the gap while watches were installed.
-	if err := mapper.EnqueueSyncChanges(id, nil, true); err != nil {
-		log.Printf("sync: queue startup reconciliation for job %d: %v", id, err)
-		return
+	if len(roots) == 0 {
+		if err := mapper.EnqueueSyncChanges(id, nil, true); err != nil {
+			log.Printf("sync: queue startup reconciliation for job %d: %v", id, err)
+			return
+		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	w := &jobWatcher{jobID: id, cancel: cancel, done: make(chan struct{}), roots: roots, wake: make(chan struct{}, 1)}
@@ -146,50 +148,71 @@ func (w *jobWatcher) runSync(ctx context.Context, jc *JobClient, job map[string]
 	method := util.ToInt(job["method"])
 	partial := method == 0 || method == 1 || method == 3
 	exclude, include := buildJobExcludeMatcher(job), buildJobIncludeMatcher(job)
-	watchDone := make(chan struct{})
-	go func() {
-		defer close(watchDone)
-		if len(w.roots) == 0 {
-			return
-		}
-		var watchers sync.WaitGroup
-		for _, root := range w.roots {
-			root := root
-			watchers.Add(1)
-			go func() {
-				defer watchers.Done()
-				watchLocalRootsPlatform(ctx, []watchLocalRoot{root}, func(paths []string, fullScan bool) {
-					if ctx.Err() != nil {
-						return
+	pollRoots := parsePathList(job["srcPath"])
+	if method == 3 {
+		pollRoots = append(pollRoots, parsePathList(job["dstPath"])...)
+	}
+	followSymlinks := util.ToInt(job["followSymlinks"]) == 1
+	watchCoverage := make(map[string]*atomic.Bool, len(w.roots))
+	var ready, watchers sync.WaitGroup
+	for _, root := range w.roots {
+		covered := new(atomic.Bool)
+		watchCoverage[root.virtualPath] = covered
+		ready.Add(1)
+		watchers.Add(1)
+		go func() {
+			defer watchers.Done()
+			onEvents := func(paths []string, fullScan bool) {
+				if ctx.Err() != nil {
+					return
+				}
+				var changed []string
+				for _, rel := range paths {
+					rel = strings.TrimPrefix(path.Clean("/"+rel), "/")
+					if rel == "" || rel == "." || strings.ContainsAny(rel, "\r\n") {
+						continue
 					}
-					var changed []string
-					for _, rel := range paths {
-						rel = strings.TrimPrefix(path.Clean("/"+rel), "/")
-						if rel == "" || rel == "." || strings.ContainsAny(rel, "\r\n") {
-							continue
-						}
-						if exclude != nil && exclude.matchesListed(rel, false) || include != nil && !include.matchesListed(rel) {
-							continue
-						}
-						virtual := path.Join(root.virtualPath, rel)
-						if method == 3 && bisyncEchoSuppress.ShouldSuppress(w.jobID, virtual) {
-							continue
-						}
-						if partial {
-							changed = append(changed, virtual)
-						} else {
-							fullScan = true
-						}
+					if exclude != nil && exclude.matchesListed(rel, false) || include != nil && !include.matchesListed(rel) {
+						continue
 					}
-					if fullScan || len(changed) > 0 {
-						w.enqueue(changed, fullScan)
+					virtual := path.Join(root.virtualPath, rel)
+					// Continuous jobs reconcile queued events against the post-transfer
+					// baseline. A time-based mask could also drop a user's next edit.
+					if !continuous && method == 3 && bisyncEchoSuppress.ShouldSuppress(w.jobID, virtual) {
+						continue
 					}
-				})
-			}()
-		}
-		watchers.Wait()
-	}()
-	defer func() { w.cancel(); <-watchDone }()
+					if partial {
+						changed = append(changed, virtual)
+					} else {
+						fullScan = true
+					}
+				}
+				if fullScan || len(changed) > 0 {
+					w.enqueue(changed, fullScan)
+				}
+			}
+			installed := false
+			watchLocalRootsPlatform(ctx, []watchLocalRoot{root}, onEvents, func(coversChanges bool) {
+				installed = true
+				covered.Store(coversChanges)
+				ready.Done()
+			})
+			covered.Store(false)
+			if !installed {
+				ready.Done()
+			}
+			if !continuous && ctx.Err() == nil {
+				watchLocalRootsPolling(ctx, []watchLocalRoot{root}, onEvents)
+			}
+		}()
+	}
+	defer func() { w.cancel(); watchers.Wait() }()
+	ready.Wait()
+	// Queue reconciliation after local watch setup so it also covers the
+	// installation gap, even if a manual run finished during setup.
+	if len(w.roots) > 0 && ctx.Err() == nil {
+		w.enqueue(nil, true)
+	}
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
@@ -223,22 +246,31 @@ func (w *jobWatcher) runSync(ctx context.Context, jc *JobClient, job map[string]
 			continue
 		}
 		if continuous && (state.LastPoll == 0 || now.Sub(time.Unix(state.LastPoll, 0)) >= poll) {
-			w.scanning.Store(true)
-			err = w.scanSyncRoots(ctx, job, partial)
-			w.scanning.Store(false)
-			if ctx.Err() != nil {
-				return
+			var roots []string
+			for _, root := range pollRoots {
+				covered := watchCoverage[root]
+				if followSymlinks || covered == nil || !covered.Load() {
+					roots = append(roots, root)
+				}
 			}
-			if err != nil {
-				_ = mapper.RecordSyncError(w.jobID, err.Error())
-				continue
-			}
-			if err = mapper.MarkSyncPoll(w.jobID); err != nil {
-				continue
-			}
-			state, err = mapper.GetSyncState(w.jobID)
-			if err != nil {
-				continue
+			if len(roots) > 0 {
+				w.scanning.Store(true)
+				err = w.scanSyncRoots(ctx, job, roots, partial)
+				w.scanning.Store(false)
+				if ctx.Err() != nil {
+					return
+				}
+				if err != nil {
+					_ = mapper.RecordSyncError(w.jobID, err.Error())
+					continue
+				}
+				if err = mapper.MarkSyncPoll(w.jobID); err != nil {
+					continue
+				}
+				state, err = mapper.GetSyncState(w.jobID)
+				if err != nil {
+					continue
+				}
 			}
 		}
 		if continuous && (state.LastAudit == 0 || now.Sub(time.Unix(state.LastAudit, 0)) >= audit) {
@@ -260,7 +292,7 @@ func (w *jobWatcher) runSync(ctx context.Context, jc *JobClient, job map[string]
 	}
 }
 
-func (w *jobWatcher) scanSyncRoots(ctx context.Context, job map[string]interface{}, partial bool) error {
+func (w *jobWatcher) scanSyncRoots(ctx context.Context, job map[string]interface{}, roots []string, partial bool) error {
 	cfg, err := loadNative(util.ToInt64(job["alistId"]))
 	if err != nil {
 		return err
@@ -290,19 +322,12 @@ func (w *jobWatcher) scanSyncRoots(ctx context.Context, job map[string]interface
 			}
 		}
 	}
-	roots := parsePathList(job["srcPath"])
-	if util.ToInt(job["method"]) == 3 {
-		roots = append(roots, parsePathList(job["dstPath"])...)
-	}
 	for _, root := range roots {
 		ep, err := cfg.Resolve(root)
 		if err != nil {
 			return err
 		}
-		// Local inotify handles fast updates. Polling also reconciles missed events,
-		// stable-age filters and out-of-band changes after a process restart.
-		// Local roots expose reliable mtime+size, so polling never hashes entire
-		// local disks; content MD5 comparison still runs during actual transfers.
+		// Avoid hashing entire local disks during fallback polling.
 		includeHash := jobWantsHash && ep.SupportsNativeMD5() && !ep.IsLocal
 		scanTimeout := 5 * time.Minute
 		if ep.IsLocal {

@@ -868,8 +868,7 @@ func (jt *JobTask) runNativeFullSync(selected *nativeRetryFilter) error {
 		plan              *fullSyncPlan
 		relocations       []fullSyncRelocation
 		writes            fullSyncWriteIndex
-		guardReason       string
-		deletesUnsafe     bool
+		keepDestination   bool
 		estCopyFiles      int64
 		estCopyBytes      int64
 	}
@@ -926,16 +925,12 @@ func (jt *JobTask) runNativeFullSync(selected *nativeRetryFilter) error {
 
 			var relocations []fullSyncRelocation
 			var writes fullSyncWriteIndex
-			var guardReason string
-			var deletesUnsafe bool
+			var keepDestination bool
 			if !repairOnly {
 				writes = plan.writeIndex()
-				if requireDeleteConsent && (len(plan.blockers) > 0 || len(plan.extraDeletes) > 0) {
-					deletesUnsafe = true
-					guardReason = "升级前已启用全量删除确认，已保留目标端文件。如需允许直接删除，请将 scheduled_full_sync_confirm 设置为 0 后重启应用"
-				} else {
+				keepDestination = requireDeleteConsent && (len(plan.blockers) > 0 || len(plan.extraDeletes) > 0)
+				if !keepDestination {
 					relocations = plan.relocations()
-					guardReason, deletesUnsafe = plan.unsafeDeleteVolume(plan.plannedDeleteWeight(relocations, writes))
 				}
 			}
 
@@ -944,7 +939,7 @@ func (jt *JobTask) runNativeFullSync(selected *nativeRetryFilter) error {
 				estBlocked := make(map[string]struct{})
 				for _, key := range sortedDeleteKeys(plan.blockers, false) {
 					item := plan.blockers[key]
-					if item.protected || repairOnly || deletesUnsafe || jt.skipCollidingDelete(writes, item) {
+					if item.protected || repairOnly || keepDestination || jt.skipCollidingDelete(writes, item) {
 						estBlocked[normalizeBlockedPath(item.blocksPath)] = struct{}{}
 					}
 				}
@@ -982,8 +977,7 @@ func (jt *JobTask) runNativeFullSync(selected *nativeRetryFilter) error {
 				plan:              plan,
 				relocations:       relocations,
 				writes:            writes,
-				guardReason:       guardReason,
-				deletesUnsafe:     deletesUnsafe,
+				keepDestination:   keepDestination,
 				estCopyFiles:      estFiles,
 				estCopyBytes:      estBytes,
 			})
@@ -1008,8 +1002,6 @@ func (jt *JobTask) runNativeFullSync(selected *nativeRetryFilter) error {
 		plan := pair.plan
 		relocations := pair.relocations
 		writes := pair.writes
-		guardReason := pair.guardReason
-		deletesUnsafe := pair.deletesUnsafe
 
 		blocked := make(map[string]struct{})
 		writeBlocked := make(map[string]struct{})
@@ -1028,7 +1020,7 @@ func (jt *JobTask) runNativeFullSync(selected *nativeRetryFilter) error {
 				errMsg := msg.MirrorDeleteGuard(reason)
 				jt.DelHook(item.dir, item.name, nil, taskStatusFailed, &errMsg, boolToTaskItemObject(item.subtree != ""), time.Now().Unix())
 			}
-			if item.protected || repairOnly || deletesUnsafe || jt.skipCollidingDelete(writes, item) {
+			if item.protected || repairOnly || pair.keepDestination || jt.skipCollidingDelete(writes, item) {
 				p := normalizeBlockedPath(item.blocksPath)
 				blocked[p] = struct{}{}
 				writeBlocked[p] = struct{}{}
@@ -1239,9 +1231,9 @@ func (jt *JobTask) runNativeFullSync(selected *nativeRetryFilter) error {
 		for dir := range suspiciousCounts {
 			suspicious[dir] = struct{}{}
 		}
-		if deletesUnsafe {
+		if pair.keepDestination {
 			jt.fullSyncDeleteGuardSkipped.Store(true)
-			errMsg := msg.MirrorDeleteGuard(guardReason)
+			errMsg := msg.MirrorDeleteGuard("升级前已启用全量删除确认，已保留目标端文件。如需允许直接删除，请将 scheduled_full_sync_confirm 设置为 0 后重启应用")
 			jt.CopyHook("", plan.dst.root, "", nil, "", taskStatusFailed, &errMsg, taskItemPath, taskItemTypeDelete, time.Now().Unix())
 			continue
 		}
@@ -1974,7 +1966,6 @@ func dryRunNativeFullSync(ctx context.Context, sess *dryRunSession, cfg native.C
 
 			relocations := plan.relocations()
 			writes := plan.writeIndex()
-			guardReason, deletesUnsafe := plan.unsafeDeleteVolume(plan.plannedDeleteWeight(relocations, writes))
 			suspiciousCounts := plan.suspiciousEmptySourceDirs()
 			suspicious := make(map[string]struct{}, len(suspiciousCounts))
 			for dir := range suspiciousCounts {
@@ -1990,18 +1981,6 @@ func dryRunNativeFullSync(ctx context.Context, sess *dryRunSession, cfg native.C
 				}
 				if _, col := writes.collision(item.dir, item.name); col {
 					blocked[normalizeBlockedPath(item.blocksPath)] = struct{}{}
-					continue
-				}
-				if deletesUnsafe {
-					blocked[normalizeBlockedPath(item.blocksPath)] = struct{}{}
-					sess.addItem(DryRunItem{
-						Action:   "skip",
-						DstPath:  item.dir,
-						FileName: item.name,
-						FileSize: plan.dst.deleteSize(item),
-						IsPath:   strings.HasSuffix(item.name, "/"),
-						Reason:   "触发批量删除保护，已保留目标项（" + guardReason + "）",
-					})
 					continue
 				}
 				sess.addItem(DryRunItem{
@@ -2096,17 +2075,6 @@ func dryRunNativeFullSync(ctx context.Context, sess *dryRunSession, cfg native.C
 				}
 				item := plan.extraDeletes[key]
 				if _, col := writes.collision(item.dir, item.name); col {
-					continue
-				}
-				if deletesUnsafe {
-					sess.addItem(DryRunItem{
-						Action:   "skip",
-						DstPath:  item.dir,
-						FileName: item.name,
-						FileSize: plan.dst.deleteSize(item),
-						IsPath:   strings.HasSuffix(item.name, "/"),
-						Reason:   "触发批量删除保护，已保留目标项（" + guardReason + "）",
-					})
 					continue
 				}
 				if fullSyncPathBlocked(key, suspicious) {

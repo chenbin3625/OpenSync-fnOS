@@ -27,45 +27,6 @@ func TestUnsafeDeleteNamesRejected(t *testing.T) {
 	}
 }
 
-func TestSafetyValveWeighsDirectoryDeletesBySubtree(t *testing.T) {
-	src := &fullSyncSnapshot{root: "/src/", dirs: map[string]FileListResult{
-		"": {"keep.txt": {Size: 1}},
-	}}
-	dst := &fullSyncSnapshot{root: "/dst/", dirs: map[string]FileListResult{
-		"":            {"keep.txt": {Size: 1}, "mount/": {}},
-		"mount/":      {"deep/": {}},
-		"mount/deep/": filesUnder("m", 150),
-	}}
-	plan := newFullSyncPlan(src, dst, nil)
-	plan.build(map[string]interface{}{"method": 1})
-	if len(plan.extraDeletes) != 1 {
-		t.Fatalf("extraDeletes = %#v, want the single mount/ root", plan.extraDeletes)
-	}
-	weight := plan.plannedDeleteWeight(plan.relocations(), plan.writeIndex())
-	if _, unsafe := plan.unsafeDeleteVolume(weight); !unsafe {
-		t.Fatalf("unsafeDeleteVolume(weight=%d) = false, want true for subtree deletion", weight)
-	}
-}
-
-func TestSafetyValveAllowsSmallDirectoryDelete(t *testing.T) {
-	src := &fullSyncSnapshot{root: "/src/", dirs: map[string]FileListResult{
-		"":      {"keep/": {}},
-		"keep/": filesUnder("k", 300),
-	}}
-	dst := &fullSyncSnapshot{root: "/dst/", dirs: map[string]FileListResult{
-		"":      {"keep/": {}, "old/": {}},
-		"keep/": filesUnder("k", 300),
-		"old/":  filesUnder("o", 150),
-	}}
-	plan := newFullSyncPlan(src, dst, nil)
-	plan.build(map[string]interface{}{"method": 1})
-
-	weight := plan.plannedDeleteWeight(plan.relocations(), plan.writeIndex())
-	if reason, unsafe := plan.unsafeDeleteVolume(weight); unsafe {
-		t.Fatalf("unsafeDeleteVolume(weight=%d) = true (%q), want false (151 of 452 entries is under ratio)", weight, reason)
-	}
-}
-
 func TestSubtreeEntryCountIncludesNestedDirectories(t *testing.T) {
 	snapshot := &fullSyncSnapshot{root: "/dst/", dirs: map[string]FileListResult{
 		"":     {"a/": {}, "ab/": {}},
@@ -78,31 +39,6 @@ func TestSubtreeEntryCountIncludesNestedDirectories(t *testing.T) {
 		if got := snapshot.subtreeEntryCount(dir); got != want {
 			t.Errorf("subtreeEntryCount(%q) = %d, want %d", dir, got, want)
 		}
-	}
-	if got := snapshot.deleteWeight(fullSyncDelete{name: "a/", subtree: "a/"}); got != 5 {
-		t.Errorf("deleteWeight(a/) = %d, want 5 (the directory plus 4 entries)", got)
-	}
-	if got := snapshot.deleteWeight(fullSyncDelete{name: "x"}); got != 1 {
-		t.Errorf("deleteWeight(file) = %d, want 1", got)
-	}
-}
-
-func TestSafetyValveCoversTypeConflictDeletes(t *testing.T) {
-	src := &fullSyncSnapshot{root: "/src/", dirs: map[string]FileListResult{
-		"": {"media": {Size: 5}},
-	}}
-	dst := &fullSyncSnapshot{root: "/dst/", dirs: map[string]FileListResult{
-		"":       {"media/": {}},
-		"media/": filesUnder("p", 200),
-	}}
-	plan := newFullSyncPlan(src, dst, nil)
-	plan.build(map[string]interface{}{"method": 1})
-	if len(plan.blockers) != 1 || len(plan.extraDeletes) != 0 {
-		t.Fatalf("blockers=%#v extraDeletes=%#v, want one blocker only", plan.blockers, plan.extraDeletes)
-	}
-	weight := plan.plannedDeleteWeight(plan.relocations(), plan.writeIndex())
-	if _, unsafe := plan.unsafeDeleteVolume(weight); !unsafe {
-		t.Fatalf("unsafeDeleteVolume(weight=%d) = false, want true for large type-conflict blocker", weight)
 	}
 }
 

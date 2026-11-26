@@ -233,6 +233,7 @@ export const handlers = [
     }
     const err = mockStore.updateNativeRemote({
       name: body.name,
+      newName: typeof body.newName === "string" ? body.newName : undefined,
       options: recordBody(body.options) as Record<string, string>,
       clearSecrets: Array.isArray(body.clearSecrets)
         ? body.clearSecrets.map(String)

@@ -54,12 +54,10 @@ test("opens task editor with step navigation", async ({ page }) => {
     expect(dialogBox?.width).toBeGreaterThanOrEqual(560);
     expect(dialogBox?.width).toBeLessThanOrEqual(620);
   }
-  await expect(
-    dialog.getByRole("radiogroup", { name: "同步方向", exact: true }),
-  ).toBeVisible();
-  await expect(
-    dialog.getByRole("radio", { name: /仅上传本地更改/ }),
-  ).toBeVisible();
+  const directions = dialog.getByRole("radiogroup", { name: "同步方向", exact: true });
+  await expect(directions.getByRole("radio")).toHaveCount(2);
+  await expect(directions.getByRole("radio", { name: /^单向同步/, checked: true })).toBeVisible();
+  await expect(directions.getByRole("radio", { name: /^双向同步/, checked: false })).toBeVisible();
   await expect(dialog.locator(".sync-method-banner")).toContainText(
     "不会删除目标端已有文件",
   );

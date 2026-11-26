@@ -20,16 +20,14 @@ import {
   IconArrowRight,
   IconChevronRight,
   IconClockStroked,
-  IconCloudStroked,
   IconCopy,
   IconDeleteStroked,
   IconEditStroked,
-  IconEyeOpenedStroked,
+  IconFolderStroked,
   IconPause,
   IconPlay,
   IconPlusStroked,
   IconRefresh,
-  IconServerStroked,
   IconSettingStroked,
   IconStop,
   IconTickCircle,
@@ -146,7 +144,6 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
     open: false,
     job: null,
   });
-  const [dryRunOpen, setDryRunOpen] = useState(false);
   const [checkOpen, setCheckOpen] = useState(false);
   const [conflictsOpen, setConflictsOpen] = useState(false);
   const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
@@ -575,7 +572,6 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
                     runKey={String(currentTaskForSelected?.taskId ?? "idle")}
                     onRun={() => triggerSyncNow(selected.id)}
                     onOpenRealtime={handleOpenRealtime}
-                    onDryRun={() => setDryRunOpen(true)}
                     onCheck={() => setCheckOpen(true)}
                     onOpenConflicts={() => setConflictsOpen(true)}
                     onClone={() =>
@@ -683,14 +679,6 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
         )}
       </div>
       </>}
-      {dryRunOpen && selected && (
-        <DryRunModal
-          jobId={selected.id}
-          jobName={getJobName(selected)}
-          onClose={() => setDryRunOpen(false)}
-          onRunReal={() => triggerSyncNow(selected.id)}
-        />
-      )}
       {mirrorPreview && selected && (
         <DryRunModal
           jobId={selected.id}
@@ -818,7 +806,6 @@ function Overview({
   runKey,
   onRun,
   onOpenRealtime,
-  onDryRun,
   onCheck,
   onOpenConflicts,
   onClone,
@@ -836,7 +823,6 @@ function Overview({
   runKey: string;
   onRun: () => void;
   onOpenRealtime: () => void;
-  onDryRun: () => void;
   onCheck: () => void;
   onOpenConflicts: () => void;
   onClone: () => void;
@@ -1083,21 +1069,9 @@ function Overview({
   })();
 
   const srcRoleLabel =
-    meta.directionKey === "bidirectional"
-      ? "左侧目录"
-      : meta.directionKey === "upload"
-        ? "本地目录"
-        : meta.directionKey === "download"
-          ? "远端目录"
-          : "源目录";
+    meta.directionKey === "bidirectional" ? "左侧目录" : "源目录";
   const dstRoleLabel =
-    meta.directionKey === "bidirectional"
-      ? "右侧目录"
-      : meta.directionKey === "upload"
-        ? "远端目录"
-        : meta.directionKey === "download"
-          ? "本地目录"
-          : "目标目录";
+    meta.directionKey === "bidirectional" ? "右侧目录" : "目标目录";
 
   const statusHeadline = (() => {
     if (running) {
@@ -1186,7 +1160,7 @@ function Overview({
                   type="light"
                   color={meta.directionKey === "bidirectional" ? "violet" : "blue"}
                 >
-                  {meta.shortLabel}
+                  {meta.directionLabel}
                 </Tag>
                 {meta.directionKey !== "bidirectional" && meta.syncDelete && (
                   <Tag size="small" type="light" color="orange">
@@ -1274,12 +1248,6 @@ function Overview({
                   </Tooltip>
                 )}
                 <IconButton
-                  label="模拟运行预览（只读）"
-                  icon={<IconEyeOpenedStroked aria-hidden="true" />}
-                  disabled={busy}
-                  onClick={onDryRun}
-                />
-                <IconButton
                   label="数据一致性校验（rclone check）"
                   icon={<IconTickCircle aria-hidden="true" />}
                   disabled={busy}
@@ -1309,11 +1277,7 @@ function Overview({
         <div className="sync-route-card">
           <div className="sync-route-node">
             <div className="flow-name">
-              {meta.directionKey === "download" ? (
-                <IconCloudStroked aria-hidden="true" />
-              ) : (
-                <IconServerStroked aria-hidden="true" />
-              )}
+              <IconFolderStroked aria-hidden="true" />
               {srcRoleLabel}
             </div>
             <div className="flow-sub flow-paths">
@@ -1325,7 +1289,7 @@ function Overview({
             <span className="sync-route-arrow" aria-hidden="true">
               {meta.arrow}
             </span>
-            <span className="sync-route-badge">{meta.shortLabel}</span>
+            <span className="sync-route-badge">{meta.directionLabel}</span>
             <span className="sync-route-policy muted">
               {meta.directionKey === "bidirectional"
                 ? "双端保持一致"
@@ -1337,11 +1301,7 @@ function Overview({
 
           <div className="sync-route-node">
             <div className="flow-name" title={engineName}>
-              {meta.directionKey === "download" ? (
-                <IconServerStroked aria-hidden="true" />
-              ) : (
-                <IconCloudStroked aria-hidden="true" />
-              )}
+              <IconFolderStroked aria-hidden="true" />
               {dstRoleLabel}
             </div>
             <div className="flow-sub flow-paths">

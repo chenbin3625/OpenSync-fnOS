@@ -660,73 +660,13 @@ func (jt *JobTask) skipCollidingDelete(writes fullSyncWriteIndex, item fullSyncD
 	return collides
 }
 
-// plannedDeleteWeight is an upper bound on the destination entries this plan
-// removes. A directory delete is recursive, so it weighs everything beneath it
-// in the destination snapshot; files relocated out of a doomed tree are moved,
-// not deleted, and are subtracted. Deletes the collision check will keep are
-// not counted. A relocation that later fails only protects its tree, so the
-// actual volume never exceeds this bound.
-func (plan *fullSyncPlan) plannedDeleteWeight(relocations []fullSyncRelocation, writes fullSyncWriteIndex) int {
-	relocatedOut := make(map[string]int)
-	for _, relocation := range relocations {
-		relocatedOut[relocation.source.deleteRoot]++
-	}
-	weight := 0
-	add := func(items map[string]fullSyncDelete) {
-		for key, item := range items {
-			if _, collides := writes.collision(item.dir, item.name); collides || item.protected {
-				continue
-			}
-			w := plan.dst.deleteWeight(item) - relocatedOut[key]
-			if w > 0 {
-				weight += w
-			}
-		}
-	}
-	add(plan.blockers)
-	add(plan.extraDeletes)
-	return weight
-}
-
-// mirrorDeleteRatioThreshold / mirrorDeleteFloor gate the delete phase. Both
-// must be exceeded: a ratio alone would block routine cleanup of a small
-// directory, and an absolute count alone would block a legitimate large purge.
-const (
-	mirrorDeleteRatioThreshold = 0.5
-	mirrorDeleteFloor          = 100
-)
-
-// unsafeDeleteVolume reports whether the planned deletions are too large a share
-// of the destination to be plausible. deleteCount must be the weighted count
-// (plannedDeleteWeight), in the same unit as entryCount: counting a recursive
-// directory delete as one entry would let a missing source subtree of any size
-// slip under the floor.
-func (plan *fullSyncPlan) unsafeDeleteVolume(deleteCount int) (string, bool) {
-	if deleteCount < mirrorDeleteFloor {
-		return "", false
-	}
-	total := plan.dst.entryCount()
-	if total == 0 {
-		return "", false
-	}
-	ratio := float64(deleteCount) / float64(total)
-	if ratio <= mirrorDeleteRatioThreshold {
-		return "", false
-	}
-	return fmt.Sprintf("planned deletions %d of %d destination entries (%.0f%%) exceed the %.0f%% safety threshold",
-		deleteCount, total, ratio*100, mirrorDeleteRatioThreshold*100), true
-}
+const emptySourceSubdirMinEntries = 100
 
 // suspiciousEmptySourceDirs returns, keyed by normalized absolute destination
 // path, the matched directories whose source listing was empty while the
-// destination subtree below them holds at least mirrorDeleteFloor entries.
-//
-// The global valve weighs deletes against the whole destination, so one
-// subdirectory whose source listing came back empty (an unmounted share, a
-// driver returning an empty page) is deleted outright when it is a minority of
-// a large tree. Emptying a directory that large in one go is rare enough that
-// keeping it for a run, with a visible record, is the conservative choice; a
-// directory removed from the source entirely is not affected.
+// destination contains entries. An empty root is always checked, and an empty
+// subdirectory is checked when its destination holds at least 100 entries.
+// An empty listing can be caused by an unmounted share or a storage driver.
 func (plan *fullSyncPlan) suspiciousEmptySourceDirs() map[string]int {
 	result := make(map[string]int)
 	for _, rel := range plan.emptySrcDirs {
@@ -738,12 +678,7 @@ func (plan *fullSyncPlan) suspiciousEmptySourceDirs() map[string]int {
 		if count <= 0 {
 			continue
 		}
-		// A subdirectory needs the floor to be considered anomalous; the root
-		// does not. While a small emptied directory is ordinary mirror
-		// cleanup, an empty root would empty the whole destination, and a
-		// destination with fewer than 100 entries would otherwise slip under
-		// every guard.
-		if rel != "" && count < mirrorDeleteFloor {
+		if rel != "" && count < emptySourceSubdirMinEntries {
 			continue
 		}
 		result[normalizeBlockedPath(plan.dst.root+rel)] = count
@@ -769,15 +704,6 @@ func (snapshot *fullSyncSnapshot) entryCount() int {
 		total += len(items)
 	}
 	return total - len(snapshot.excluded)
-}
-
-// deleteWeight is how many snapshot entries deleting item removes: the entry
-// itself plus, for a directory, every entry recorded beneath it.
-func (snapshot *fullSyncSnapshot) deleteWeight(item fullSyncDelete) int {
-	if item.subtree == "" {
-		return 1
-	}
-	return 1 + snapshot.subtreeEntryCount(item.subtree)
 }
 
 func (snapshot *fullSyncSnapshot) deleteSize(item fullSyncDelete) int64 {
@@ -808,8 +734,7 @@ func (snapshot *fullSyncSnapshot) deleteSize(item fullSyncDelete) int64 {
 }
 
 // subtreeEntryCount totals the entries recorded in relDir and all directories
-// below it. Counts for every directory are built in one pass on first use, so
-// weighing many delete roots stays linear in the snapshot size.
+// below it. Counts for every directory are built in one pass on first use.
 func (snapshot *fullSyncSnapshot) subtreeEntryCount(relDir string) int {
 	snapshot.mu.Lock()
 	defer snapshot.mu.Unlock()

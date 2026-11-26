@@ -1,12 +1,11 @@
 import type { NativeExtraFlags, SyncStatus } from "../types";
 import { formatTimestamp } from "../utils/date";
 
-export type SyncDirectionKey = "bidirectional" | "upload" | "download" | "custom";
+export type SyncDirectionKey = "oneway" | "bidirectional";
 
 export interface ContinuousSyncMeta {
   directionKey: SyncDirectionKey;
   directionLabel: string;
-  shortLabel: string;
   arrow: "⇄" | "→";
   syncDelete: boolean;
   pollIntervalSec: number;
@@ -75,7 +74,7 @@ export function getContinuousSyncMeta(job: {
 }): ContinuousSyncMeta {
   const extra = parseJobExtraFlagsObject(job.extraFlags);
   const method = Number(job.method ?? 0);
-  const rawDir = (job.syncStatus?.direction || extra.syncDirection || "").trim();
+  const bidirectional = method === 3;
   const poll =
     Number(job.syncStatus?.pollIntervalSec || extra.syncPollIntervalSec || 0) || 60;
   const audit =
@@ -84,49 +83,11 @@ export function getContinuousSyncMeta(job: {
   const debounce =
     Number(job.syncStatus?.debounceSec || extra.watchDebounceSec || 0) || 30;
 
-  if (method === 3) {
-    return {
-      directionKey: "bidirectional",
-      directionLabel: "双向同步",
-      shortLabel: "双向同步",
-      arrow: "⇄",
-      syncDelete: true,
-      pollIntervalSec: poll,
-      auditIntervalMin: audit,
-      debounceSec: debounce,
-    };
-  }
-  const syncDelete = method === 1;
-  if (rawDir === "upload") {
-    return {
-      directionKey: "upload",
-      directionLabel: "仅上传本地更改",
-      shortLabel: "单向上传",
-      arrow: "→",
-      syncDelete,
-      pollIntervalSec: poll,
-      auditIntervalMin: audit,
-      debounceSec: debounce,
-    };
-  }
-  if (rawDir === "download") {
-    return {
-      directionKey: "download",
-      directionLabel: "仅下载远端更改",
-      shortLabel: "单向下载",
-      arrow: "→",
-      syncDelete,
-      pollIntervalSec: poll,
-      auditIntervalMin: audit,
-      debounceSec: debounce,
-    };
-  }
   return {
-    directionKey: "custom",
-    directionLabel: "自定义单向同步",
-    shortLabel: "单向同步",
-    arrow: "→",
-    syncDelete,
+    directionKey: bidirectional ? "bidirectional" : "oneway",
+    directionLabel: bidirectional ? "双向同步" : "单向同步",
+    arrow: bidirectional ? "⇄" : "→",
+    syncDelete: bidirectional || method === 1,
     pollIntervalSec: poll,
     auditIntervalMin: audit,
     debounceSec: debounce,

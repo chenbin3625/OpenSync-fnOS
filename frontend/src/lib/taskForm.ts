@@ -75,7 +75,6 @@ function emptyNativeExtraFlags(): Required<NativeExtraFlags> {
     watchDebounceSec: 0,
     syncPollIntervalSec: 0,
     syncAuditIntervalMin: 0,
-    syncDirection: "",
     autoRetryMax: 0,
     autoRetryDelayMin: 0,
     postSyncJobId: 0,
@@ -139,7 +138,6 @@ function parseNativeExtraFlags(value: unknown): Required<NativeExtraFlags> {
     watchDebounceSec: Math.min(3600, num("watchDebounceSec")),
     syncPollIntervalSec: num("syncPollIntervalSec"),
     syncAuditIntervalMin: num("syncAuditIntervalMin"),
-    syncDirection: str("syncDirection"),
     autoRetryMax: Math.min(10, num("autoRetryMax")),
     autoRetryDelayMin: Math.min(1440, num("autoRetryDelayMin")),
     postSyncJobId: num("postSyncJobId"),
@@ -184,7 +182,6 @@ function serializeNativeExtraFlags(flags: NativeExtraFlags | undefined): string 
   if (flags.watchEnable) out.watchEnable = true;
   if (flags.syncPollIntervalSec) out.syncPollIntervalSec = Math.trunc(flags.syncPollIntervalSec);
   if (flags.syncAuditIntervalMin) out.syncAuditIntervalMin = Math.trunc(flags.syncAuditIntervalMin);
-  if (flags.syncDirection) out.syncDirection = flags.syncDirection;
   if (Number(flags.watchDebounceSec || 0) > 0)
     out.watchDebounceSec = Math.min(3600, Math.trunc(Number(flags.watchDebounceSec)));
   if (Number(flags.autoRetryMax || 0) > 0)
@@ -594,7 +591,6 @@ export function buildJobPayload(form: JobForm) {
     ...form.extraFlags,
     watchEnable: legacySchedule && Boolean(form.extraFlags.watchEnable),
     missedCatchUp: legacySchedule && Boolean(form.extraFlags.missedCatchUp),
-    syncDirection: method === 3 ? "" : form.extraFlags?.syncDirection || "",
   };
   return {
     ...runtimeStripped,
@@ -1185,14 +1181,6 @@ export function validateJobFormFields(
   ) {
     fields.interval = "变动合并等待需为 2–3600 秒的整数";
     step1Errors.push(fields.interval);
-  }
-  if (form.method !== 3 && ["upload", "download"].includes(form.extraFlags?.syncDirection || "")) {
-    const upload = form.extraFlags?.syncDirection === "upload";
-    const local = (p: string) => p.split("/").filter(Boolean)[0] === "本地";
-    if (form.srcPath.some((p) => local(p) !== upload) || form.dstPath.some((p) => local(p) === upload)) {
-      fields.srcPath = "上传：本地目录 → 远端目录；下载：远端目录 → 本地目录";
-      step0Errors.push(fields.srcPath);
-    }
   }
   if (form.windowEnable) {
     const hhmm = /^([01]\d|2[0-3]):([0-5]\d)$/;

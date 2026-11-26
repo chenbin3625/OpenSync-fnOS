@@ -4,6 +4,5 @@ package service
 
 import "context"
 
-func watchLocalRootsPlatform(ctx context.Context, roots []watchLocalRoot, onEvents func(paths []string, fullScan bool)) {
-	watchLocalRootsPolling(ctx, roots, onEvents)
+func watchLocalRootsPlatform(context.Context, []watchLocalRoot, func([]string, bool), func(bool)) {
 }

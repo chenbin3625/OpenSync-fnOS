@@ -364,6 +364,69 @@ test("storage form rejects invalid names and protects dirty cancellation", async
   await page.getByRole("button", { name: "放弃", exact: true }).click();
   await expect(page.getByRole("dialog")).not.toBeVisible();
 });
+
+test("storage edit saves a new name with or without connection changes", async ({ page }) => {
+  let remoteName = "Archive";
+  let options = { type: "webdav", url: "https://dav.example.com/archive", vendor: "other" };
+  await page.route("**/app/opensync/svr/**", async (route) => {
+    const request = route.request();
+    const { pathname } = new URL(request.url());
+    const success = (data: unknown) => route.fulfill({
+      json: { code: 200, data, msg: "" },
+    });
+    if (pathname.endsWith("/session")) return success({ uid: 1, version: "test" });
+    if (pathname.endsWith("/alist")) return success([{ id: 1, kind: "rclone" }]);
+    if (pathname.endsWith("/native/storage/test")) {
+      expect(request.postDataJSON()).toMatchObject({ name: "Archive", editing: true });
+      return success({ ok: true, latencyMs: 1, message: "连接正常" });
+    }
+    if (pathname.endsWith("/native/storage/rename")) {
+      expect(request.postDataJSON()).toEqual({ oldName: "Archive", newName: "ArchiveV2" });
+      remoteName = "ArchiveV2";
+      return success({ oldName: "Archive", newName: remoteName, updatedJobs: 1 });
+    }
+    if (pathname.endsWith("/native/storage")) {
+      if (request.method() === "PUT") {
+        const edit = request.postDataJSON();
+        expect(edit).toMatchObject({
+          name: "ArchiveV2", newName: "ArchiveV3",
+          options: { url: "https://dav.example.com/new-archive" },
+        });
+        remoteName = edit.newName;
+        options = edit.options;
+        return success(null);
+      }
+      return success({
+        engineId: 1, enabled: true, rcloneAvailable: true, localRoots: [],
+        remotes: [{
+          name: remoteName, type: "webdav", options,
+          configuredSecrets: ["pass"], usedByCrypts: [], usedByJobs: ["备份"],
+        }],
+      });
+    }
+    return success(null);
+  });
+
+  await page.goto("/app/opensync/engines");
+  await page.getByRole("button", { name: "编辑 Archive", exact: true }).click();
+  await expect(page.getByRole("button", { name: "重命名 Archive", exact: true })).toHaveCount(0);
+  const dialog = page.getByRole("dialog");
+  const name = dialog.getByRole("textbox", { name: "存储名称", exact: true });
+  await expect(name).toHaveValue("Archive");
+  await name.fill("ArchiveV2");
+  await dialog.getByRole("button", { name: "测试连接", exact: true }).click();
+  await expect(dialog.getByText("连接正常", { exact: false })).toBeVisible();
+  await dialog.getByRole("button", { name: "保存修改", exact: true }).click();
+  await expect(dialog).toBeHidden();
+
+  await page.getByRole("button", { name: "编辑 ArchiveV2", exact: true }).click();
+  await name.fill("ArchiveV3");
+  await dialog.getByRole("textbox", { name: "WebDAV 地址", exact: true }).fill("https://dav.example.com/new-archive");
+  await dialog.getByRole("button", { name: "保存修改", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(page.getByRole("button", { name: "编辑 ArchiveV3", exact: true })).toBeVisible();
+});
+
 test("notification channels switch without retaining unrelated fields", async ({
   page,
 }) => {

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"maps"
 	"path"
 	"slices"
 	"strings"
@@ -84,6 +85,10 @@ type NativeDeletePathInput struct {
 // across composite remotes (crypt/chunker/compress/hasher/union) and all
 // native sync jobs (srcPath, dstPath, dstMap).
 func RenameNativeStorage(ctx context.Context, in NativeRenameInput) (*NativeRenameResult, error) {
+	return renameNativeStorage(in, nil, nil)
+}
+
+func renameNativeStorage(in NativeRenameInput, oldParams, newParams map[string]string) (*NativeRenameResult, error) {
 	oldName := strings.TrimSpace(in.OldName)
 	newName := strings.TrimSpace(in.NewName)
 	if oldName == "" || newName == "" {
@@ -197,12 +202,27 @@ func RenameNativeStorage(ctx context.Context, in NativeRenameInput) (*NativeRena
 			releaseLocked()
 			return nil, publicError(fmt.Sprintf("存储 %q 不存在", oldName))
 		}
+		if newParams != nil && (actualOld != oldName || !maps.Equal(c[actualOld], oldParams)) {
+			alistMutationMu.Unlock()
+			alistRefMu.Unlock()
+			releaseLocked()
+			return nil, publicError("存储配置已变更，请重新打开编辑后再保存")
+		}
+		if newParams != nil {
+			c[actualOld] = newParams
+		}
 		renamedCfg, err := c.Rename(actualOld, newName)
+		if err != nil {
+			err = publicError(err.Error())
+		} else if newParams != nil {
+			// The persisted jobs still use the old name until the transaction commits.
+			err = validateExistingNativeJobs(id, c, []string{actualOld})
+		}
 		if err != nil {
 			alistMutationMu.Unlock()
 			alistRefMu.Unlock()
 			releaseLocked()
-			return nil, publicError(err.Error())
+			return nil, err
 		}
 
 		jobs, err := mapper.GetJobListAll()
@@ -331,6 +351,7 @@ func RenameNativeStorage(ctx context.Context, in NativeRenameInput) (*NativeRena
 				clearBisyncRuntimeAndState(u.id)
 			}
 		}
+		refreshNativeStorageConcurrencyLimits(renamedCfg)
 		RemoveEngineHealth(id)
 		alistMutationMu.Unlock()
 		alistRefMu.Unlock()

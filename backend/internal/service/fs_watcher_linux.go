@@ -19,11 +19,10 @@ import (
 
 const maxInotifyWatchesPerJob = 4096
 
-func watchLocalRootsPlatform(ctx context.Context, roots []watchLocalRoot, onEvents func(paths []string, fullScan bool)) {
+func watchLocalRootsPlatform(ctx context.Context, roots []watchLocalRoot, onEvents func(paths []string, fullScan bool), onReady func(coversChanges bool)) {
 	fd, err := unix.InotifyInit1(unix.IN_CLOEXEC | unix.IN_NONBLOCK)
 	if err != nil {
 		log.Printf("fs_watcher: inotify init failed (%v), falling back to polling", err)
-		watchLocalRootsPolling(ctx, roots, onEvents)
 		return
 	}
 	defer unix.Close(fd)
@@ -55,9 +54,24 @@ func watchLocalRootsPlatform(ctx context.Context, roots []watchLocalRoot, onEven
 	}
 
 	limitExceeded := false
+	coversChanges := true
 	for _, r := range roots {
+		// Network mounts can change on the server without emitting local events.
+		var stat unix.Statfs_t
+		if err := unix.Statfs(r.absDir, &stat); err != nil {
+			coversChanges = false
+		} else {
+			switch uint32(stat.Type) {
+			case unix.NFS_SUPER_MAGIC, unix.CIFS_SUPER_MAGIC, unix.SMB2_SUPER_MAGIC, unix.SMB_SUPER_MAGIC,
+				unix.FUSE_SUPER_MAGIC, unix.V9FS_MAGIC, unix.CEPH_SUPER_MAGIC, unix.AFS_SUPER_MAGIC:
+				coversChanges = false
+			}
+		}
 		_ = filepath.WalkDir(r.absDir, func(p string, d fs.DirEntry, walkErr error) error {
-			if walkErr != nil {
+			if ctx.Err() != nil {
+				return fs.SkipAll
+			}
+			if walkErr != nil || (p == r.absDir && !d.IsDir()) {
 				limitExceeded = true
 				return fs.SkipAll
 			}
@@ -78,11 +92,14 @@ func watchLocalRootsPlatform(ctx context.Context, roots []watchLocalRoot, onEven
 			break
 		}
 	}
-	if limitExceeded {
-		log.Printf("fs_watcher: incomplete inotify coverage (cap %d), falling back to polling", maxInotifyWatchesPerJob)
-		watchLocalRootsPolling(ctx, roots, onEvents)
+	if ctx.Err() != nil {
 		return
 	}
+	if limitExceeded {
+		log.Printf("fs_watcher: incomplete inotify coverage (cap %d), falling back to polling", maxInotifyWatchesPerJob)
+		return
+	}
+	onReady(coversChanges)
 
 	buf := make([]byte, 32*1024)
 	pollFds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
@@ -97,11 +114,14 @@ func watchLocalRootsPlatform(ctx context.Context, roots []watchLocalRoot, onEven
 				continue
 			}
 			onEvents(nil, true)
-			watchLocalRootsPolling(ctx, roots, onEvents)
 			return
 		}
 		if n <= 0 {
 			continue
+		}
+		if pollFds[0].Revents&(unix.POLLERR|unix.POLLHUP|unix.POLLNVAL) != 0 {
+			onEvents(nil, true)
+			return
 		}
 		rn, readErr := unix.Read(fd, buf)
 		if readErr != nil {
@@ -109,7 +129,6 @@ func watchLocalRootsPlatform(ctx context.Context, roots []watchLocalRoot, onEven
 				continue
 			}
 			onEvents(nil, true)
-			watchLocalRootsPolling(ctx, roots, onEvents)
 			return
 		}
 		if rn < unix.SizeofInotifyEvent {
@@ -128,10 +147,10 @@ func watchLocalRootsPlatform(ctx context.Context, roots []watchLocalRoot, onEven
 				name = strings.TrimRight(string(nameBytes), "\x00")
 			}
 			offset += nameLen
-			// Consume queue overflow cleanly.
+			// An overflow can hide newly created directories and invalidate coverage.
 			if raw.Mask&unix.IN_Q_OVERFLOW != 0 {
-				fullScan = true
-				continue
+				onEvents(changed, true)
+				return
 			}
 			info, ok := wdMap[int(raw.Wd)]
 			if !ok {
@@ -144,7 +163,6 @@ func watchLocalRootsPlatform(ctx context.Context, roots []watchLocalRoot, onEven
 			}
 			if raw.Mask&(unix.IN_DELETE_SELF|unix.IN_MOVE_SELF|unix.IN_UNMOUNT) != 0 {
 				onEvents(changed, true)
-				watchLocalRootsPolling(ctx, roots, onEvents)
 				return
 			}
 			if name == "" {
@@ -156,8 +174,14 @@ func watchLocalRootsPlatform(ctx context.Context, roots []watchLocalRoot, onEven
 			fullPath := filepath.Join(info.dirAbs, name)
 			if raw.Mask&(unix.IN_CREATE|unix.IN_MOVED_TO) != 0 && raw.Mask&unix.IN_ISDIR != 0 {
 				// Watch newly created directory subtree.
-				_ = filepath.WalkDir(fullPath, func(p string, d fs.DirEntry, walkErr error) error {
-					if walkErr != nil || !d.IsDir() {
+				walkErr := filepath.WalkDir(fullPath, func(p string, d fs.DirEntry, walkErr error) error {
+					if ctx.Err() != nil {
+						return fs.SkipAll
+					}
+					if walkErr != nil {
+						return walkErr
+					}
+					if !d.IsDir() {
 						return nil
 					}
 					if !addDir(info.rootAbs, p) {
@@ -167,9 +191,8 @@ func watchLocalRootsPlatform(ctx context.Context, roots []watchLocalRoot, onEven
 					return nil
 				})
 				fullScan = true
-				if limitExceeded {
+				if limitExceeded || (walkErr != nil && !errors.Is(walkErr, fs.ErrNotExist)) {
 					onEvents(changed, true)
-					watchLocalRootsPolling(ctx, roots, onEvents)
 					return
 				}
 				continue

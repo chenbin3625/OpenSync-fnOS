@@ -511,7 +511,8 @@ func (jt *JobTask) runNativeBisync() error {
 	)
 
 	if jt.SyncPartial && len(jt.SyncChangedFiles) > 0 && !capsA.CaseInsensitive && !capsB.CaseInsensitive &&
-		!resetOccurred && metaA != nil && metaB != nil && metaA.InitializedAt > 0 && metaB.InitializedAt > 0 {
+		util.ToInt(job["followSymlinks"]) != 1 && !resetOccurred && metaA != nil && metaB != nil &&
+		metaA.InitializedAt > 0 && metaB.InitializedAt > 0 {
 		deltaRels := extractBisyncDeltaRels(jt.SyncChangedFiles, rootA, rootB, jobTrashDir(job))
 		if len(deltaRels) > 0 && len(deltaRels) <= 64 {
 			if fBase, fSnapA, fSnapB, fExcl, ok := probeBisyncDeltaPaths(ctx, cfg, jobID, rootA, rootB, deltaRels, job, spec, includeM, wantHashA, wantHashB, now, sessOpts); ok {
@@ -1279,6 +1280,11 @@ func probeBisyncDeltaPaths(
 		}
 		stB, okB, errB := cfg.StatEntry(ctx, bisyncVirtualPath(rootB, rel), wantHashB, sessOpts)
 		if errB != nil {
+			return nil, nil, nil, nil, false
+		}
+		// A previously synced file may have been removed since the event.
+		// Use full root counts and the complete baseline before planning deletions.
+		if b != nil && b.State == mapper.BisyncStateSynced && (!okA || stA == nil || !okB || stB == nil) {
 			return nil, nil, nil, nil, false
 		}
 		if okB && stB != nil {

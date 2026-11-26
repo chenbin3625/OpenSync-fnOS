@@ -236,7 +236,7 @@ func TestMoveModeSourceCrossJobConflictAndInactiveTrashDir(t *testing.T) {
 	}
 }
 
-func TestRenameNativeStorageAtomicAndBusyGuard(t *testing.T) {
+func TestUpdateNativeStorageRenameAtomicAndBusyGuard(t *testing.T) {
 	defer setupNativeTestDB(t)()
 	ctx := context.Background()
 
@@ -256,6 +256,14 @@ func TestRenameNativeStorageAtomicAndBusyGuard(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := SaveNativeStorage(ctx, NativeStorageInput{
+		Name: "Vault",
+		Options: map[string]string{
+			"type": "crypt", "remote": "ossOld:bucket/vault", "password": "test-password",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	jobID, err := CreateJobClient(map[string]interface{}{
 		"remark":  "重命名测试任务",
 		"alistId": engineID,
@@ -268,7 +276,18 @@ func TestRenameNativeStorageAtomicAndBusyGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// While job is marked busy, RenameNativeStorage must reject without changing DB.
+	edit := NativeRemoteEditInput{
+		Name: "ossOld", NewName: "ossNew",
+		Options: map[string]string{
+			"type": "s3", "provider": "Alibaba", "endpoint": "oss-cn-hangzhou.aliyuncs.com",
+			"access_key_id": "ak", "description": "updated",
+		},
+	}
+	_, before, err := loadExistingNativeRow()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A running job prevents both the rename and the configuration change.
 	jc, err := GetJobClientByID(jobID)
 	if err != nil {
 		t.Fatal(err)
@@ -276,19 +295,31 @@ func TestRenameNativeStorageAtomicAndBusyGuard(t *testing.T) {
 	if !jc.tryMarkDoing() {
 		t.Fatal("expected tryMarkDoing to succeed")
 	}
-	if _, err := RenameNativeStorage(ctx, NativeRenameInput{OldName: "ossOld", NewName: "ossNew"}); err == nil || !strings.Contains(err.Error(), "正在执行中") {
+	if err := UpdateNativeStorage(ctx, edit); err == nil || !strings.Contains(err.Error(), "正在执行中") {
 		jc.markDone()
 		t.Fatalf("expected busy guard error, got: %v", err)
 	}
 	jc.markDone()
 
-	// Once idle, RenameNativeStorage updates engine & job atomically.
-	res, err := RenameNativeStorage(ctx, NativeRenameInput{OldName: "ossOld", NewName: "ossNew"})
+	_, afterRejected, err := loadExistingNativeRow()
 	if err != nil {
-		t.Fatalf("RenameNativeStorage failed: %v", err)
+		t.Fatal(err)
 	}
-	if res.UpdatedJobs != 1 {
-		t.Fatalf("expected 1 updated job, got %+v", res)
+	if afterRejected["ossOld"]["description"] != "" || afterRejected["ossNew"] != nil {
+		t.Fatal("a rejected save changed the storage configuration")
+	}
+	if err := UpdateNativeStorage(ctx, edit); err != nil {
+		t.Fatalf("UpdateNativeStorage failed: %v", err)
+	}
+	_, after, err := loadExistingNativeRow()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after["ossOld"] != nil || after["ossNew"]["description"] != "updated" || after["Vault"]["remote"] != "ossNew:bucket/vault" {
+		t.Fatal("the save did not update the name, configuration and crypt reference together")
+	}
+	if after["ossNew"]["secret_access_key"] != before["ossOld"]["secret_access_key"] {
+		t.Fatal("the save changed the existing secret")
 	}
 	row, err := mapper.GetJobByID(jobID)
 	if err != nil {

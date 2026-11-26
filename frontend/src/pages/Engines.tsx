@@ -1,8 +1,6 @@
 import { useCallback, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import Button from "@douyinfe/semi-ui/lib/es/button";
-import Input from "@douyinfe/semi-ui/lib/es/input";
-import Modal from "@douyinfe/semi-ui/lib/es/modal";
 import Tag from "@douyinfe/semi-ui/lib/es/tag";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import {
@@ -17,19 +15,16 @@ import {
   IconLockStroked,
   IconPlusStroked,
   IconRefresh,
-  IconSettingStroked,
   IconUpload,
 } from "@douyinfe/semi-icons";
 import { api } from "../api/client";
 import {
   NativeStorageEditor,
   remoteTypeLabels,
-  validateRemoteName,
   type NativeEditorMode,
 } from "../components/NativeStorageEditor";
 import { QuickCryptModal } from "../components/QuickCryptModal";
 import {
-  Field,
   Header,
   IconButton,
   InlineNotice,
@@ -83,9 +78,6 @@ export default function Engines() {
     Record<string, NativeAboutInfo>
   >({});
   const [deletingName, setDeletingName] = useState<string | null>(null);
-  const [renameTarget, setRenameTarget] = useState<string | null>(null);
-  const [renameNewName, setRenameNewName] = useState("");
-  const [renaming, setRenaming] = useState(false);
 
   const state = nativeState.data;
   const nativeEngine = engines.data?.find(
@@ -110,8 +102,7 @@ export default function Engines() {
     checkingAll ||
     testingName !== null ||
     aboutLoadingName !== null ||
-    deletingName !== null ||
-    renaming;
+    deletingName !== null;
 
   const refreshAll = useCallback(
     async (silent = true) => {
@@ -216,38 +207,6 @@ export default function Engines() {
       },
       "仅删除 OpenSync 中保存的连接配置，不会删除远端文件。",
     );
-  };
-
-  const handleExecuteRename = async () => {
-    if (!renameTarget) return;
-    const trimmed = renameNewName.trim();
-    const nameErr = validateRemoteName(trimmed);
-    if (nameErr) {
-      Toast.warning(nameErr);
-      return;
-    }
-    setRenaming(true);
-    try {
-      const res = await api.renameNativeStorage({
-        oldName: renameTarget,
-        newName: trimmed,
-      });
-      Toast.success(
-        res.updatedJobs > 0
-          ? `已重命名为「${res.newName}」，并自动更新了 ${res.updatedJobs} 个关联任务`
-          : `已重命名为「${res.newName}」`,
-      );
-      setRenameTarget(null);
-      setRenameNewName("");
-      setTestResults({});
-      setAboutResults({});
-      await refreshAll(true);
-      window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
-    } catch (err) {
-      errorToast(err);
-    } finally {
-      setRenaming(false);
-    }
   };
 
   const renderAboutSummary = (info?: NativeAboutInfo) => {
@@ -637,24 +596,13 @@ export default function Engines() {
                         />
                       )}
                       <IconButton
-                        label={`重命名 ${item.name}`}
-                        icon={<IconSettingStroked aria-hidden="true" />}
+                        label={`编辑 ${item.name}`}
+                        icon={<IconEditStroked aria-hidden="true" />}
                         disabled={anyBusy}
-                        onClick={() => {
-                          setRenameTarget(item.name);
-                          setRenameNewName(item.name);
-                        }}
+                        onClick={() =>
+                          setModal({ mode: "form", editRemote: item })
+                        }
                       />
-                      {item.type !== "local" && (
-                        <IconButton
-                          label={`编辑 ${item.name}`}
-                          icon={<IconEditStroked aria-hidden="true" />}
-                          disabled={anyBusy}
-                          onClick={() =>
-                            setModal({ mode: "form", editRemote: item })
-                          }
-                        />
-                      )}
                       <IconButton
                         label={
                           isLocked
@@ -693,7 +641,12 @@ export default function Engines() {
           initialBrowsePath={modal.initialBrowsePath}
           onClose={() => setModal(null)}
           onChanged={() => void refreshAll(true)}
-          onSaved={() => {
+          onSaved={(savedName) => {
+            if (modal.editRemote && savedName && savedName !== modal.editRemote.name) {
+              setTestResults({});
+              setAboutResults({});
+              window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
+            }
             setModal(null);
             void refreshAll(true);
           }}
@@ -728,35 +681,6 @@ export default function Engines() {
         );
       })()}
 
-      {renameTarget && (
-        <Modal
-          visible
-          centered
-          width={440}
-          title={`重命名存储 · ${renameTarget}`}
-          onCancel={() => {
-            if (!renaming) setRenameTarget(null);
-          }}
-          okText="确认重命名"
-          confirmLoading={renaming}
-          onOk={() => void handleExecuteRename()}
-        >
-          <div className="editor-form">
-            <Field
-              label="新存储名称"
-              required
-              hint="重命名将自动级联更新关联的加密存储及同步任务的源/目标路径"
-            >
-              <Input
-                value={renameNewName}
-                maxLength={64}
-                onChange={setRenameNewName}
-                placeholder="输入新的存储名称"
-              />
-            </Field>
-          </div>
-        </Modal>
-      )}
     </div>
   );
 }

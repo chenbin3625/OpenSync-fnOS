@@ -1050,6 +1050,7 @@ export class MockStore {
 
   updateNativeRemote(input: {
     name: string;
+    newName?: string;
     options: Record<string, string>;
     clearSecrets?: string[];
     authSessionId?: string;
@@ -1095,7 +1096,13 @@ export class MockStore {
         next[secretKey] = oldParams[secretKey];
       }
     }
-    this.nativeRemotes.set(existingKey, next);
+    const newName = input.newName?.trim();
+    if (newName && newName !== existingKey) {
+      const result = this.renameNativeRemote(existingKey, newName, next);
+      if (typeof result === "string") return result;
+    } else {
+      this.nativeRemotes.set(existingKey, next);
+    }
     if (input.authSessionId) {
       this.nativeAuthSessions.delete(input.authSessionId);
     }
@@ -1790,6 +1797,7 @@ export class MockStore {
   renameNativeRemote(
     oldName: string,
     newName: string,
+    options?: Record<string, string>,
   ): NativeRenameResult | string {
     const oldTrim = oldName.trim();
     const newTrim = newName.trim();
@@ -1802,7 +1810,7 @@ export class MockStore {
       (k) => k !== actualOld && k.toLowerCase() === newTrim.toLowerCase(),
     );
     if (conflict) return `存储 "${conflict}" 已存在`;
-    const params = this.nativeRemotes.get(actualOld)!;
+    const params = options ?? this.nativeRemotes.get(actualOld)!;
     this.nativeRemotes.delete(actualOld);
     this.nativeRemotes.set(newTrim, params);
     for (const [k, other] of this.nativeRemotes.entries()) {

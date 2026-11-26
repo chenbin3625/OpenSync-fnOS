@@ -6,6 +6,7 @@ import {
   formatRelativeSyncTime,
   getContinuousSyncMeta,
   isSyncStatusError,
+  parseJobExtraFlagsObject,
   resolveEffectiveSyncStatus,
 } from "../src/lib/continuousSync";
 import type { JobForm } from "../src/lib/taskForm";
@@ -15,7 +16,7 @@ describe("continuous synchronization", () => {
   const draft = () => ({
     ...defaultJobForm(7), remark: "持续备份", isCron: 3,
     srcPath: ["/本地/root/photos"], dstPath: ["/Cloud/photos"],
-    extraFlags: { ...defaultJobForm(7).extraFlags, syncDirection: "upload", syncPollIntervalSec: 30, syncAuditIntervalMin: 60, watchDebounceSec: 2 },
+    extraFlags: { ...defaultJobForm(7).extraFlags, syncPollIntervalSec: 30, syncAuditIntervalMin: 60, watchDebounceSec: 2 },
   });
   const stored = (form: JobForm): JobItem => {
     const p = buildJobPayload(form);
@@ -47,12 +48,11 @@ describe("continuous synchronization", () => {
     expect(buildJobPayload(form)).not.toHaveProperty("syncStatus");
   });
 
-  it("validates polling limits, debounce limits, direction and rejects move mode", () => {
+  it("validates polling and debounce limits and rejects move mode", () => {
     expect(validateJobForm(draft())).toBe("");
     expect(validateJobForm({ ...draft(), extraFlags: { ...draft().extraFlags, syncPollIntervalSec: 9 } })).toContain("10–86400");
     expect(validateJobForm({ ...draft(), extraFlags: { ...draft().extraFlags, syncAuditIntervalMin: 10081 } })).toContain("10080");
     expect(validateJobForm({ ...draft(), extraFlags: { ...draft().extraFlags, watchDebounceSec: 1 } })).toContain("2–3600");
-    expect(validateJobForm({ ...draft(), extraFlags: { ...draft().extraFlags, syncDirection: "download" } })).toContain("下载");
     expect(validateJobForm({ ...draft(), method: 2 })).toContain("持续同步");
   });
 
@@ -64,7 +64,22 @@ describe("continuous synchronization", () => {
     expect(formatNextRun({ ...job, enable: 0 })).toBe("持续同步已暂停");
     const scheduled = jobToForm({ ...job, isCron: 1, extraFlags: "" });
     expect(buildJobPayload(scheduled).isCron).toBe(1);
-    expect(scheduled.extraFlags?.syncDirection).toBe("");
+  });
+
+  it.each(["upload", "download", "custom"])("opens an existing %s task as one-way sync and allows changing its endpoints", (syncDirection) => {
+    const job = stored(draft());
+    if (syncDirection === "download") [job.srcPath, job.dstPath] = [job.dstPath, job.srcPath];
+    job.extraFlags = JSON.stringify({ ...parseJobExtraFlagsObject(job.extraFlags), syncDirection });
+
+    expect(getContinuousSyncMeta(job).directionKey).toBe("oneway");
+    const form = jobToForm(job);
+    const saved = buildJobPayload(form);
+    expect(saved.srcPath).toEqual(JSON.parse(job.srcPath));
+    expect(saved.dstPath).toEqual(JSON.parse(job.dstPath));
+    expect(JSON.parse(saved.extraFlags)).not.toHaveProperty("syncDirection");
+
+    const localCopy = { ...form, srcPath: ["/本地/root/photos"], dstPath: ["/本地/root/backup"] };
+    expect(validateJobForm(localCopy)).toBe("");
   });
 
   it("derives Cloud Sync metadata, readable cadence plan, relative sync time and error status", () => {
@@ -73,8 +88,8 @@ describe("continuous synchronization", () => {
       extraFlags: JSON.stringify({ syncDirection: "upload", syncPollIntervalSec: 300, syncAuditIntervalMin: 360, watchDebounceSec: 15 }),
     });
     expect(uploadMeta).toMatchObject({
-      directionKey: "upload",
-      shortLabel: "单向上传",
+      directionKey: "oneway",
+      directionLabel: "单向同步",
       arrow: "→",
       syncDelete: true,
       pollIntervalSec: 300,

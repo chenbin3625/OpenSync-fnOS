@@ -98,7 +98,8 @@ type RemoteFormType =
   | "alias"
   | "archive"
   | "union"
-  | "combine";
+  | "combine"
+  | "local";
 
 export type NativeEditorMode =
   | "local"
@@ -268,6 +269,7 @@ const formTypes: RemoteFormType[] = [
   "archive",
   "union",
   "combine",
+  "local",
 ];
 
 const oauthTypes = new Set<RemoteFormType>([
@@ -1008,6 +1010,8 @@ export function NativeStorageEditor({
     [],
   );
   const [draft, setDraft] = useState<RemoteFormDraft>(() => initialDraftValue);
+  const savedRemoteName = editRemote?.name;
+  const connectionName = savedRemoteName ?? draft.name.trim();
   const [initialDraftSnap, setInitialDraftSnap] = useState(() =>
     snapshotDraft(initialDraftValue),
   );
@@ -1744,7 +1748,7 @@ export function NativeStorageEditor({
     setFormTestResult(null);
     try {
       const res = await api.testNativeStorage({
-        name: draft.name.trim(),
+        name: connectionName,
         options: buildRemoteOptions(draft),
         editing: draft.editing,
         clearSecrets: draft.clearSecrets.length > 0 ? draft.clearSecrets : undefined,
@@ -1759,7 +1763,13 @@ export function NativeStorageEditor({
   };
 
   const handleSaveForm = async () => {
-    const errs = validateRemoteDraft(draft, true);
+    const trimmedName = draft.name.trim();
+    const nameChanged = savedRemoteName !== undefined && trimmedName !== savedRemoteName;
+    const renameOnly = nameChanged &&
+      snapshotDraft({ ...draft, name: savedRemoteName }) === initialDraftSnap;
+    const errs = renameOnly ? {} : validateRemoteDraft(draft, true);
+    const nameError = renameOnly && validateRemoteName(trimmedName);
+    if (nameError) errs.name = nameError;
     if (Object.keys(errs).length > 0) {
       setFieldErrors(errs);
       Toast.warning(Object.values(errs)[0]);
@@ -1767,22 +1777,25 @@ export function NativeStorageEditor({
     }
     setSavingForm(true);
     try {
-      const trimmedName = draft.name.trim();
-      const options = buildRemoteOptions(draft);
-      if (draft.editing) {
-        await api.updateNativeStorage({
-          name: trimmedName,
-          options,
-          clearSecrets:
-            draft.clearSecrets.length > 0 ? draft.clearSecrets : undefined,
-          authSessionId: draft.authSessionId || undefined,
-        });
+      if (savedRemoteName !== undefined) {
+        if (renameOnly) {
+          await api.renameNativeStorage({ oldName: savedRemoteName, newName: trimmedName });
+        } else {
+          await api.updateNativeStorage({
+            name: savedRemoteName,
+            newName: nameChanged ? trimmedName : undefined,
+            options: buildRemoteOptions(draft),
+            clearSecrets:
+              draft.clearSecrets.length > 0 ? draft.clearSecrets : undefined,
+            authSessionId: draft.authSessionId || undefined,
+          });
+        }
         completedAuthRef.current = undefined;
         Toast.success(`存储「${trimmedName}」已更新`);
       } else {
         await api.saveNativeStorage({
           name: trimmedName,
-          options,
+          options: buildRemoteOptions(draft),
           authSessionId: draft.authSessionId || undefined,
         });
         completedAuthRef.current = undefined;
@@ -1899,7 +1912,7 @@ export function NativeStorageEditor({
   const quickBackingSources = useMemo(() => {
     const items: Array<{ label: string; value: string; kind: "remote" | "local" }> = [];
     for (const r of state?.remotes || []) {
-      if (draft.editing && r.name === draft.name) continue;
+      if (r.name === savedRemoteName) continue;
       if (r.type === "local") continue;
       items.push({ label: `${r.name}:`, value: `${r.name}:`, kind: "remote" });
     }
@@ -1907,7 +1920,7 @@ export function NativeStorageEditor({
       items.push({ label: root.path, value: root.path, kind: "local" });
     }
     return items;
-  }, [state, draft.editing, draft.name]);
+  }, [state, savedRemoteName]);
 
   const hasConflictCandidates = Boolean(
     importPreview?.items.some((i) => i.status === "conflict" && i.canReplace),
@@ -1981,7 +1994,7 @@ export function NativeStorageEditor({
           : view === "browse"
             ? `浏览与恢复 · ${browsePath}`
             : draft.editing
-              ? `编辑远程存储 · ${draft.name}`
+              ? `编辑远程存储 · ${savedRemoteName}`
               : "添加远程存储";
 
   const secretPlaceholder = (key: string, emptyHint: string) =>
@@ -2361,13 +2374,13 @@ export function NativeStorageEditor({
                 error={fieldErrors.name}
                 hint={
                   draft.editing
-                    ? "如需改名请返回列表点击重命名（自动级联更新任务路径）"
+                    ? "改名后会自动更新关联存储和同步任务的路径"
                     : "用于任务路径前缀，如 /archive/..."
                 }
               >
                 <Input
                   value={draft.name}
-                  disabled={draft.editing}
+                  disabled={savingForm}
                   maxLength={64}
                   onChange={(v) => {
                     setDraft((prev) => ({ ...prev, name: v }));
@@ -2572,7 +2585,7 @@ export function NativeStorageEditor({
                 <NativeStorageAuthWizard
                   remoteType="quark"
                   remoteLabel={remoteTypeLabels.quark}
-                  remoteName={draft.name.trim()}
+                  remoteName={connectionName}
                   editing={draft.editing}
                   draftOptions={buildRemoteOptions(draft)}
                   clearSecrets={draft.clearSecrets}
@@ -3176,7 +3189,7 @@ export function NativeStorageEditor({
                 <NativeStorageAuthWizard
                   remoteType={draft.type}
                   remoteLabel={remoteTypeLabels[draft.type] || draft.type}
-                  remoteName={draft.name.trim()}
+                  remoteName={connectionName}
                   editing={draft.editing}
                   draftOptions={buildRemoteOptions(draft)}
                   clearSecrets={draft.clearSecrets}
@@ -3632,7 +3645,7 @@ export function NativeStorageEditor({
                 <NativeStorageAuthWizard
                   remoteType={draft.type}
                   remoteLabel={remoteTypeLabels[draft.type] || draft.type}
-                  remoteName={draft.name.trim()}
+                  remoteName={connectionName}
                   editing={draft.editing}
                   draftOptions={buildRemoteOptions(draft)}
                   clearSecrets={draft.clearSecrets}
@@ -4113,7 +4126,7 @@ export function NativeStorageEditor({
                 <NativeStorageAuthWizard
                   remoteType={draft.type}
                   remoteLabel={remoteTypeLabels[draft.type] || draft.type}
-                  remoteName={draft.name.trim()}
+                  remoteName={connectionName}
                   editing={draft.editing}
                   draftOptions={buildRemoteOptions(draft)}
                   clearSecrets={draft.clearSecrets}
@@ -4272,7 +4285,7 @@ export function NativeStorageEditor({
                 <NativeStorageAuthWizard
                   remoteType={draft.type}
                   remoteLabel={remoteTypeLabels[draft.type] || draft.type}
-                  remoteName={draft.name.trim()}
+                  remoteName={connectionName}
                   editing={draft.editing}
                   draftOptions={buildRemoteOptions(draft)}
                   clearSecrets={draft.clearSecrets}
