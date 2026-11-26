@@ -22,7 +22,6 @@ import {
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import {
-  IconAlertTriangle,
   IconApps,
   IconBellStroked,
   IconCloudStroked,
@@ -63,8 +62,8 @@ const sections = [
     icon: <IconApps aria-hidden="true" />,
   },
   {
-    path: "/tasks",
-    label: "任务管理",
+    path: "/sync",
+    label: "同步任务",
     icon: <IconCloudStroked aria-hidden="true" />,
   },
   {
@@ -89,12 +88,7 @@ export const SessionContext = createContext<{ development: boolean }>({
 
 function jobStatusDotClass(job: JobItem): string {
   if (job.legacyOpenList) return "job-dot job-dot--error";
-  if (job.pendingApproval || job.syncStatus?.state === "waiting_approval")
-    return "job-dot job-dot--approval";
-  if (
-    job.syncStatus?.state === "error" ||
-    job.syncStatus?.state === "needs_rebuild"
-  )
+  if (job.syncStatus?.state === "error")
     return "job-dot job-dot--error";
   if (job.running && job.paused) return "job-dot job-dot--paused";
   if (
@@ -128,10 +122,6 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
   const notifiedRelease = useRef<string | null>(null);
   const taskItems = taskMenu.data?.dataList || [];
   const hasTaskItems = taskItems.length > 0;
-  const pendingApprovalJobs = useMemo(
-    () => taskItems.filter((job) => Boolean(job.pendingApproval)),
-    [taskItems],
-  );
   const rawJobId = new URLSearchParams(search).get("jobId");
   const currentTaskId = rawJobId && /^\d+$/.test(rawJobId) ? rawJobId : null;
   // Tasks.selectJob() falls back to the first job when the URL has no jobId, so
@@ -174,13 +164,12 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
     };
   }, []);
   useEffect(() => {
-    const refresh = () => void taskMenu.refresh();
+    const refresh = () => void taskMenu.refresh(true);
     window.addEventListener("opensync:jobs-changed", refresh);
     return () => window.removeEventListener("opensync:jobs-changed", refresh);
   }, [taskMenu.refresh]);
   useEffect(() => {
-    // Poll job states gently while visible so sidebar status dots and global
-    // pending-approval alerts stay current across all pages.
+    // Poll job states gently while visible so sidebar status dots stay current across all pages.
     const interval = window.setInterval(() => {
       if (document.visibilityState === "visible") {
         void taskMenu.refresh(true);
@@ -260,13 +249,6 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
   }, [latest.setData, version]);
   useEffect(() => () => checkInFlight.current?.abort(), []);
   const tasksSelected = pathname.startsWith("/tasks") && !hasTaskItems;
-  const showGlobalApprovalStrip =
-    pendingApprovalJobs.length > 0 &&
-    !pathname.startsWith("/dashboard") &&
-    !(
-      pathname.startsWith("/tasks") &&
-      pendingApprovalJobs.some((j) => String(j.id) === activeTaskId)
-    );
   return (
     <VersionContext
       value={{
@@ -281,6 +263,13 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
         <aside className="app-sidebar" aria-label="主菜单">
           <nav aria-label="主导航">
             <NavLink
+              to="/sync"
+              className={({ isActive }) => `nav-link${isActive ? " selected" : ""}`}
+            >
+              {sections[1].icon}
+              <span className="nav-label">{sections[1].label}</span>
+            </NavLink>
+            <NavLink
               to="/dashboard"
               className={({ isActive }) =>
                 `nav-link${isActive ? " selected" : ""}`
@@ -288,14 +277,6 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
             >
               {sections[0].icon}
               <span className="nav-label">{sections[0].label}</span>
-              {pendingApprovalJobs.length > 0 && (
-                <span
-                  className="nav-badge"
-                  aria-label={`${pendingApprovalJobs.length} 个待审批`}
-                >
-                  {pendingApprovalJobs.length}
-                </span>
-              )}
             </NavLink>
             {hasTaskItems ? (
               <button
@@ -402,36 +383,14 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
           </div>
         </aside>
         <main className="app-workspace">
-          {showGlobalApprovalStrip && (
-            <div className="global-approval-strip" role="alert">
-              <IconAlertTriangle aria-hidden="true" size="small" />
-              <span>
-                有 {pendingApprovalJobs.length} 个全量同步任务（
-                {getJobName(pendingApprovalJobs[0])}
-                {pendingApprovalJobs.length > 1 ? " 等" : ""}）存在待确认删除项（不影响同步运行）
-              </span>
-              <Button
-                size="small"
-                type="danger"
-                theme="solid"
-                onClick={() =>
-                  navigate(
-                    `/tasks?jobId=${pendingApprovalJobs[0].id}&tab=overview&approval=1`,
-                  )
-                }
-              >
-                查看并审批
-              </Button>
-            </div>
-          )}
           <Suspense fallback={<LoadingPanel />}>{children}</Suspense>
         </main>
         <nav className="mobile-navigation" aria-label="主导航">
-          {sections.map((s) => (
+          {[sections[1], sections[0], ...sections.slice(2)].map((s) => (
             <NavLink
               key={s.path}
               to={s.path}
-              className={({ isActive }) => (isActive ? "active" : "")}
+              className={({ isActive }) => (isActive || (s.path === "/sync" && pathname.startsWith("/tasks")) ? "active" : "")}
             >
               {s.icon}
               <span>{s.label}</span>
@@ -489,13 +448,14 @@ function Workspace() {
     <SessionContext value={session.data}>
       <Shell version={session.data.version}>
         <Routes>
+          <Route path="/sync" element={<Tasks key="sync" overview />} />
           <Route path="/dashboard" element={<Dashboard />} />
-          <Route path="/tasks" element={<Tasks />} />
+          <Route path="/tasks" element={<Tasks key="details" />} />
           <Route path="/engines" element={<Engines />} />
           <Route path="/storages" element={<Engines />} />
           <Route path="/notifications" element={<Notifications />} />
           <Route path="/settings" element={<Settings />} />
-          <Route path="*" element={<Navigate to="/dashboard" replace />} />
+          <Route path="*" element={<Navigate to="/sync" replace />} />
         </Routes>
       </Shell>
     </SessionContext>

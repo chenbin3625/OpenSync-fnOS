@@ -27,9 +27,8 @@ const (
 // notifyJob is one notification event, already detached from the task runtime
 // so the worker never reads state that has moved on.
 type notifyJob struct {
-	kind       string // "" / "task" | "approval" | "system_alert"
+	kind       string // "" / "task" | "system_alert"
 	taskID     int64
-	jobID      int64
 	status     int
 	taskNum    map[string]interface{}
 	duration   int
@@ -38,7 +37,6 @@ type notifyJob struct {
 	title      string
 	content    string
 	vars       map[string]string
-	jobData    map[string]interface{}
 }
 
 type notifyDispatcher struct {
@@ -115,25 +113,6 @@ func QueueTaskNotification(taskID int64, status int, taskNum map[string]interfac
 	})
 	if !queued {
 		log.Printf("Dropped completion notification for task %d: notify queue is full or shutting down", taskID)
-	}
-}
-
-// QueueApprovalNotification queues an immediate notification when a full sync
-// pauses awaiting user confirmation of destination deletions.
-func QueueApprovalNotification(taskID, jobID int64, job map[string]interface{}, approval *FullSyncApproval) {
-	if approval == nil {
-		return
-	}
-	queued := notifyDispatch.enqueue(notifyJob{
-		kind:    "approval",
-		taskID:  taskID,
-		jobID:   jobID,
-		event:   "approval",
-		jobData: copyTaskNum(job),
-		vars:    buildApprovalNotifyVars(taskID, jobID, job, approval),
-	})
-	if !queued {
-		log.Printf("Dropped approval notification for task %d: notify queue is full or shutting down", taskID)
 	}
 }
 

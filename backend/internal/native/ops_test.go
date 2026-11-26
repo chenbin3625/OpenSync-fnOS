@@ -2,7 +2,6 @@ package native
 
 import (
 	"context"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,30 +43,31 @@ func TestRootDeleteAndMoveRejected(t *testing.T) {
 	}
 }
 
-func TestCopyURLTargetBlocksReservedAddresses(t *testing.T) {
-	for _, raw := range []string{
-		"http://127.0.0.1/file",
-		"http://[::1]/file",
-		"http://100.64.0.1/file",
-		"http://198.18.0.1/file",
-		"http://[fd00::1]/file",
-		"http://user:pass@example.com/file",
-	} {
-		if err := validateCopyURLTarget(raw); err == nil {
-			t.Errorf("reserved or credential-bearing URL %q was accepted", raw)
-		}
+func TestDeleteFileRefusesDirectoryReplacement(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("TRIM_PKGTMP", "")
+	t.Setenv("TRIM_DATA_ACCESSIBLE_PATHS", root)
+	local, err := virtualLocal(root)
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestBlockedCopyURLIPRanges(t *testing.T) {
-	for _, raw := range []string{
-		"100.64.0.1", "198.18.0.1", "192.0.2.1", "198.51.100.1", "203.0.113.1", "fc00::1",
-	} {
-		if !isBlockedCopyURLIP(net.ParseIP(raw)) {
-			t.Errorf("reserved address %s was not blocked", raw)
-		}
+	dir := filepath.Join(root, "replaced")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
 	}
-	if isBlockedCopyURLIP(net.ParseIP("8.8.8.8")) {
-		t.Fatal("public address 8.8.8.8 was incorrectly blocked")
+	child := filepath.Join(dir, "keep.txt")
+	if err := os.WriteFile(child, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{}
+	target := local + "/replaced"
+	if err := cfg.DeletePath(context.Background(), target, false, SessionOptions{}); err == nil {
+		t.Fatal("file deletion accepted a replacement directory")
+	}
+	if err := cfg.RemoveEmptyDir(context.Background(), target, SessionOptions{}); err == nil {
+		t.Fatal("empty directory removal accepted a non-empty directory")
+	}
+	if got, err := os.ReadFile(child); err != nil || string(got) != "keep" {
+		t.Fatalf("replacement directory contents changed: %q (%v)", got, err)
 	}
 }

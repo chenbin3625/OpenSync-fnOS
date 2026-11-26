@@ -81,7 +81,7 @@ describe("mock store", () => {
     });
   });
 
-  it("stages post-sync deletion approval without blocking or aborting the sync task", () => {
+  it("runs mirror sync jobs directly without staging deferred deletion approval", () => {
     const store = createMockStore({
       jobs: [
         {
@@ -92,34 +92,10 @@ describe("mock store", () => {
           srcPath: ["/Photos"],
           dstPath: ["/Backup"],
         },
-        {
-          id: 18,
-          remark: "全量任务二",
-          method: 1,
-          enable: 1,
-          srcPath: ["/Docs"],
-          dstPath: ["/BackupDocs"],
-        },
       ],
     });
     const running = store.runJob(8);
-    expect(running.approval).toBeUndefined();
-    expect(store.getPendingApproval(8)?.deleteCount).toBeGreaterThan(0);
-
-    store.updateJobAction({ taskId: running.taskId, action: "approve" });
-    expect(store.getPendingApproval(8)).toBeNull();
     expect(store.getCurrentTask(8)?.taskId).toBe(running.taskId);
-
-    const running2 = store.runJob(18);
-    expect(store.getPendingApproval(18)?.deleteCount).toBeGreaterThan(0);
-    store.updateJobAction({ taskId: running2.taskId, action: "reject" });
-    expect(store.getPendingApproval(18)).toBeNull();
-    // Rejecting deferred deletions skips deletes without aborting the sync task.
-    expect(store.getCurrentTask(18)?.taskId).toBe(running2.taskId);
-    expect(store.listHistory(18).dataList[0]).toMatchObject({
-      id: running2.taskId,
-      status: 1,
-    });
   });
 
   it("filters history by terminal status and an exclusive end boundary", () => {

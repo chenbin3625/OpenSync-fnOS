@@ -507,7 +507,7 @@ func TestStartCopyItemAssignsDistinctDoingKeysConcurrently(t *testing.T) {
 	}
 }
 
-func TestRemoveJobClientWithPendingFullSyncApprovalDoesNotDeadlockSSE(t *testing.T) {
+func TestRemoveJobClientWhileTaskRunningDoesNotDeadlockSSE(t *testing.T) {
 	testDB := newServiceTaskStatusTestDB(t)
 	restoreDB := mapper.SetDBForTest(testDB)
 	defer restoreDB()
@@ -527,12 +527,6 @@ func TestRemoveJobClientWithPendingFullSyncApprovalDoesNotDeadlockSSE(t *testing
 
 	task := &JobTask{TaskID: 550, JobClient: client, Job: client.Job}
 	task.initRuntime()
-	pendingDeleteApprovals.ResetForTest()
-	defer pendingDeleteApprovals.ResetForTest()
-	pendingDeleteApprovals.Stage(task, []pendingDeleteTarget{{
-		SrcRoot: "/src/", DstRoot: "/dst/", SrcDir: "/src/", DstDir: "/dst/",
-		Name: "old.txt", Size: 12, Count: 1,
-	}})
 	client.setCurrentTask(task)
 	if !client.tryMarkDoing() {
 		t.Fatalf("tryMarkDoing() = false, want true")
@@ -603,9 +597,6 @@ func TestRemoveJobClientWithPendingFullSyncApprovalDoesNotDeadlockSSE(t *testing
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("RemoveJobClient(55) deadlocked")
-	}
-	if pendingDeleteApprovals.Has(55) {
-		t.Fatal("RemoveJobClient(55) did not clear pending delete approval")
 	}
 }
 

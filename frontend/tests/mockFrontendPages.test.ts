@@ -152,8 +152,6 @@ describe("mock settings contract", () => {
       copyConcurrency: 5,
       scanConcurrency: 16,
       maxRetries: 2,
-      scheduledFullSyncConfirm: 0,
-      fullSyncApprovalTimeout: 30,
       engineHealthCheckInterval: 15,
       defaultBwLimit: "",
       proxyUrl: "",

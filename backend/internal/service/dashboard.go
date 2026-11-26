@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/csv"
 	"fmt"
 	"math"
@@ -92,26 +93,57 @@ type dashboardQuotaItem struct {
 	Message   string `json:"message,omitempty"`
 }
 
+type dashboardQuotaSnapshot struct {
+	db         *sql.DB
+	proxy      string
+	at         time.Time
+	items      []dashboardQuotaItem
+	refreshing bool
+}
+
 var (
-	dashboardQuotaCacheMu   sync.Mutex
-	dashboardQuotaCacheAt   time.Time
-	dashboardQuotaCacheData []dashboardQuotaItem
+	dashboardQuotaCacheMu sync.Mutex
+	dashboardQuotaCache   *dashboardQuotaSnapshot
 )
+
+func invalidateDashboardStorageQuotas() {
+	dashboardQuotaCacheMu.Lock()
+	dashboardQuotaCache = nil
+	dashboardQuotaCacheMu.Unlock()
+}
 
 func getCachedDashboardStorageQuotas() []dashboardQuotaItem {
 	const ttl = 5 * time.Minute
+	db, proxy := mapper.GetDB(), globalNativeProxyURL()
 	dashboardQuotaCacheMu.Lock()
-	if !dashboardQuotaCacheAt.IsZero() && time.Since(dashboardQuotaCacheAt) < ttl && dashboardQuotaCacheData != nil {
-		cp := append([]dashboardQuotaItem(nil), dashboardQuotaCacheData...)
-		dashboardQuotaCacheMu.Unlock()
-		return cp
+	defer dashboardQuotaCacheMu.Unlock()
+	if dashboardQuotaCache == nil || dashboardQuotaCache.db != db || dashboardQuotaCache.proxy != proxy {
+		dashboardQuotaCache = &dashboardQuotaSnapshot{db: db, proxy: proxy, items: []dashboardQuotaItem{}}
 	}
-	dashboardQuotaCacheMu.Unlock()
+	snapshot := dashboardQuotaCache
+	if !snapshot.refreshing && time.Since(snapshot.at) >= ttl {
+		_, cfg, err := loadExistingNativeRow()
+		if err != nil {
+			snapshot.at = time.Now().Add(-ttl + 30*time.Second)
+			return snapshot.items
+		}
+		snapshot.refreshing = true
+		go func(previous []dashboardQuotaItem) {
+			items := probeDashboardStorageQuotas(cfg, proxy, previous)
+			dashboardQuotaCacheMu.Lock()
+			defer dashboardQuotaCacheMu.Unlock()
+			if dashboardQuotaCache != snapshot {
+				return
+			}
+			snapshot.refreshing = false
+			snapshot.items = items
+			snapshot.at = time.Now()
+		}(snapshot.items)
+	}
+	return snapshot.items
+}
 
-	_, cfg, err := loadExistingNativeRow()
-	if err != nil {
-		return []dashboardQuotaItem{}
-	}
+func probeDashboardStorageQuotas(cfg native.Config, proxy string, previous []dashboardQuotaItem) []dashboardQuotaItem {
 	type target struct {
 		name string
 		typ  string
@@ -134,9 +166,13 @@ func getCachedDashboardStorageQuotas() []dashboardQuotaItem {
 		targets = targets[:12]
 	}
 	items := make([]dashboardQuotaItem, len(targets))
+	previousByName := make(map[string]dashboardQuotaItem, len(previous))
+	for _, item := range previous {
+		previousByName[item.Name] = item
+	}
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 4)
-	opts := native.SessionOptions{ProxyURL: globalNativeProxyURL()}
+	opts := native.SessionOptions{ProxyURL: proxy}
 	for i, t := range targets {
 		wg.Add(1)
 		go func(idx int, tgt target) {
@@ -148,6 +184,9 @@ func getCachedDashboardStorageQuotas() []dashboardQuotaItem {
 			info, aboutErr := cfg.About(probeCtx, tgt.name, opts)
 			if aboutErr != nil || info == nil {
 				items[idx] = dashboardQuotaItem{Name: tgt.name, Type: tgt.typ, Supported: false}
+				if item, ok := previousByName[tgt.name]; ok && item.Type == tgt.typ {
+					items[idx] = item
+				}
 				return
 			}
 			items[idx] = dashboardQuotaItem{
@@ -162,45 +201,44 @@ func getCachedDashboardStorageQuotas() []dashboardQuotaItem {
 		}(i, t)
 	}
 	wg.Wait()
-
-	dashboardQuotaCacheMu.Lock()
-	dashboardQuotaCacheAt = time.Now()
-	dashboardQuotaCacheData = items
-	dashboardQuotaCacheMu.Unlock()
-	return append([]dashboardQuotaItem(nil), items...)
+	return items
 }
 
-// GetDashboardOverview aggregates KPI counters, pending full-sync approvals,
-// recent 7-day execution metrics, and per-job status cards for /dashboard.
-func GetDashboardOverview() (map[string]interface{}, error) {
-	jobs, err := mapper.GetJobListAll()
-	if err != nil {
-		return nil, fmt.Errorf("dashboard load jobs: %w", err)
-	}
-	engines, err := GetClientList()
-	if err != nil {
-		return nil, fmt.Errorf("dashboard load engines: %w", err)
-	}
-	latestTasks, err := mapper.GetLatestTaskPerJob()
-	if err != nil {
-		latestTasks = map[int64]map[string]interface{}{}
-	}
-	now := time.Now().In(schedulerLocation())
-	since7d := now.AddDate(0, 0, -7).Unix()
-	since30d := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, schedulerLocation()).AddDate(0, 0, -29).Unix()
+type dailyBucket struct {
+	Date        string `json:"date"`
+	Runs        int64  `json:"runs"`
+	SuccessRuns int64  `json:"successRuns"`
+	FailRuns    int64  `json:"failRuns"`
+	Files       int64  `json:"files"`
+	Bytes       int64  `json:"bytes"`
+}
 
-	type dailyBucket struct {
-		Date        string `json:"date"`
-		Runs        int64  `json:"runs"`
-		SuccessRuns int64  `json:"successRuns"`
-		FailRuns    int64  `json:"failRuns"`
-		Files       int64  `json:"files"`
-		Bytes       int64  `json:"bytes"`
+var dashboardHistoryCache struct {
+	mu        sync.Mutex
+	db        *sql.DB
+	day, zone string
+	at        time.Time
+	recent    map[string]interface{}
+	daily     []dailyBucket
+}
+
+func getDashboardHistory(now time.Time) (map[string]interface{}, []dailyBucket, error) {
+	const ttl = 30 * time.Second
+	db := mapper.GetDB()
+	day, zone := now.Format("2006-01-02"), now.Location().String()
+	cache := &dashboardHistoryCache
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if cache.db == db && cache.day == day && cache.zone == zone && time.Since(cache.at) < ttl {
+		return cache.recent, cache.daily, nil
 	}
+	since7d := now.AddDate(0, 0, -7).Unix()
+	since30d := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).AddDate(0, 0, -29).Unix()
+
 	dailyBuckets := make([]dailyBucket, 30)
 	bucketIndex := make(map[string]int, 30)
 	for i := 0; i < 30; i++ {
-		day := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, schedulerLocation()).AddDate(0, 0, -(29 - i))
+		day := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).AddDate(0, 0, -(29 - i))
 		key := day.Format("2006-01-02")
 		dailyBuckets[i] = dailyBucket{Date: key}
 		bucketIndex[key] = i
@@ -226,7 +264,7 @@ func GetDashboardOverview() (map[string]interface{}, error) {
 			totalFiles += files
 			totalBytes += sz
 		}
-		dayKey := time.Unix(ts, 0).In(schedulerLocation()).Format("2006-01-02")
+		dayKey := time.Unix(ts, 0).In(now.Location()).Format("2006-01-02")
 		if idx, ok := bucketIndex[dayKey]; ok {
 			dailyBuckets[idx].Runs++
 			switch status {
@@ -240,7 +278,40 @@ func GetDashboardOverview() (map[string]interface{}, error) {
 		}
 		return nil
 	}); err != nil {
-		return nil, fmt.Errorf("dashboard load recent tasks: %w", err)
+		return nil, nil, fmt.Errorf("dashboard load recent tasks: %w", err)
+	}
+	cache.db, cache.day, cache.zone, cache.at = db, day, zone, time.Now()
+	cache.daily = dailyBuckets
+	cache.recent = map[string]interface{}{
+		"totalRuns":   totalRuns,
+		"successRuns": successRuns,
+		"failRuns":    failRuns,
+		"stoppedRuns": stoppedRuns,
+		"totalFiles":  totalFiles,
+		"totalBytes":  totalBytes,
+	}
+	return cache.recent, cache.daily, nil
+}
+
+// GetDashboardOverview aggregates KPI counters,
+// recent 7-day execution metrics, and per-job status cards for /dashboard.
+func GetDashboardOverview() (map[string]interface{}, error) {
+	jobs, err := mapper.GetJobListAll()
+	if err != nil {
+		return nil, fmt.Errorf("dashboard load jobs: %w", err)
+	}
+	engines, err := GetClientList()
+	if err != nil {
+		return nil, fmt.Errorf("dashboard load engines: %w", err)
+	}
+	latestTasks, err := mapper.GetLatestTaskPerJob()
+	if err != nil {
+		latestTasks = map[int64]map[string]interface{}{}
+	}
+	now := time.Now().In(schedulerLocation())
+	recent, dailyBuckets, err := getDashboardHistory(now)
+	if err != nil {
+		return nil, err
 	}
 
 	engineNameByID := make(map[int64]string, len(engines))
@@ -265,6 +336,7 @@ func GetDashboardOverview() (map[string]interface{}, error) {
 
 	queuedSet := engineQueue.AllQueuedJobIDs()
 	syncStates, syncStateErr := mapper.ListSyncStates()
+	conflictCounts, _ := mapper.ListUnresolvedBisyncConflictCounts()
 	legacyEngineIDs := legacyOpenListAlistIDs()
 	jobClientListMu.RLock()
 	clientsCopy := make(map[int64]*JobClient, len(jobClientList))
@@ -282,7 +354,6 @@ func GetDashboardOverview() (map[string]interface{}, error) {
 	totalSpeedAvg := 0.0
 	totalDoneBytes := int64(0)
 	totalRemainBytes := int64(0)
-	pendingApprovals := make([]map[string]interface{}, 0)
 	jobSummaries := make([]map[string]interface{}, 0, len(jobs))
 
 	for _, job := range jobs {
@@ -301,7 +372,6 @@ func GetDashboardOverview() (map[string]interface{}, error) {
 		running := false
 		paused := false
 		currentTaskID := int64(0)
-		approval := pendingDeleteApprovals.GetByJobID(jobID)
 		var liveNum *taskNumStats
 		liveProgress := 0.0
 		liveDoneSize := int64(0)
@@ -348,31 +418,6 @@ func GetDashboardOverview() (map[string]interface{}, error) {
 				}
 			}
 		}
-		if approval != nil {
-			jobName := strings.TrimSpace(util.StringValue(job["remark"]))
-			if jobName == "" {
-				jobName = fmt.Sprintf("任务 #%d", jobID)
-			}
-			pendingApprovals = append(pendingApprovals, map[string]interface{}{
-				"jobId":         jobID,
-				"jobName":       jobName,
-				"taskId":        approval.TaskID,
-				"deleteCount":   approval.DeleteCount,
-				"deleteSize":    approval.DeleteSize,
-				"pathCount":     approval.PathCount,
-				"status":        approval.Status,
-				"createdAt":     approval.CreatedAt,
-				"expiresAt":     approval.ExpiresAt,
-				"planChanged":   approval.PlanChanged,
-				"lastError":     approval.LastError,
-				"execPhase":     approval.ExecPhase,
-				"execDone":      approval.ExecDone,
-				"execTotal":     approval.ExecTotal,
-				"execFailed":    approval.ExecFailed,
-				"execCurrent":   approval.ExecCurrent,
-				"execStartedAt": approval.ExecStartedAt,
-			})
-		}
 
 		var lastTaskSummary map[string]interface{}
 		if lt, ok := latestTasks[jobID]; ok && lt != nil {
@@ -401,44 +446,43 @@ func GetDashboardOverview() (map[string]interface{}, error) {
 			effectiveEnable = 0
 		}
 		jobSummaries = append(jobSummaries, map[string]interface{}{
-			"id":              jobID,
-			"remark":          job["remark"],
-			"srcPath":         job["srcPath"],
-			"dstPath":         job["dstPath"],
-			"alistId":         alistID,
-			"alistName":       alistName,
-			"legacyOpenList":  legacyOpenList,
-			"method":          util.ToInt(job["method"]),
-			"enable":          effectiveEnable,
-			"isCron":          util.ToInt(job["isCron"]),
-			"interval":        job["interval"],
-			"windowEnable":    util.ToInt(job["windowEnable"]),
-			"windowStart":     job["windowStart"],
-			"windowEnd":       job["windowEnd"],
-			"extraFlags":      job["extraFlags"],
-			"nextRunTime":     nextRunTime,
-			"running":         running,
-			"paused":          running && paused,
-			"queued":          queued,
-			"watching":        !legacyOpenList && jobFSWatchers.IsWatching(jobID),
-			"checkRunning":    !legacyOpenList && IsJobCheckRunning(jobID),
-			"currentTaskId":   currentTaskID,
-			"pendingApproval": approval,
-			"liveNum":         liveNum,
-			"liveProgress":    liveProgress,
-			"liveDoneSize":    liveDoneSize,
-			"liveTotalSize":   liveTotalSize,
-			"liveSpeed":       liveSpeed,
-			"liveSpeedAvg":    liveSpeedAvg,
-			"liveRemainTime":  liveRemainTime,
-			"liveBwLimit":     liveBwLimit,
-			"liveScanFinish":  liveScanFinish,
-			"liveScan":        liveScan,
-			"lastTask":        lastTaskSummary,
+			"id":             jobID,
+			"remark":         job["remark"],
+			"srcPath":        job["srcPath"],
+			"dstPath":        job["dstPath"],
+			"alistId":        alistID,
+			"alistName":      alistName,
+			"legacyOpenList": legacyOpenList,
+			"method":         util.ToInt(job["method"]),
+			"enable":         effectiveEnable,
+			"isCron":         util.ToInt(job["isCron"]),
+			"interval":       job["interval"],
+			"windowEnable":   util.ToInt(job["windowEnable"]),
+			"windowStart":    job["windowStart"],
+			"windowEnd":      job["windowEnd"],
+			"extraFlags":     job["extraFlags"],
+			"nextRunTime":    nextRunTime,
+			"running":        running,
+			"paused":         running && paused,
+			"queued":         queued,
+			"watching":       !legacyOpenList && jobFSWatchers.IsWatching(jobID),
+			"checkRunning":   !legacyOpenList && IsJobCheckRunning(jobID),
+			"currentTaskId":  currentTaskID,
+			"liveNum":        liveNum,
+			"liveProgress":   liveProgress,
+			"liveDoneSize":   liveDoneSize,
+			"liveTotalSize":  liveTotalSize,
+			"liveSpeed":      liveSpeed,
+			"liveSpeedAvg":   liveSpeedAvg,
+			"liveRemainTime": liveRemainTime,
+			"liveBwLimit":    liveBwLimit,
+			"liveScanFinish": liveScanFinish,
+			"liveScan":       liveScan,
+			"lastTask":       lastTaskSummary,
 		})
 		if !legacyOpenList {
 			statusRow := cloneJobConfig(job)
-			addSyncStatus(statusRow, syncStates[jobID], syncStateErr, clientsCopy[jobID])
+			addSyncStatus(statusRow, syncStates[jobID], syncStateErr, conflictCounts[jobID], clientsCopy[jobID])
 			jobSummaries[len(jobSummaries)-1]["syncStatus"] = statusRow["syncStatus"]
 		}
 	}
@@ -475,14 +519,13 @@ func GetDashboardOverview() (map[string]interface{}, error) {
 
 	return map[string]interface{}{
 		"kpi": map[string]interface{}{
-			"totalJobs":        len(jobs),
-			"enabledJobs":      enabledJobs,
-			"runningJobs":      runningJobs,
-			"queuedJobs":       queuedJobs,
-			"pendingApprovals": len(pendingApprovals),
-			"totalEngines":     len(engines),
-			"onlineEngines":    onlineEngines,
-			"offlineEngines":   offlineEngines,
+			"totalJobs":      len(jobs),
+			"enabledJobs":    enabledJobs,
+			"runningJobs":    runningJobs,
+			"queuedJobs":     queuedJobs,
+			"totalEngines":   len(engines),
+			"onlineEngines":  onlineEngines,
+			"offlineEngines": offlineEngines,
 		},
 		"realtime": map[string]interface{}{
 			"totalSpeed":          totalSpeed,
@@ -498,18 +541,10 @@ func GetDashboardOverview() (map[string]interface{}, error) {
 			"sampledAt":           now.Unix(),
 			"speedHistory":        speedHistory,
 		},
-		"recent7d": map[string]interface{}{
-			"totalRuns":   totalRuns,
-			"successRuns": successRuns,
-			"failRuns":    failRuns,
-			"stoppedRuns": stoppedRuns,
-			"totalFiles":  totalFiles,
-			"totalBytes":  totalBytes,
-		},
-		"pendingApprovals": pendingApprovals,
-		"jobs":             jobSummaries,
-		"dailyTrend":       dailyBuckets,
-		"storageQuotas":    getCachedDashboardStorageQuotas(),
+		"recent7d":      recent,
+		"jobs":          jobSummaries,
+		"dailyTrend":    dailyBuckets,
+		"storageQuotas": getCachedDashboardStorageQuotas(),
 	}, nil
 }
 
@@ -712,8 +747,11 @@ func taskItemStatusLabel(s int) string {
 	}
 }
 
-// ExportTaskItems exports filtered task items for a task as CSV or TXT.
+// ExportTaskItems exports filtered task items for a task as CSV.
 func ExportTaskItems(params map[string]interface{}, format string) (string, string, []byte, error) {
+	if format := strings.ToLower(strings.TrimSpace(format)); format != "" && format != "csv" {
+		return "", "", nil, publicError("仅支持 CSV 导出")
+	}
 	taskID := util.ToInt64(params["taskId"])
 	if taskID <= 0 {
 		return "", "", nil, publicError(msg.T(msg.LostPart))
@@ -724,35 +762,6 @@ func ExportTaskItems(params map[string]interface{}, format string) (string, stri
 	items, err := mapper.GetJobTaskItemsForExport(params, 50000)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("export task items: %w", err)
-	}
-
-	format = strings.ToLower(strings.TrimSpace(format))
-	if format == "" {
-		format = "csv"
-	}
-
-	if format == "txt" {
-		var buf strings.Builder
-		for _, item := range items {
-			st := taskItemStatusLabel(util.ToInt(item["status"]))
-			tp := taskItemTypeLabel(util.ToInt(item["type"]))
-			src := util.StringValue(item["srcPath"])
-			dst := util.StringValue(item["dstPath"])
-			name := util.StringValue(item["fileName"])
-			sizeStr := util.ConvertBytes(util.ToInt64(item["fileSize"]))
-			errMsg := util.StringValue(item["errMsg"])
-			ts := ""
-			if ct := util.ToInt64(item["createTime"]); ct > 0 {
-				ts = time.Unix(ct, 0).In(schedulerLocation()).Format("2006-01-02 15:04:05")
-			}
-			line := fmt.Sprintf("[%s] [%s] [%s] %s | %s -> %s | %s", ts, st, tp, name, src, dst, sizeStr)
-			if errMsg != "" {
-				line += " | 错误: " + errMsg
-			}
-			buf.WriteString(line + "\n")
-		}
-		filename := fmt.Sprintf("opensync-task-%d-items.txt", taskID)
-		return filename, "text/plain; charset=utf-8", []byte(buf.String()), nil
 	}
 
 	var buf bytes.Buffer

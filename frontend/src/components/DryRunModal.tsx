@@ -35,14 +35,17 @@ export function DryRunModal({
   jobName,
   onClose,
   onRunReal,
+  onEnableMirror,
 }: {
   jobId: number;
   jobName: string;
   onClose: () => void;
   onRunReal?: () => void;
+  onEnableMirror?: () => Promise<void>;
 }) {
   const [result, setResult] = useState<DryRunResult | null>(null);
   const [starting, setStarting] = useState(true);
+  const [enabling, setEnabling] = useState(false);
   const [error, setError] = useState("");
   const [filterAction, setFilterAction] = useState("all");
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -128,8 +131,12 @@ export function DryRunModal({
 
   useEffect(() => {
     mountedRef.current = true;
-    void start();
+    let active = true;
+    queueMicrotask(() => {
+      if (active) void start();
+    });
     return () => {
+      active = false;
       mountedRef.current = false;
       cancelledRef.current = true;
       runGenRef.current += 1;
@@ -139,6 +146,7 @@ export function DryRunModal({
   }, [jobId]);
 
   const handleCancel = async () => {
+    if (enabling) return;
     cancelledRef.current = true;
     runGenRef.current += 1;
     stopPolling();
@@ -175,7 +183,9 @@ export function DryRunModal({
       width={780}
       centered
       className="editor-modal dry-run-modal"
-      title={`模拟运行预览 · ${jobName}`}
+      title={`${onEnableMirror ? "镜像影响预览" : "模拟运行预览"} · ${jobName}`}
+      maskClosable={!enabling}
+      closable={!enabling}
       onCancel={() => void handleCancel()}
       footer={
         <div className="editor-actions">
@@ -183,12 +193,12 @@ export function DryRunModal({
             type="tertiary"
             className="editor-actions-start"
             icon={<IconRefresh aria-hidden="true" />}
-            disabled={isRunning}
+            disabled={isRunning || enabling}
             onClick={() => void start()}
           >
             重新预览
           </Button>
-          <Button type="tertiary" onClick={() => void handleCancel()}>
+          <Button type="tertiary" onClick={() => void handleCancel()} disabled={enabling}>
             {isRunning ? "中止预览" : "关闭"}
           </Button>
           {onRunReal && result?.status === "completed" && (
@@ -204,12 +214,33 @@ export function DryRunModal({
               确认并立即正式执行
             </Button>
           )}
+          {onEnableMirror && !isRunning && result?.status === "completed" && !error && (
+            <Button
+              type="danger"
+              theme="solid"
+              loading={enabling}
+              onClick={async () => {
+                setEnabling(true);
+                try {
+                  await onEnableMirror();
+                } catch (err) {
+                  errorToast(err);
+                } finally {
+                  setEnabling(false);
+                }
+              }}
+            >
+              确认并启动镜像
+            </Button>
+          )}
         </div>
       }
     >
       <div className="dry-run-body">
         <div className="dry-run-note">
-          只读扫描对比源目录与目标目录，不会对任何文件执行复制、移动、重命名或删除操作。（使用内容比对或普通 WebDAV 目标时，预演需读取目标内容进行校验）
+          {onEnableMirror
+            ? "预览期间任务保持暂停。启动后会重新检查目录，并清理目标端独有的文件。"
+            : "只读扫描对比源目录与目标目录，不会对任何文件执行复制、移动、重命名或删除操作。（使用内容比对或普通 WebDAV 目标时，预演需读取目标内容进行校验）"}
         </div>
 
         {error && (

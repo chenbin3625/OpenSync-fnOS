@@ -82,7 +82,6 @@ function emptyNativeExtraFlags(): Required<NativeExtraFlags> {
     checkSchedule: "",
     missedCatchUp: false,
     directStream: false,
-    bisyncResyncMode: "",
     bisyncMaxDelete: 0,
     bisyncForce: false,
   };
@@ -147,7 +146,6 @@ function parseNativeExtraFlags(value: unknown): Required<NativeExtraFlags> {
     checkSchedule: str("checkSchedule"),
     missedCatchUp: Boolean(obj.missedCatchUp),
     directStream: Boolean(obj.directStream),
-    bisyncResyncMode: str("bisyncResyncMode"),
     bisyncMaxDelete: Math.min(100, num("bisyncMaxDelete")),
     bisyncForce: Boolean(obj.bisyncForce),
   };
@@ -199,8 +197,6 @@ function serializeNativeExtraFlags(flags: NativeExtraFlags | undefined): string 
     out.checkSchedule = flags.checkSchedule.trim();
   if (flags.missedCatchUp) out.missedCatchUp = true;
   if (flags.directStream) out.directStream = true;
-  if (flags.bisyncResyncMode?.trim())
-    out.bisyncResyncMode = flags.bisyncResyncMode.trim();
   if (Number(flags.bisyncMaxDelete || 0) > 0)
     out.bisyncMaxDelete = Math.min(100, Math.trunc(Number(flags.bisyncMaxDelete)));
   if (flags.bisyncForce) out.bisyncForce = true;
@@ -361,6 +357,10 @@ export function normalizeJobMethod(method: unknown) {
   return supportedJobMethods.has(parsed) && Number.isInteger(parsed) ? parsed : 0;
 }
 
+export function requiresFirstMirrorPreview(job: Pick<JobItem, "method" | "isCron" | "enable" | "syncStatus">) {
+  return job.method === 1 && job.isCron === 3 && job.enable !== 1 && !job.syncStatus?.lastSuccess;
+}
+
 export function selectJob<T extends { id: number }>(
   jobs: T[],
   selectedId: number | null,
@@ -486,8 +486,8 @@ export function jobToForm(job: JobItem): JobForm {
   return {
     ...defaultJobForm(job.alistId),
     ...job,
-    isCron: 3,
-    method: normalizeJobMethod(job.method),
+    isCron: job.isCron,
+    method: job.method === 2 && job.isCron !== 3 ? 2 : normalizeJobMethod(job.method),
     srcPath: parseJobPathList(job.srcPath),
     dstPath: parseJobPathList(job.dstPath),
     remark: job.remark || "",
@@ -573,7 +573,6 @@ export function buildJobPayload(form: JobForm) {
     running?: unknown;
     paused?: unknown;
     queued?: unknown;
-    pendingApproval?: unknown;
     watching?: unknown;
     checkRunning?: unknown;
     lastStatus?: unknown;
@@ -584,23 +583,23 @@ export function buildJobPayload(form: JobForm) {
   delete runtimeStripped.running;
   delete runtimeStripped.paused;
   delete runtimeStripped.queued;
-  delete runtimeStripped.pendingApproval;
   delete runtimeStripped.watching;
   delete runtimeStripped.checkRunning;
   delete runtimeStripped.lastStatus;
   delete runtimeStripped.nextRunTime;
   delete runtimeStripped.syncStatus;
-  const method = normalizeJobMethod(form.method);
+  const legacySchedule = form.id !== undefined && form.isCron !== 3;
+  const method = legacySchedule && form.method === 2 ? 2 : normalizeJobMethod(form.method);
   const extraFlags: NativeExtraFlags = {
     ...form.extraFlags,
-    watchEnable: false,
-    missedCatchUp: false,
+    watchEnable: legacySchedule && Boolean(form.extraFlags.watchEnable),
+    missedCatchUp: legacySchedule && Boolean(form.extraFlags.missedCatchUp),
     syncDirection: method === 3 ? "" : form.extraFlags?.syncDirection || "",
   };
   return {
     ...runtimeStripped,
     method,
-    isCron: 3,
+    isCron: legacySchedule ? form.isCron : 3,
     remark: form.remark.trim() || null,
     exclude: form.exclude.trim() || null,
     include: form.include.trim() || null,
@@ -619,7 +618,7 @@ export function buildJobPayload(form: JobForm) {
         ? ".opensync-trash"
         : form.trashDir.trim() || ".opensync-trash",
     trashRetentionDays: Math.max(0, Math.trunc(Number(form.trashRetentionDays) || 0)),
-    deleteEmptySrcDirs: 0,
+    deleteEmptySrcDirs: Number(legacySchedule && method === 2 && form.deleteEmptySrcDirs),
     filterMode: Number(form.filterMode) || 0,
     minFileAgeMinutes: Math.max(0, Math.trunc(Number(form.minFileAgeMinutes) || 0)),
     olderThanDays: Math.max(0, Math.trunc(Number(form.olderThanDays) || 0)),
@@ -1167,7 +1166,7 @@ export function validateJobFormFields(
 
   // Step 1: 同步设置（持续同步轮询 / 完整核对 / 变动静默 / 时间窗口 / 通知绑定）
   const step1Errors: string[] = [];
-  if (form.method === 2) {
+  if (form.method === 2 && form.isCron === 3) {
     fields.interval = "当前仅支持持续同步模式，请使用单向同步或双向同步";
     step1Errors.push(fields.interval);
   }

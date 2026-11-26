@@ -3,6 +3,7 @@ package native
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -45,6 +46,8 @@ func tokenRefreshableFields(typ string) []string {
 		return []string{"client_access_token", "client_refresh_token"}
 	case "quark":
 		return []string{"cookie"}
+	case "pan123":
+		return []string{"access_token", "token_expires_at"}
 	default:
 		return nil
 	}
@@ -199,6 +202,64 @@ func limitedOutputWithStderr(cmd *exec.Cmd, max int) ([]byte, string, error) {
 	return b.Bytes(), detail, e
 }
 
+// readRcloneList drains an lsjson array without retaining a second full copy
+// of the directory in memory.
+func readRcloneList[T any](cmd *exec.Cmd, maxBytes int64, visit func(T)) (stderr string, parseErr, runErr error) {
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", nil, err
+	}
+	errBuf := &tailBuffer{limit: maxStderrCapture}
+	cmd.Stderr = errBuf
+	if err := cmd.Start(); err != nil {
+		return "", nil, err
+	}
+	limited := &io.LimitedReader{R: stdout, N: maxBytes + 1}
+	dec := json.NewDecoder(limited)
+	tok, parseErr := dec.Token()
+	if parseErr == nil && tok != nil {
+		if tok != json.Delim('[') {
+			parseErr = errors.New("无法解析远端目录列表")
+		} else {
+			for dec.More() {
+				var entry T
+				if parseErr = dec.Decode(&entry); parseErr != nil {
+					break
+				}
+				visit(entry)
+			}
+			if parseErr == nil {
+				_, parseErr = dec.Token()
+			}
+		}
+	}
+	if parseErr == nil {
+		var extra json.RawMessage
+		if err := dec.Decode(&extra); err != io.EOF {
+			parseErr = errors.New("无法解析远端目录列表")
+		}
+	}
+	if limited.N == 0 {
+		parseErr = errors.New("rclone 输出超过上限")
+	}
+	killed := parseErr != nil && parseErr != io.EOF && cmd.Process.Kill() == nil
+	if killed {
+		_ = stdout.Close()
+	}
+	runErr = cmd.Wait()
+	stderr = errBuf.String()
+	if runErr != nil && stderr != "" && !killed {
+		log.Printf("native rclone command failed (%v): %s", runErr, sanitizeRcloneError(stderr))
+	}
+	if killed {
+		runErr = nil
+	}
+	if parseErr != nil && limited.N > 0 {
+		parseErr = errors.New("无法解析远端目录列表")
+	}
+	return stderr, parseErr, runErr
+}
+
 // classifyRcloneError turns rclone stderr diagnostics into safe, actionable
 // messages without leaking internal paths or secrets.
 func classifyRcloneError(backendType, stderr string) error {
@@ -214,10 +275,19 @@ func classifyRcloneError(backendType, stderr string) error {
 		if backendType == "quark" {
 			return errors.New("夸克网盘登录状态已失效（Cookie 过期），请在存储管理中重新扫码或更新 Cookie")
 		}
+		if backendType == "pan123" {
+			if strings.Contains(low, "短信") || strings.Contains(low, "安全验证") || strings.Contains(low, "微信") {
+				return errors.New("123云盘触发安全验证（短信验证码或微信登录），请先在 123云盘官网完成验证或改为粘贴 Web Access Token")
+			}
+			return errors.New("123云盘认证失败或令牌已过期，请检查开放平台凭证、账号密码或更新 Access Token")
+		}
 		return errors.New("认证失败，请检查账号、密码、OAuth Token 或访问密钥是否正确")
 	case strings.Contains(low, "429") || strings.Contains(low, "too many requests"):
 		if backendType == "quark" {
 			return errors.New("夸克网盘接口触发限流（429），请降低并发数或稍后重试")
+		}
+		if backendType == "pan123" {
+			return errors.New("123云盘接口触发限流（429），请降低并发数或调整接口限流速率后重试")
 		}
 		return errors.New("远端存储接口触发限流（429），请降低并发或稍后重试")
 	case strings.Contains(low, "accessdenied") || strings.Contains(low, "403") || strings.Contains(low, "forbidden") || strings.Contains(low, "permission denied"):
@@ -290,10 +360,38 @@ func dispatchTokenUpdate(remoteName string, original map[string]string, field, v
 	if remoteName == "" || original == nil || field == "" || value == "" || value == strings.TrimSpace(original[field]) {
 		return
 	}
+	dispatchTokenFieldsUpdate(remoteName, original, map[string]string{field: value}, opts)
+}
+
+func dispatchPan123TokenUpdate(remoteName string, original map[string]string, accessToken string, expiresAt time.Time, opts SessionOptions) {
+	accessToken = strings.TrimSpace(accessToken)
+	if remoteName == "" || original == nil || accessToken == "" {
+		return
+	}
+	fields := map[string]string{}
+	if accessToken != strings.TrimSpace(original["access_token"]) {
+		fields["access_token"] = accessToken
+	}
+	if !expiresAt.IsZero() {
+		expStr := expiresAt.UTC().Format(time.RFC3339)
+		if expStr != strings.TrimSpace(original["token_expires_at"]) {
+			fields["token_expires_at"] = expStr
+		}
+	}
+	if len(fields) == 0 {
+		return
+	}
+	dispatchTokenFieldsUpdate(remoteName, original, fields, opts)
+}
+
+func dispatchTokenFieldsUpdate(remoteName string, original map[string]string, fields map[string]string, opts SessionOptions) {
+	if remoteName == "" || original == nil || len(fields) == 0 {
+		return
+	}
 	updates := map[string]TokenUpdate{
 		remoteName: {
 			Original: maps.Clone(original),
-			Fields:   map[string]string{field: value},
+			Fields:   maps.Clone(fields),
 		},
 	}
 	if opts.OnTokenUpdate != nil {
@@ -580,6 +678,10 @@ func (c Config) SessionFor(specs []SessionSpec, opts SessionOptions) (*Session, 
 		if p == nil {
 			continue
 		}
+		if p["type"] == "pan123" {
+			initialRemotes[n] = maps.Clone(p)
+			continue
+		}
 		if tracked := tokenRefreshableFields(p["type"]); len(tracked) > 0 {
 			for _, field := range tracked {
 				if val := strings.TrimSpace(p[field]); val != "" {
@@ -638,6 +740,25 @@ func (c Config) SessionFor(specs []SessionSpec, opts SessionOptions) (*Session, 
 			// Always expose Quark's zero-cost native MD5 via <oc:checksums>
 			// because /file/sort returns md5 in the listing response itself.
 			davURL, err := s.mountBridgeDAV(&quarkBridgeFS{client: qClient}, curMode, true)
+			if err != nil {
+				return nil, err
+			}
+			fmt.Fprintf(&conf, "[%s]\ntype = webdav\nvendor = owncloud\nnextcloud_chunk_size = 0\nurl = %s\n\n", n, davURL)
+			continue
+		}
+		if p["type"] == "pan123" {
+			remoteName := n
+			pClient, err := newPan123ClientFromParams(p, opts, func(newToken string, expiresAt time.Time) {
+				s.recordInProcessTokenUpdate(remoteName, "access_token", newToken)
+				if !expiresAt.IsZero() {
+					s.recordInProcessTokenUpdate(remoteName, "token_expires_at", expiresAt.UTC().Format(time.RFC3339))
+				}
+			})
+			if err != nil {
+				return nil, err
+			}
+			// Expose 123Pan's zero-cost native MD5 via <oc:checksums>.
+			davURL, err := s.mountBridgeDAV(&pan123BridgeFS{client: pClient}, curMode, true)
 			if err != nil {
 				return nil, err
 			}

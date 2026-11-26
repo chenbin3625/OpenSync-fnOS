@@ -375,7 +375,7 @@ func DeleteJob(jobID int64) error {
 		if _, err := tx.Exec("DELETE FROM job_task WHERE jobId=?", jobID); err != nil {
 			return err
 		}
-		for _, table := range []string{"sync_file_state", "sync_state"} {
+		for _, table := range []string{"sync_file_state", "sync_state", "bisync_entry", "bisync_root_meta", "bisync_conflict"} {
 			if exists, err := txTableExists(tx, table); err != nil {
 				return err
 			} else if exists {
@@ -651,16 +651,20 @@ func GetJobTasksByIDs(taskIDs []int64) ([]map[string]interface{}, error) {
 }
 
 // GetLatestTaskPerJob returns the most recent job_task record for every jobId.
-func GetLatestTaskPerJob() (map[int64]map[string]interface{}, error) {
-	rows, err := FetchAllToTable(`
-		SELECT id, jobId, status, errMsg, runTime, taskNum, createTime
-		FROM (
-			SELECT id, jobId, status, errMsg, runTime, taskNum, createTime,
-			       ROW_NUMBER() OVER (PARTITION BY jobId ORDER BY createTime DESC, id DESC) AS rn
-			FROM job_task
-		)
-		WHERE rn = 1
-	`)
+func GetLatestTaskPerJob(jobIDs ...int64) (map[int64]map[string]interface{}, error) {
+	query := `
+		SELECT t.id, t.jobId, t.status, t.errMsg, t.runTime, t.taskNum, t.createTime
+		FROM job AS j JOIN job_task AS t ON t.id = (
+			SELECT id FROM job_task WHERE jobId = j.id
+			ORDER BY createTime DESC, id DESC LIMIT 1
+		)`
+	var args []interface{}
+	if len(jobIDs) > 0 {
+		var clause string
+		clause, args = int64InClause(jobIDs)
+		query += " WHERE j.id IN (" + clause + ")"
+	}
+	rows, err := FetchAllToTable(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1092,13 +1096,6 @@ func UpdateJobTaskStatusAndNum(taskID int64, status int, errMsg *string, taskNum
 	return ExecuteUpdate("UPDATE job_task SET status=?, errMsg=?, taskNum=?, runTime=strftime('%s','now') WHERE id=?", status, errMsg, taskNum, taskID)
 }
 
-// UpdateJobTaskStatusAndNumPreserveRunTime refreshes task status and counters
-// after deferred deletion approval executes without altering the sync task's
-// original runTime.
-func UpdateJobTaskStatusAndNumPreserveRunTime(taskID int64, status int, errMsg *string, taskNum string) error {
-	return ExecuteUpdate("UPDATE job_task SET status=?, errMsg=?, taskNum=? WHERE id=?", status, errMsg, taskNum, taskID)
-}
-
 // UpdateJobTaskStatusClearNum records a final status without counters. taskNum
 // is left NULL so the task list recomputes it on the next read instead of
 // caching counters that could not be read.
@@ -1185,7 +1182,7 @@ func GetJobTaskItemList(params map[string]interface{}) (map[string]interface{}, 
 
 const maxExportTaskItemRows = 50000
 
-// GetJobTaskItemsForExport fetches filtered task items bounded by limit for CSV/TXT export.
+// GetJobTaskItemsForExport fetches filtered task items bounded by limit for CSV export.
 func GetJobTaskItemsForExport(params map[string]interface{}, limit int) ([]map[string]interface{}, error) {
 	if limit <= 0 || limit > maxExportTaskItemRows {
 		limit = maxExportTaskItemRows
@@ -1505,58 +1502,6 @@ func escapeLike(s string) string {
 	s = strings.ReplaceAll(s, `%`, `\%`)
 	s = strings.ReplaceAll(s, `_`, `\_`)
 	return s
-}
-
-// --- Pending Delete Approval ---
-
-// UpsertPendingDeleteApproval persists a deferred deletion approval for jobID.
-// It is a no-op when the database is not initialized or does not contain the
-// pending_delete_approval table (e.g. isolated in-memory unit tests).
-func UpsertPendingDeleteApproval(jobID, taskID int64, payload string, createdAt, expiresAt int64) error {
-	handle := dbIfInitialized()
-	if handle == nil {
-		return nil
-	}
-	exists, err := dbTableExists(handle, "pending_delete_approval")
-	if err != nil || !exists {
-		return err
-	}
-	return ExecuteUpdate(
-		`INSERT INTO pending_delete_approval (jobId, taskId, payload, createdAt, expiresAt)
-		 VALUES (?, ?, ?, ?, ?)
-		 ON CONFLICT(jobId) DO UPDATE SET
-		   taskId=excluded.taskId,
-		   payload=excluded.payload,
-		   createdAt=excluded.createdAt,
-		   expiresAt=excluded.expiresAt`,
-		jobID, taskID, payload, createdAt, expiresAt,
-	)
-}
-
-// DeletePendingDeleteApproval removes a persisted deferred deletion approval.
-func DeletePendingDeleteApproval(jobID int64) error {
-	handle := dbIfInitialized()
-	if handle == nil {
-		return nil
-	}
-	exists, err := dbTableExists(handle, "pending_delete_approval")
-	if err != nil || !exists {
-		return err
-	}
-	return ExecuteUpdate("DELETE FROM pending_delete_approval WHERE jobId=?", jobID)
-}
-
-// ListPendingDeleteApprovals returns all persisted deferred deletion approvals.
-func ListPendingDeleteApprovals() ([]map[string]interface{}, error) {
-	handle := dbIfInitialized()
-	if handle == nil {
-		return nil, nil
-	}
-	exists, err := dbTableExists(handle, "pending_delete_approval")
-	if err != nil || !exists {
-		return nil, err
-	}
-	return FetchAllToTable("SELECT jobId, taskId, payload, createdAt, expiresAt FROM pending_delete_approval ORDER BY createdAt DESC, jobId ASC")
 }
 
 // ForEachRecentTaskWithTime streams recent tasks since unix timestamp including

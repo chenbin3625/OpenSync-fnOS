@@ -35,7 +35,7 @@ describe("existing synchronization contracts", () => {
       "会删除目标端多余文件",
     );
     expect(methodOptions.map((method) => method.description).join("\n")).toContain(
-      "rclone bisync",
+      "首次运行建立同步基线",
     );
 
     for (const method of [0, 1]) {
@@ -292,7 +292,7 @@ describe("existing synchronization contracts", () => {
       dstPath: ["/c"],
     });
   });
-  it("normalizes legacy move methods to continuous one-way sync on edit", () => {
+  it("preserves a legacy move task when saving edits", () => {
     const job = {
       id: 9,
       alistId: 7,
@@ -307,9 +307,13 @@ describe("existing synchronization contracts", () => {
     };
     const form = jobToForm(job);
 
-    expect(form.method).toBe(0);
-    expect(form.isCron).toBe(3);
-    expect(buildJobPayload(form)).toMatchObject({ method: 0, isCron: 3 });
+    const edited = { ...form, remark: "改名" };
+    expect(validateJobForm(edited)).toBe("");
+    expect(buildJobPayload(edited)).toMatchObject({
+      method: 2,
+      isCron: 2,
+      remark: "改名",
+    });
   });
 
   it("rejects sources and destinations that are equal or nested", () => {
@@ -658,7 +662,6 @@ describe("existing synchronization contracts", () => {
         userAgent: "OpenSync/1.0",
         ioTimeout: "3m",
         conTimeout: "30s",
-        bisyncResyncMode: "newer",
         bisyncMaxDelete: 25,
         bisyncForce: true,
       }),
@@ -679,7 +682,6 @@ describe("existing synchronization contracts", () => {
       userAgent: "OpenSync/1.0",
       ioTimeout: "3m",
       conTimeout: "30s",
-      bisyncResyncMode: "newer",
       bisyncMaxDelete: 25,
       bisyncForce: true,
     });

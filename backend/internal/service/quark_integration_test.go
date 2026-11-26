@@ -86,7 +86,8 @@ func TestPersistRefreshedQuarkCookie(t *testing.T) {
 		"cookie":       "__pus=abc; __puus=old_puus",
 		"account_name": "测试号",
 	}
-	cfg := native.Config{"qk": orig}
+	pan := map[string]string{"type": "pan123", "protocol": "open_api", "access_token": "old"}
+	cfg := native.Config{"qk": orig, "pan": pan}
 	raw, _ := json.Marshal(cfg)
 	id, remark, _, _, err := loadExistingNativeRowFull()
 	if err != nil || id == 0 {
@@ -115,9 +116,16 @@ func TestPersistRefreshedQuarkCookie(t *testing.T) {
 			Original: orig,
 			Fields:   map[string]string{"cookie": "__pus=abc; __puus=new_puus"},
 		},
+		"pan": {
+			Original: pan,
+			Fields:   map[string]string{"access_token": "rotated", "token_expires_at": "2026-11-28T00:00:00Z"},
+		},
 	})
 	_, _, _, loaded, err = loadExistingNativeRowFull()
 	if err != nil || !strings.Contains(loaded["qk"]["cookie"], "__puus=new_puus") {
 		t.Fatalf("expected rotated quark cookie persisted, got %+v err=%v", loaded["qk"], err)
+	}
+	if loaded["pan"]["access_token"] != "rotated" || loaded["pan"]["token_expires_at"] != "2026-11-28T00:00:00Z" {
+		t.Fatal("expected both refreshed 123 cloud token fields to persist")
 	}
 }

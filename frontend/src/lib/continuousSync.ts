@@ -21,10 +21,8 @@ export const syncStatusLabels: Record<SyncStatus["state"], string> = {
   syncing: "同步中",
   synced: "已同步",
   waiting_window: "等待运行窗口",
-  waiting_approval: "待确认删除",
   paused: "已暂停",
   error: "同步异常",
-  needs_rebuild: "待重建基线",
 };
 
 export type SyncStatusTone = "success" | "primary" | "warning" | "danger" | "muted";
@@ -39,10 +37,8 @@ export function syncStatusTone(state?: SyncStatus["state"]): SyncStatusTone {
     case "syncing":
       return "primary";
     case "waiting_window":
-    case "waiting_approval":
       return "warning";
     case "error":
-    case "needs_rebuild":
       return "danger";
     case "paused":
     default:
@@ -51,9 +47,7 @@ export function syncStatusTone(state?: SyncStatus["state"]): SyncStatusTone {
 }
 
 export function isSyncStatusError(status?: SyncStatus | null): boolean {
-  return Boolean(
-    status && (status.state === "error" || status.state === "needs_rebuild"),
-  );
+  return Boolean(status && status.state === "error");
 }
 
 export function parseJobExtraFlagsObject(
@@ -187,7 +181,6 @@ export function resolveEffectiveSyncStatus(job: {
   enable: number;
   running?: boolean;
   paused?: boolean;
-  pendingApproval?: unknown;
   syncStatus?: SyncStatus | null;
 }): SyncStatus {
   if (job.syncStatus) return job.syncStatus;
@@ -205,17 +198,6 @@ export function resolveEffectiveSyncStatus(job: {
   if (job.running) {
     return {
       state: job.paused ? "paused" : "syncing",
-      pendingChanges: 0,
-      lastSuccess: 0,
-      lastPoll: 0,
-      nextPoll: 0,
-      error: "",
-      failures: 0,
-    };
-  }
-  if (job.pendingApproval) {
-    return {
-      state: "waiting_approval",
       pendingChanges: 0,
       lastSuccess: 0,
       lastPoll: 0,

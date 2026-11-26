@@ -53,6 +53,19 @@ func writeSyncFlowConfig(t *testing.T, id int64, cfg native.Config) {
 	}
 }
 
+func TestNativeJobRejectsEquivalentPan123RootIDs(t *testing.T) {
+	cfg := native.Config{
+		"first":  {"type": "pan123", "protocol": "open_api", "client_id": "account", "root_folder_id": "0"},
+		"second": {"type": "pan123", "protocol": "open_api", "client_id": "account", "root_folder_id": "00"},
+	}
+	err := validateNativeSyncPaths(cfg, map[string]interface{}{
+		"method": 2, "srcPath": []string{"/first/photos"}, "dstPath": []string{"/second/photos"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "实际目录重叠") {
+		t.Fatalf("move between identical 123 roots: %v", err)
+	}
+}
+
 func TestNativeJobRejectsCrossPairPhysicalSourceOverlap(t *testing.T) {
 	cfg := native.Config{
 		"a": {"type": "s3", "provider": "Other", "endpoint": "https://storage.example.test"},

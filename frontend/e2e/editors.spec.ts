@@ -69,9 +69,8 @@ test("task editor keeps size filters disabled until selected", async ({
   await page.goto("/app/opensync/tasks?jobId=42");
   await page
     .locator(".overview-card")
-    .getByRole("button", { name: "更多操作", exact: true })
+    .getByRole("button", { name: "编辑任务", exact: true })
     .click();
-  await page.locator(".semi-dropdown-menu").getByText("设置", { exact: true }).click();
   const dialog = page.getByRole("dialog");
 
   await page.getByRole("tab", { name: "过滤规则", exact: true }).click();
@@ -209,9 +208,8 @@ test("saves a fractional file-size threshold while the input is focused", async 
   await page.goto("/app/opensync/tasks?jobId=42");
   await page
     .locator(".overview-card")
-    .getByRole("button", { name: "更多操作", exact: true })
+    .getByRole("button", { name: "编辑任务", exact: true })
     .click();
-  await page.locator(".semi-dropdown-menu").getByText("设置", { exact: true }).click();
   const dialog = page.getByRole("dialog");
   await page.getByRole("tab", { name: "过滤规则", exact: true }).click();
 
@@ -284,9 +282,8 @@ test("task editor provides preset and custom file type filters", async ({
   await page.goto("/app/opensync/tasks?jobId=42");
   await page
     .locator(".overview-card")
-    .getByRole("button", { name: "更多操作", exact: true })
+    .getByRole("button", { name: "编辑任务", exact: true })
     .click();
-  await page.locator(".semi-dropdown-menu").getByText("设置", { exact: true }).click();
   const dialog = page.getByRole("dialog");
   await expect(dialog).toBeVisible();
 
@@ -351,21 +348,17 @@ test("task editor provides preset and custom file type filters", async ({
   await expect(customTag).toHaveCount(0);
 });
 
-test("engine form rejects invalid addresses and protects dirty cancellation", async ({
+test("storage form rejects invalid names and protects dirty cancellation", async ({
   page,
 }) => {
   await page.goto("/app/opensync/engines");
-  await page.getByRole("button", { name: "添加引擎", exact: true }).click();
-  await page
-    .getByRole("textbox", { name: "引擎名称", exact: true })
-    .fill("校验测试引擎");
-  await page.getByRole("button", { name: "保存", exact: true }).click();
+  await page.getByRole("button", { name: "添加远程存储", exact: true }).click();
+  const name = page.getByRole("textbox", { name: "存储名称", exact: true });
+  await name.fill("invalid/name");
+  await page.getByRole("button", { name: "保存存储", exact: true }).click();
   await expect(
-    page.getByText("请输入有效的 HTTP / HTTPS 引擎地址"),
+    page.getByText(/^存储名称需以字母/).first(),
   ).toBeVisible();
-  await page
-    .getByRole("textbox", { name: "引擎地址", exact: true })
-    .fill("ftp://invalid");
   await page.getByRole("button", { name: "取消", exact: true }).click();
   await expect(page.getByText("放弃未保存的修改？")).toBeVisible();
   await page.getByRole("button", { name: "放弃", exact: true }).click();
@@ -402,7 +395,7 @@ test("notification channels switch without retaining unrelated fields", async ({
     page.getByText("请输入有效的 Webhook URL", { exact: true }),
   ).toBeVisible();
   await channelSelect.click();
-  const wecomOption = page.getByRole("option").filter({ hasText: "企业微信" });
+  const wecomOption = page.getByRole("option").filter({ hasText: /企业微信$/ });
   await wecomOption.click();
   await expect(wecomOption).toBeHidden();
   await expect(
@@ -430,9 +423,7 @@ test("settings uses plain inputs, validates limits and keeps backend units", asy
     exact: true,
   });
   await expect(timeout).toBeVisible();
-  await expect(
-    page.locator(".settings-card-body .setting-row .field-tip-icon"),
-  ).toHaveCount(6);
+  await expect(page.getByLabel("任务超时说明", { exact: true })).toBeVisible();
   await page.getByLabel("任务超时说明", { exact: true }).hover();
   await expect(
     page.getByText("单个任务运行超过该时长后自动标记为超时", { exact: true }),
@@ -536,9 +527,8 @@ test("directory picker scrolls when there are many folders", async ({ page }) =>
   await page.goto("/app/opensync/tasks?jobId=42");
   await page
     .locator(".overview-card")
-    .getByRole("button", { name: "更多操作", exact: true })
+    .getByRole("button", { name: "编辑任务", exact: true })
     .click();
-  await page.locator(".semi-dropdown-menu").getByText("设置", { exact: true }).click();
   const dialog = page.getByRole("dialog");
   await dialog.getByRole("combobox", { name: "选择源目录" }).first().click();
 
@@ -621,9 +611,8 @@ async function openPickerForEditedTask(
   await page.goto("/app/opensync/tasks?jobId=42");
   await page
     .locator(".overview-card")
-    .getByRole("button", { name: "更多操作", exact: true })
+    .getByRole("button", { name: "编辑任务", exact: true })
     .click();
-  await page.locator(".semi-dropdown-menu").getByText("设置", { exact: true }).click();
   const dialog = page.getByRole("dialog");
   const source = dialog.locator(".remote-paths").first();
   await source.getByRole("combobox", { name: "选择源目录" }).click();
@@ -633,6 +622,10 @@ async function openPickerForEditedTask(
   // 只展开未展开的节点：根目录加载后会自动展开，再点一次会收起
   const expand = async (key: string) => {
     await expect(option(key)).toBeVisible();
+    if (key === "/") {
+      await expect(option(key)).toHaveAttribute("aria-expanded", "true");
+      return;
+    }
     if ((await option(key).getAttribute("aria-expanded")) === "true") return;
     await option(key).locator(".semi-tree-option-expand-icon").click();
     await expect(option(key)).toHaveAttribute("aria-expanded", "true");
@@ -794,6 +787,7 @@ test("task editor previews destination folders live across path rules and edit d
 
   await page.goto("/app/opensync/tasks?jobId=51");
   await page.getByRole("button", { name: "新建任务", exact: true }).click();
+  await page.getByRole("button", { name: "高级设置", exact: true }).click();
   const dialog = page.getByRole("dialog");
   const preview = dialog.getByRole("region", { name: "同步位置预览" });
   await expect(preview).toContainText("选择源路径和目标路径后");
@@ -880,9 +874,8 @@ test("task editor previews destination folders live across path rules and edit d
 
   await page
     .locator(".overview-card")
-    .getByRole("button", { name: "更多操作", exact: true })
+    .getByRole("button", { name: "编辑任务", exact: true })
     .click();
-  await page.locator(".semi-dropdown-menu").getByText("设置", { exact: true }).click();
   const editDialog = page.getByRole("dialog");
   const editPreview = editDialog.getByRole("region", { name: "同步位置预览" });
   await expect(editPreview).toContainText("/backup/2/");
@@ -951,22 +944,20 @@ test("guides no-engine onboarding, detects cross-job conflicts, and deduplicates
   // 1. 无引擎时的冷启动引导
   await page.goto("/app/opensync/tasks");
   await expect(
-    page.getByRole("button", { name: "前往添加存储引擎", exact: true }),
+    page.getByRole("button", { name: "前往存储管理", exact: true }),
   ).toBeVisible();
   await page.getByRole("button", { name: "新建任务", exact: true }).click();
+  await page.getByRole("button", { name: "高级设置", exact: true }).click();
   const emptyDialog = page.getByRole("dialog");
-  await expect(emptyDialog.locator(".engine-empty-guide")).toContainText(
-    "还未添加存储引擎",
-  );
+  await expect(emptyDialog.locator(".engine-empty-guide")).toContainText("内置存储尚未就绪");
   await emptyDialog
-    .getByRole("button", { name: "前往引擎管理", exact: true })
+    .getByRole("button", { name: "前往存储管理", exact: true })
     .click();
   await expect(page).toHaveURL(/\/app\/opensync\/engines/);
 
   // 2. 有引擎和已有任务时：检测跨任务冲突、目录请求去重、日程预设与提前保存
   engines = [
-    { id: 1, remark: "主引擎", url: "https://engine.test", userName: "a" },
-    { id: 2, remark: "备引擎", url: "https://engine2.test", userName: "b" },
+    { id: 1, remark: "内置存储", url: "native://rclone", userName: "" },
   ];
   jobs = [
     {
@@ -987,8 +978,9 @@ test("guides no-engine onboarding, detects cross-job conflicts, and deduplicates
 
   await page.goto("/app/opensync/tasks?jobId=50");
   // 总览页显示所属引擎与过滤概览
-  await expect(page.locator(".overview-card")).toContainText("主引擎");
+  await expect(page.locator(".overview-card")).toContainText("已有相册备份");
   await page.getByRole("button", { name: "新建任务", exact: true }).click();
+  await page.getByRole("button", { name: "高级设置", exact: true }).click();
   const dialog = page.getByRole("dialog");
   await dialog.getByRole("textbox", { name: "任务名称", exact: true }).fill("新任务");
 
@@ -1013,13 +1005,6 @@ test("guides no-engine onboarding, detects cross-job conflicts, and deduplicates
   const preview = dialog.getByRole("region", { name: "同步位置预览" });
   await expect(preview.getByRole("alert")).toContainText("已有相册备份");
 
-  // 切换引擎触发二次确认
-  await dialog.getByRole("combobox", { name: "存储引擎", exact: true }).click();
-  await page.getByRole("option").filter({ hasText: "备引擎" }).click();
-  const confirm = page.getByRole("dialog").filter({ hasText: "切换存储引擎？" });
-  await expect(confirm).toBeVisible();
-  await confirm.getByRole("button", { name: "取消", exact: true }).click();
-
   // 改为不冲突的目标路径 /Backup2 后进入第 2 步
   await trees.nth(1).locator('[role="combobox"]').click({ position: { x: 2, y: 18 } });
   await popover
@@ -1035,10 +1020,10 @@ test("guides no-engine onboarding, detects cross-job conflicts, and deduplicates
   await expect(dialog.locator(".schedule-preview-card")).toContainText("远端每");
 
   // 切换远端轮询与完整核对快捷预设
-  await dialog.getByRole("button", { name: "5 分钟", exact: true }).click();
+  await dialog.getByRole("button", { name: "每 5 分钟", exact: true }).click();
   await expect(dialog.locator(".schedule-preview-plan")).toContainText("每 5 分钟");
 
-  await dialog.getByRole("button", { name: "每 6 小时", exact: true }).click();
+  await dialog.getByRole("button", { name: "6 小时", exact: true }).click();
   await expect(dialog.locator(".schedule-preview-plan")).toContainText("每 6 小时完整核对");
 
   // 第 2 步直接可见「保存」与可选的「过滤规则」按钮，且窄屏下不裁切
@@ -1150,10 +1135,11 @@ test("task editor quick-enables end-to-end crypt storage for remote destination"
 
   await page.goto("/app/opensync/tasks");
   await page.getByRole("button", { name: "新建任务" }).first().click();
+  await page.getByRole("button", { name: "高级设置", exact: true }).click();
 
   const editorDialog = page
     .getByRole("dialog")
-    .filter({ hasText: "新建任务" })
+    .filter({ hasText: "新建持续同步任务" })
     .first();
   await expect(editorDialog).toBeVisible();
 

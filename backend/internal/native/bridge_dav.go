@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"opensync/internal/pan123"
 	"opensync/internal/quark"
 )
 
@@ -212,6 +213,153 @@ func (q *quarkBridgeFS) Close() error {
 	return q.client.Close()
 }
 
+var (
+	pan123OptionsHookMu sync.RWMutex
+	pan123OptionsHook   func(*pan123.Options)
+)
+
+// setPan123OptionsHookForTest lets unit tests redirect 123Pan API calls to an
+// httptest.Server without exposing endpoint override fields in user config.
+func setPan123OptionsHookForTest(fn func(*pan123.Options)) func() {
+	pan123OptionsHookMu.Lock()
+	prev := pan123OptionsHook
+	pan123OptionsHook = fn
+	pan123OptionsHookMu.Unlock()
+	return func() {
+		pan123OptionsHookMu.Lock()
+		pan123OptionsHook = prev
+		pan123OptionsHookMu.Unlock()
+	}
+}
+
+func applyPan123OptionsHook(opts *pan123.Options) {
+	pan123OptionsHookMu.RLock()
+	fn := pan123OptionsHook
+	pan123OptionsHookMu.RUnlock()
+	if fn != nil {
+		fn(opts)
+	}
+}
+
+func newPan123ClientFromParams(p map[string]string, sessOpts SessionOptions, onTokenUpdate func(string, time.Time)) (*pan123.Client, error) {
+	proxyURL := strings.TrimSpace(p["proxy_url"])
+	if proxyURL == "" {
+		proxyURL = strings.TrimSpace(sessOpts.ProxyURL)
+	}
+	insecure := p["insecure_skip_verify"] == "true" || sessOpts.InsecureSkipVerify
+
+	var tps float64
+	if raw := strings.TrimSpace(p["tps_limit"]); raw != "" {
+		if v, err := strconv.ParseFloat(raw, 64); err == nil && v > 0 {
+			tps = v
+		}
+	}
+	var conc int
+	if raw := strings.TrimSpace(p["upload_concurrency"]); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v >= 1 && v <= pan123.MaxUploadConcurrency {
+			conc = v
+		}
+	}
+	var ttlMin int
+	if raw := strings.TrimSpace(p["direct_link_ttl"]); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			ttlMin = v
+		}
+	}
+	var expAt time.Time
+	if raw := strings.TrimSpace(p["token_expires_at"]); raw != "" {
+		if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+			expAt = parsed
+		}
+	}
+
+	opts := pan123.Options{
+		Protocol:           pan123.NormalizeProtocol(p["protocol"]),
+		ClientID:           strings.TrimSpace(p["client_id"]),
+		ClientSecret:       strings.TrimSpace(p["client_secret"]),
+		AccessToken:        strings.TrimSpace(p["access_token"]),
+		TokenExpiresAt:     expAt,
+		UseDirectLink:      p["use_direct_link"] == "true",
+		DirectLinkKey:      strings.TrimSpace(p["direct_link_key"]),
+		DirectLinkTTL:      ttlMin,
+		Username:           strings.TrimSpace(p["web_user"]),
+		Password:           p["web_password"],
+		Platform:           strings.TrimSpace(p["platform"]),
+		RootFolderID:       strings.TrimSpace(p["root_folder_id"]),
+		UserAgent:          strings.TrimSpace(p["user_agent"]),
+		ProxyURL:           proxyURL,
+		InsecureSkipVerify: insecure,
+		TPSLimit:           tps,
+		UploadConcurrency:  conc,
+		OnTokenUpdate:      onTokenUpdate,
+	}
+	applyPan123OptionsHook(&opts)
+	return pan123.NewClient(opts)
+}
+
+// pan123BridgeFS adapts *pan123.Client to the generic BridgeFS interface.
+type pan123BridgeFS struct {
+	client *pan123.Client
+}
+
+func (p *pan123BridgeFS) Stat(ctx context.Context, relPath string) (BridgeEntry, error) {
+	e, err := p.client.Stat(ctx, relPath)
+	if err != nil {
+		return BridgeEntry{}, err
+	}
+	return BridgeEntry{
+		Name:    e.Name,
+		IsDir:   e.IsDir,
+		Size:    e.Size,
+		ModTime: e.ModTime,
+		MD5:     e.MD5,
+	}, nil
+}
+
+func (p *pan123BridgeFS) ListDir(ctx context.Context, relPath string) ([]BridgeEntry, error) {
+	items, err := p.client.ListDir(ctx, relPath)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]BridgeEntry, 0, len(items))
+	for _, e := range items {
+		out = append(out, BridgeEntry{
+			Name:    e.Name,
+			IsDir:   e.IsDir,
+			Size:    e.Size,
+			ModTime: e.ModTime,
+			MD5:     e.MD5,
+		})
+	}
+	return out, nil
+}
+
+func (p *pan123BridgeFS) OpenRead(ctx context.Context, relPath, rangeHeader, ifRange string) (io.ReadCloser, http.Header, int, error) {
+	return p.client.DownloadStream(ctx, relPath, rangeHeader, ifRange)
+}
+
+func (p *pan123BridgeFS) Put(ctx context.Context, relPath string, body io.Reader, size int64, modTime *time.Time) error {
+	_, err := p.client.UploadStream(ctx, relPath, body, size, modTime)
+	return err
+}
+
+func (p *pan123BridgeFS) Mkdir(ctx context.Context, relPath string) error {
+	_, err := p.client.MkdirAll(ctx, relPath)
+	return err
+}
+
+func (p *pan123BridgeFS) Move(ctx context.Context, srcRel, dstRel string, overwrite bool) error {
+	return p.client.Move(ctx, srcRel, dstRel, overwrite)
+}
+
+func (p *pan123BridgeFS) Delete(ctx context.Context, relPath string) error {
+	return p.client.Delete(ctx, relPath)
+}
+
+func (p *pan123BridgeFS) Close() error {
+	return p.client.Close()
+}
+
 func writeBridgeError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, os.ErrNotExist):
@@ -220,11 +368,11 @@ func writeBridgeError(w http.ResponseWriter, err error) {
 		http.Error(w, "Precondition Failed", http.StatusPreconditionFailed)
 	case errors.Is(err, os.ErrPermission):
 		http.Error(w, "Forbidden", http.StatusForbidden)
-	case errors.Is(err, quark.ErrUnauthorized):
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-	case errors.Is(err, quark.ErrRateLimited):
+	case errors.Is(err, quark.ErrUnauthorized), errors.Is(err, pan123.ErrUnauthorized), errors.Is(err, pan123.ErrAuthChallenge):
+		http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+	case errors.Is(err, quark.ErrRateLimited), errors.Is(err, pan123.ErrRateLimited):
 		http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
-	case errors.Is(err, quark.ErrInvalidName):
+	case errors.Is(err, quark.ErrInvalidName), errors.Is(err, pan123.ErrInvalidName):
 		http.Error(w, "Bad Request", http.StatusBadRequest)
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		http.Error(w, "Request Timeout", http.StatusGatewayTimeout)

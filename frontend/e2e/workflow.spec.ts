@@ -7,7 +7,7 @@ import type { AddressInfo } from "node:net";
 // DELETEs used for cleanup must declare it explicitly.
 const jsonWrite = { headers: { "Content-Type": "application/json" } };
 
-// Only the external engine is substituted; app routes, SQLite and UI are real.
+// Only the remote storage and webhook are substituted; app routes, SQLite and UI are real.
 let engine: Server, engineUrl: string;
 let webhookBody: unknown;
 let webhookCalls = 0;
@@ -24,33 +24,11 @@ test.beforeAll(async () => {
       response.end("{}");
       return;
     }
-    if (request.url === "/api/me") {
-      response.end(
-        JSON.stringify({
-          code: 200,
-          message: "ok",
-          data: { username: "contract-engine" },
-        }),
-      );
-      return;
-    }
-    if (request.url === "/api/fs/list") {
-      let body = "";
-      for await (const chunk of request) body += chunk;
-      const content =
-        JSON.parse(body).path === "/"
-          ? [
-              { name: "Photos", is_dir: true },
-              { name: "Backup", is_dir: true },
-            ]
-          : [];
-      response.end(
-        JSON.stringify({
-          code: 200,
-          message: "ok",
-          data: { content, total: content.length },
-        }),
-      );
+    if (request.method === "PROPFIND") {
+      const path = new URL(request.url || "/", "http://localhost").pathname;
+      const dirs = path === "/" && request.headers.depth === "1" ? ["/", "/Photos/", "/Backup/"] : [path];
+      response.writeHead(207, { "Content-Type": "application/xml" });
+      response.end(`<D:multistatus xmlns:D="DAV:">${dirs.map((dir) => `<D:response><D:href>${dir}</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>`).join("")}</D:multistatus>`);
       return;
     }
     response.end(JSON.stringify({ code: 200, message: "ok", data: {} }));
@@ -136,77 +114,41 @@ test.afterAll(async () => {
   await new Promise<void>((resolve) => engine.close(() => resolve()));
 });
 
-test("creates an engine and manual job, then edits without changing sync mode", async ({
+test("creates a WebDAV storage and continuous task, then edits without changing sync mode", async ({
   page,
   request,
 }, testInfo) => {
   test.setTimeout(90000);
+  page.setDefaultTimeout(8000);
   const name = "合同测试-" + testInfo.project.name + "-" + Date.now();
-  let engineId: number | undefined, jobId: number | undefined;
+  let jobId: number | undefined;
+  let storageCreated = false;
   try {
     await page.goto("/app/opensync/engines");
-    await page.getByRole("button", { name: "添加引擎", exact: true }).click();
-    await page
-      .getByRole("textbox", { name: "引擎地址", exact: true })
-      .fill(engineUrl);
-    await page
-      .getByRole("textbox", { name: "API Token", exact: true })
-      .fill("test-fixture-token");
-    await page
-      .getByRole("textbox", { name: "引擎名称", exact: true })
-      .fill(name);
-    await page.getByRole("button", { name: "保存", exact: true }).click();
+    await page.getByRole("button", { name: "添加远程存储", exact: true }).click();
+    await page.getByRole("button", { name: "OpenList / AList (WebDAV)", exact: true }).click();
+    await page.getByRole("textbox", { name: "存储名称", exact: true }).fill(name);
+    await page.getByRole("textbox", { name: "WebDAV 地址", exact: true }).fill(engineUrl);
+    await page.getByRole("button", { name: "保存存储", exact: true }).click();
     await expect(page.getByRole("dialog")).not.toBeVisible();
+    storageCreated = true;
     await expect(
-      page.getByRole("heading", { name, exact: true }),
+      page.locator(".storage-card").filter({ hasText: name }).getByRole("heading"),
     ).toBeVisible();
-    const engines = await (await request.get("/app/opensync/svr/alist")).json();
-    engineId = engines.data.find(
-      (e: { url: string }) => e.url === engineUrl,
-    ).id;
     await page.goto("/app/opensync/tasks");
     await page.getByRole("button", { name: "新建任务", exact: true }).click();
-    await page.getByRole("combobox", { name: "存储引擎", exact: true }).click();
-    await page.getByRole("option").filter({ hasText: name }).click();
+    await page.getByRole("button", { name: "高级设置", exact: true }).click();
     const dialog = page.getByRole("dialog");
-    const trees = dialog.locator(".remote-paths");
-    await trees.nth(0).locator('[role="combobox"]').click();
-    const sourceRoot = page.locator('.semi-tree-option[data-key="/"]').first();
-    if ((await sourceRoot.getAttribute("aria-expanded")) !== "true")
-      await sourceRoot.locator(".semi-tree-option-expand-icon").click();
-    await page
-      .locator(".semi-tree-option")
-      .filter({ hasText: /^Photos$/ })
-      .click();
-    await page
-      .getByRole("heading", { name: "新建任务", exact: true })
-      .click();
-    await trees.nth(1).locator('[role="combobox"]').click();
-    const targetRoot = page.locator('.semi-tree-option[data-key="/"]').first();
-    if ((await targetRoot.getAttribute("aria-expanded")) !== "true")
-      await targetRoot.locator(".semi-tree-option-expand-icon").click();
-    await page
-      .locator(".semi-tree-option")
-      .filter({ hasText: /^Backup$/ })
-      .click();
-    await page
-      .getByRole("heading", { name: "新建任务", exact: true })
-      .click();
+    const manualPath = dialog.getByPlaceholder("/存储名称/存储桶/子目录");
+    await manualPath.fill(`/${name}/Photos`);
+    await dialog.getByRole("button", { name: "添加到源路径", exact: true }).click();
+    await manualPath.fill(`/${name}/Backup`);
+    await dialog.getByRole("button", { name: "添加到目标路径", exact: true }).click();
     await page
       .getByRole("textbox", { name: "任务名称", exact: true })
       .fill(name);
     await page.getByRole("button", { name: "下一步", exact: true }).click();
     await expect(dialog.locator(".schedule-preview-card")).toBeVisible();
-    // 高级选项（目录缓存）折叠收纳在「同步设置」步内
-    await dialog
-      .getByRole("button", { name: /高级选项（目录缓存）/ })
-      .click();
-    await expect(
-      dialog.locator(".setting-row").filter({ hasText: "源端缓存" }),
-    ).toBeVisible();
-    await expect(
-      dialog.locator(".setting-row").filter({ hasText: "目标缓存" }),
-    ).toBeVisible();
     // 第 2 步可直接保存，不必强制经过可选的「过滤规则」步
     const posted = page.waitForRequest(
       (r) => r.url().endsWith("/svr/job") && r.method() === "POST",
@@ -236,13 +178,8 @@ test("creates an engine and manual job, then edits without changing sync mode", 
     const forceMobileClick = testInfo.project.name.includes("mobile");
     await page
       .locator(".overview-card")
-      .getByRole("button", { name: "更多操作", exact: true })
+      .getByRole("button", { name: "编辑任务", exact: true })
       .click({ force: forceMobileClick });
-    const editButton = page
-      .locator(".semi-dropdown-menu")
-      .getByText("设置", { exact: true });
-    await expect(editButton).toBeVisible();
-    await editButton.click({ force: forceMobileClick });
     await expect(
       page.getByRole("tab", { name: "过滤规则", exact: true }),
     ).toBeVisible();
@@ -277,10 +214,6 @@ test("creates an engine and manual job, then edits without changing sync mode", 
       updated.data.dataList.find((j: { id: number }) => j.id === jobId),
     ).toMatchObject({ method: 0, isCron: 3, remark: name + "-修改" });
   } finally {
-    if (!engineId) {
-      const es = await (await request.get("/app/opensync/svr/alist")).json();
-      engineId = es.data.find((e: { url: string }) => e.url === engineUrl)?.id;
-    }
     if (!jobId) {
       const js = await (
         await request.get("/app/opensync/svr/job?pageNum=1&pageSize=100")
@@ -290,6 +223,6 @@ test("creates an engine and manual job, then edits without changing sync mode", 
       )?.id;
     }
     if (jobId) await request.delete(`/app/opensync/svr/job?id=${jobId}`, jsonWrite);
-    if (engineId) await request.delete(`/app/opensync/svr/alist?id=${engineId}`, jsonWrite);
+    if (storageCreated) await request.delete(`/app/opensync/svr/native/storage?name=${encodeURIComponent(name)}`, jsonWrite);
   }
 });

@@ -36,9 +36,9 @@ export function useResource<T>(
     try {
       const result = await fetchRef.current(controller.signal);
       if (!controller.signal.aborted && id === requestRef.current) {
-        setDataState(result);
-        setError("");
-        setRefreshError("");
+        setDataState((prev) => (isDeepEqual(prev, result) ? prev : result));
+        setError((prev) => (prev ? "" : prev));
+        setRefreshError((prev) => (prev ? "" : prev));
       }
     } catch (err) {
       if (!controller.signal.aborted && id === requestRef.current) {

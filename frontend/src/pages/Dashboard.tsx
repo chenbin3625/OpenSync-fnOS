@@ -23,9 +23,7 @@ import {
   IconChevronRight,
   IconClockStroked,
   IconCloudStroked,
-  IconCopy,
   IconDeleteStroked,
-  IconEyeOpenedStroked,
   IconPause,
   IconPlay,
   IconPlusStroked,
@@ -50,8 +48,6 @@ import {
   errorToast,
 } from "../components/common";
 import { BwLimitChip } from "../components/BwLimitChip";
-import { DryRunModal } from "../components/DryRunModal";
-import { FullSyncApprovalModal } from "../components/FullSyncApprovalModal";
 import { describeBwLimit } from "../lib/bwLimit";
 import {
   buildSpeedChartGeometry,
@@ -64,11 +60,11 @@ import {
   sortStorageQuotas,
   splitSpeedParts,
 } from "../lib/dashboardMetrics";
-import { useAction, useResource } from "../lib/hooks";
+import { isDeepEqual, useAction, useResource } from "../lib/hooks";
 import { formatDisplayPathList } from "../lib/syncPathPreview";
 import {
-  cloneJobToForm,
   isLegacyOpenListJob,
+  requiresFirstMirrorPreview,
 } from "../lib/taskForm";
 import {
   formatDuration,
@@ -80,7 +76,6 @@ import { formatTimestamp } from "../utils/date";
 import type {
   DashboardJobItem,
   DashboardSpeedSample,
-  FullSyncApproval,
   JobItem,
 } from "../types";
 import {
@@ -101,7 +96,6 @@ type StatusFilter =
   | "running"
   | "synced"
   | "queued"
-  | "approval"
   | "failed"
   | "disabled";
 
@@ -127,7 +121,6 @@ function directionTagColor(directionKey: string): "blue" | "violet" | "cyan" | "
 
 function jobDotTone(job: DashboardJobItem, legacy = false): string {
   if (legacy) return "kpi-dot kpi-dot--danger";
-  if (job.pendingApproval) return "kpi-dot kpi-dot--warning";
   if (job.running && job.paused) return "kpi-dot kpi-dot--warning";
   if (job.running) return "kpi-dot kpi-dot--primary kpi-dot--pulse";
   if (job.queued) return "kpi-dot kpi-dot--primary";
@@ -246,20 +239,7 @@ export default function Dashboard() {
   const [methodFilter, setMethodFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
-  const [dryRunJob, setDryRunJob] = useState<{ id: number; name: string } | null>(
-    null,
-  );
-  const [approvalModal, setApprovalModal] = useState<{
-    jobId: number;
-    jobName: string;
-    approval: FullSyncApproval;
-    loading?: boolean;
-  } | null>(null);
-  const [editorState, setEditorState] = useState<{
-    open: boolean;
-    job: JobItem | null;
-    initialDraft?: ReturnType<typeof cloneJobToForm> | null;
-  }>({ open: false, job: null, initialDraft: null });
+  const [editorOpen, setEditorOpen] = useState(false);
 
   const refreshAll = useCallback(
     async (silent = true) => {
@@ -276,20 +256,23 @@ export default function Dashboard() {
   const data = dashboard.data;
   const allJobs = data?.jobs || [];
 
-  // Record rolling speed history on each dashboard snapshot so the live curve
-  // works smoothly with both server-side history and legacy fixtures.
+  // Record rolling speed history on each dashboard snapshot only when the
+  // server does not supply speedHistory (legacy fixtures), avoiding a
+  // redundant second render on every 2s poll.
   useEffect(() => {
     if (!data) return;
     const rt = data.realtime;
+    if (rt && rt.speedHistory && rt.speedHistory.length > 0) return;
     const fallbackSpeed = (data.jobs || []).reduce(
       (sum, j) => sum + (j.running && !j.paused ? safeSpeed(j.liveSpeed) : 0),
       0,
     );
     const currentSpeed = rt ? safeSpeed(rt.totalSpeed) : fallbackSpeed;
     const sampleTs = rt?.sampledAt || Math.floor(Date.now() / 1000);
-    setLocalSpeedHistory((prev) =>
-      mergeSpeedHistory(prev, rt?.speedHistory, sampleTs, currentSpeed),
-    );
+    setLocalSpeedHistory((prev) => {
+      const next = mergeSpeedHistory(prev, undefined, sampleTs, currentSpeed);
+      return isDeepEqual(prev, next) ? prev : next;
+    });
   }, [data]);
 
   const hasLiveActivity =
@@ -342,7 +325,9 @@ export default function Dashboard() {
           if (Boolean(a.paused) !== Boolean(b.paused)) {
             return a.paused ? 1 : -1;
           }
-          return safeSpeed(b.liveSpeed) - safeSpeed(a.liveSpeed);
+          // Keep row order stable across 2s speed polls so active tasks never
+          // jump or swap positions as instantaneous speeds fluctuate.
+          return a.id - b.id;
         }),
     [allJobs, engines.data],
   );
@@ -371,7 +356,6 @@ export default function Dashboard() {
     let running = 0;
     let synced = 0;
     let queued = 0;
-    let approval = 0;
     let failed = 0;
     let disabled = 0;
     for (const job of allJobs) {
@@ -386,7 +370,6 @@ export default function Dashboard() {
         synced += 1;
       }
       if (job.queued) queued += 1;
-      if (job.pendingApproval) approval += 1;
       if (isJobFailed(job)) failed += 1;
       if (job.enable !== 1) disabled += 1;
     }
@@ -395,7 +378,6 @@ export default function Dashboard() {
       running,
       synced,
       queued,
-      approval,
       failed,
       disabled,
     };
@@ -475,7 +457,6 @@ export default function Dashboard() {
       )
         return false;
       if (statusFilter === "queued" && !job.queued) return false;
-      if (statusFilter === "approval" && !job.pendingApproval) return false;
       if (statusFilter === "failed" && !isJobFailed(job)) return false;
       if (statusFilter === "disabled" && job.enable === 1) return false;
       if (kw) {
@@ -541,41 +522,15 @@ export default function Dashboard() {
     navigate(`/tasks?jobId=${job.id}&tab=overview`);
   };
 
-  const openApprovalModal = (
-    jobId: number,
-    jobName: string,
-    seed: FullSyncApproval,
-  ) => {
-    const needsFetch = !seed.paths || seed.paths.length === 0;
-    setApprovalModal({
-      jobId,
-      jobName,
-      approval: seed,
-      loading: needsFetch,
-    });
-    if (needsFetch) {
-      void api
-        .pendingApproval(jobId)
-        .then((fresh) => {
-          setApprovalModal((prev) => {
-            if (!prev || prev.jobId !== jobId) return prev;
-            if (!fresh) return null;
-            return { ...prev, approval: fresh, loading: false };
-          });
-        })
-        .catch(() => {
-          setApprovalModal((prev) =>
-            prev && prev.jobId === jobId ? { ...prev, loading: false } : prev,
-          );
-        });
-    }
-  };
-
   const runBatch = (
     act: "run" | "stop" | "enable" | "disable" | "run_all" | "stop_all",
     ids?: number[],
     label?: string,
   ) => {
+    if (act === "enable" && allJobs.some((job) => ids?.includes(job.id) && requiresFirstMirrorPreview(job))) {
+      Toast.warning("所选任务包含待预览的镜像。请先逐个确认镜像影响。");
+      return;
+    }
     const execute = () =>
       action.run(async () => {
         try {
@@ -626,19 +581,6 @@ export default function Dashboard() {
     );
   };
 
-  const handleClone = (jobId: number) => {
-    const full = fullJobMap.get(jobId);
-    if (!full) {
-      Toast.warning("正在加载任务配置，请稍后重试");
-      return;
-    }
-    setEditorState({
-      open: true,
-      job: null,
-      initialDraft: cloneJobToForm(full),
-    });
-  };
-
   const handleRunOne = (job: DashboardJobItem) => {
     void action.run(async () => {
       try {
@@ -652,6 +594,10 @@ export default function Dashboard() {
   };
 
   const handleToggleEnableOne = (job: DashboardJobItem) => {
+    if (requiresFirstMirrorPreview(job)) {
+      navigate(`/tasks?jobId=${job.id}&tab=overview&mirrorPreview=1`);
+      return;
+    }
     const pausing = job.enable === 1;
     const execute = () =>
       action.run(async () => {
@@ -740,12 +686,6 @@ export default function Dashboard() {
       key: "queued",
       label: "排队中",
       count: statusCounts.queued,
-    },
-    {
-      key: "approval",
-      label: "待审批",
-      count: statusCounts.approval,
-      tone: statusCounts.approval > 0 ? "warning" : undefined,
     },
     {
       key: "failed",
@@ -841,9 +781,7 @@ export default function Dashboard() {
     ? "running"
     : kpi?.queuedJobs
       ? "queued"
-      : kpi?.pendingApprovals
-        ? "approval"
-        : "running";
+      : "running";
 
   const liveBarPct = realtime.isTransferring
     ? realtime.overallPercent > 0
@@ -889,9 +827,7 @@ export default function Dashboard() {
         type="primary"
         theme="solid"
         icon={<IconPlusStroked aria-hidden="true" />}
-        onClick={() =>
-          setEditorState({ open: true, job: null, initialDraft: null })
-        }
+        onClick={() => setEditorOpen(true)}
       >
         新建同步任务
       </Button>
@@ -939,9 +875,7 @@ export default function Dashboard() {
             <Button
               theme="solid"
               icon={<IconPlusStroked aria-hidden="true" />}
-              onClick={() =>
-                setEditorState({ open: true, job: null, initialDraft: null })
-              }
+              onClick={() => setEditorOpen(true)}
             >
               新建任务
             </Button>
@@ -951,105 +885,25 @@ export default function Dashboard() {
 
       <LoadState
         loading={dashboard.loading && !data}
-        error={dashboard.error}
+        error={data ? "" : dashboard.error}
         retry={dashboard.refresh}
       >
         {data && kpi && recent && (
           <div className="dashboard-content">
+            {dashboard.refreshError && (
+              <InlineNotice
+                role="alert"
+                icon={<IconAlertTriangle aria-hidden="true" size="small" />}
+                message={`实时数据刷新失败，正在保留上次快照：${dashboard.refreshError}`}
+                onRetry={() => void dashboard.refresh(true)}
+              />
+            )}
             {legacyJobCount > 0 && (
               <InlineNotice
                 role="alert"
                 icon={<IconAlertTriangle aria-hidden="true" size="small" />}
                 message={`检测到 ${legacyJobCount} 个旧版 OpenList 同步任务已自动停用。当前版本已移除 OpenList 引擎，请删除旧任务后在「存储管理」接入对应存储并重新创建。`}
               />
-            )}
-
-            {data.pendingApprovals.length > 0 && (
-              <div className="approval-alert-banner" role="alert">
-                <div className="approval-alert-head">
-                  <span className="approval-alert-icon" aria-hidden="true">
-                    <IconAlertTriangle />
-                  </span>
-                  <div className="approval-alert-copy">
-                    <strong>
-                      有 {data.pendingApprovals.length}{" "}
-                      个全量同步任务存在待确认删除项
-                    </strong>
-                    <span className="approval-alert-sub">
-                      文件同步已完成且不受阻塞，目标端多余文件将保留至您确认后再执行清理。
-                    </span>
-                  </div>
-                </div>
-                <div className="approval-alert-list">
-                  {data.pendingApprovals.map((item) => {
-                    const matchedJob = allJobs.find((j) => j.id === item.jobId);
-                    const executing = item.status === "executing";
-                    const seedApproval: FullSyncApproval =
-                      matchedJob?.pendingApproval
-                        ? {
-                            ...matchedJob.pendingApproval,
-                            jobId: item.jobId,
-                            jobName: item.jobName,
-                            taskId:
-                              matchedJob.pendingApproval.taskId || item.taskId,
-                          }
-                        : {
-                            jobId: item.jobId,
-                            jobName: item.jobName,
-                            taskId: item.taskId,
-                            deleteCount: item.deleteCount,
-                            deleteSize: item.deleteSize,
-                            pathCount: item.pathCount,
-                            paths: [],
-                            status: item.status,
-                            createdAt: item.createdAt,
-                            expiresAt: item.expiresAt,
-                            planChanged: item.planChanged,
-                            lastError: item.lastError,
-                          };
-                    return (
-                      <div
-                        key={`${item.jobId}-${item.taskId}`}
-                        className="approval-alert-row"
-                      >
-                        <div className="approval-alert-item-main">
-                          <strong>{item.jobName}</strong>
-                          <Tag size="small" type="light" color="grey">
-                            任务 #{item.taskId}
-                          </Tag>
-                          <span className="approval-alert-impact">
-                            {executing ? (
-                              "正在后台校验并执行删除…"
-                            ) : (
-                              <>
-                                待确认删除 <strong>{item.deleteCount} 项</strong>
-                                {item.deleteSize > 0
-                                  ? ` · ${formatSize(item.deleteSize)}`
-                                  : ""}
-                              </>
-                            )}
-                          </span>
-                        </div>
-                        <Button
-                          size="small"
-                          type="danger"
-                          theme="solid"
-                          disabled={executing}
-                          onClick={() =>
-                            openApprovalModal(
-                              item.jobId,
-                              item.jobName,
-                              seedApproval,
-                            )
-                          }
-                        >
-                          {executing ? "正在删除…" : "查看并审批"}
-                        </Button>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
             )}
 
             {/* 4 Core KPI Cards */}
@@ -1120,7 +974,7 @@ export default function Dashboard() {
                     />
                   )}
                 </div>
-                <div className="dashboard-kpi-foot">
+                <div className="dashboard-kpi-foot dashboard-kpi-foot--live">
                   {realtime.isTransferring ? (
                     <>
                       <span className="dashboard-kpi-stat is-primary">
@@ -1131,7 +985,10 @@ export default function Dashboard() {
                         峰值 {formatSpeed(realtime.peakSpeed)}
                       </span>
                       {realtime.estimatedRemainTime > 0 && (
-                        <span>
+                        <span
+                          className="dashboard-kpi-eta"
+                          title={`剩余 ${formatDuration(realtime.estimatedRemainTime)}`}
+                        >
                           剩余 {formatDuration(realtime.estimatedRemainTime)}
                         </span>
                       )}
@@ -1217,11 +1074,6 @@ export default function Dashboard() {
                   <span className="dashboard-kpi-denom">
                     / {kpi.totalJobs}
                   </span>
-                  {kpi.pendingApprovals > 0 && (
-                    <span className="dashboard-kpi-pill is-warning">
-                      待审批 {kpi.pendingApprovals}
-                    </span>
-                  )}
                 </div>
                 {kpi.totalJobs > 0 && (
                   <div className="dashboard-kpi-bar" aria-hidden="true">
@@ -1359,7 +1211,13 @@ export default function Dashboard() {
                       </span>
                       {recent.totalRuns > 0 && (
                         <span
-                          className={`dashboard-kpi-pill${recent.failRuns > 0 ? " is-warning" : " is-success"}`}
+                          className={`dashboard-kpi-pill${
+                            recent.failRuns > 0
+                              ? " is-warning"
+                              : recent.successRuns > 0
+                                ? " is-success"
+                                : " is-muted"
+                          }`}
                         >
                           成功率 {recentSuccessRate}%
                         </span>
@@ -1394,7 +1252,9 @@ export default function Dashboard() {
                           异常 {recent.failRuns}
                         </span>
                       ) : (
-                        <span className="dashboard-kpi-stat is-success">
+                        <span
+                          className={`dashboard-kpi-stat${recent.successRuns > 0 ? " is-success" : ""}`}
+                        >
                           成功 {recent.successRuns}
                         </span>
                       )}
@@ -1613,9 +1473,9 @@ export default function Dashboard() {
                       />
                       <line
                         x1="0"
-                        y1={SPEED_CHART_HEIGHT / 2}
+                        y1={(10 + (SPEED_CHART_HEIGHT - 6)) / 2}
                         x2={SPEED_CHART_WIDTH}
-                        y2={SPEED_CHART_HEIGHT / 2}
+                        y2={(10 + (SPEED_CHART_HEIGHT - 6)) / 2}
                         className="dashboard-speed-gridline"
                         vectorEffect="non-scaling-stroke"
                       />
@@ -1677,7 +1537,7 @@ export default function Dashboard() {
                       <div className="dashboard-speed-hitlayer">
                         {speedChart.points.map((pt, idx) => (
                           <span
-                            key={`${pt.ts}-${idx}`}
+                            key={idx}
                             className="dashboard-speed-hit"
                             style={{
                               left: `${(pt.x / SPEED_CHART_WIDTH) * 100}%`,
@@ -2325,13 +2185,11 @@ export default function Dashboard() {
                       isSelected ? "is-selected" : "",
                       legacy
                         ? "is-failed"
-                        : job.pendingApproval
-                          ? "is-approval"
-                          : job.running
-                            ? "is-running"
-                            : failed
-                              ? "is-failed"
-                              : "",
+                        : job.running
+                          ? "is-running"
+                          : failed
+                            ? "is-failed"
+                            : "",
                       legacy || (job.enable !== 1 && !job.running)
                         ? "is-disabled"
                         : "",
@@ -2397,19 +2255,12 @@ export default function Dashboard() {
                                 旧版已停用
                               </Tag>
                             )}
-                            {!legacy && job.pendingApproval && (
-                              <Tag size="small" type="solid" color="orange">
-                                {job.pendingApproval.status === "executing"
-                                  ? "正在删除"
-                                  : "待确认删除"}
-                              </Tag>
-                            )}
                             {!legacy && job.queued && (
                               <Tag size="small" type="light" color="cyan">
                                 排队等待中
                               </Tag>
                             )}
-                            {!legacy && !job.pendingApproval && (
+                            {!legacy && (
                               <SyncStatusTag status={effectiveStatus} />
                             )}
                             {!legacy && job.checkRunning && (
@@ -2455,15 +2306,7 @@ export default function Dashboard() {
 
                         <div
                           className="dashboard-job-status-col"
-                          onClick={() =>
-                            !legacy && !job.running && job.pendingApproval
-                              ? openApprovalModal(
-                                  job.id,
-                                  jobName,
-                                  job.pendingApproval,
-                                )
-                              : openJobDetail(job)
-                          }
+                          onClick={() => openJobDetail(job)}
                         >
                           {legacy ? (
                             <div className="dashboard-job-approval-note">
@@ -2554,40 +2397,16 @@ export default function Dashboard() {
                                 )}
                               </div>
                             </div>
-                          ) : job.pendingApproval ? (
-                            <div className="dashboard-job-approval-note">
-                              <span className="dashboard-job-approval-title">
-                                <IconAlertTriangle
-                                  size="small"
-                                  aria-hidden="true"
-                                />
-                                {job.pendingApproval.status === "executing"
-                                  ? "正在后台执行删除…"
-                                  : `待确认删除 ${job.pendingApproval.deleteCount} 项${
-                                      job.pendingApproval.deleteSize > 0
-                                        ? ` · ${formatSize(job.pendingApproval.deleteSize)}`
-                                        : ""
-                                    }`}
-                              </span>
-                              <span className="dashboard-job-approval-action">
-                                {job.pendingApproval.status === "executing"
-                                  ? "不影响后续持续同步"
-                                  : "同步已完成 · 点击查看清单并审批"}
-                              </span>
-                            </div>
-                          ) : effectiveStatus.state === "error" ||
-                            effectiveStatus.state === "needs_rebuild" ? (
+                          ) : effectiveStatus.state === "error" ? (
                             <div className="dashboard-job-sync-error">
                               <span className="dashboard-job-sync-error-title">
                                 <IconAlertTriangle
                                   size="small"
                                   aria-hidden="true"
                                 />
-                                {effectiveStatus.state === "needs_rebuild"
-                                  ? "待重建双向同步基线"
-                                  : effectiveStatus.failures > 1
-                                    ? `同步异常（连续失败 ${effectiveStatus.failures} 次）`
-                                    : "同步异常"}
+                                {effectiveStatus.failures > 1
+                                  ? `同步异常（连续失败 ${effectiveStatus.failures} 次）`
+                                  : "同步异常"}
                               </span>
                               <span
                                 className="dashboard-job-sync-error-desc"
@@ -2707,16 +2526,6 @@ export default function Dashboard() {
                             />
                           ) : (
                             <>
-                              <IconButton
-                                label="模拟运行预览"
-                                icon={
-                                  <IconEyeOpenedStroked aria-hidden="true" />
-                                }
-                                disabled={action.busy}
-                                onClick={() =>
-                                  setDryRunJob({ id: job.id, name: jobName })
-                                }
-                              />
                               {job.running || job.queued ? (
                                 <>
                                   {job.running && job.currentTaskId > 0 && (
@@ -2771,12 +2580,6 @@ export default function Dashboard() {
                                   />
                                 </>
                               )}
-                              <IconButton
-                                label="复制任务"
-                                icon={<IconCopy aria-hidden="true" />}
-                                disabled={action.busy}
-                                onClick={() => handleClone(job.id)}
-                              />
                             </>
                           )}
                           <IconButton
@@ -2795,105 +2598,27 @@ export default function Dashboard() {
         )}
       </LoadState>
 
-      {approvalModal && (
-        <FullSyncApprovalModal
-          approval={approvalModal.approval}
-          jobName={approvalModal.jobName}
-          loading={Boolean(approvalModal.loading)}
-          busy={action.busy}
-          onClose={() => setApprovalModal(null)}
-          onApprove={(selectedPaths) =>
-            action.run(async () => {
-              const taskId = approvalModal.approval.taskId;
-              if (!taskId) return;
-              try {
-                await api.taskAction(
-                  taskId,
-                  "approve",
-                  undefined,
-                  selectedPaths && selectedPaths.length > 0
-                    ? { paths: selectedPaths }
-                    : undefined,
-                );
-                setApprovalModal(null);
-                Toast.success(
-                  selectedPaths && selectedPaths.length > 0
-                    ? `已提交后台校验并删除选中的 ${selectedPaths.length} 项`
-                    : "已提交后台校验并执行删除",
-                );
-                await refreshAll(true);
-              } catch (err) {
-                errorToast(err);
-              }
-            })
-          }
-          onExclude={(selectedPaths) =>
-            action.run(async () => {
-              const taskId = approvalModal.approval.taskId;
-              if (!taskId || !selectedPaths.length) return;
-              try {
-                const res = await api.excludeApprovalPaths(
-                  taskId,
-                  selectedPaths,
-                );
-                setApprovalModal(null);
-                Toast.success(`已将 ${res.excludedCount} 项加入任务排除规则`);
-                await refreshAll(true);
-              } catch (err) {
-                errorToast(err);
-              }
-            })
-          }
-          onReject={() =>
-            action.run(async () => {
-              const taskId = approvalModal.approval.taskId;
-              if (!taskId) return;
-              try {
-                await api.taskAction(taskId, "reject");
-                setApprovalModal(null);
-                Toast.success("已跳过本次删除，目标端文件已保留");
-                await refreshAll(true);
-              } catch (err) {
-                errorToast(err);
-              }
-            })
-          }
-        />
-      )}
-
-      {dryRunJob && (
-        <DryRunModal
-          jobId={dryRunJob.id}
-          jobName={dryRunJob.name}
-          onClose={() => setDryRunJob(null)}
-          onRunReal={() => {
-            const target = allJobs.find((j) => j.id === dryRunJob.id);
-            if (target) handleRunOne(target);
-          }}
-        />
-      )}
-
-      {editorState.open && (
+      {editorOpen && (
         <Suspense fallback={<LoadingPanel />}>
           <JobEditor
-            job={editorState.job}
-            initialDraft={editorState.initialDraft || undefined}
+            job={null}
             engines={engines.data || []}
             existingJobs={jobsList.data?.dataList || []}
             enginesError={engines.error}
             onRetryEngines={() => void engines.refresh()}
             onNavigateEngines={() => {
-              setEditorState({ open: false, job: null, initialDraft: null });
+              setEditorOpen(false);
               navigate("/engines");
             }}
-            onClose={() =>
-              setEditorState({ open: false, job: null, initialDraft: null })
-            }
+            onClose={() => setEditorOpen(false)}
             onSaved={(result: TaskEditorSavedResult) => {
-              setEditorState({ open: false, job: null, initialDraft: null });
+              setEditorOpen(false);
               const createdId = result.createdId;
+              const mirrorPreviewId = result.mirrorPreviewId;
               const goToCreated = () => {
-                if (createdId) {
+                if (mirrorPreviewId) {
+                  navigate(`/tasks?jobId=${mirrorPreviewId}&tab=overview&mirrorPreview=1`);
+                } else if (createdId) {
                   navigate(`/tasks?jobId=${createdId}&tab=overview`);
                 }
               };

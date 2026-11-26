@@ -93,7 +93,7 @@ test("dark host theme colors the shell, surfaces, controls, and text together", 
   page,
 }) => {
   await page.goto("/app/opensync/settings");
-  await expect(page.locator(".settings-card")).toHaveCount(2);
+  await expect(page.getByRole("textbox", { name: "任务超时", exact: true })).toBeVisible();
   await page.evaluate(() => {
     document.body.setAttribute("theme-mode", "dark");
     document.documentElement.dataset.theme = "dark";
@@ -128,7 +128,7 @@ test("small secondary text has readable contrast on a light surface", async ({
   page,
 }) => {
   await page.goto("/app/opensync/settings");
-  await expect(page.locator(".settings-card")).toHaveCount(2);
+  await expect(page.getByRole("textbox", { name: "任务超时", exact: true })).toBeVisible();
   const ratio = await page.evaluate(() => {
     const luminance = (color: string) => {
       const channels = color.match(/\d+/g)!.slice(0, 3).map((value) => {
@@ -201,7 +201,7 @@ test("320px settings and overview labels keep a single line", async ({
   test.skip(page.viewportSize()?.width !== 320, "narrow mobile layout only");
   await routeTaskWorkspace(page, null);
   await page.goto("/app/opensync/settings");
-  await expect(page.locator(".settings-card")).toHaveCount(2);
+  await expect(page.getByRole("textbox", { name: "任务超时", exact: true })).toBeVisible();
   const settingLabel = page.locator(".setting-row-label").first();
   const headingBox = await page
     .locator(".settings-card-head h2")
@@ -219,7 +219,7 @@ test("320px settings and overview labels keep a single line", async ({
   await page.goto("/app/opensync/tasks?jobId=1&tab=overview");
   const latestLabel = page
     .locator(".info-row")
-    .filter({ hasText: "最近一次执行" })
+    .filter({ hasText: "最近同步批次" })
     .locator(":scope > span");
   await expect(latestLabel).toBeVisible();
   expect(

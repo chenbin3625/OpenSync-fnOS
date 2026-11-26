@@ -156,9 +156,11 @@ describe("原生存储认证表单", () => {
       "object_storage",
     ]);
     expect(new Set(creatableRemoteTypes).size).toBe(creatableRemoteTypes.length);
-    expect(creatableRemoteTypes).toHaveLength(31);
+    expect(creatableRemoteTypes).toHaveLength(32);
     expect(creatableRemoteTypes).toContain("quark");
+    expect(creatableRemoteTypes).toContain("pan123");
     expect(remoteTypeLabels.quark).toBe("夸克网盘");
+    expect(remoteTypeLabels.pan123).toBe("123云盘");
     for (const typ of creatableRemoteTypes) {
       expect(remoteTypeLabels[typ]).toBeTruthy();
     }
@@ -294,6 +296,88 @@ describe("原生存储认证表单", () => {
     });
     expect(existing.editing).toBe(true);
     expect(existing.type).toBe("quark");
+    expect(validateRemoteDraft(existing, true)).toEqual({});
+  });
+
+  it("123云盘支持 OpenAPI 与个人盘 Web 双协议配置、编辑保留密钥及参数校验", () => {
+    const emptyPan123 = { ...emptyDraft("pan123"), name: "我的123云盘" };
+    const openErrs = validateRemoteDraft(emptyPan123, true);
+    expect(openErrs).toHaveProperty("client_id");
+    expect(openErrs).toHaveProperty("client_secret");
+
+    // OpenAPI with Client ID + Secret passes and defaults protocol to open_api.
+    const openValid = {
+      ...emptyPan123,
+      options: {
+        client_id: "cid-1",
+        client_secret: "csec-1",
+        upload_concurrency: "4",
+        tps_limit: "3",
+        use_direct_link: "true",
+        direct_link_key: "dl-key",
+        direct_link_ttl: "30",
+      },
+    };
+    expect(validateRemoteDraft(openValid, true)).toEqual({});
+    const builtOpen = buildRemoteOptions(openValid);
+    expect(builtOpen.type).toBe("pan123");
+    expect(builtOpen.protocol).toBe("open_api");
+    expect(builtOpen.client_id).toBe("cid-1");
+    expect(builtOpen.client_secret).toBe("csec-1");
+
+    // OpenAPI with static Access Token passes without Client ID/Secret.
+    const openTokenOnly = {
+      ...emptyPan123,
+      options: { protocol: "open_api", access_token: "static-open-token" },
+    };
+    expect(validateRemoteDraft(openTokenOnly, true)).toEqual({});
+
+    // Personal Web protocol requires web_user + web_password or access_token.
+    const webEmpty = {
+      ...emptyPan123,
+      options: { protocol: "web" },
+    };
+    expect(validateRemoteDraft(webEmpty, true)).toHaveProperty("web_user");
+    expect(validateRemoteDraft(webEmpty, true)).toHaveProperty("web_password");
+
+    const webTokenOnly = {
+      ...emptyPan123,
+      options: { protocol: "web", access_token: "jwt-web-token" },
+    };
+    expect(validateRemoteDraft(webTokenOnly, true)).toEqual({});
+    expect(buildRemoteOptions(webTokenOnly).protocol).toBe("web");
+
+    // Invalid root_folder_id / upload_concurrency / direct_link_ttl rejected.
+    expect(
+      validateRemoteDraft(
+        {
+          ...openTokenOnly,
+          options: { ...openTokenOnly.options, root_folder_id: "not-a-number" },
+        },
+        true,
+      ),
+    ).toHaveProperty("root_folder_id");
+    expect(
+      validateRemoteDraft(
+        {
+          ...openTokenOnly,
+          options: { ...openTokenOnly.options, upload_concurrency: "10" },
+        },
+        true,
+      ),
+    ).toHaveProperty("upload_concurrency");
+
+    // Editing an existing 123Pan remote preserves saved secrets without re-entering.
+    const existing = draftFromRemote({
+      name: "我的123云盘",
+      type: "pan123",
+      summary: "123云盘 (开放平台)",
+      options: { protocol: "open_api", client_id: "cid-1", root_folder_id: "0" },
+      configuredSecrets: ["client_secret", "access_token"],
+      usedByJobs: [],
+      usedByCrypts: [],
+    });
+    expect(existing.editing).toBe(true);
     expect(validateRemoteDraft(existing, true)).toEqual({});
   });
 });

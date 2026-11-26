@@ -1,7 +1,6 @@
 package service
 
 import (
-	"crypto/sha256"
 	"fmt"
 	"log"
 	"opensync/pkg/util"
@@ -71,44 +70,6 @@ type fullSyncRelocation struct {
 	target *fullSyncFile
 }
 
-// FullSyncApproval describes the deferred destructive deletions of a full-sync
-// run. DeleteCount includes entries below a recursive directory delete; Paths
-// is a bounded preview so a large mirror does not put an unbounded payload in
-// API responses.
-type FullSyncApproval struct {
-	JobID         int64                  `json:"jobId,omitempty"`
-	JobName       string                 `json:"jobName,omitempty"`
-	TaskID        int64                  `json:"taskId,omitempty"`
-	DeleteCount   int                    `json:"deleteCount"`
-	DeleteSize    int64                  `json:"deleteSize"`
-	PathCount     int                    `json:"pathCount"`
-	FilteredCount int                    `json:"filteredCount,omitempty"`
-	HasMore       bool                   `json:"hasMore,omitempty"`
-	Paths         []FullSyncApprovalPath `json:"paths"`
-	Status        string                 `json:"status,omitempty"`
-	CreatedAt     int64                  `json:"createdAt,omitempty"`
-	ExpiresAt     int64                  `json:"expiresAt,omitempty"`
-	PlanChanged   bool                   `json:"planChanged,omitempty"`
-	LastError     string                 `json:"lastError,omitempty"`
-	ExecPhase     string                 `json:"execPhase,omitempty"`
-	ExecDone      int                    `json:"execDone,omitempty"`
-	ExecTotal     int                    `json:"execTotal,omitempty"`
-	ExecFailed    int                    `json:"execFailed,omitempty"`
-	ExecCurrent   string                 `json:"execCurrent,omitempty"`
-	ExecStartedAt int64                  `json:"execStartedAt,omitempty"`
-	signature     string
-}
-
-type FullSyncApprovalPath struct {
-	Path   string `json:"path"`
-	IsPath bool   `json:"isPath"`
-	Count  int    `json:"count"`
-	Size   int64  `json:"size"`
-	Action string `json:"action"`
-}
-
-const fullSyncApprovalPathLimit = 100
-
 type fullSyncPlan struct {
 	src *fullSyncSnapshot
 	dst *fullSyncSnapshot
@@ -176,44 +137,6 @@ func (plan *fullSyncPlan) error() error {
 // fullSyncPlanBranchHook runs at the start of every concurrent compareDir
 // branch. Tests swap it to exercise the panic recovery; production leaves it nil.
 var fullSyncPlanBranchHook func()
-
-func combineFullSyncApprovals(plans []*fullSyncPlan) *FullSyncApproval {
-	combined := &FullSyncApproval{}
-	var signatures []string
-	for _, plan := range plans {
-		approval := plan.approvalPreview()
-		if approval == nil {
-			continue
-		}
-		combined.DeleteCount += approval.DeleteCount
-		combined.DeleteSize += approval.DeleteSize
-		combined.PathCount += approval.PathCount
-		if approval.signature != "" {
-			signatures = append(signatures, approval.signature)
-		}
-		if len(combined.Paths) < fullSyncApprovalPathLimit {
-			remaining := fullSyncApprovalPathLimit - len(combined.Paths)
-			if remaining > len(approval.Paths) {
-				remaining = len(approval.Paths)
-			}
-			combined.Paths = append(combined.Paths, approval.Paths[:remaining]...)
-		}
-	}
-	if combined.PathCount == 0 {
-		return nil
-	}
-	sort.Strings(signatures)
-	sum := sha256.Sum256([]byte(strings.Join(signatures, "\x00")))
-	combined.signature = fmt.Sprintf("%x", sum[:])
-	return combined
-}
-
-func sameFullSyncApproval(before, after *FullSyncApproval) bool {
-	if before == nil || after == nil {
-		return before == nil && after == nil
-	}
-	return before.signature != "" && before.signature == after.signature
-}
 
 func emptyFullSyncSnapshot(root string) *fullSyncSnapshot {
 	return &fullSyncSnapshot{
@@ -640,91 +563,6 @@ func newFullSyncFile(srcDir, dstDir, name string, metadata FileMetadata) *fullSy
 	}
 }
 
-func (plan *fullSyncPlan) approvalPreview() *FullSyncApproval {
-	relocations := plan.relocations()
-	writes := plan.writeIndex()
-	_, deletesUnsafe := plan.unsafeDeleteVolume(plan.plannedDeleteWeight(relocations, writes))
-	suspiciousCounts := plan.suspiciousEmptySourceDirs()
-	suspicious := make(map[string]struct{}, len(suspiciousCounts))
-	for dir := range suspiciousCounts {
-		suspicious[dir] = struct{}{}
-	}
-	consumed := make(map[string]struct{}, len(relocations))
-	relocatedCounts := make(map[string]int, len(relocations))
-	relocatedSizes := make(map[string]int64, len(relocations))
-	for _, relocation := range relocations {
-		if relocation.source.deleteRoot == relocation.source.object {
-			consumed[relocation.source.deleteRoot] = struct{}{}
-		}
-		relocatedCounts[relocation.source.deleteRoot]++
-		if relocation.source.metadata.Size > 0 {
-			relocatedSizes[relocation.source.deleteRoot] += relocation.source.metadata.Size
-		}
-	}
-	preview := &FullSyncApproval{}
-	var signatureParts []string
-	add := func(item fullSyncDelete, action string) {
-		if item.protected {
-			return
-		}
-		if _, collides := writes.collision(item.dir, item.name); collides {
-			return
-		}
-		itemPath := fullSyncObjectPath(item.dir, item.name)
-		if action == "删除" && (deletesUnsafe || fullSyncPathBlocked(itemPath, suspicious)) {
-			return
-		}
-		count := plan.dst.deleteWeight(item)
-		size := plan.dst.deleteSize(item)
-		if action == "删除" && item.subtree != "" {
-			prefix := strings.TrimSuffix(itemPath, "/") + "/"
-			for root, relocated := range relocatedCounts {
-				if root == itemPath || strings.HasPrefix(root, prefix) {
-					count -= relocated
-					size -= relocatedSizes[root]
-				}
-			}
-			if count < 1 {
-				count = 1
-			}
-			if size < 0 {
-				size = 0
-			}
-		}
-		preview.PathCount++
-		if action == "删除" {
-			preview.DeleteCount += count
-			preview.DeleteSize += size
-		}
-		signatureParts = append(signatureParts, fmt.Sprintf("%s\x00%s\x00%d\x00%d", action, itemPath, count, size))
-		if len(preview.Paths) < fullSyncApprovalPathLimit {
-			preview.Paths = append(preview.Paths, FullSyncApprovalPath{
-				Path:   itemPath,
-				IsPath: strings.HasSuffix(item.name, "/"),
-				Count:  count,
-				Size:   size,
-				Action: action,
-			})
-		}
-	}
-	for _, key := range sortedDeleteKeys(plan.blockers, false) {
-		add(plan.blockers[key], "删除")
-	}
-	for _, key := range sortedDeleteKeys(plan.extraDeletes, true) {
-		if _, moved := consumed[key]; moved {
-			continue
-		}
-		add(plan.extraDeletes[key], "删除")
-	}
-	if preview.PathCount == 0 {
-		return nil
-	}
-	sort.Strings(signatureParts)
-	sum := sha256.Sum256([]byte(strings.Join(signatureParts, "\x00")))
-	preview.signature = fmt.Sprintf("%x", sum[:])
-	return preview
-}
-
 // fullSyncWriteIndex holds, per destination directory, the names this plan
 // writes (copies, updates, relocation targets, new directories), keyed by a
 // case- and Unicode-normalization-folded form of the name. Only directories
@@ -967,38 +805,6 @@ func (snapshot *fullSyncSnapshot) deleteSize(item fullSyncDelete) int64 {
 		}
 	}
 	return total
-}
-
-// subtreeSummary computes the exact remaining entry count, total file bytes,
-// and content digest of a directory subtree after subtracting excluded entries
-// and files already relocated out of the directory during the sync phase.
-func (snapshot *fullSyncSnapshot) subtreeSummary(subtree string, relocatedOut map[string]struct{}) (count int, size int64, digest string) {
-	snapshot.mu.Lock()
-	defer snapshot.mu.Unlock()
-	var entries []subtreeDigestEntry
-	for dir, items := range snapshot.dirs {
-		if dir != subtree && !strings.HasPrefix(dir, subtree) {
-			continue
-		}
-		subRelDir := strings.TrimPrefix(dir, subtree)
-		for name, meta := range items {
-			if _, excluded := snapshot.excluded[dir+name]; excluded {
-				continue
-			}
-			if len(relocatedOut) > 0 {
-				if _, moved := relocatedOut[fullSyncObjectPath(snapshot.root+dir, name)]; moved {
-					continue
-				}
-			}
-			entries = append(entries, subtreeDigestEntry{
-				relPath:  subRelDir + name,
-				isDir:    strings.HasSuffix(name, "/"),
-				size:     meta.Size,
-				modified: meta.Modified,
-			})
-		}
-	}
-	return summarizeSubtreeEntries(entries)
 }
 
 // subtreeEntryCount totals the entries recorded in relDir and all directories

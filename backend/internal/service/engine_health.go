@@ -64,11 +64,12 @@ func GetEngineHealth(alistID int64) EngineHealth {
 	return h
 }
 
-// RemoveEngineHealth removes cached health state for a deleted engine.
+// RemoveEngineHealth invalidates health and quota snapshots after engine changes.
 func RemoveEngineHealth(alistID int64) {
 	engineHealthMu.Lock()
 	delete(engineHealthCache, alistID)
 	engineHealthMu.Unlock()
+	invalidateDashboardStorageQuotas()
 }
 
 func isStorageHealthy(st EngineStorageStatus) bool {

@@ -124,11 +124,11 @@ func TestNotifyChannelsEventFilterTemplatesAndDelivery(t *testing.T) {
 	if !shouldSendNotifyForEvent(map[string]interface{}{"eventMode": "errors_only"}, "fail", false) {
 		t.Fatal("errors_only should send on fail")
 	}
-	if !shouldSendNotifyForEvent(map[string]interface{}{"eventMode": "errors_only"}, "approval", false) {
-		t.Fatal("errors_only should send on approval")
+	if !shouldSendNotifyForEvent(map[string]interface{}{"eventMode": "errors_only"}, "timeout", false) {
+		t.Fatal("errors_only should send on timeout")
 	}
-	custom := map[string]interface{}{"eventMode": "custom", "events": []interface{}{"approval", "fail"}}
-	if shouldSendNotifyForEvent(custom, "success", false) || !shouldSendNotifyForEvent(custom, "approval", false) {
+	custom := map[string]interface{}{"eventMode": "custom", "events": []interface{}{"timeout", "fail"}}
+	if shouldSendNotifyForEvent(custom, "success", false) || !shouldSendNotifyForEvent(custom, "timeout", false) {
 		t.Fatal("custom events filter mismatch")
 	}
 
@@ -529,10 +529,26 @@ func TestDashboardOverviewWithBuiltInEngine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureNativeEngine: %v", err)
 	}
-	_, _ = mapper.AddJob(map[string]interface{}{
+	jobID, err := mapper.AddJob(map[string]interface{}{
 		"enable": 1, "remark": "总览任务", "srcPath": `["/a"]`, "dstPath": `["/b"]`,
-		"alistId": alistID, "method": 0, "isCron": 2,
+		"alistId": alistID, "method": 3, "isCron": 3,
 	})
+	if err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+	for _, relPath := range []string{"open.txt", "resolved.txt"} {
+		conflictID, err := mapper.UpsertBisyncConflict(mapper.BisyncConflict{
+			JobID: jobID, RelPath: relPath, ConflictType: mapper.BisyncConflictContent,
+		})
+		if err != nil {
+			t.Fatalf("UpsertBisyncConflict(%s): %v", relPath, err)
+		}
+		if relPath == "resolved.txt" {
+			if err := mapper.ResolveBisyncConflict(conflictID); err != nil {
+				t.Fatalf("ResolveBisyncConflict: %v", err)
+			}
+		}
+	}
 
 	overview, err := GetDashboardOverview()
 	if err != nil {
@@ -542,9 +558,23 @@ func TestDashboardOverviewWithBuiltInEngine(t *testing.T) {
 	if kpi["totalJobs"] != 1 {
 		t.Fatalf("expected totalJobs=1, got %+v", kpi)
 	}
+	jobs, err := GetJobList(nil)
+	if err != nil {
+		t.Fatalf("GetJobList: %v", err)
+	}
+	for source, items := range map[string]interface{}{"dashboard": overview["jobs"], "job list": jobs["dataList"]} {
+		rows, ok := items.([]map[string]interface{})
+		if !ok || len(rows) != 1 {
+			t.Fatalf("%s jobs = %+v, want one job", source, items)
+		}
+		status, _ := rows[0]["syncStatus"].(map[string]interface{})
+		if status["conflictCount"] != 1 {
+			t.Fatalf("%s syncStatus = %+v, want one unresolved conflict", source, status)
+		}
+	}
 
 	cfg := config.GetSystemSettings()
-	if cfg.FullSyncApprovalTimeout < 0 || cfg.EngineHealthCheckInterval < 0 {
+	if cfg.EngineHealthCheckInterval < 0 {
 		t.Fatalf("invalid config defaults: %+v", cfg)
 	}
 }

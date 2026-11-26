@@ -18,12 +18,13 @@ import (
 )
 
 func syncFingerprint(job map[string]interface{}, cfg native.Config) string {
+	// Only include directory/storage identity fields so tuning policies
+	// (filters, trash, conflictPolicy, bwlimit, compareMode, minFileAge)
+	// never invalidate the sync baseline or force full re-initialization.
 	definition := make(map[string]interface{})
-	for _, key := range []string{"srcPath", "dstPath", "dstMap", "alistId", "method", "exclude", "include", "filterMode", "minFileSize", "maxFileSize", "minFileAgeMinutes", "olderThanDays", "newerThanDays", "followSymlinks", "compareMode", "conflictPolicy", "trashEnable", "trashDir"} {
+	for _, key := range []string{"srcPath", "dstPath", "dstMap", "alistId", "method"} {
 		definition[key] = job[key]
 	}
-	extra, _, _ := parseNativeExtraFlags(job["extraFlags"])
-	definition["ignoreSize"] = extra.IgnoreSize
 	identities := make(map[string]map[string]string)
 	for _, name := range extractJobStorageNamesWithDeps(job, cfg) {
 		if key, ok := cfg.FindKey(name); ok {
@@ -143,7 +144,7 @@ func (w *jobWatcher) runSync(ctx context.Context, jc *JobClient, job map[string]
 	// Stable-age rules must leave queued files pending until they can be copied.
 	settle := max(debounce, time.Duration(util.ToInt(job["minFileAgeMinutes"]))*time.Minute)
 	method := util.ToInt(job["method"])
-	partial := method == 0 || method == 1
+	partial := method == 0 || method == 1 || method == 3
 	exclude, include := buildJobExcludeMatcher(job), buildJobIncludeMatcher(job)
 	watchDone := make(chan struct{})
 	go func() {
@@ -157,24 +158,32 @@ func (w *jobWatcher) runSync(ctx context.Context, jc *JobClient, job map[string]
 			watchers.Add(1)
 			go func() {
 				defer watchers.Done()
-				watchLocalRootsPlatform(ctx, []watchLocalRoot{root}, func(rel string, overflow bool) {
+				watchLocalRootsPlatform(ctx, []watchLocalRoot{root}, func(paths []string, fullScan bool) {
 					if ctx.Err() != nil {
 						return
 					}
-					if rel != "" {
+					var changed []string
+					for _, rel := range paths {
 						rel = strings.TrimPrefix(path.Clean("/"+rel), "/")
 						if rel == "" || rel == "." || strings.ContainsAny(rel, "\r\n") {
-							return
+							continue
 						}
 						if exclude != nil && exclude.matchesListed(rel, false) || include != nil && !include.matchesListed(rel) {
-							return
+							continue
+						}
+						virtual := path.Join(root.virtualPath, rel)
+						if method == 3 && bisyncEchoSuppress.ShouldSuppress(w.jobID, virtual) {
+							continue
+						}
+						if partial {
+							changed = append(changed, virtual)
+						} else {
+							fullScan = true
 						}
 					}
-					var changed []string
-					if rel != "" && partial {
-						changed = []string{path.Join(root.virtualPath, rel)}
+					if fullScan || len(changed) > 0 {
+						w.enqueue(changed, fullScan)
 					}
-					w.enqueue(changed, overflow || !partial || rel == "")
 				})
 			}()
 		}
@@ -211,9 +220,6 @@ func (w *jobWatcher) runSync(ctx context.Context, jc *JobClient, job map[string]
 		}
 		now := time.Now()
 		if !JobInTimeWindow(job, now) || jc.isBusy() || now.Unix() < state.RetryAt {
-			continue
-		}
-		if method == 3 && state.BisyncInitialized && (state.BisyncNeedsRebuild || native.BisyncNeedsRebuild(bisyncWorkDir(w.jobID))) && !native.BisyncResyncRequested(bisyncWorkDir(w.jobID)) {
 			continue
 		}
 		if continuous && (state.LastPoll == 0 || now.Sub(time.Unix(state.LastPoll, 0)) >= poll) {
@@ -261,13 +267,6 @@ func (w *jobWatcher) scanSyncRoots(ctx context.Context, job map[string]interface
 	}
 	if err := mapper.EnsureSyncState(w.jobID, syncFingerprint(job, cfg)); err != nil {
 		return err
-	}
-	state, err := mapper.GetSyncState(w.jobID)
-	if err != nil {
-		return err
-	}
-	if util.ToInt(job["method"]) == 3 && state.BisyncNeedsRebuild && !native.BisyncResyncRequested(bisyncWorkDir(w.jobID)) {
-		return fmt.Errorf("存储或任务配置已改变，请明确重建双向同步基线")
 	}
 	jobWantsHash := util.ToInt(job["compareMode"]) == 2
 	if !jobWantsHash && util.ToInt(job["compareMode"]) == 0 {
@@ -343,7 +342,7 @@ func (w *jobWatcher) scanSyncRoots(ctx context.Context, job map[string]interface
 }
 
 // addSyncStatus exposes durable progress separately from an individual run.
-func addSyncStatus(row map[string]interface{}, s mapper.SyncState, stateErr error, client *JobClient) {
+func addSyncStatus(row map[string]interface{}, s mapper.SyncState, stateErr error, conflictCount int, client *JobClient) {
 	jobID := util.ToInt64(row["id"])
 	continuous := util.ToInt(row["isCron"]) == 3
 	extra, _, _ := parseNativeExtraFlags(row["extraFlags"])
@@ -362,18 +361,14 @@ func addSyncStatus(row map[string]interface{}, s mapper.SyncState, stateErr erro
 	if s.Pending {
 		status = "pending"
 	}
-	if pendingDeleteApprovals.Has(jobID) {
-		status = "waiting_approval"
-	}
 	if !JobInTimeWindow(row, time.Now()) {
 		status = "waiting_window"
 	}
 	if message != "" {
 		status = "error"
 	}
-	if util.ToInt(row["method"]) == 3 && s.BisyncInitialized && (s.BisyncNeedsRebuild || native.BisyncNeedsRebuild(bisyncWorkDir(jobID))) && !native.BisyncResyncRequested(bisyncWorkDir(jobID)) {
-		status = "needs_rebuild"
-		message = "双向同步基线缺失，请重建双向基线"
+	if util.ToInt(row["method"]) != 3 || jobID <= 0 {
+		conflictCount = 0
 	}
 	m := jobFSWatchers
 	m.mu.Lock()
@@ -416,11 +411,13 @@ func addSyncStatus(row map[string]interface{}, s mapper.SyncState, stateErr erro
 	row["syncStatus"] = map[string]interface{}{
 		"state":            status,
 		"pendingChanges":   pending,
+		"conflictCount":    conflictCount,
 		"lastSuccess":      s.LastSuccess,
 		"lastPoll":         s.LastPoll,
 		"nextPoll":         s.LastPoll + int64(poll/time.Second),
 		"error":            message,
 		"failures":         s.Failures,
+		"retryAt":          s.RetryAt,
 		"direction":        extra.SyncDirection,
 		"pollIntervalSec":  int(poll / time.Second),
 		"auditIntervalMin": int(audit / time.Minute),

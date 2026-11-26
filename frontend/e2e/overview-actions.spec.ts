@@ -1,5 +1,47 @@
 import { expect, test } from "@playwright/test";
 
+test("bisync conflicts name the configured sides and restrict type conflicts to keeping both", async ({ page }) => {
+  const conflicts = [
+    { id: 31, relPath: "notes.txt", conflictType: "content", conflictCopyPath: "notes.conflict.txt" },
+    { id: 32, relPath: "photos", conflictType: "type", conflictCopyPath: "photos.conflict" },
+  ];
+  await page.route("**/app/opensync/svr/**", async (route) => {
+    const url = new URL(route.request().url());
+    const success = (data: unknown) =>
+      route.fulfill({ json: { code: 200, data, msg: "" } });
+    if (url.pathname.endsWith("/session"))
+      return success({ uid: 1, development: false, version: "test" });
+    if (url.pathname.endsWith("/alist")) return success([]);
+    if (url.pathname.endsWith("/job/conflicts")) return success(conflicts);
+    if (url.pathname.endsWith("/job") && !url.searchParams.has("current")) {
+      return success({
+        dataList: [
+          {
+            id: 1, enable: 1, remark: "双向任务", alistId: 1, method: 3, isCron: 3,
+            srcPath: '["/cloud/notes"]', dstPath: '["/local/disk/notes"]',
+            syncStatus: { state: "synced", conflictCount: 2 },
+          },
+        ],
+        count: 1,
+      });
+    }
+    return success(null);
+  });
+
+  await page.goto("/app/opensync/tasks?jobId=1&tab=overview");
+  await page.getByRole("button", { name: "处理 2 项冲突" }).click();
+  const dialog = page.getByRole("dialog").filter({ hasText: "双向同步冲突处理" });
+  await expect(dialog.getByText("/cloud/notes", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("/local/disk/notes", { exact: true })).toBeVisible();
+  // There are two conflicts, but only the content conflict offers version selection.
+  await expect(dialog.getByRole("button", { name: "保留左侧版本" })).toHaveCount(1);
+  await expect(dialog.getByRole("button", { name: "保留右侧版本" })).toHaveCount(1);
+  await expect(dialog.getByRole("button", { name: "保留本地版本" })).toHaveCount(0);
+  const request = page.waitForRequest("**/job/conflicts/resolve");
+  await dialog.getByRole("button", { name: "保留右侧版本" }).click();
+  expect((await request).postDataJSON()).toEqual({ jobId: 1, conflictId: 31, action: "keep_remote" });
+});
+
 test("overview embeds live sync progress and stops current batch without disabling continuous sync", async ({
   page,
 }) => {

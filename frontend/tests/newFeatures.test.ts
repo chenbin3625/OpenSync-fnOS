@@ -71,7 +71,7 @@ describe("new notification channels, event filters and templates", () => {
       botToken: "123:XYZ",
       chatId: "42",
       eventMode: "custom",
-      events: ["fail", "approval"],
+      events: ["fail", "timeout"],
       titleTemplate: "[{status}] {jobName}",
       contentTemplate: "Err: {errSummary}",
     });
@@ -79,7 +79,7 @@ describe("new notification channels, event filters and templates", () => {
       botToken: "123:XYZ",
       chatId: "42",
       eventMode: "custom",
-      events: ["fail", "approval"],
+      events: ["fail", "timeout"],
       titleTemplate: "[{status}] {jobName}",
       contentTemplate: "Err: {errSummary}",
     });
@@ -90,7 +90,7 @@ describe("new notification channels, event filters and templates", () => {
       params: JSON.stringify(custom),
     });
     expect(roundTripped.eventMode).toBe("custom");
-    expect(roundTripped.events).toEqual(["fail", "approval"]);
+    expect(roundTripped.events).toEqual(["fail", "timeout"]);
     expect(roundTripped.titleTemplate).toBe("[{status}] {jobName}");
     expect(getNotifyEndpointSummary({ method: 6, params: JSON.stringify(custom) })).toBe(
       "Chat ID: 42",
@@ -247,53 +247,5 @@ describe("new MSW endpoints for dashboard, dry-run, filter tester, backup, healt
       body: JSON.stringify({ clearJobId: 1 }),
     });
     expect(await batchDel.json()).toMatchObject({ code: 200 });
-  });
-
-  it("serves post-positioned pending deletion approvals via GET /job/approval", async () => {
-    resetMockStore({
-      jobs: [
-        {
-          id: 5,
-          remark: "镜像全量",
-          method: 1,
-          enable: 1,
-          srcPath: ["/Photos"],
-          dstPath: ["/Backup"],
-        },
-      ],
-    });
-    await fetch(`${apiUrl}/job`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id: "5" }),
-    });
-
-    const singleRes = await fetch(`${apiUrl}/job/approval?jobId=5`);
-    const single = (await singleRes.json()) as {
-      code: number;
-      data: { jobId: number; taskId: number; deleteCount: number; status: string } | null;
-    };
-    expect(single.code).toBe(200);
-    expect(single.data?.jobId).toBe(5);
-    expect(single.data?.deleteCount).toBeGreaterThan(0);
-    expect(single.data?.status).toBe("pending");
-
-    const allRes = await fetch(`${apiUrl}/job/approval`);
-    const all = (await allRes.json()) as {
-      code: number;
-      data: Array<{ jobId: number }>;
-    };
-    expect(all.code).toBe(200);
-    expect(all.data.map((a) => a.jobId)).toEqual([5]);
-
-    const rejectRes = await fetch(`${apiUrl}/job`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ taskId: String(single.data!.taskId), action: "reject" }),
-    });
-    expect(await rejectRes.json()).toMatchObject({ code: 200 });
-
-    const afterRes = await fetch(`${apiUrl}/job/approval?jobId=5`);
-    expect(await afterRes.json()).toMatchObject({ code: 200, data: null });
   });
 });

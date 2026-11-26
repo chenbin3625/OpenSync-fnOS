@@ -136,37 +136,61 @@ func (c *Client) listDirByFIDWithPath(ctx context.Context, pdirFID, dirRel strin
 	return out, nil
 }
 
-func (c *Client) fetchDirPages(ctx context.Context, pdirFID string) ([]Entry, error) {
+// ListDirPage reads one provider page without storing a partial directory in
+// the path resolver's complete-directory cache.
+func (c *Client) ListDirPage(ctx context.Context, relPath string, page int) ([]Entry, bool, error) {
+	if page < 1 || page > 2000 {
+		return nil, false, errors.New("目录分页位置无效")
+	}
+	fid, err := c.resolveDirFID(ctx, relPath)
+	if err != nil {
+		return nil, false, err
+	}
+	return c.readDirPage(ctx, fid, page)
+}
+
+func (c *Client) readDirPage(ctx context.Context, pdirFID string, page int) ([]Entry, bool, error) {
 	const pageSize = 100
+	q := url.Values{
+		"pdir_fid":        {pdirFID},
+		"_page":           {strconv.Itoa(page)},
+		"_size":           {strconv.Itoa(pageSize)},
+		"_fetch_total":    {"1"},
+		"_fetch_sub_dirs": {"0"},
+		"_sort":           {"file_type:asc,file_name:asc"},
+	}
+	var resp sortResp
+	if err := c.doJSON(ctx, http.MethodGet, "/file/sort", q, nil, &resp); err != nil {
+		return nil, false, err
+	}
+	entries := make([]Entry, 0, len(resp.Data.List))
+	for _, item := range resp.Data.List {
+		if entry, ok := apiItemToEntry(item, pdirFID); ok {
+			entries = append(entries, entry)
+		}
+	}
+	more := len(resp.Data.List) >= pageSize && page < 2000 &&
+		(resp.Metadata.Total <= 0 || page*pageSize < resp.Metadata.Total)
+	return entries, more, nil
+}
+
+func (c *Client) fetchDirPages(ctx context.Context, pdirFID string) ([]Entry, error) {
 	var all []Entry
 	seenFIDs := make(map[string]struct{})
-	seenNames := make(map[string]int) // name -> index in all (keep newest if Quark has duplicate names)
+	seenNames := make(map[string]int)
 
 	for page := 1; ; page++ {
-		q := url.Values{
-			"pdir_fid":        {pdirFID},
-			"_page":           {strconv.Itoa(page)},
-			"_size":           {strconv.Itoa(pageSize)},
-			"_fetch_total":    {"1"},
-			"_fetch_sub_dirs": {"0"},
-			"_sort":           {"file_type:asc,file_name:asc"},
-		}
-		var resp sortResp
-		if err := c.doJSON(ctx, http.MethodGet, "/file/sort", q, nil, &resp); err != nil {
+		entries, more, err := c.readDirPage(ctx, pdirFID, page)
+		if err != nil {
 			return nil, err
 		}
-		for _, item := range resp.Data.List {
-			entry, ok := apiItemToEntry(item, pdirFID)
-			if !ok {
-				continue
-			}
+		for _, entry := range entries {
 			if _, dup := seenFIDs[entry.FID]; dup {
 				continue
 			}
 			seenFIDs[entry.FID] = struct{}{}
 			if prevIdx, dupName := seenNames[entry.Name]; dupName {
-				// Quark allows duplicate names; keep the more recently updated one
-				// (or prefer directory over file on tie) for deterministic path resolution.
+				// Match path resolution for duplicate names by keeping the newest.
 				if entry.ModTime.After(all[prevIdx].ModTime) {
 					all[prevIdx] = entry
 				}
@@ -175,13 +199,7 @@ func (c *Client) fetchDirPages(ctx context.Context, pdirFID string) ([]Entry, er
 			seenNames[entry.Name] = len(all)
 			all = append(all, entry)
 		}
-		if len(resp.Data.List) < pageSize {
-			break
-		}
-		if resp.Metadata.Total > 0 && page*pageSize >= resp.Metadata.Total {
-			break
-		}
-		if page >= 2000 {
+		if !more {
 			break
 		}
 	}

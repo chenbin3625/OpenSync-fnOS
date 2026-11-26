@@ -251,21 +251,3 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	*c.n += int64(n)
 	return n, err
 }
-
-// CopyURLWithProgress pulls an HTTP(S) URL into dstDir while streaming progress
-// callbacks when the destination is local (HTTP Range resumable) or falling back
-// to CopyURL for remote destinations.
-func (c Config) CopyURLWithProgress(
-	ctx context.Context,
-	rawURL, dstDir string,
-	opt CopyURLOptions,
-	opts SessionOptions,
-	onProgress func(doneBytes, totalBytes int64, speed float64),
-) (string, error) {
-	dstDir = strings.TrimRight(strings.TrimSpace(dstDir), "/")
-	if ep, err := c.Resolve(dstDir); err == nil && ep.IsLocal {
-		_, sub := parts(dstDir)
-		return copyURLToLocalResumable(ctx, rawURL, sub, opt, opts, nil, onProgress)
-	}
-	return c.CopyURL(ctx, rawURL, dstDir, opt, opts)
-}

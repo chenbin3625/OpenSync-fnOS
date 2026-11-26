@@ -111,7 +111,7 @@ func TestNewFeatureHTTPHandlers(t *testing.T) {
 	})
 
 	w = httptest.NewRecorder()
-	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/svr/job/items/export?taskId=1&format=txt", nil))
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/svr/job/items/export?taskId=1", nil))
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "ok.txt") {
 		t.Fatalf("GET /svr/job/items/export status=%d body=%s", w.Code, w.Body.String())
 	}
@@ -129,47 +129,5 @@ func TestNewFeatureHTTPHandlers(t *testing.T) {
 	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/svr/alist/health", nil))
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"code":200`) {
 		t.Fatalf("GET /svr/alist/health status=%d body=%s", w.Code, w.Body.String())
-	}
-}
-
-func TestPendingApprovalHTTPHandler(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	cleanup := setupHandlerFeatureDB(t)
-	defer cleanup()
-
-	router := gin.New()
-	router.GET("/svr/job/approval", GetPendingApproval)
-	router.PUT("/svr/job", UpdateJob)
-
-	// List all pending approvals when empty.
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/svr/job/approval", nil))
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"data":[]`) {
-		t.Fatalf("GET /svr/job/approval status=%d body=%s", w.Code, w.Body.String())
-	}
-
-	// Single job lookup when none pending returns data:null.
-	w = httptest.NewRecorder()
-	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/svr/job/approval?jobId=42", nil))
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"data":null`) {
-		t.Fatalf("GET /svr/job/approval?jobId=42 status=%d body=%s", w.Code, w.Body.String())
-	}
-
-	// Invalid jobId is rejected with HTTP 400.
-	w = httptest.NewRecorder()
-	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/svr/job/approval?jobId=bad", nil))
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("GET /svr/job/approval?jobId=bad status=%d, want 400 (body=%s)", w.Code, w.Body.String())
-	}
-
-	// Approving/rejecting when none pending returns friendly error envelope.
-	for _, action := range []string{"approve", "reject"} {
-		req := httptest.NewRequest(http.MethodPut, "/svr/job", strings.NewReader(`{"taskId":9999,"action":"`+action+`"}`))
-		req.Header.Set("Content-Type", "application/json")
-		w = httptest.NewRecorder()
-		router.ServeHTTP(w, req)
-		if !strings.Contains(w.Body.String(), `"code":500`) || !strings.Contains(w.Body.String(), "当前没有待确认的删除项") {
-			t.Fatalf("PUT /svr/job %s status=%d body=%s", action, w.Code, w.Body.String())
-		}
 	}
 }

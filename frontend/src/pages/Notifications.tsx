@@ -65,7 +65,7 @@ function DeliveryNote({ item }: { item: NotifyItem }) {
 function getEventFilterBadge(params?: string): string | null {
   try {
     const parsed = JSON.parse(params || "{}") as Record<string, unknown>;
-    if (parsed.eventMode === "errors_only") return "仅异常 / 待审批";
+    if (parsed.eventMode === "errors_only") return "仅异常 / 失败";
     if (parsed.eventMode === "custom" && Array.isArray(parsed.events)) {
       return `自定义 ${parsed.events.length} 类事件`;
     }

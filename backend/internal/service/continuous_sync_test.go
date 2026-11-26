@@ -285,7 +285,7 @@ func TestContinuousInboxWaitsOutsideWindowAndWhileBusy(t *testing.T) {
 	}
 	row := cloneJobConfig(job)
 	row["isCron"] = 3
-	addSyncStatus(row, s, nil, nil)
+	addSyncStatus(row, s, nil, 0, nil)
 	status := row["syncStatus"].(map[string]interface{})
 	if fmt.Sprint(status["state"]) != "error" { // No registered worker must be visible as unhealthy.
 		t.Fatalf("missing worker reported healthy: %v", status)

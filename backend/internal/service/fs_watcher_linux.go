@@ -19,11 +19,11 @@ import (
 
 const maxInotifyWatchesPerJob = 4096
 
-func watchLocalRootsPlatform(ctx context.Context, roots []watchLocalRoot, onEvent func(relPath string, overflow bool)) {
+func watchLocalRootsPlatform(ctx context.Context, roots []watchLocalRoot, onEvents func(paths []string, fullScan bool)) {
 	fd, err := unix.InotifyInit1(unix.IN_CLOEXEC | unix.IN_NONBLOCK)
 	if err != nil {
 		log.Printf("fs_watcher: inotify init failed (%v), falling back to polling", err)
-		watchLocalRootsPolling(ctx, roots, onEvent)
+		watchLocalRootsPolling(ctx, roots, onEvents)
 		return
 	}
 	defer unix.Close(fd)
@@ -80,7 +80,7 @@ func watchLocalRootsPlatform(ctx context.Context, roots []watchLocalRoot, onEven
 	}
 	if limitExceeded {
 		log.Printf("fs_watcher: incomplete inotify coverage (cap %d), falling back to polling", maxInotifyWatchesPerJob)
-		watchLocalRootsPolling(ctx, roots, onEvent)
+		watchLocalRootsPolling(ctx, roots, onEvents)
 		return
 	}
 
@@ -96,8 +96,8 @@ func watchLocalRootsPlatform(ctx context.Context, roots []watchLocalRoot, onEven
 			if errors.Is(pollErr, unix.EINTR) {
 				continue
 			}
-			onEvent("", true)
-			watchLocalRootsPolling(ctx, roots, onEvent)
+			onEvents(nil, true)
+			watchLocalRootsPolling(ctx, roots, onEvents)
 			return
 		}
 		if n <= 0 {
@@ -108,13 +108,15 @@ func watchLocalRootsPlatform(ctx context.Context, roots []watchLocalRoot, onEven
 			if errors.Is(readErr, unix.EAGAIN) || errors.Is(readErr, unix.EINTR) {
 				continue
 			}
-			onEvent("", true)
-			watchLocalRootsPolling(ctx, roots, onEvent)
+			onEvents(nil, true)
+			watchLocalRootsPolling(ctx, roots, onEvents)
 			return
 		}
 		if rn < unix.SizeofInotifyEvent {
 			continue
 		}
+		var changed []string
+		fullScan := false
 		offset := 0
 		for offset+unix.SizeofInotifyEvent <= rn {
 			raw := (*unix.InotifyEvent)(unsafe.Pointer(&buf[offset]))
@@ -128,7 +130,7 @@ func watchLocalRootsPlatform(ctx context.Context, roots []watchLocalRoot, onEven
 			offset += nameLen
 			// Consume queue overflow cleanly.
 			if raw.Mask&unix.IN_Q_OVERFLOW != 0 {
-				onEvent("", true)
+				fullScan = true
 				continue
 			}
 			info, ok := wdMap[int(raw.Wd)]
@@ -141,8 +143,8 @@ func watchLocalRootsPlatform(ctx context.Context, roots []watchLocalRoot, onEven
 				continue
 			}
 			if raw.Mask&(unix.IN_DELETE_SELF|unix.IN_MOVE_SELF|unix.IN_UNMOUNT) != 0 {
-				onEvent("", true)
-				watchLocalRootsPolling(ctx, roots, onEvent)
+				onEvents(changed, true)
+				watchLocalRootsPolling(ctx, roots, onEvents)
 				return
 			}
 			if name == "" {
@@ -160,25 +162,25 @@ func watchLocalRootsPlatform(ctx context.Context, roots []watchLocalRoot, onEven
 					}
 					if !addDir(info.rootAbs, p) {
 						limitExceeded = true
-						onEvent("", true)
 						return fs.SkipAll
 					}
 					return nil
 				})
-				onEvent("", true)
+				fullScan = true
 				if limitExceeded {
-					watchLocalRootsPolling(ctx, roots, onEvent)
+					onEvents(changed, true)
+					watchLocalRootsPolling(ctx, roots, onEvents)
 					return
 				}
 				continue
 			}
 			if raw.Mask&(unix.IN_DELETE|unix.IN_MOVED_FROM|unix.IN_DELETE_SELF) != 0 {
-				onEvent("", true)
+				fullScan = true
 				continue
 			}
 			rel, relErr := filepath.Rel(info.rootAbs, fullPath)
 			if relErr != nil {
-				onEvent("", true)
+				fullScan = true
 				continue
 			}
 			rel = filepath.ToSlash(rel)
@@ -186,15 +188,18 @@ func watchLocalRootsPlatform(ctx context.Context, roots []watchLocalRoot, onEven
 				continue
 			}
 			if raw.Mask&unix.IN_ISDIR != 0 {
-				onEvent("", true)
+				fullScan = true
 				continue
 			}
 			// Ignore transient zero-event or non-regular files if already gone.
 			if st, statErr := os.Lstat(fullPath); statErr == nil && st.Mode().IsRegular() {
-				onEvent(rel, false)
+				changed = append(changed, rel)
 			} else {
-				onEvent("", true)
+				fullScan = true
 			}
+		}
+		if fullScan || len(changed) > 0 {
+			onEvents(changed, fullScan)
 		}
 	}
 }

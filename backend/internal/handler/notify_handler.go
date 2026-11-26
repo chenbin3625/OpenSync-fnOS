@@ -132,14 +132,16 @@ func TestNotify(c *gin.Context) {
 	done := make(chan error, 1)
 	go func() {
 		defer notifyTestWG.Done()
-		defer func() { <-notifyTestSem }()
+		var err error
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("notify test panicked: %v", r)
-				done <- fmt.Errorf("notify test panic: %v", r)
+				err = fmt.Errorf("notify test panic: %v", r)
 			}
+			<-notifyTestSem
+			done <- err
 		}()
-		done <- testService(payload)
+		err = testService(payload)
 	}()
 
 	select {

@@ -56,15 +56,15 @@ describe("continuous synchronization", () => {
     expect(validateJobForm({ ...draft(), method: 2 })).toContain("持续同步");
   });
 
-  it("normalizes all tasks to continuous sync schedule", () => {
+  it("defaults to continuous sync and preserves existing schedules", () => {
     const job = stored(draft());
     expect(formatSchedulePlan(job)).toContain("持续");
     expect(formatSchedule(job)).toBe("持续同步");
     expect(formatNextRun(job)).toBe("持续同步中");
     expect(formatNextRun({ ...job, enable: 0 })).toBe("持续同步已暂停");
-    const migrated = jobToForm({ ...job, isCron: 1, extraFlags: "" });
-    expect(buildJobPayload(migrated).isCron).toBe(3);
-    expect(migrated.extraFlags?.syncDirection).toBe("");
+    const scheduled = jobToForm({ ...job, isCron: 1, extraFlags: "" });
+    expect(buildJobPayload(scheduled).isCron).toBe(1);
+    expect(scheduled.extraFlags?.syncDirection).toBe("");
   });
 
   it("derives Cloud Sync metadata, readable cadence plan, relative sync time and error status", () => {
@@ -95,7 +95,6 @@ describe("continuous synchronization", () => {
     expect(formatRelativeSyncTime(1_700_000_000 - 7200, nowMs)).toBe("2 小时前");
 
     expect(isSyncStatusError({ state: "error", pendingChanges: 0, lastSuccess: 0, lastPoll: 0, nextPoll: 0, error: "boom", failures: 2 })).toBe(true);
-    expect(isSyncStatusError({ state: "needs_rebuild", pendingChanges: 0, lastSuccess: 0, lastPoll: 0, nextPoll: 0, error: "", failures: 0 })).toBe(true);
     expect(isSyncStatusError({ state: "synced", pendingChanges: 0, lastSuccess: 100, lastPoll: 100, nextPoll: 160, error: "", failures: 0 })).toBe(false);
 
     expect(resolveEffectiveSyncStatus({ enable: 0 }).state).toBe("paused");

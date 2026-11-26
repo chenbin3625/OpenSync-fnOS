@@ -45,7 +45,6 @@ type JobTask struct {
 	ctx                        context.Context
 	cancel                     context.CancelFunc
 	runtimeMu                  sync.Mutex
-	RequireFullSyncApproval    bool
 	fullSyncDeleteGuardSkipped atomic.Bool
 	drained                    atomic.Bool
 	ScanTotalDirs              atomic.Int64
@@ -388,32 +387,4 @@ func (jt *JobTask) recordInterruptedPendingItems(fallbackPairs [][2]string) {
 	if len(items) > 0 {
 		jt.appendFinishMany(items)
 	}
-}
-
-func (jt *JobTask) approvalJobID() int64 {
-	if id := jt.jobIDSnapshot(); id > 0 {
-		return id
-	}
-	if jt != nil && jt.Job != nil {
-		return util.ToInt64(jt.Job["id"])
-	}
-	return 0
-}
-
-const defaultFullSyncApprovalWait = 30 * time.Minute
-
-// fullSyncApprovalWait bounds how long a pending deletion approval stays valid
-// before expiring automatically without deleting destination files.
-// Tests may override it directly; in production it follows SystemSettings.FullSyncApprovalTimeout.
-var fullSyncApprovalWait = defaultFullSyncApprovalWait
-
-func effectiveFullSyncApprovalWait() time.Duration {
-	if fullSyncApprovalWait != defaultFullSyncApprovalWait {
-		return fullSyncApprovalWait
-	}
-	minutes := config.GetSystemSettings().FullSyncApprovalTimeout
-	if minutes <= 0 {
-		return 0
-	}
-	return time.Duration(minutes) * time.Minute
 }

@@ -21,6 +21,33 @@ func setupNativeTestDB(t *testing.T) func() {
 	return cleanup
 }
 
+func TestPan123EditOnlyKeepsTokenForUnchangedCredentials(t *testing.T) {
+	old := map[string]string{
+		"type": "pan123", "protocol": "open_api", "client_id": "first", "client_secret": "secret",
+		"access_token": "first-token", "token_expires_at": "old-expiry",
+	}
+	for _, tc := range []struct {
+		name                  string
+		edit                  map[string]string
+		wantToken, wantExpiry string
+	}{
+		{"description", map[string]string{"client_id": "first", "description": "changed"}, "first-token", "old-expiry"},
+		{"new account", map[string]string{"client_id": "second", "client_secret": "second-secret"}, "", ""},
+		{"new token", map[string]string{"client_id": "first", "access_token": "second-token", "token_expires_at": "old-expiry"}, "second-token", ""},
+		{"new protocol", map[string]string{"protocol": "web", "web_user": "account", "web_password": "password"}, "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _, err := mergeEditRemoteParams(old, tc.edit, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got["access_token"] != tc.wantToken || got["token_expires_at"] != tc.wantExpiry {
+				t.Fatal("unexpected token inheritance")
+			}
+		})
+	}
+}
+
 func TestNativeStorageCRUDAndProtection(t *testing.T) {
 	defer setupNativeTestDB(t)()
 	ctx := context.Background()
@@ -283,7 +310,7 @@ func TestNativeMultiPairContinuesAfterPartialFileFailure(t *testing.T) {
 	}
 }
 
-func TestNativeTestClientReturnsActualOfflineReason(t *testing.T) {
+func TestNativeEngineHealthReturnsActualOfflineReason(t *testing.T) {
 	defer setupNativeTestDB(t)()
 	ctx := context.Background()
 	if err := SaveNativeStorage(ctx, NativeStorageInput{}); err != nil {
@@ -295,12 +322,12 @@ func TestNativeTestClientReturnsActualOfflineReason(t *testing.T) {
 	}
 	id := util.ToInt64(rows[0]["id"])
 	t.Setenv("OPENSYNC_RCLONE_BIN", filepath.Join(t.TempDir(), "missing-rclone"))
-	_, err = TestClientWithHealth(ctx, id)
-	if err == nil {
-		t.Fatal("expected offline error")
+	health, err := CheckEngineHealth(ctx, id)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(err.Error(), "rclone") {
-		t.Fatalf("expected native offline reason mentioning rclone, got %q", err.Error())
+	if health == nil || health.Status != "offline" || !strings.Contains(health.Error, "rclone") {
+		t.Fatalf("expected offline health with a rclone reason, got %+v", health)
 	}
 }
 

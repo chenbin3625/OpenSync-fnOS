@@ -19,6 +19,7 @@ import (
 	"time"
 	"unicode"
 
+	"opensync/internal/pan123"
 	"opensync/internal/quark"
 )
 
@@ -44,6 +45,7 @@ var supportedRemoteOrder = []string{
 	"s3",
 	"webdav",
 	"quark",
+	"pan123",
 	"sftp",
 	"smb",
 	"ftp",
@@ -100,6 +102,7 @@ var fields = map[string]string{
 	"s3":                  "provider env_auth access_key_id secret_access_key session_token region endpoint location_constraint acl storage_class force_path_style no_check_bucket v2_auth list_version chunk_size upload_cutoff upload_concurrency disable_http2 server_side_encryption sse_kms_key_id directory_markers leave_parts_on_error upload_checksum_algorithm no_head no_head_object insecure_skip_verify proxy_url description",
 	"webdav":              "url vendor user pass bearer_token pacer_min_sleep nextcloud_chunk_size headers encoding insecure_skip_verify proxy_url description",
 	"quark":               "cookie root_folder_id account_name upload_concurrency part_size tps_limit user_agent insecure_skip_verify proxy_url description",
+	"pan123":              "protocol client_id client_secret access_token token_expires_at web_user web_password platform use_direct_link direct_link_key direct_link_ttl root_folder_id account_name upload_concurrency tps_limit user_agent insecure_skip_verify proxy_url description",
 	"sftp":                "host user port pass key_pem key_file_pass shell_type disable_hashcheck allow_hashcheck known_hosts idle_timeout concurrency chunk_size use_insecure_cipher set_modtime description",
 	"smb":                 "host user port pass domain spn hide_special_share case_insensitive idle_timeout description",
 	"ftp":                 "host user port pass tls explicit_tls disable_tls13 concurrency idle_timeout no_check_certificate shut_timeout writing_mdtm force_list_hidden insecure_skip_verify description",
@@ -178,6 +181,8 @@ var SecretFields = []string{
 	"file_password",
 	"folder_password",
 	"access_token",
+	"web_password",
+	"direct_link_key",
 }
 
 // ObscuredFields lists parameter keys stored using rclone's password obfuscation
@@ -399,17 +404,6 @@ func ValidateOrderBy(value string) error {
 		}
 	}
 	return nil
-}
-
-// ValidateBisyncResyncMode validates rclone bisync --resync-mode values.
-func ValidateBisyncResyncMode(value string) error {
-	trimmed := strings.ToLower(strings.TrimSpace(value))
-	switch trimmed {
-	case "", "newer", "older", "path1", "path2", "larger", "smaller":
-		return nil
-	default:
-		return errors.New("双向基线冲突策略仅支持 newer、older、path1、path2、larger 或 smaller")
-	}
 }
 
 // ValidateUserAgent validates an optional HTTP User-Agent string.
@@ -855,6 +849,21 @@ func RemoteSummary(p map[string]string) string {
 			return "夸克网盘 · 目录 " + rf
 		}
 		return "夸克网盘"
+	case "pan123":
+		modeLabel := "开放平台"
+		if pan123.NormalizeProtocol(p["protocol"]) == pan123.ProtocolWeb {
+			modeLabel = "个人盘 Web"
+		}
+		if acct := strings.TrimSpace(p["account_name"]); acct != "" {
+			return "123云盘 (" + modeLabel + ") · " + acct
+		}
+		if u := strings.TrimSpace(p["web_user"]); u != "" && pan123.NormalizeProtocol(p["protocol"]) == pan123.ProtocolWeb {
+			return "123云盘 (" + modeLabel + ") · " + u
+		}
+		if rf := strings.TrimSpace(p["root_folder_id"]); rf != "" && rf != "0" {
+			return "123云盘 (" + modeLabel + ") · 目录 " + rf
+		}
+		return "123云盘 (" + modeLabel + ")"
 	case "sftp", "smb", "ftp":
 		host := strings.TrimSpace(p["host"])
 		port := strings.TrimSpace(p["port"])
@@ -1238,7 +1247,7 @@ func (c Config) UsesBuiltInDriver(name string) bool {
 		}
 		visited[canonical] = true
 		p := c[canonical]
-		if p["type"] == "quark" {
+		if p["type"] == "quark" || p["type"] == "pan123" {
 			return true
 		}
 		for _, dep := range c.remoteDependencies(canonical) {
@@ -1272,7 +1281,7 @@ func (c Config) ExportINI(ctx context.Context, names []string, encryptPassword s
 		}
 		slices.Sort(skippedBuiltIn)
 		if len(selected) == 0 && len(skippedBuiltIn) > 0 {
-			return "", errors.New("当前仅包含 OpenSync 内置网盘驱动（如夸克网盘），暂不支持导出到外部官方 rclone")
+			return "", errors.New("当前仅包含 OpenSync 内置网盘驱动（如夸克网盘、123云盘），暂不支持导出到外部官方 rclone")
 		}
 	} else {
 		var queue []string
@@ -1286,7 +1295,7 @@ func (c Config) ExportINI(ctx context.Context, names []string, encryptPassword s
 				return "", fmt.Errorf("存储 %q 不存在", raw)
 			}
 			if c.UsesBuiltInDriver(key) {
-				return "", fmt.Errorf("存储 %q 使用 OpenSync 内置夸克网盘驱动，外部官方 rclone 暂不支持直接导出", key)
+				return "", fmt.Errorf("存储 %q 使用 OpenSync 内置网盘驱动，外部官方 rclone 暂不支持直接导出", key)
 			}
 			if !selected[key] {
 				selected[key] = true
@@ -1301,7 +1310,7 @@ func (c Config) ExportINI(ctx context.Context, names []string, encryptPassword s
 			for _, dep := range c.remoteDependencies(cur) {
 				if dep != Local && c[dep] != nil && !selected[dep] {
 					if c.UsesBuiltInDriver(dep) {
-						return "", fmt.Errorf("存储依赖 %q 使用 OpenSync 内置夸克网盘驱动，外部官方 rclone 暂不支持直接导出", dep)
+						return "", fmt.Errorf("存储依赖 %q 使用 OpenSync 内置网盘驱动，外部官方 rclone 暂不支持直接导出", dep)
 					}
 					selected[dep] = true
 					queue = append(queue, dep)
@@ -1696,6 +1705,52 @@ func ValidateEntry(name string, p map[string]string, plainSecrets bool) error {
 		if ps := p["part_size"]; ps != "" {
 			if err := ValidateRcloneSize(ps, false, fmt.Sprintf("%s 的分片大小（part_size）格式无效，如 10M、20M", name)); err != nil {
 				return err
+			}
+		}
+		if ua := p["user_agent"]; ua != "" {
+			if err := ValidateUserAgent(ua); err != nil {
+				return fmt.Errorf("%s：%s", name, err.Error())
+			}
+		}
+	case "pan123":
+		proto := pan123.NormalizeProtocol(p["protocol"])
+		if proto != pan123.ProtocolOpenAPI && proto != pan123.ProtocolWeb {
+			return fmt.Errorf("%s 的协议模式（protocol）无效，仅支持 open_api 或 web", name)
+		}
+		hasToken := strings.TrimSpace(p["access_token"]) != ""
+		if proto == pan123.ProtocolOpenAPI {
+			hasClientPair := strings.TrimSpace(p["client_id"]) != "" && strings.TrimSpace(p["client_secret"]) != ""
+			if !hasToken && !hasClientPair {
+				return fmt.Errorf("%s 需要填写 123云盘开放平台的 Client ID 与 Client Secret，或直接提供 Access Token", name)
+			}
+		} else {
+			hasUserPass := strings.TrimSpace(p["web_user"]) != "" && p["web_password"] != ""
+			if !hasToken && !hasUserPass {
+				return fmt.Errorf("%s 需要填写 123云盘个人账号与密码，或直接粘贴 Web Access Token", name)
+			}
+		}
+		if _, err := pan123.ParseRootFolderID(p["root_folder_id"]); err != nil {
+			return fmt.Errorf("%s 的%s", name, err.Error())
+		}
+		if uc := p["upload_concurrency"]; uc != "" {
+			n, err := strconv.Atoi(uc)
+			if err != nil || n < 1 || n > pan123.MaxUploadConcurrency {
+				return fmt.Errorf("%s 的分片上传并发数（upload_concurrency）需为 1–8 的整数", name)
+			}
+		}
+		if tps := p["tps_limit"]; tps != "" {
+			v, err := strconv.ParseFloat(tps, 64)
+			if err != nil || v <= 0 || v > 20 {
+				return fmt.Errorf("%s 的接口限流速率（tps_limit）需为大于 0 且不超过 20 的数值", name)
+			}
+		}
+		if err := validateBoolField(name, "use_direct_link", p["use_direct_link"]); err != nil {
+			return err
+		}
+		if ttl := p["direct_link_ttl"]; ttl != "" {
+			n, err := strconv.Atoi(ttl)
+			if err != nil || n < 1 || n > 10080 {
+				return fmt.Errorf("%s 的直链签名有效期（direct_link_ttl）需为 1–10080 分钟的整数", name)
 			}
 		}
 		if ua := p["user_agent"]; ua != "" {

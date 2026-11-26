@@ -3,23 +3,20 @@ import type {
   AlistItem,
   AppLogsResponse,
   BatchJobActionResult,
+  BisyncConflict,
   CurrentTaskData,
   DashboardOverview,
   DryRunResult,
   EngineHealth,
   FilterTestResult,
-  FullSyncApproval,
   JobCheckResult,
   JobItem,
   NativeAboutInfo,
   NativeAuthStepSnapshot,
   NativeBrowseResult,
-  NativeCopyURLResult,
-  NativeDedupeResult,
   NativeExportResult,
   NativeImportPreview,
   NativeImportResult,
-  NativeLinkResult,
   NativeRenameResult,
   NativeSizeInfo,
   NativeStorageState,
@@ -31,7 +28,6 @@ import type {
   SystemBackupPayload,
   SystemImportSummary,
   SystemSettings,
-  TaskItem,
   TaskItemPageData,
   TaskRecord,
 } from "../types";
@@ -361,22 +357,15 @@ export const api = {
       method: "POST",
       data: { name },
     }),
-  browseNativeStorage: (path: string, signal?: AbortSignal) =>
+  browseNativeStorage: (
+    path: string,
+    signal?: AbortSignal,
+    options?: { paged?: boolean; cursor?: string; fresh?: boolean },
+  ) =>
     request<NativeBrowseResult>("/native/storage/browse", {
       method: "POST",
-      data: { path },
+      data: { path, ...options },
       signal,
-    }),
-  restoreNativeFile: (data: {
-    srcPath: string;
-    dstLocalDir: string;
-    isDir: boolean;
-    overwrite: boolean;
-  }) =>
-    request("/native/storage/restore", {
-      method: "POST",
-      data,
-      timeoutMs: 30 * 60 * 1000,
     }),
   mkdirNativeStorage: (path: string) =>
     request("/native/storage/mkdir", { method: "POST", data: { path } }),
@@ -402,51 +391,6 @@ export const api = {
       data: { path },
       timeoutMs: 2 * 60 * 1000,
     }),
-  dedupeNativeStorage: (data: {
-    path: string;
-    mode: string;
-    byHash?: boolean;
-    sizeOnly?: boolean;
-    dryRun?: boolean;
-  }) =>
-    request<NativeDedupeResult>("/native/storage/dedupe", {
-      method: "POST",
-      data,
-      timeoutMs: 10 * 60 * 1000,
-    }),
-  cleanupNativeStorage: (name: string) =>
-    request("/native/storage/cleanup", {
-      method: "POST",
-      data: { name },
-      timeoutMs: 5 * 60 * 1000,
-    }),
-  linkNativeStorage: (data: {
-    path: string;
-    expire?: string;
-    unlink?: boolean;
-  }) =>
-    request<NativeLinkResult>("/native/storage/link", {
-      method: "POST",
-      data,
-    }),
-  copyUrlNativeStorage: (data: {
-    url: string;
-    dstDir: string;
-    fileName?: string;
-    autoFilename?: boolean;
-    noClobber?: boolean;
-  }) =>
-    request<NativeCopyURLResult>("/native/storage/copyurl", {
-      method: "POST",
-      data,
-      timeoutMs: 30 * 60 * 1000,
-    }),
-  setTierNativeStorage: (data: { path: string; tier: string }) =>
-    request("/native/storage/settier", {
-      method: "POST",
-      data,
-      timeoutMs: 5 * 60 * 1000,
-    }),
   listNativeTransfers: (signal?: AbortSignal) =>
     request<NativeTransferTask[]>("/native/storage/transfers", {
       signal,
@@ -459,17 +403,6 @@ export const api = {
     overwrite: boolean;
   }) =>
     request<NativeTransferTask>("/native/storage/transfers/restore", {
-      method: "POST",
-      data,
-    }),
-  startAsyncCopyUrlNativeStorage: (data: {
-    url: string;
-    dstDir: string;
-    fileName?: string;
-    autoFilename?: boolean;
-    noClobber?: boolean;
-  }) =>
-    request<NativeTransferTask>("/native/storage/transfers/copyurl", {
       method: "POST",
       data,
     }),
@@ -566,12 +499,8 @@ export const api = {
       method: "POST",
       data,
     }),
-  saveEngine: (data: unknown, edit: boolean) =>
-    request("/alist", { method: edit ? "PUT" : "POST", data }),
   deleteEngine: (id: number) =>
     request("/alist", { method: "DELETE", params: { id } }),
-  testEngine: (id: number) =>
-    request<EngineHealth | null>("/alist/test", { method: "POST", params: { id } }),
   jobMenu: (signal?: AbortSignal) => requestAllJobs(signal),
   saveJob: (data: unknown, signal?: AbortSignal) =>
     request<{ id?: number } | null>("/job", { method: "POST", data, signal }).then(
@@ -608,47 +537,6 @@ export const api = {
     ),
   current: (id: number, signal?: AbortSignal) =>
     requestCurrentTask<CurrentTaskData | null>({ id }, signal),
-  pendingApproval: (
-    jobId: number,
-    signalOrOpts?:
-      | AbortSignal
-      | {
-          offset?: number;
-          limit?: number;
-          q?: string;
-          type?: "all" | "dir" | "file" | string;
-          signal?: AbortSignal;
-        },
-  ) => {
-    const isSignal =
-      Boolean(signalOrOpts) &&
-      typeof (signalOrOpts as AbortSignal).aborted === "boolean";
-    const opts = isSignal
-      ? { signal: signalOrOpts as AbortSignal }
-      : ((signalOrOpts as {
-          offset?: number;
-          limit?: number;
-          q?: string;
-          type?: string;
-          signal?: AbortSignal;
-        }) ?? {});
-    return request<FullSyncApproval | null>("/job/approval", {
-      params: {
-        jobId,
-        offset: opts.offset,
-        limit: opts.limit,
-        q: opts.q || undefined,
-        type: opts.type && opts.type !== "all" ? opts.type : undefined,
-      },
-      signal: opts.signal,
-      cache: "no-store",
-    });
-  },
-  pendingApprovals: (signal?: AbortSignal) =>
-    request<FullSyncApproval[]>("/job/approval", {
-      signal,
-      cache: "no-store",
-    }),
   history: (
     id: number,
     params: Record<string, unknown>,
@@ -669,14 +557,13 @@ export const api = {
     }),
   exportTaskItemsUrl: (
     taskId: number | string,
-    format: "csv" | "txt",
     params: Record<string, unknown> = {},
-  ) => buildApiUrl("/job/items/export", { taskId, format, ...params }),
+  ) => buildApiUrl("/job/items/export", { taskId, ...params }),
   taskAction: (
     taskId: number,
-    action: "stop" | "retry" | "approve" | "reject" | "pause" | "resume" | "bwlimit",
+    action: "stop" | "retry" | "pause" | "resume" | "bwlimit",
     itemIds?: number[],
-    extra?: { bwLimit?: string; paths?: string[] },
+    extra?: { bwLimit?: string },
   ) =>
     request("/job", {
       method: "PUT",
@@ -685,26 +572,11 @@ export const api = {
         action,
         ...(itemIds && itemIds.length > 0 ? { itemIds } : {}),
         ...(extra?.bwLimit !== undefined ? { bwLimit: extra.bwLimit } : {}),
-        ...(extra?.paths && extra.paths.length > 0 ? { paths: extra.paths } : {}),
       },
     }).then((result) => {
-      if (
-        action === "approve" ||
-        action === "reject" ||
-        action === "pause" ||
-        action === "resume" ||
-        action === "stop"
-      ) {
+      if (action === "pause" || action === "resume" || action === "stop") {
         invalidateJobsCache();
       }
-      return result;
-    }),
-  excludeApprovalPaths: (taskId: number, paths: string[]) =>
-    request<{ excludedCount: number }>("/job/approval/exclude", {
-      method: "POST",
-      data: { taskId: String(taskId), paths },
-    }).then((result) => {
-      invalidateJobsCache();
       return result;
     }),
   deleteTask: (taskId: number) =>
@@ -734,10 +606,19 @@ export const api = {
       method: "POST",
       data: { id, download, cryptCheck },
     }),
-  resetBisyncJob: (id: number, runNow = false) =>
-    request("/job/bisync/resync", {
+  getJobConflicts: (id: number, includeResolved = false) =>
+    request<BisyncConflict[]>("/job/conflicts", {
+      params: { id, includeResolved: includeResolved ? 1 : 0 },
+      cache: "no-store",
+    }),
+  resolveJobConflict: (
+    jobId: number,
+    conflictId: number,
+    action: "keep_local" | "keep_remote" | "keep_both" | "dismiss",
+  ) =>
+    request("/job/conflicts/resolve", {
       method: "POST",
-      data: { id, runNow },
+      data: { jobId, conflictId, action },
     }),
   getJobCheck: (id: number, signal?: AbortSignal) =>
     request<JobCheckResult | null>("/job/check", {
@@ -747,8 +628,8 @@ export const api = {
     }),
   cancelJobCheck: (id: number) =>
     request("/job/check", { method: "DELETE", params: { id } }),
-  exportJobCheckUrl: (id: number, format: "csv" | "txt") =>
-    buildApiUrl("/job/check/export", { id, format }),
+  exportJobCheckUrl: (id: number) =>
+    buildApiUrl("/job/check/export", { id }),
   repairJobCheck: (id: number) =>
     request<{ repairCount: number }>("/job/check/repair", {
       method: "POST",

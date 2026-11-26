@@ -7,19 +7,15 @@ import type {
   DryRunResult,
   EngineHealth,
   FilterTestResult,
-  FullSyncApproval,
   JobCheckResult,
   JobItem,
   NativeAboutInfo,
   NativeAuthStepSnapshot,
   NativeBrowseResult,
-  NativeCopyURLResult,
-  NativeDedupeResult,
   NativeExportResult,
   NativeImportCandidate,
   NativeImportPreview,
   NativeImportResult,
-  NativeLinkResult,
   NativeLocalRoot,
   NativeRemoteItem,
   NativeRenameResult,
@@ -62,8 +58,6 @@ const defaultSettings: SystemSettings = {
   copyConcurrency: 5,
   scanConcurrency: 16,
   maxRetries: 2,
-  scheduledFullSyncConfirm: 0,
-  fullSyncApprovalTimeout: 30,
   engineHealthCheckInterval: 15,
   defaultBwLimit: "",
   proxyUrl: "",
@@ -124,6 +118,17 @@ function mockNativeSummary(params: Record<string, string>): string {
         return `夸克网盘 · 目录 ${params.root_folder_id}`;
       }
       return "夸克网盘";
+    case "pan123": {
+      const modeLabel = params.protocol === "web" ? "个人盘 Web" : "开放平台";
+      if (params.account_name) return `123云盘 (${modeLabel}) · ${params.account_name}`;
+      if (params.protocol === "web" && params.web_user) {
+        return `123云盘 (${modeLabel}) · ${params.web_user}`;
+      }
+      if (params.root_folder_id && params.root_folder_id !== "0") {
+        return `123云盘 (${modeLabel}) · 目录 ${params.root_folder_id}`;
+      }
+      return `123云盘 (${modeLabel})`;
+    }
     case "sftp":
     case "smb": {
       const addr = params.port ? `${params.host}:${params.port}` : params.host || "";
@@ -556,7 +561,6 @@ export class MockStore {
   private settings: SystemSettings;
   private histories = new Map<number, TaskRecord[]>();
   private currentTasks = new Map<number, CurrentTaskData>();
-  private pendingApprovals = new Map<number, FullSyncApproval>();
   private currentItems = new Map<number, TaskItem[]>();
   private taskItems = new Map<number, TaskItem[]>();
   private nextEngineId: number;
@@ -718,6 +722,23 @@ export class MockStore {
   // [{"path": "<name>"}]; the frontend tolerates both shapes, so mock mode
   // should exercise the real one.
   listPaths(path: string): { path: string }[] {
+    if (path === "/") {
+      return [...new Set([
+        ...defaultPaths["/"].map((item) => item.name),
+        ...(this.nativeLocalRoots.length ? ["本地"] : []),
+        ...this.nativeRemotes.keys(),
+      ])].map((name) => ({ path: name }));
+    }
+    if (path === "/本地") return this.nativeLocalRoots.map((root) => ({ path: root.id }));
+    const [, mount, ...relative] = path.split("/");
+    if (this.nativeRemotes.has(mount)) {
+      return (defaultPaths[`/${relative.join("/")}`] || []).map((item) => ({ path: item.name }));
+    }
+    if (mount === "本地") {
+      const [root, ...folders] = relative;
+      const label = this.nativeLocalRoots.find((item) => item.id === root)?.path.split("/").at(-1);
+      return (defaultPaths[`/${[label, ...folders].join("/")}`] || []).map((item) => ({ path: item.name }));
+    }
     return (defaultPaths[path] || []).map((item) => ({ path: item.name }));
   }
 
@@ -1843,9 +1864,9 @@ export class MockStore {
       );
       if (!actual) continue;
       const params = this.nativeRemotes.get(actual)!;
-      if (params.type === "quark") {
+      if (params.type === "quark" || params.type === "pan123") {
         if (names && names.length > 0) {
-          return `存储 "${actual}" 使用 OpenSync 内置夸克网盘驱动，外部官方 rclone 暂不支持直接导出`;
+          return `存储 "${actual}" 使用 OpenSync 内置网盘驱动，外部官方 rclone 暂不支持直接导出`;
         }
         skippedBuiltIn.push(actual);
         continue;
@@ -1858,7 +1879,7 @@ export class MockStore {
     }
     if (blocks.length === 0) {
       return skippedBuiltIn.length > 0
-        ? "当前仅包含 OpenSync 内置网盘驱动（如夸克网盘），暂不支持导出到外部官方 rclone"
+        ? "当前仅包含 OpenSync 内置网盘驱动（如夸克网盘、123云盘），暂不支持导出到外部官方 rclone"
         : "没有可导出的远端存储配置";
     }
     const header =
@@ -1981,71 +2002,15 @@ export class MockStore {
     return { count: 18, bytes: 128 * 1024 * 1024, sizeless: 0 };
   }
 
-  dedupeNativeStorage(input: {
-    path: string;
-    mode?: string;
-    dryRun?: boolean;
-  }): NativeDedupeResult | string {
-    if (!input.path?.trim() || input.path.trim() === "/") return "请提供有效路径";
-    return {
-      mode: input.mode || "newest",
-      dryRun: Boolean(input.dryRun),
-      logs: [`[mock] Checked ${input.path}: 0 duplicates found`],
-    };
+  listJobConflicts(jobId: number, _includeResolved = false) {
+    const job = this.jobs.find((j) => j.id === jobId);
+    if (!job) return [];
+    return [];
   }
 
-  cleanupNativeStorage(name: string): string | null {
-    if (!name?.trim() || name.trim() === "本地") return "请提供远端存储名称";
-    return null;
-  }
-
-  linkNativeStorage(input: {
-    path: string;
-    expire?: string;
-    unlink?: boolean;
-  }): NativeLinkResult | string {
-    if (!input.path?.trim() || input.path.trim() === "/") return "请提供有效路径";
-    if (input.unlink) {
-      return { url: "", message: "已取消共享链接" };
-    }
-    return { url: `https://share.example.com/s${input.path}` };
-  }
-
-  copyUrlNativeStorage(input: {
-    url: string;
-    dstDir: string;
-    fileName?: string;
-    autoFilename?: boolean;
-    noClobber?: boolean;
-  }): NativeCopyURLResult | string {
-    if (!input.url?.trim() || !input.dstDir?.trim()) return "请提供 URL 和目标目录";
-    try {
-      const parsed = new URL(input.url.trim());
-      if (
-        ["127.0.0.1", "localhost", "::1"].includes(parsed.hostname) ||
-        parsed.hostname.startsWith("169.254.")
-      ) {
-        return "不允许访问本机回环或链路本地地址";
-      }
-      const fallback = parsed.pathname.split("/").filter(Boolean).pop() || "downloaded.bin";
-      return { fileName: input.fileName?.trim() || fallback };
-    } catch {
-      return "URL 格式无效";
-    }
-  }
-
-  setTierNativeStorage(input: { path: string; tier: string }): string | null {
-    if (!input.path?.trim() || !input.tier?.trim()) return "请提供路径和存储级别";
-    return null;
-  }
-
-  resetBisyncJob(jobId: number, runNow = false): string | null {
+  resolveJobConflict(jobId: number, _conflictId: number, _action: string): string | null {
     const job = this.jobs.find((j) => j.id === jobId);
     if (!job) return "任务不存在";
-    if (job.method !== 3) return "仅双向同步任务支持重建基线";
-    if (runNow) {
-      this.runJob(jobId);
-    }
     return null;
   }
 
@@ -2103,7 +2068,6 @@ export class MockStore {
           running: Boolean(current),
           paused: Boolean(current?.paused),
           queued: false,
-          pendingApproval: this.pendingApprovals.has(job.id),
           lastStatus: latest?.status ?? 0,
         };
       }),
@@ -2129,7 +2093,6 @@ export class MockStore {
   deleteJob(id: number): void {
     this.jobs = this.jobs.filter((job) => job.id !== id);
     this.currentTasks.delete(id);
-    this.pendingApprovals.delete(id);
     this.currentItems.delete(id);
     this.histories.delete(id);
   }
@@ -2153,7 +2116,6 @@ export class MockStore {
     const items = createDemoTaskItems();
     const base = createDemoTaskView(now(), items);
     const taskId = this.nextTaskId++;
-    const job = this.jobs.find((item) => item.id === jobId);
     const task: CurrentTaskData = {
       ...base,
       taskId,
@@ -2161,52 +2123,7 @@ export class MockStore {
     this.currentTasks.set(jobId, task);
     this.currentItems.set(jobId, items);
     this.taskItems.set(taskId, items);
-    if (job?.method === 1) {
-      const createdAt = now();
-      const timeoutMin = this.settings.fullSyncApprovalTimeout ?? 30;
-      this.pendingApprovals.set(jobId, {
-        jobId,
-        jobName: job.remark || `任务 #${jobId}`,
-        taskId,
-        status: "pending",
-        createdAt,
-        expiresAt: timeoutMin > 0 ? createdAt + timeoutMin * 60 : 0,
-        deleteCount: 3,
-        deleteSize: 48 * 1024 * 1024,
-        pathCount: 2,
-        paths: [
-          {
-            path: "/Backup/Nightly/old-camera",
-            isPath: true,
-            count: 2,
-            size: 48 * 1024 * 1024,
-            action: "删除",
-          },
-          {
-            path: "/Backup/Nightly/obsolete.mov",
-            isPath: false,
-            count: 1,
-            size: 0,
-            action: "删除",
-          },
-        ],
-      });
-    }
     return { ...task };
-  }
-
-  getPendingApproval(jobId: number): FullSyncApproval | null {
-    const approval = this.pendingApprovals.get(jobId);
-    return approval
-      ? { ...approval, paths: approval.paths.map((p) => ({ ...p })) }
-      : null;
-  }
-
-  listPendingApprovals(): FullSyncApproval[] {
-    return [...this.pendingApprovals.values()].map((approval) => ({
-      ...approval,
-      paths: approval.paths.map((p) => ({ ...p })),
-    }));
   }
 
   getCurrentTask(jobId: number): CurrentTaskData | null {
@@ -2322,16 +2239,6 @@ export class MockStore {
   }): void {
     if (input.taskId !== undefined) {
       const taskId = numberValue(input.taskId, 0);
-      if (input.action === "approve" || input.action === "reject") {
-        // Post-positioned deletion approval is decoupled from the running sync
-        // task: neither approve nor reject aborts or blocks currentTasks.
-        for (const [jobId, approval] of this.pendingApprovals) {
-          if (approval.taskId !== taskId) continue;
-          this.pendingApprovals.delete(jobId);
-          return;
-        }
-        return;
-      }
       if (input.action === "stop") this.stopTask(taskId);
       if (input.action === "retry") this.retryTask(taskId);
       if (input.action === "pause") this.pauseTask(taskId);
@@ -2559,7 +2466,6 @@ export class MockStore {
   }
 
   getDashboard(): DashboardOverview {
-    const pendingApprovals: DashboardOverview["pendingApprovals"] = [];
     let runningJobs = 0;
     let activeJobs = 0;
     let pausedJobs = 0;
@@ -2572,22 +2478,6 @@ export class MockStore {
       if (job.enable === 1) enabledJobs += 1;
       const current = this.currentTasks.get(job.id);
       if (current) runningJobs += 1;
-      const approval = this.getPendingApproval(job.id);
-      if (approval) {
-        pendingApprovals.push({
-          jobId: job.id,
-          jobName: job.remark || `任务 #${job.id}`,
-          taskId: approval.taskId ?? 0,
-          deleteCount: approval.deleteCount,
-          deleteSize: approval.deleteSize,
-          pathCount: approval.pathCount,
-          status: approval.status,
-          createdAt: approval.createdAt,
-          expiresAt: approval.expiresAt,
-          planChanged: approval.planChanged,
-          lastError: approval.lastError,
-        });
-      }
       const engine = this.engines.find((e) => e.id === job.alistId);
       const latest = (this.histories.get(job.id) || [])[0];
       const done = current?.doneSize ?? 0;
@@ -2623,7 +2513,6 @@ export class MockStore {
         paused,
         queued: false,
         currentTaskId: current?.taskId ?? 0,
-        pendingApproval: approval,
         liveNum: current?.num ?? null,
         liveProgress: total > 0 ? (done * 100) / total : 0,
         liveDoneSize: done,
@@ -2685,7 +2574,6 @@ export class MockStore {
         enabledJobs,
         runningJobs,
         queuedJobs: 0,
-        pendingApprovals: pendingApprovals.length,
         totalEngines: this.engines.length,
         onlineEngines: healths.filter((h) => h.status === "online").length,
         offlineEngines: healths.filter((h) => h.status === "offline").length,
@@ -2712,7 +2600,6 @@ export class MockStore {
         totalFiles,
         totalBytes,
       },
-      pendingApprovals,
       jobs: jobSummaries,
     };
   }

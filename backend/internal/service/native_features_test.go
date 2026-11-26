@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"opensync/internal/config"
 	"opensync/internal/mapper"
 	"opensync/internal/native"
 )
@@ -32,7 +33,6 @@ func TestNativeFullSyncMoveBisyncDryRunCheckRenameAndRedaction(t *testing.T) {
 		for _, jc := range clients {
 			_ = jc.StopJob(true)
 		}
-		pendingDeleteApprovals.ResetForTest()
 		cleanupDB()
 	}()
 	ctx := context.Background()
@@ -105,7 +105,7 @@ func TestNativeFullSyncMoveBisyncDryRunCheckRenameAndRedaction(t *testing.T) {
 	vBiA := findRoot("bi_a")
 	vBiB := findRoot("bi_b")
 
-	// --- 1. Native Full Sync (method=1) + Trash + Pending Delete Approval ---
+	// --- 1. Native Full Sync (method=1) + Trash (direct deletion without secondary approval) ---
 	_ = os.WriteFile(filepath.Join(srcFull, "keep.txt"), []byte("keep-v1"), 0644)
 	_ = os.WriteFile(filepath.Join(dstFull, "stale.txt"), []byte("stale-to-delete"), 0644)
 
@@ -141,26 +141,29 @@ func TestNativeFullSyncMoveBisyncDryRunCheckRenameAndRedaction(t *testing.T) {
 		t.Fatalf("unexpected full sync dry-run: %+v", dryRes)
 	}
 
-	// Execute full sync manually (stages stale.txt deletion for approval!)
+	// An installation that explicitly opted into confirmation keeps destination files.
+	originalConfig := config.GetConfig()
+	guardedConfig := *originalConfig
+	guardedConfig.Server.ScheduledFullSyncConfirm = 1
+	func() {
+		config.SetConfigForTest(&guardedConfig)
+		defer config.SetConfigForTest(originalConfig)
+		runAndWait(fullJobID)
+	}()
+	if _, err := os.ReadFile(filepath.Join(dstFull, "keep.txt")); err != nil {
+		t.Fatalf("legacy deletion guard blocked copy: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dstFull, "stale.txt")); err != nil {
+		t.Fatalf("legacy deletion guard failed to preserve destination: %v", err)
+	}
+
+	// Explicitly allowing direct deletion lets the mirror move stale.txt into trash.
 	runAndWait(fullJobID)
 	if _, err := os.ReadFile(filepath.Join(dstFull, "keep.txt")); err != nil {
 		t.Fatalf("keep.txt not copied during full sync: %v", err)
 	}
-	approval := GetPendingApproval(fullJobID)
-	if approval == nil || approval.DeleteCount != 1 {
-		t.Fatalf("expected staged pending delete approval with 1 item, got: %+v", approval)
-	}
-	// Approve staged deletion -> moves stale.txt into .opensync-trash
-	if err := ApproveFullSyncTask(approval.TaskID); err != nil {
-		t.Fatalf("ApproveFullSyncTask native pending deletion failed: %v", err)
-	}
-	deadline = time.Now().Add(15 * time.Second)
-	for GetPendingApproval(fullJobID) != nil && time.Now().Before(deadline) {
-		time.Sleep(100 * time.Millisecond)
-	}
 	if _, err := os.Stat(filepath.Join(dstFull, "stale.txt")); err == nil {
-		items, _ := mapper.GetJobTaskItemList(map[string]interface{}{"taskId": approval.TaskID, "pageNum": 1, "pageSize": 50})
-		t.Fatalf("stale.txt should have been deleted/trashed after approval; approval=%+v items=%+v", GetPendingApproval(fullJobID), items)
+		t.Fatalf("stale.txt should have been deleted/trashed directly during full sync")
 	}
 	foundInTrash := false
 	_ = filepath.Walk(filepath.Join(dstFull, ".opensync-trash"), func(p string, info os.FileInfo, e error) error {
@@ -325,21 +328,20 @@ func TestNativeFullSyncMoveBisyncDryRunCheckRenameAndRedaction(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(srcFull, "renamed_sub")); !os.IsNotExist(err) {
 		t.Fatal("expected renamed_sub deleted")
 	}
-	if err := ResetBisyncJob(biJobID, true); err != nil {
-		t.Fatalf("ResetBisyncJob failed: %v", err)
+	if err := DoJobManual(biJobID); err != nil {
+		t.Fatalf("DoJobManual bisync failed: %v", err)
 	}
 	jc, _ := GetJobClientByID(biJobID)
 	if !jc.waitUntilIdle(30 * time.Second) {
-		t.Fatalf("bisync job did not finish after ResetBisyncJob")
+		t.Fatalf("bisync job did not finish")
 	}
 	if _, canonical, err := parseNativeExtraFlags(map[string]interface{}{
-		"maxTransfer":      "1G",
-		"cutoffMode":       "soft",
-		"orderBy":          "size,asc",
-		"bufferSize":       "16M",
-		"useMmap":          true,
-		"bisyncResyncMode": "path1",
-		"bisyncMaxDelete":  50,
+		"maxTransfer":     "1G",
+		"cutoffMode":      "soft",
+		"orderBy":         "size,asc",
+		"bufferSize":      "16M",
+		"useMmap":         true,
+		"bisyncMaxDelete": 50,
 	}); err != nil || !strings.Contains(canonical, `"cutoffMode":"soft"`) {
 		t.Fatalf("parseNativeExtraFlags extended failed: %q (%v)", canonical, err)
 	}

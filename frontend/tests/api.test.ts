@@ -76,18 +76,18 @@ describe("gateway-aware API requests", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(result.dataList).toEqual([{ id: 1 }, { id: 501 }]);
   });
-  it("tests an existing engine through the dedicated endpoint", async () => {
+  it("tests an existing remote through the dedicated endpoint", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ code: 200, data: null, msg: "" }),
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    await api.testEngine(7);
+    await api.testNativeStorage({ name: "archive" });
 
     expect(fetchMock).toHaveBeenCalledWith(
-      `${apiBase}/alist/test?id=7`,
-      expect.objectContaining({ method: "POST" }),
+      `${apiBase}/native/storage/test`,
+      expect.objectContaining({ method: "POST", body: JSON.stringify({ name: "archive" }) }),
     );
   });
   it("disables HTTP caching for realtime task requests", async () => {

@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const currentVersion = 261126
+const currentVersion = 261127
 
 // InitSQL initializes the database schema and runs migrations
 func InitSQL() {
@@ -126,6 +126,7 @@ func InitSQL() {
 		}
 
 		stmts = append(stmts, syncSchemaStatements()...)
+		stmts = append(stmts, bisyncSchemaStatements()...)
 		stmts = append(stmts,
 
 			`CREATE TABLE notify(
@@ -137,14 +138,6 @@ func InitSQL() {
 				lastSendTime integer DEFAULT 0,
 				lastSendError text DEFAULT NULL,
 				createTime integer DEFAULT (strftime('%s', 'now'))
-			)`,
-
-			`CREATE TABLE pending_delete_approval(
-				jobId integer primary key,
-				taskId integer NOT NULL,
-				payload text NOT NULL,
-				createdAt integer NOT NULL,
-				expiresAt integer DEFAULT 0
 			)`,
 		)
 
@@ -242,6 +235,7 @@ func isNoSuchTableOrNoRows(err error) bool {
 
 func ensureIndexes(db *sql.DB) {
 	indexes := []string{
+		"CREATE INDEX IF NOT EXISTS idx_sync_file_state_tombstone ON sync_file_state(jobId, observedAt) WHERE deleted=1",
 		"CREATE INDEX IF NOT EXISTS idx_job_task_job_time ON job_task(jobId, createTime DESC, id DESC)",
 		"CREATE INDEX IF NOT EXISTS idx_job_task_status_job ON job_task(status, jobId)",
 		"CREATE INDEX IF NOT EXISTS idx_job_task_effective_time ON job_task(COALESCE(NULLIF(runTime, 0), createTime), id)",
@@ -441,15 +435,6 @@ func migrationStatements(fromVersion int64) []string {
 			"ALTER TABLE job ADD COLUMN notifyIds text DEFAULT NULL",
 		)
 	}
-	if fromVersion < 261123 {
-		stmts = append(stmts, `CREATE TABLE IF NOT EXISTS pending_delete_approval(
-			jobId integer primary key,
-			taskId integer NOT NULL,
-			payload text NOT NULL,
-			createdAt integer NOT NULL,
-			expiresAt integer DEFAULT 0
-		)`)
-	}
 	if fromVersion < 261124 {
 		stmts = append(stmts,
 			"ALTER TABLE job ADD COLUMN bwLimit text DEFAULT NULL",
@@ -465,6 +450,9 @@ func migrationStatements(fromVersion int64) []string {
 	}
 	if fromVersion < 261126 {
 		stmts = append(stmts, syncSchemaStatements()...)
+	}
+	if fromVersion < 261127 {
+		stmts = append(stmts, bisyncSchemaStatements()...)
 	}
 	stmts = append(stmts, fmt.Sprintf("UPDATE schema_version SET version=%d", currentVersion))
 	return stmts

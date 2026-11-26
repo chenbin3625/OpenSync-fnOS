@@ -227,60 +227,23 @@ func TestRealRcloneCheckFollowSymlinksAndBisyncBackupDir(t *testing.T) {
 	}
 
 	// Verify Bisync --backup-dir1/--backup-dir2 soft-deletes deleted/overwritten files into trash.
+	// StatEntry verifies single-file metadata inspection including local inode & MD5.
 	biA := filepath.Join(root, "biA")
-	biB := filepath.Join(root, "biB")
-	workDir := filepath.Join(root, "work")
-	for _, d := range []string{biA, biB} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.MkdirAll(biA, 0o755); err != nil {
+		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(biA, "keep.txt"), []byte("keep"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(biA, "del.txt"), []byte("del-v1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("TRIM_DATA_ACCESSIBLE_PATHS", biA+":"+biB)
-	var vA, vB string
+	t.Setenv("TRIM_DATA_ACCESSIBLE_PATHS", biA)
+	var vA string
 	for _, r := range AuthorizedRoots() {
 		if r.Path == biA {
 			vA = "/" + Local + "/" + r.ID
-		} else if r.Path == biB {
-			vB = "/" + Local + "/" + r.ID
 		}
 	}
-	biOpt := BisyncOptions{
-		WorkDir:     workDir,
-		Compare:     1,
-		BackupDir:   ".opensync-trash/2026-11-26/v1",
-		FilterLines: []string{"- .opensync-trash/**"},
-	}
-	if _, err := cfg.Bisync(ctx, vA, vB, biOpt, nil); err != nil {
-		t.Fatalf("initial Bisync failed: %v", err)
-	}
-	if err := os.Remove(filepath.Join(biA, "del.txt")); err != nil {
-		t.Fatal(err)
-	}
-	var events []Event
-	if _, err := cfg.Bisync(ctx, vA, vB, biOpt, func(ev Event) {
-		if ev.File != "" {
-			events = append(events, ev)
-		}
-	}); err != nil {
-		t.Fatalf("second Bisync with BackupDir failed: %v", err)
-	}
-	trashed := filepath.Join(biB, ".opensync-trash", "2026-11-26", "v1", "del.txt")
-	if b, err := os.ReadFile(trashed); err != nil || string(b) != "del-v1" {
-		t.Fatalf("expected del.txt moved to bisync backup dir %s: got %q (%v)", trashed, string(b), err)
-	}
-	sawDeleteEvent := false
-	for _, ev := range events {
-		if ev.File == "del.txt" && ev.Reason == "delete" {
-			sawDeleteEvent = true
-		}
-	}
-	if !sawDeleteEvent {
-		t.Fatalf("expected delete event for del.txt moved into backup dir, got %+v", events)
+	st, ok, err := cfg.StatEntry(ctx, vA+"/keep.txt", true, SessionOptions{})
+	if err != nil || !ok || st == nil || st.Size != 4 || st.Inode == 0 || st.MD5 == "" {
+		t.Fatalf("StatEntry unexpected: st=%+v ok=%v err=%v", st, ok, err)
 	}
 }

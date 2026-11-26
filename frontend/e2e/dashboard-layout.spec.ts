@@ -8,7 +8,6 @@ const richDashboardFixture = {
     enabledJobs: 4,
     runningJobs: 2,
     queuedJobs: 1,
-    pendingApprovals: 1,
     totalEngines: 3,
     onlineEngines: 2,
     offlineEngines: 1,
@@ -70,16 +69,6 @@ const richDashboardFixture = {
       free: 1.1 * 1024 * 1024 * 1024 * 1024,
     },
   ],
-  pendingApprovals: [
-    {
-      jobId: 2,
-      jobName: "影音库全量镜像",
-      taskId: 8042,
-      deleteCount: 14,
-      deleteSize: 186 * 1024 * 1024,
-      pathCount: 4,
-    },
-  ],
   jobs: [
     {
       id: 1,
@@ -95,7 +84,6 @@ const richDashboardFixture = {
       running: true,
       queued: false,
       currentTaskId: 8051,
-      pendingApproval: null,
       liveNum: { wait: 12, running: 3, success: 35, fail: 0, other: 0 },
       liveProgress: 72.4,
       liveDoneSize: 1.2 * 1024 * 1024 * 1024,
@@ -122,12 +110,6 @@ const richDashboardFixture = {
       running: true,
       queued: false,
       currentTaskId: 8042,
-      pendingApproval: {
-        deleteCount: 14,
-        deleteSize: 186 * 1024 * 1024,
-        pathCount: 4,
-        paths: [],
-      },
       liveNum: null,
       liveProgress: 56,
       liveDoneSize: 0.6 * 1024 * 1024 * 1024,
@@ -152,7 +134,6 @@ const richDashboardFixture = {
       running: false,
       queued: true,
       currentTaskId: 0,
-      pendingApproval: null,
       liveNum: null,
       liveProgress: 0,
       nextRunTime: now + 1800,
@@ -183,7 +164,6 @@ const richDashboardFixture = {
       running: false,
       queued: false,
       currentTaskId: 0,
-      pendingApproval: null,
       liveNum: null,
       liveProgress: 0,
       nextRunTime: now + 7200,
@@ -214,7 +194,6 @@ const richDashboardFixture = {
       running: false,
       queued: false,
       currentTaskId: 0,
-      pendingApproval: null,
       liveNum: null,
       liveProgress: 0,
       nextRunTime: 0,
@@ -262,7 +241,6 @@ async function routeDashboardFixtures(page: Page) {
           dstPath: j.dstPath,
           running: j.running,
           queued: j.queued,
-          pendingApproval: Boolean(j.pendingApproval),
           lastStatus: j.lastTask?.status ?? 0,
         })),
         count: richDashboardFixture.jobs.length,
@@ -284,7 +262,6 @@ test("dashboard renders KPI cards, padded section header, status filters and zer
   await expect(page.locator(".dashboard-speed-chart")).toBeVisible();
   await expect(page.locator(".dashboard-live-task-row")).toHaveCount(2);
   await expect(page.locator(".dashboard-job-speed").first()).toContainText("24.60 MB/s");
-  await expect(page.locator(".approval-alert-banner")).toBeVisible();
   await expect(page.locator(".dashboard-job-row")).toHaveCount(5);
 
   // Switch between Sync Trend and Storage Quota insights
@@ -337,6 +314,26 @@ test("dashboard renders KPI cards, padded section header, status filters and zer
   expect(firstInfoBox).not.toBeNull();
   expect(firstInfoBox!.x - (firstCheckBox!.x + firstCheckBox!.width)).toBeLessThanOrEqual(24);
 
+  // Speed chart SVG and Y-axis must stay strictly contained inside .dashboard-speed-chart
+  // and never overflow onto the active tasks list (regression guard for wide viewports).
+  const chartBox = await page.locator(".dashboard-speed-chart").boundingBox();
+  const svgBox = await page.locator(".dashboard-speed-svg").boundingBox();
+  const yAxisBox = await page.locator(".dashboard-speed-yaxis").boundingBox();
+  const liveTasksBox = await page.locator(".dashboard-live-tasks").boundingBox();
+  expect(chartBox).not.toBeNull();
+  expect(svgBox).not.toBeNull();
+  expect(yAxisBox).not.toBeNull();
+  expect(liveTasksBox).not.toBeNull();
+  expect(svgBox!.y + svgBox!.height).toBeLessThanOrEqual(
+    chartBox!.y + chartBox!.height + 1,
+  );
+  expect(yAxisBox!.y + yAxisBox!.height).toBeLessThanOrEqual(
+    chartBox!.y + chartBox!.height + 1,
+  );
+  expect(liveTasksBox!.y).toBeGreaterThanOrEqual(
+    chartBox!.y + chartBox!.height - 1,
+  );
+
   // Dark theme tokens apply cleanly across dashboard surfaces (wait for CSS transition)
   await page.evaluate(() => {
     document.body.setAttribute("theme-mode", "dark");
@@ -355,4 +352,160 @@ test("dashboard renders KPI cards, padded section header, status filters and zer
       fullPage: true,
     });
   }
+});
+
+test("dashboard chart stays bounded at 1920px and stays flicker-free across live polls", async ({
+  page,
+}) => {
+  test.skip(
+    (page.viewportSize()?.width || 0) < 1400,
+    "wide desktop chart & poll regression",
+  );
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  let phase: "initial" | "fail" | "swapped" = "initial";
+  let failSeen = false;
+  let swappedSeen = false;
+
+  await page.route("**/app/opensync/svr/**", async (route) => {
+    const url = new URL(route.request().url());
+    const success = (data: unknown) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ code: 200, data, msg: "" }),
+      });
+    if (url.pathname.endsWith("/session"))
+      return success({ uid: 1, development: false, version: "0.0.53" });
+    if (url.pathname.endsWith("/version/latest"))
+      return success({
+        latestVersion: "v0.0.53",
+        releaseURL: "https://example.test/releases",
+        hasUpdate: false,
+      });
+    if (url.pathname.endsWith("/alist"))
+      return success([
+        {
+          id: 1,
+          remark: "内置存储",
+          url: "rclone://native",
+          kind: "rclone",
+          health: {
+            status: "online",
+            storagesKnown: true,
+            storages: [
+              { mountPath: "/本地", status: "ok" },
+              { mountPath: "/谷歌", status: "ok" },
+              { mountPath: "/夸克", status: "ok" },
+            ],
+          },
+        },
+      ]);
+    if (url.pathname.endsWith("/job"))
+      return success({
+        dataList: richDashboardFixture.jobs.slice(0, 2).map((j) => ({
+          id: j.id,
+          remark: j.remark,
+          enable: 1,
+          alistId: 1,
+          method: j.method,
+          isCron: 3,
+          srcPath: j.srcPath,
+          dstPath: j.dstPath,
+          running: true,
+        })),
+        count: 2,
+      });
+    if (url.pathname.endsWith("/dashboard")) {
+      // Simulate a transient background poll failure after initial load — must not unmount dashboard.
+      if (phase === "fail") {
+        failSeen = true;
+        phase = "swapped";
+        return route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({ code: 503, data: null, msg: "服务繁忙" }),
+        });
+      }
+      // Swap speeds on subsequent poll — active task order must stay stable (no row jumping).
+      const swap = phase === "swapped";
+      if (swap) swappedSeen = true;
+      const jobs = [
+        {
+          ...richDashboardFixture.jobs[0],
+          liveSpeed: (swap ? 5.2 : 24.6) * 1024 * 1024,
+        },
+        {
+          ...richDashboardFixture.jobs[1],
+          liveSpeed: (swap ? 31.4 : 13.8) * 1024 * 1024,
+        },
+      ];
+      return success({
+        ...richDashboardFixture,
+        recent7d: {
+          totalRuns: 3,
+          successRuns: 0,
+          failRuns: 0,
+          stoppedRuns: 0,
+          totalFiles: 0,
+          totalBytes: 0,
+        },
+        jobs,
+      });
+    }
+    return success(null);
+  });
+
+  await page.goto("/app/opensync/dashboard");
+  await expect(page.locator(".dashboard-speed-chart")).toBeVisible();
+  await expect(page.locator(".dashboard-live-task-row")).toHaveCount(2);
+
+  // Verify zero vertical overflow of SVG/Y-axis at 1920x1080
+  const boxes = await page.evaluate(() => {
+    const rect = (sel: string) =>
+      document.querySelector<HTMLElement | SVGElement>(sel)!.getBoundingClientRect();
+    const chart = rect(".dashboard-speed-chart");
+    const svg = rect(".dashboard-speed-svg");
+    const yaxis = rect(".dashboard-speed-yaxis");
+    const tasks = rect(".dashboard-live-tasks");
+    return {
+      chartBottom: chart.bottom,
+      svgBottom: svg.bottom,
+      yaxisBottom: yaxis.bottom,
+      tasksTop: tasks.top,
+    };
+  });
+  expect(boxes.svgBottom).toBeLessThanOrEqual(boxes.chartBottom + 1);
+  expect(boxes.yaxisBottom).toBeLessThanOrEqual(boxes.chartBottom + 1);
+  expect(boxes.tasksTop).toBeGreaterThanOrEqual(boxes.chartBottom - 1);
+
+  // Verify 0% success pill uses muted styling rather than green success styling
+  const recentPill = page.locator(".dashboard-kpi-card").nth(3).locator(".dashboard-kpi-pill");
+  await expect(recentPill).toHaveText("成功率 0%");
+  await expect(recentPill).toHaveClass(/is-muted/);
+  await expect(recentPill).not.toHaveClass(/is-success/);
+
+  const initialOrder = await page
+    .locator(".dashboard-live-task-name")
+    .allTextContents();
+  expect(initialOrder).toEqual(["家庭相册每日备份", "影音库全量镜像"]);
+
+  if (process.env.PLAYWRIGHT_SCREENSHOTS === "1") {
+    await page.screenshot({
+      path: "test-results/dashboard-light-1920.png",
+      fullPage: true,
+    });
+  }
+
+  // Next poll fails transiently (must keep dashboard mounted), followed by swapped speeds
+  phase = "fail";
+  await expect.poll(() => failSeen, { timeout: 6000 }).toBe(true);
+  await expect(page.locator(".dashboard-kpi-card")).toHaveCount(4);
+  await expect(page.getByText(/实时数据刷新失败/)).toBeVisible();
+
+  await expect.poll(() => swappedSeen, { timeout: 6000 }).toBe(true);
+  await expect(page.getByText(/实时数据刷新失败/)).toHaveCount(0);
+  await expect(page.locator(".dashboard-kpi-card")).toHaveCount(4);
+  const afterOrder = await page
+    .locator(".dashboard-live-task-name")
+    .allTextContents();
+  expect(afterOrder).toEqual(["家庭相册每日备份", "影音库全量镜像"]);
 });

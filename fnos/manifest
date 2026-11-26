@@ -1,7 +1,7 @@
 appname=opensync
-version=0.0.53
+version=0.0.54
 display_name=OpenSync
-desc=<div><p><strong>OpenSync</strong> 是运行在飞牛 fnOS 上的文件同步与备份工具，可作为群晖 Cloud Sync 的替代方案。</p><p>内置 rclone 引擎，开箱即可在本地授权目录与其他磁盘、S3（阿里云 OSS / 腾讯云 COS / Cloudflare R2 / MinIO 等）、WebDAV（兼容自建 OpenList / AList）、SFTP、SMB、OneDrive、Google Drive、Dropbox、Crypt 加密存储等之间自动同步文件。</p><ul><li>支持增量同步、全量同步、移动与双向同步，满足备份、镜像、搬家与多端同步场景。</li><li>支持 Cron、固定间隔和手动触发，并提供只读模拟运行与数据一致性校验。</li><li>支持文件名、文件后缀、文件目录、系统目录过滤和文件大小/时间限制。</li><li>提供实时进度、执行历史、失败重试、目标端回收站与任务超时控制。</li><li>支持钉钉、企业微信、飞书、Telegram、SMTP 邮件、Server酱、Bark、ntfy、Gotify、PushPlus 与自定义 Webhook 通知。</li></ul><p>开源地址：<a href="https://github.com/chenbin3625/OpenSync-fnOS">https://github.com/chenbin3625/OpenSync-fnOS</a></p></div>
+desc=<div><p><strong>OpenSync</strong> 是运行在飞牛 fnOS 上的文件同步与备份工具，可作为群晖 Cloud Sync 的替代方案。</p><p>支持本地授权目录、夸克网盘、123 云盘，以及通过内置 rclone 接入的 S3、WebDAV（兼容自建 OpenList / AList）、SFTP、SMB、OneDrive、Google Drive、Dropbox、Crypt 加密存储等。</p><ul><li>支持持续上传、下载、单向镜像与双向同步，可设置传输时段、并发上限和限速。</li><li>提供远程目录浏览、只读模拟运行、数据一致性校验和文件过滤。</li><li>提供实时进度、执行历史、失败重试、回收站、双向冲突处理与批量删除保护。</li><li>支持任务通知、存储连通性告警及日报或周报。</li></ul><p>开源地址：<a href="https://github.com/chenbin3625/OpenSync-fnOS">https://github.com/chenbin3625/OpenSync-fnOS</a></p></div>
 platform=x86
 source=thirdparty
 maintainer=chenbin3625
@@ -16,4 +16,4 @@ ctl_stop=true
 install_type=
 checkport=false
 disable_authorization_path=false
-changelog=v0.0.53 修复夸克网盘直传大文件并发分片触发阿里云 OSS 顺序上传报错（PartNotSequential / PartAlreadyExist）的问题：单文件分片改为严格按序串行上传，新增断点 ETag 连续性校验与失效会话自动重建机制，同时保持多文件并行直传吞吐。
+changelog=v0.0.54 新增 123 云盘原生接入，支持开放平台和个人盘 Web 协议。双向同步改用三方比对，支持冲突副本、冲突处理和批量删除保护。更新同步总览、快捷任务向导及远程目录浏览。

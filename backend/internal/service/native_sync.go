@@ -59,7 +59,6 @@ type nativeExtraFlags struct {
 	CheckSchedule        string `json:"checkSchedule,omitempty"`
 	MissedCatchUp        bool   `json:"missedCatchUp,omitempty"`
 	DirectStream         bool   `json:"directStream,omitempty"`
-	BisyncResyncMode     string `json:"bisyncResyncMode,omitempty"`
 	BisyncMaxDelete      int    `json:"bisyncMaxDelete,omitempty"`
 	BisyncForce          bool   `json:"bisyncForce,omitempty"`
 }
@@ -312,11 +311,8 @@ func parseNativeExtraFlags(raw interface{}) (nativeExtraFlags, string, error) {
 				return nativeExtraFlags{}, "", publicError("定时一致性校验周期仅支持 daily、weekly 或 monthly")
 			}
 		case "bisyncResyncMode":
-			s, ok := extraFlagString(val)
-			if !ok || native.ValidateBisyncResyncMode(s) != nil {
-				return nativeExtraFlags{}, "", publicError("双向基线冲突策略仅支持 newer、older、path1、path2、larger 或 smaller")
-			}
-			out.BisyncResyncMode = strings.ToLower(s)
+			// Legacy rclone resync policy has no equivalent in the three-way planner.
+			continue
 		case "bisyncMaxDelete":
 			if val == nil || val == "" {
 				continue
@@ -495,15 +491,12 @@ func buildNativeRcloneFilterLines(job map[string]interface{}) []string {
 	return lines
 }
 
-func bisyncWorkDir(jobID int64) string {
-	return filepath.Join(config.DataDir(), "bisync", fmt.Sprintf("job-%d", jobID))
-}
-
-func cleanupBisyncWorkDir(jobID int64) {
+func clearBisyncRuntimeAndState(jobID int64) {
 	if jobID <= 0 {
 		return
 	}
-	_ = os.RemoveAll(bisyncWorkDir(jobID))
+	bisyncEchoSuppress.ClearJob(jobID)
+	_ = mapper.ClearBisyncJobState(jobID)
 }
 
 func nativeTrashBackupSubdir(jt *JobTask, job map[string]interface{}) string {
@@ -776,53 +769,6 @@ func buildNativeFullSyncSnapshot(
 	return snap, true, nil
 }
 
-// buildNativePendingDeleteTargets converts deferred fullSyncDelete items into
-// pendingDeleteTarget records with subtree digests for live re-verification.
-func buildNativePendingDeleteTargets(plan *fullSyncPlan, items []fullSyncDelete) []pendingDeleteTarget {
-	srcRootNonEmpty := len(plan.src.dirs[""]) > 0
-	targets := make([]pendingDeleteTarget, 0, len(items))
-	for _, item := range items {
-		isDir := strings.HasSuffix(item.name, "/")
-		target := pendingDeleteTarget{
-			SrcRoot:         plan.src.root,
-			DstRoot:         plan.dst.root,
-			SrcDir:          item.srcDir,
-			DstDir:          item.dir,
-			Name:            item.name,
-			IsDir:           isDir,
-			IsBlocker:       item.isBlocker,
-			Size:            item.metadata.Size,
-			Count:           1,
-			Modified:        item.metadata.Modified,
-			SrcRootNonEmpty: srcRootNonEmpty,
-		}
-		if isDir && item.subtree != "" {
-			var subEntries []subtreeDigestEntry
-			var collect func(relPrefix, snapDir string)
-			collect = func(relPrefix, snapDir string) {
-				children := plan.dst.dirs[snapDir]
-				for _, childName := range sortedFileListKeys(children) {
-					childMeta := children[childName]
-					childIsDir := strings.HasSuffix(childName, "/")
-					subEntries = append(subEntries, subtreeDigestEntry{
-						relPath:  relPrefix + childName,
-						isDir:    childIsDir,
-						size:     childMeta.Size,
-						modified: childMeta.Modified,
-					})
-					if childIsDir {
-						collect(relPrefix+childName, snapDir+childName)
-					}
-				}
-			}
-			collect("", item.subtree)
-			target.Count, target.Size, target.SubtreeDigest = summarizeSubtreeEntries(subEntries)
-		}
-		targets = append(targets, target)
-	}
-	return targets
-}
-
 func nativePairEffectiveCompareMode(cfg native.Config, src, dst string, compareMode int) int {
 	if compareMode != 0 {
 		return compareMode
@@ -897,7 +843,7 @@ func filterCompletedTransferring(items []native.TransferItem, completed map[stri
 
 // runNativeFullSync executes full mirror sync (method=1) using native rclone
 // while reusing OpenSync's fullSyncPlan safety guards, same-side relocations,
-// trash soft-delete, conflict backup, and pending deletion approval queue.
+// trash soft-delete, and conflict backup.
 func (jt *JobTask) runNativeFullSync(selected *nativeRetryFilter) error {
 	defer jt.clearNativePlanned()
 
@@ -908,10 +854,9 @@ func (jt *JobTask) runNativeFullSync(selected *nativeRetryFilter) error {
 	includeM := buildJobIncludeMatcher(job)
 	now := time.Now()
 	repairOnly := jt.hasRetrySource()
-	deferDeletes := jt.RequireFullSyncApproval && !repairOnly
+	requireDeleteConsent := config.GetConfig().Server.ScheduledFullSyncConfirm == 1
 	sessOpts := native.SessionOptions{ProxyURL: globalNativeProxyURL()}
 
-	var allDeferredTargets []pendingDeleteTarget
 	var errs []error
 	var totalScannedDirs int64
 
@@ -984,9 +929,14 @@ func (jt *JobTask) runNativeFullSync(selected *nativeRetryFilter) error {
 			var guardReason string
 			var deletesUnsafe bool
 			if !repairOnly {
-				relocations = plan.relocations()
 				writes = plan.writeIndex()
-				guardReason, deletesUnsafe = plan.unsafeDeleteVolume(plan.plannedDeleteWeight(relocations, writes))
+				if requireDeleteConsent && (len(plan.blockers) > 0 || len(plan.extraDeletes) > 0) {
+					deletesUnsafe = true
+					guardReason = "升级前已启用全量删除确认，已保留目标端文件。如需允许直接删除，请将 scheduled_full_sync_confirm 设置为 0 后重启应用"
+				} else {
+					relocations = plan.relocations()
+					guardReason, deletesUnsafe = plan.unsafeDeleteVolume(plan.plannedDeleteWeight(relocations, writes))
+				}
 			}
 
 			var estFiles, estBytes int64
@@ -994,7 +944,7 @@ func (jt *JobTask) runNativeFullSync(selected *nativeRetryFilter) error {
 				estBlocked := make(map[string]struct{})
 				for _, key := range sortedDeleteKeys(plan.blockers, false) {
 					item := plan.blockers[key]
-					if item.protected || repairOnly || deletesUnsafe || jt.skipCollidingDelete(writes, item) || deferDeletes {
+					if item.protected || repairOnly || deletesUnsafe || jt.skipCollidingDelete(writes, item) {
 						estBlocked[normalizeBlockedPath(item.blocksPath)] = struct{}{}
 					}
 				}
@@ -1063,7 +1013,6 @@ func (jt *JobTask) runNativeFullSync(selected *nativeRetryFilter) error {
 
 		blocked := make(map[string]struct{})
 		writeBlocked := make(map[string]struct{})
-		var deferredItems []fullSyncDelete
 
 		// Phase 1: Type-conflict blockers
 		for _, key := range sortedDeleteKeys(plan.blockers, false) {
@@ -1083,11 +1032,6 @@ func (jt *JobTask) runNativeFullSync(selected *nativeRetryFilter) error {
 				p := normalizeBlockedPath(item.blocksPath)
 				blocked[p] = struct{}{}
 				writeBlocked[p] = struct{}{}
-				continue
-			}
-			if deferDeletes {
-				blocked[normalizeBlockedPath(item.blocksPath)] = struct{}{}
-				deferredItems = append(deferredItems, item)
 				continue
 			}
 			delErr := nativeDeleteOrTrash(ctx, cfg, jt, job, plan.dst.root, item.dir, item.name, item.subtree != "")
@@ -1289,7 +1233,7 @@ func (jt *JobTask) runNativeFullSync(selected *nativeRetryFilter) error {
 			continue
 		}
 
-		// Phase 5: Extra deletions (guarded by safety valves & optional approval)
+		// Phase 5: Extra deletions (guarded by safety valves)
 		suspiciousCounts := plan.suspiciousEmptySourceDirs()
 		suspicious := make(map[string]struct{}, len(suspiciousCounts))
 		for dir := range suspiciousCounts {
@@ -1307,7 +1251,7 @@ func (jt *JobTask) runNativeFullSync(selected *nativeRetryFilter) error {
 			jt.CopyHook("", plan.dst.root, "", nil, "", taskStatusFailed, &errMsg, taskItemPath, taskItemTypeDelete, time.Now().Unix())
 		}
 
-		useBatchHardDelete := !deferDeletes && !trashEnabled(job)
+		useBatchHardDelete := !trashEnabled(job)
 		var batchFileItems []fullSyncDelete
 		var batchFileRels []string
 		var dirOrTrashItems []fullSyncDelete
@@ -1330,10 +1274,6 @@ func (jt *JobTask) runNativeFullSync(selected *nativeRetryFilter) error {
 			}
 			item := plan.extraDeletes[key]
 			if jt.skipCollidingDelete(writes, item) {
-				continue
-			}
-			if deferDeletes {
-				deferredItems = append(deferredItems, item)
 				continue
 			}
 			isDir := item.subtree != ""
@@ -1384,19 +1324,8 @@ func (jt *JobTask) runNativeFullSync(selected *nativeRetryFilter) error {
 				jt.DelHook(item.dir, item.name, plan.dst.deleteSize(item), taskStatusSuccess, nil, boolToTaskItemObject(item.subtree != ""), time.Now().Unix())
 			}
 		}
-
-		if len(deferredItems) > 0 {
-			allDeferredTargets = append(allDeferredTargets, buildNativePendingDeleteTargets(plan, deferredItems)...)
-		}
 	}
 
-	if deferDeletes && ctx.Err() == nil {
-		if len(allDeferredTargets) > 0 {
-			pendingDeleteApprovals.Stage(jt, allDeferredTargets)
-		} else {
-			pendingDeleteApprovals.ClearIfPending(jt.approvalJobID())
-		}
-	}
 	if ctx.Err() == nil {
 		cleanupNativeExpiredTrash(ctx, cfg, jt.TaskID, job)
 	}
@@ -1887,134 +1816,6 @@ func verifyAndBatchDeleteMovedSources(
 
 func (m FileMetadata) ModTime() int64 { return m.Modified }
 
-func buildNativeBisyncOptions(job map[string]interface{}, jt *JobTask, dry bool) native.BisyncOptions {
-	limits := taskRuntimeLimitsForJob(job)
-	extra, _, _ := parseNativeExtraFlags(job["extraFlags"])
-	backupDir := ""
-	if !dry {
-		backupDir = nativeTrashBackupSubdir(jt, job)
-	}
-	return native.BisyncOptions{
-		WorkDir:              bisyncWorkDir(util.ToInt64(job["id"])),
-		ResyncMode:           extra.BisyncResyncMode,
-		MaxDelete:            extra.BisyncMaxDelete,
-		Force:                extra.BisyncForce,
-		TrackRenames:         extra.TrackRenames,
-		DryRun:               dry,
-		BackupDir:            backupDir,
-		Transfers:            limits.CopyConcurrency,
-		Checkers:             limits.ScanConcurrency,
-		Retries:              limits.MaxRetries,
-		Compare:              util.ToInt(job["compareMode"]),
-		ConflictPolicy:       util.ToInt(job["conflictPolicy"]),
-		FilterLines:          buildNativeRcloneFilterLines(job),
-		MinSize:              util.ToInt64(job["minFileSize"]),
-		MaxSize:              util.ToInt64(job["maxFileSize"]),
-		MinAgeMinutes:        util.ToInt(job["minFileAgeMinutes"]),
-		OlderThanDays:        util.ToInt(job["olderThanDays"]),
-		NewerThanDays:        util.ToInt(job["newerThanDays"]),
-		BwLimit:              effectiveJobBwLimit(job),
-		TPSLimit:             jobFloat64(job["tpsLimit"]),
-		TPSLimitBurst:        util.ToInt(job["tpsLimitBurst"]),
-		ModifyWindow:         strings.TrimSpace(util.StringValue(job["modifyWindow"])),
-		FastList:             util.ToInt(job["fastList"]) == 1,
-		MultiThreadStreams:   util.ToInt(job["multiThreadStreams"]),
-		MultiThreadCutoff:    extra.MultiThreadCutoff,
-		MultiThreadChunkSize: extra.MultiThreadChunkSize,
-		BufferSize:           extra.BufferSize,
-		UseMmap:              extra.UseMmap,
-		MaxTransfer:          extra.MaxTransfer,
-		CutoffMode:           extra.CutoffMode,
-		MaxDuration:          extra.MaxDuration,
-		OrderBy:              extra.OrderBy,
-		MaxBacklog:           extra.MaxBacklog,
-		UserAgent:            extra.UserAgent,
-		IOTimeout:            extra.IOTimeout,
-		ConTimeout:           extra.ConTimeout,
-		LowLevelRetries:      extra.LowLevelRetries,
-		RetriesSleep:         extra.RetriesSleep,
-		IgnoreSize:           extra.IgnoreSize,
-		CreateEmptySrcDirs:   util.ToInt(job["createEmptySrcDirs"]) == 1,
-		FollowSymlinks:       util.ToInt(job["followSymlinks"]) == 1,
-		NoUpdateModtime:      extra.NoUpdateModtime,
-		Inplace:              extra.Inplace,
-		CheckFirst:           extra.CheckFirst,
-		S3NoHead:             extra.S3NoHead,
-		ProxyURL:             globalNativeProxyURL(),
-		Controller:           jt.controller(),
-	}
-}
-
-// runNativeBisync executes bidirectional sync (method=3) using `rclone bisync`.
-func (jt *JobTask) runNativeBisync() error {
-	ctx := jt.context()
-	cfg := jt.nativeConfig
-	job := jt.Job
-	srcPaths := parsePathList(job["srcPath"])
-	dstPaths := parsePathList(job["dstPath"])
-	if len(srcPaths) != 1 || len(dstPaths) != 1 {
-		return errors.New("双向同步仅支持单个源目录与单个目标目录")
-	}
-	src, dst := srcPaths[0], dstPaths[0]
-	opts := buildNativeBisyncOptions(job, jt, false)
-	if err := mapper.EnsureSyncState(util.ToInt64(job["id"]), syncFingerprint(job, cfg)); err != nil {
-		return err
-	}
-	state, err := mapper.GetSyncState(util.ToInt64(job["id"]))
-	if err != nil {
-		return err
-	}
-	opts.RequireExistingState = state.BisyncInitialized
-	if state.BisyncNeedsRebuild && !native.BisyncResyncRequested(opts.WorkDir) {
-		return errors.New("存储或任务配置已改变，请明确重建双向同步基线")
-	}
-	_, err = cfg.Bisync(ctx, src, dst, opts, func(v native.Event) {
-		if v.Stats != nil {
-			if v.Stats.Bytes > 0 || v.Stats.Transfers > 0 || len(v.Stats.Transferring) > 0 {
-				jt.FirstSync.CompareAndSwap(0, time.Now().Unix())
-			}
-			statsCopy := *v.Stats
-			jt.nativeStats.Store(&nativeProgressSnapshot{src: src, dst: dst, stats: &statsCopy})
-			jt.notifyProgressChange()
-			return
-		}
-		if v.File == "" {
-			return
-		}
-		jt.FirstSync.CompareAndSwap(0, time.Now().Unix())
-		srcDir := path.Join(src, path.Dir(v.File))
-		dstDir := path.Join(dst, path.Dir(v.File))
-		base := path.Base(v.File)
-		status := taskStatusSuccess
-		var itemErr *string
-		if v.Failed {
-			text := strings.TrimSpace(v.Error)
-			if text == "" {
-				text = "双向同步未完成此项"
-			}
-			itemErr = &text
-			status = taskStatusFailed
-		}
-		if v.Reason == "delete" {
-			jt.DelHook(dstDir, base, v.Size, status, itemErr, taskItemFile, time.Now().Unix())
-			return
-		}
-		itemType := taskItemTypeCopy
-		if v.Reason == "move" {
-			itemType = taskItemTypeMove
-		}
-		jt.appendFinish(NewCopyJobTaskItem(jt.TaskID, srcDir, dstDir, base, v.Size, "", status, itemErr, taskItemFile, itemType, time.Now().Unix()))
-	})
-	jt.nativeStats.Store(nil)
-	if err == nil && ctx.Err() == nil {
-		cleanupNativeExpiredTrash(ctx, cfg, jt.TaskID, job)
-	}
-	if err == nil {
-		err = mapper.MarkBisyncInitialized(util.ToInt64(job["id"]))
-	}
-	return err
-}
-
 func (jt *JobTask) populateNativeWaiting(src, dst string, files []native.PendingFile) {
 	if jt == nil || jt.Waiting == nil || len(files) == 0 {
 		return
@@ -2399,66 +2200,4 @@ func dryRunNativeMove(ctx context.Context, sess *dryRunSession, cfg native.Confi
 		}
 	}
 	return nil
-}
-
-func dryRunNativeBisync(ctx context.Context, sess *dryRunSession, cfg native.Config, job map[string]interface{}) error {
-	srcPaths := parsePathList(job["srcPath"])
-	dstPaths := parsePathList(job["dstPath"])
-	if len(srcPaths) != 1 || len(dstPaths) != 1 {
-		return errors.New("双向同步仅支持单个源目录与单个目标目录")
-	}
-	src, dst := srcPaths[0], dstPaths[0]
-	opts := buildNativeBisyncOptions(job, nil, true)
-	_, err := cfg.Bisync(ctx, src, dst, opts, func(v native.Event) {
-		if v.Stats != nil && v.Stats.Listed > 0 {
-			sess.scannedDirs.Store(v.Stats.Listed)
-			return
-		}
-		if v.File == "" {
-			return
-		}
-		action := "copy"
-		switch {
-		case v.Reason == "delete":
-			action = "delete"
-		case v.Reason == "move":
-			action = "move"
-		case v.Updated:
-			action = "update"
-		}
-		sess.addItem(DryRunItem{
-			Action:   action,
-			SrcPath:  src,
-			DstPath:  dst,
-			FileName: v.File,
-			FileSize: v.Size,
-			Reason:   "双向同步预览",
-		})
-	})
-	return err
-}
-
-// nativeDirListToFileList adapts native.ListDirEntries to FileListResult for
-// live verification of pending deletion approvals.
-func nativeDirListToFileList(ctx context.Context, cfg native.Config, dir string) (FileListResult, bool, error) {
-	entries, exists, err := cfg.ListDirEntries(ctx, strings.TrimRight(dir, "/"), native.SessionOptions{ProxyURL: globalNativeProxyURL()})
-	if err != nil {
-		return nil, false, err
-	}
-	if !exists {
-		return nil, true, nil
-	}
-	res := make(FileListResult, len(entries))
-	for _, e := range entries {
-		key := e.Name
-		if e.IsDir {
-			key += "/"
-		}
-		res[key] = FileMetadata{
-			Size:     e.Size,
-			Modified: e.ModTime,
-			MD5:      e.MD5,
-		}
-	}
-	return res, false, nil
 }

@@ -49,12 +49,10 @@ import {
   errorToast,
   type MenuAction,
 } from "../components/common";
+import { BisyncConflictsModal } from "../components/BisyncConflictsModal";
 import { CheckModal } from "../components/CheckModal";
 import { DryRunModal } from "../components/DryRunModal";
-import {
-  FullSyncApprovalModal,
-  PendingApprovalBanner,
-} from "../components/FullSyncApprovalModal";
+import { SyncOverview } from "./SyncOverview";
 import {
   SyncStatusTag,
   formatContinuousSyncPlan,
@@ -78,6 +76,7 @@ import {
   buildTaskSearchParams,
   cloneJobToForm,
   isLegacyOpenListJob,
+  requiresFirstMirrorPreview,
   resolveJobSelection,
   resolveTaskTab,
   summarizeJobFilters,
@@ -98,6 +97,7 @@ import type {
   AlistItem,
   CurrentTaskData,
   JobItem,
+  NativeRemoteItem,
   TaskRecord,
 } from "../types";
 
@@ -108,11 +108,16 @@ const History = lazy(() =>
   import("./TaskExecution").then((module) => ({ default: module.History })),
 );
 const JobEditor = lazy(() => import("./TaskEditor"));
+const StorageEditor = lazy(() =>
+  import("../components/NativeStorageEditor").then(({ NativeStorageEditor }) => ({
+    default: NativeStorageEditor,
+  })),
+);
 const currentTaskPollMs = 3000;
 const currentTaskRealtimePollMs = 3000;
 const currentTaskFollowUpMs = 1000;
 
-export default function Tasks() {
+export default function Tasks({ overview = false }: { overview?: boolean }) {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const jobIdParam = params.get("jobId");
@@ -124,25 +129,31 @@ export default function Tasks() {
         ? parsedJobId
         : -1;
   const rawTab = params.get("tab");
-  const jobs = useResource((signal) => api.jobMenu(signal));
+  const jobs = useResource((signal) => api.jobMenu(signal), [], overview);
   const engines = useResource((signal) => api.engines(signal));
+  const storage = useResource(
+    (signal) => overview ? api.nativeStorageState(signal) : Promise.resolve(null),
+    [overview],
+  );
+  const [repair, setRepair] = useState<NativeRemoteItem | "local" | null>(null);
   const [editor, setEditor] = useState<{
     open: boolean;
     job: JobItem | null;
     initialDraft?: JobForm;
+    initialRemote?: string;
   }>({
     open: false,
     job: null,
   });
   const [dryRunOpen, setDryRunOpen] = useState(false);
   const [checkOpen, setCheckOpen] = useState(false);
-  const [approvalModalOpen, setApprovalModalOpen] = useState(false);
+  const [conflictsOpen, setConflictsOpen] = useState(false);
   const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
   const [pendingCreatedId, setPendingCreatedId] = useState<number | null>(null);
   const mobileJobButtons = useRef<Array<HTMLButtonElement | null>>([]);
   const actions = useAction();
   const list = jobs.data?.dataList || [];
-  const { job: selected, replaceWith } = resolveJobSelection(list, selectedId, {
+  const { job: selected, replaceWith } = resolveJobSelection(overview ? [] : list, selectedId, {
     pendingId: pendingCreatedId,
     refreshing: jobs.loading,
   });
@@ -190,24 +201,23 @@ export default function Tasks() {
       try {
         const result = await api.current(selectedJobId, signal);
         if (!signal.aborted) {
-          setSnapshotState({ jobId: selectedJobId, ok: true });
+          setSnapshotState((prev) =>
+            prev && prev.jobId === selectedJobId && prev.ok
+              ? prev
+              : { jobId: selectedJobId, ok: true },
+          );
         }
         return result;
       } catch (err) {
         if (!signal.aborted) {
-          setSnapshotState({ jobId: selectedJobId, ok: false });
+          setSnapshotState((prev) =>
+            prev && prev.jobId === selectedJobId && !prev.ok
+              ? prev
+              : { jobId: selectedJobId, ok: false },
+          );
         }
         throw err;
       }
-    },
-    [selectedJobId],
-  );
-  const pendingApproval = useResource(
-    async (signal) => {
-      if (!selectedJobId || deletedJobIdsRef.current.has(selectedJobId)) {
-        return null;
-      }
-      return api.pendingApproval(selectedJobId, signal);
     },
     [selectedJobId],
   );
@@ -232,51 +242,18 @@ export default function Tasks() {
     hasCurrentTask ||
     realtimeTab ||
     (!currentTaskSettled && Boolean(selected?.running));
-  const activeApproval = pendingApproval.data ?? null;
-  const approvalExecuting = activeApproval?.status === "executing";
   const refreshCurrentTask = currentTask.refresh;
-  const refreshPendingApproval = pendingApproval.refresh;
-  const requestedApprovalOpen = params.get("approval") === "1";
-
-  useEffect(() => {
-    setApprovalModalOpen(false);
-  }, [selectedJobId]);
-
-  useEffect(() => {
-    if (!requestedApprovalOpen || !activeApproval) return;
-    setApprovalModalOpen(true);
-    const next = new URLSearchParams(params);
-    next.delete("approval");
-    setParams(next, { replace: true });
-  }, [requestedApprovalOpen, activeApproval, params, setParams]);
 
   const prevTaskIdRef = useRef<number | null>(null);
   useEffect(() => {
     const curId = currentTaskForSelected?.taskId ?? null;
     if (prevTaskIdRef.current !== null && curId === null) {
-      void refreshPendingApproval(true);
       void jobs.refresh(true);
       setHistoryRefreshKey((k) => k + 1);
       window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
     }
     prevTaskIdRef.current = curId;
-  }, [currentTaskForSelected?.taskId, refreshPendingApproval, jobs.refresh]);
-
-  const prevExecutingRef = useRef(false);
-  useEffect(() => {
-    if (prevExecutingRef.current && !approvalExecuting) {
-      setHistoryRefreshKey((k) => k + 1);
-      void jobs.refresh(true);
-      window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
-    }
-    prevExecutingRef.current = approvalExecuting;
-  }, [approvalExecuting, jobs.refresh]);
-
-  useEffect(() => {
-    if (!activeApproval && approvalModalOpen) {
-      setApprovalModalOpen(false);
-    }
-  }, [activeApproval, approvalModalOpen]);
+  }, [currentTaskForSelected?.taskId, jobs.refresh]);
 
   const prevRealtimeTab = useRef(realtimeTab);
   useEffect(() => {
@@ -303,27 +280,15 @@ export default function Tasks() {
           !deletedJobIdsRef.current.has(selectedJobId)
         ) {
           void refreshCurrentTask(true);
-          void refreshPendingApproval(true);
           void jobs.refresh(true);
         }
       },
-      approvalExecuting
-        ? 1500
-        : realtimeTab
-          ? currentTaskRealtimePollMs
-          : currentTaskPollMs,
+      realtimeTab ? currentTaskRealtimePollMs : currentTaskPollMs,
     );
     return () => {
       clearInterval(interval);
     };
-  }, [
-    selectedJobId,
-    realtimeTab,
-    approvalExecuting,
-    refreshCurrentTask,
-    refreshPendingApproval,
-    jobs.refresh,
-  ]);
+  }, [selectedJobId, realtimeTab, refreshCurrentTask, jobs.refresh]);
 
   const followUp = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(followUp.current), []);
@@ -354,10 +319,9 @@ export default function Tasks() {
     [selected?.id, setParams],
   );
   const handleRealtimeEnded = useCallback(() => {
-    void refreshPendingApproval(true);
     void jobs.refresh(true);
     setHistoryRefreshKey((k) => k + 1);
-  }, [refreshPendingApproval, jobs.refresh]);
+  }, [jobs.refresh]);
   const handleOpenRealtime = useCallback(
     () => update({ tab: "realtime" }),
     [update],
@@ -377,14 +341,10 @@ export default function Tasks() {
       clearTimeout(followUp.current);
       return;
     }
-    await Promise.all([
-      currentTask.refresh(true),
-      pendingApproval.refresh(true),
-    ]);
+    await currentTask.refresh(true);
     clearTimeout(followUp.current);
     followUp.current = setTimeout(() => {
       void refreshCurrentTask(true);
-      void refreshPendingApproval(true);
     }, currentTaskFollowUpMs);
   };
   const action = (operation: () => Promise<unknown>, message: string) =>
@@ -408,6 +368,36 @@ export default function Tasks() {
       }
     });
   };
+  const toggleSync = (job: JobItem, running = Boolean(job.running)) => {
+    const pausing = job.enable === 1;
+    const label = job.isCron === 3 ? "持续同步" : "任务";
+    const toggle = () => api.jobAction({ id: String(job.id), pause: pausing });
+    if (pausing && running) {
+      confirmAction({
+        title: `暂停${label}并中止当前传输？`,
+        content: "已完成的文件会保留。恢复同步后会检查并补齐暂停期间的变更。",
+        okText: "暂停同步",
+        onOk: () => actions.run(async () => {
+          try {
+            await toggle();
+            Toast.success(`${label}已暂停`);
+            await refreshJobs();
+          } catch (err) {
+            errorToast(err);
+            throw err;
+          }
+        }),
+      });
+      return;
+    }
+    action(toggle, pausing ? `${label}已暂停` : `${label}已恢复`);
+  };
+  const mirrorPreview = Boolean(
+    selected && selected.method === 1 && selected.isCron === 3 &&
+    selected.enable !== 1 && params.get("mirrorPreview") === "1",
+  );
+  const conflictPreview = Boolean(selected?.method === 3 && params.get("conflicts") === "1");
+  const closeMirrorPreview = () => update({ mirrorPreview: null }, { replace: true });
   const emptyAction =
     !engines.loading && !engines.error && (engines.data?.length ?? 0) === 0 ? (
       <div className="empty-guide">
@@ -432,70 +422,46 @@ export default function Tasks() {
         新建同步任务
       </Button>
     ) : undefined;
-  const approvePendingDelete = (selectedPaths?: string[]) =>
-    actions.run(async () => {
-      if (!activeApproval?.taskId) return;
-      try {
-        await api.taskAction(
-          activeApproval.taskId,
-          "approve",
-          undefined,
-          selectedPaths && selectedPaths.length > 0
-            ? { paths: selectedPaths }
-            : undefined,
-        );
-        setApprovalModalOpen(false);
-        Toast.success(
-          selectedPaths && selectedPaths.length > 0
-            ? `已提交后台校验并删除选中的 ${selectedPaths.length} 项`
-            : "已提交后台校验并执行删除",
-        );
-        await refreshJobs();
-      } catch (err) {
-        errorToast(err);
-      }
-    });
-  const excludePendingDelete = (selectedPaths: string[]) =>
-    actions.run(async () => {
-      if (!activeApproval?.taskId || !selectedPaths.length) return;
-      try {
-        const res = await api.excludeApprovalPaths(
-          activeApproval.taskId,
-          selectedPaths,
-        );
-        setApprovalModalOpen(false);
-        Toast.success(`已将 ${res.excludedCount} 项加入任务排除规则`);
-        await refreshJobs();
-      } catch (err) {
-        errorToast(err);
-      }
-    });
-  const rejectPendingDelete = () =>
-    actions.run(async () => {
-      if (!activeApproval?.taskId) return;
-      try {
-        await api.taskAction(activeApproval.taskId, "reject");
-        setApprovalModalOpen(false);
-        Toast.success("已跳过本次删除，目标端文件已保留");
-        await refreshJobs();
-      } catch (err) {
-        errorToast(err);
-      }
-    });
 
   return (
     <div className="page task-page">
-      {selected && activeApproval && approvalModalOpen && (
-        <FullSyncApprovalModal
-          approval={activeApproval}
-          jobName={getJobName(selected)}
-          busy={actions.busy}
-          onClose={() => setApprovalModalOpen(false)}
-          onApprove={approvePendingDelete}
-          onExclude={excludePendingDelete}
-          onReject={rejectPendingDelete}
-        />
-      )}
+      {overview ? (
+        <>
+          <Header
+            title="同步任务"
+            actions={
+              <Button
+                type="primary"
+                theme="solid"
+                icon={<IconPlusStroked aria-hidden="true" />}
+                onClick={() => setEditor({ open: true, job: null })}
+              >
+                新建同步任务
+              </Button>
+            }
+          />
+          {storage.error && (
+            <InlineNotice message={storage.error} role="alert" onRetry={storage.refresh} />
+          )}
+          {jobs.error && (
+            <InlineNotice message={jobs.error} role="alert" onRetry={jobs.refresh} />
+          )}
+          {(jobs.loading && !jobs.data) || (storage.loading && !storage.data) ? (
+            <LoadingPanel />
+          ) : (jobs.data || storage.data) && (
+            <SyncOverview
+              jobs={list}
+              remotes={storage.data?.remotes || []}
+              busy={actions.busy}
+              onAdd={(initialRemote) => setEditor({ open: true, job: null, initialRemote })}
+              onToggle={toggleSync}
+              onRetry={(job) => triggerSyncNow(job.id)}
+              onRepair={setRepair}
+              onLocalFolders={() => setRepair("local")}
+            />
+          )}
+        </>
+      ) : <>
       <Header
         title="任务管理"
         tabs={
@@ -609,22 +575,22 @@ export default function Tasks() {
           <EmptyState action={emptyAction} />
         ) : (
           <section className="task-detail-pane flex-column">
+            {jobs.data && jobs.refreshError && (
+              <InlineNotice
+                className="engine-load-error"
+                role="alert"
+                message={`任务列表刷新失败：${jobs.refreshError}`}
+                onRetry={() => void jobs.refresh(true)}
+              />
+            )}
             <LoadState
-              loading={jobs.loading}
-              error={jobs.error}
+              loading={jobs.loading && !jobs.data}
+              error={jobs.data ? "" : jobs.error}
               retry={jobs.refresh}
               empty={!list.length}
             />
-            {selected && !jobs.error ? (
+            {selected && (jobs.data || !jobs.error) ? (
               <div className="task-tab-content">
-                {activeApproval && (
-                  <PendingApprovalBanner
-                    approval={activeApproval}
-                    busy={actions.busy}
-                    onInspect={() => setApprovalModalOpen(true)}
-                    onReject={() => void rejectPendingDelete()}
-                  />
-                )}
                 {tab === "overview" && (
                   <Overview
                     job={selected}
@@ -634,32 +600,12 @@ export default function Tasks() {
                     paused={Boolean(
                       currentTaskForSelected?.paused ?? selected.paused,
                     )}
-                    hasPendingApproval={Boolean(activeApproval)}
                     runKey={String(currentTaskForSelected?.taskId ?? "idle")}
                     onRun={() => triggerSyncNow(selected.id)}
                     onOpenRealtime={handleOpenRealtime}
-                    onOpenApproval={() => setApprovalModalOpen(true)}
                     onDryRun={() => setDryRunOpen(true)}
                     onCheck={() => setCheckOpen(true)}
-                    onResyncBisync={() => {
-                      confirmAction({
-                        title: "重建双向同步基线（--resync）？",
-                        content:
-                          "适用于首次运行异常中断、存储更换或基线清单丢失后的恢复。确认后将立即执行一次带 --resync 的双向同步，重建基线并恢复持续同步。",
-                        okText: "立即重建并同步",
-                        onOk: () =>
-                          actions.run(async () => {
-                            try {
-                              await api.resetBisyncJob(selected.id, true);
-                              Toast.success("已触发双向基线重建同步");
-                              await refreshJobs();
-                            } catch (err) {
-                              errorToast(err);
-                              throw err;
-                            }
-                          }),
-                      });
-                    }}
+                    onOpenConflicts={() => setConflictsOpen(true)}
                     onClone={() =>
                       setEditor({
                         open: true,
@@ -699,38 +645,11 @@ export default function Tasks() {
                       });
                     }}
                     onToggle={() => {
-                      const pausing = selected.enable === 1;
-                      if (pausing && currentTaskForSelected) {
-                        confirmAction({
-                          title: "暂停持续同步并中止当前传输？",
-                          content:
-                            "暂停后将停止本地与远端监控，并中止当前正在进行的传输批次（已完成的文件不会撤销），后续可随时恢复并自动补齐期间变更。",
-                          okText: "暂停同步",
-                          onOk: () =>
-                            actions.run(async () => {
-                              try {
-                                await api.jobAction({
-                                  id: String(selected.id),
-                                  pause: true,
-                                });
-                                Toast.success("持续同步已暂停");
-                                await refreshJobs();
-                              } catch (err) {
-                                errorToast(err);
-                                throw err;
-                              }
-                            }),
-                        });
+                      if (requiresFirstMirrorPreview(selected)) {
+                        update({ mirrorPreview: 1 });
                         return;
                       }
-                      action(
-                        () =>
-                          api.jobAction({
-                            id: String(selected.id),
-                            pause: pausing,
-                          }),
-                        pausing ? "持续同步已暂停" : "持续同步已恢复",
-                      );
+                      toggleSync(selected, Boolean(currentTaskForSelected || selected.running));
                     }}
                     onEdit={() => setEditor({ open: true, job: selected })}
                     onDelete={() => {
@@ -791,12 +710,26 @@ export default function Tasks() {
           </section>
         )}
       </div>
+      </>}
       {dryRunOpen && selected && (
         <DryRunModal
           jobId={selected.id}
           jobName={getJobName(selected)}
           onClose={() => setDryRunOpen(false)}
           onRunReal={() => triggerSyncNow(selected.id)}
+        />
+      )}
+      {mirrorPreview && selected && (
+        <DryRunModal
+          jobId={selected.id}
+          jobName={getJobName(selected)}
+          onClose={closeMirrorPreview}
+          onEnableMirror={async () => {
+            await api.jobAction({ id: String(selected.id), pause: false });
+            closeMirrorPreview();
+            Toast.success("镜像已启用");
+            await refreshJobs();
+          }}
         />
       )}
       {checkOpen && selected && (
@@ -810,11 +743,41 @@ export default function Tasks() {
           }}
         />
       )}
+      {(conflictsOpen || conflictPreview) && selected && (
+        <BisyncConflictsModal
+          jobId={selected.id}
+          jobName={getJobName(selected)}
+          leftPath={parseJobPathList(selected.srcPath)[0] ?? ""}
+          rightPath={parseJobPathList(selected.dstPath)[0] ?? ""}
+          onClose={() => {
+            setConflictsOpen(false);
+            if (conflictPreview) update({ conflicts: null }, { replace: true });
+          }}
+          onResolved={() => {
+            void refreshJobs();
+          }}
+        />
+      )}
+      {repair && (
+        <Suspense fallback={<LoadingPanel />}>
+          <StorageEditor
+            mode={repair === "local" ? "local" : "form"}
+            editRemote={repair === "local" ? null : repair}
+            onClose={() => setRepair(null)}
+            onSaved={() => {
+              setRepair(null);
+              void storage.refresh(true);
+              void refreshJobs({ skipCurrentTask: true });
+            }}
+          />
+        </Suspense>
+      )}
       {editor.open && (
         <Suspense fallback={<LoadingPanel />}>
           <JobEditor
             job={editor.job}
             initialDraft={editor.initialDraft}
+            initialRemote={editor.initialRemote}
             engines={engines.data || []}
             existingJobs={list}
             enginesError={engines.error}
@@ -827,12 +790,21 @@ export default function Tasks() {
             onSaved={(result: TaskEditorSavedResult) => {
               setEditor({ open: false, job: null });
               const createdId = result.createdId;
+              const mirrorPreviewId = result.mirrorPreviewId;
+              if (overview && createdId) {
+                window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
+                navigate(`/tasks?jobId=${createdId}&tab=overview${mirrorPreviewId ? "&mirrorPreview=1" : ""}`);
+                return;
+              }
               if (createdId) {
                 setPendingCreatedId(createdId);
                 update({
                   jobId: createdId,
                   tab: "overview",
+                  mirrorPreview: mirrorPreviewId ? 1 : null,
                 });
+              } else if (mirrorPreviewId) {
+                update({ mirrorPreview: 1 });
               }
               void (async () => {
                 try {
@@ -867,14 +839,12 @@ function Overview({
   busy,
   currentTask,
   paused,
-  hasPendingApproval,
   runKey,
   onRun,
   onOpenRealtime,
-  onOpenApproval,
   onDryRun,
   onCheck,
-  onResyncBisync,
+  onOpenConflicts,
   onClone,
   onTogglePause,
   onStop,
@@ -887,14 +857,12 @@ function Overview({
   busy: boolean;
   currentTask: CurrentTaskData | null;
   paused: boolean;
-  hasPendingApproval: boolean;
   runKey: string;
   onRun: () => void;
   onOpenRealtime: () => void;
-  onOpenApproval: () => void;
   onDryRun: () => void;
   onCheck: () => void;
-  onResyncBisync: () => void;
+  onOpenConflicts: () => void;
   onClone: () => void;
   onTogglePause: () => void;
   onStop: () => void;
@@ -930,10 +898,9 @@ function Overview({
         enable: job.enable,
         running,
         paused,
-        pendingApproval: hasPendingApproval,
         syncStatus: job.syncStatus,
       }),
-    [job.enable, running, paused, hasPendingApproval, job.syncStatus],
+    [job.enable, running, paused, job.syncStatus],
   );
   const statusTone = syncStatusTone(effectiveStatus.state);
 
@@ -1033,13 +1000,10 @@ function Overview({
     if (typeof obj.conTimeout === "string" && obj.conTimeout.trim()) {
       list.push(`连接超时 ${obj.conTimeout.trim()}`);
     }
-    if (typeof obj.bisyncResyncMode === "string" && obj.bisyncResyncMode.trim()) {
-      list.push(`基线策略 ${obj.bisyncResyncMode.trim()}`);
-    }
     if (Number(obj.bisyncMaxDelete || 0) > 0) {
       list.push(`最多删除 ${obj.bisyncMaxDelete}%`);
     }
-    if (obj.bisyncForce) list.push("强制(--force)");
+    if (obj.bisyncForce) list.push("超限强删");
     return list;
   }, [job.extraFlags]);
 
@@ -1098,22 +1062,15 @@ function Overview({
         },
       ]
     : [
-        {
-          label: "模拟运行预览",
-          icon: <IconEyeOpenedStroked aria-hidden="true" />,
-          onClick: onDryRun,
-        },
-        {
-          label: "数据一致性校验",
-          icon: <IconTickCircle aria-hidden="true" />,
-          onClick: onCheck,
-        },
         ...(job.method === 3
           ? [
               {
-                label: "重建双向基线（--resync）",
-                icon: <IconRefresh aria-hidden="true" />,
-                onClick: onResyncBisync,
+                label:
+                  (effectiveStatus.conflictCount || 0) > 0
+                    ? `冲突处理 (${effectiveStatus.conflictCount})`
+                    : "冲突处理",
+                icon: <IconAlertTriangle aria-hidden="true" />,
+                onClick: onOpenConflicts,
               },
             ]
           : []),
@@ -1121,11 +1078,6 @@ function Overview({
           label: "复制任务",
           icon: <IconCopy aria-hidden="true" />,
           onClick: onClone,
-        },
-        {
-          label: "设置",
-          icon: <IconSettingStroked aria-hidden="true" />,
-          onClick: onEdit,
         },
         {
           label: "删除",
@@ -1192,12 +1144,8 @@ function Overview({
         return "正在检测目录变更";
       case "waiting_window":
         return "等待进入运行窗口";
-      case "waiting_approval":
-        return "存在待确认删除项";
       case "paused":
         return "持续同步已暂停";
-      case "needs_rebuild":
-        return "双向同步基线需要重建";
       case "error":
         return effectiveStatus.failures > 1
           ? `同步异常（连续失败 ${effectiveStatus.failures} 次）`
@@ -1227,12 +1175,8 @@ function Overview({
         return job.windowEnable
           ? `当前不在允许窗口（${job.windowStart || "00:00"}–${job.windowEnd || "06:00"}），窗口恢复后自动补齐`
           : "当前处于窗口外，窗口恢复后自动补齐";
-      case "waiting_approval":
-        return "新增与修改已同步完成，请确认目标端多余文件的删除清单";
       case "paused":
         return "恢复同步后将自动对账并补齐暂停期间产生的变更";
-      case "needs_rebuild":
-        return "存储端点或配置发生变动，重建双向基线后可恢复自动同步";
       case "error":
         return "系统将按退避策略自动重试，你也可以修复存储后点击立即重试";
       default:
@@ -1472,17 +1416,6 @@ function Overview({
                   >
                     查看传输明细
                   </Button>
-                ) : effectiveStatus.state === "needs_rebuild" ? (
-                  <Button
-                    size="small"
-                    type="danger"
-                    theme="solid"
-                    icon={<IconRefresh aria-hidden="true" />}
-                    disabled={busy}
-                    onClick={onResyncBisync}
-                  >
-                    重建双向基线
-                  </Button>
                 ) : effectiveStatus.state === "error" && enabled ? (
                   <Button
                     size="small"
@@ -1494,15 +1427,16 @@ function Overview({
                   >
                     立即重试
                   </Button>
-                ) : effectiveStatus.state === "waiting_approval" && hasPendingApproval ? (
+                ) : (effectiveStatus.conflictCount || 0) > 0 && job.method === 3 ? (
                   <Button
                     size="small"
                     type="warning"
                     theme="solid"
+                    icon={<IconAlertTriangle aria-hidden="true" />}
                     disabled={busy}
-                    onClick={onOpenApproval}
+                    onClick={onOpenConflicts}
                   >
-                    查看待确认删除
+                    处理 {effectiveStatus.conflictCount} 项冲突
                   </Button>
                 ) : !enabled ? (
                   <Button

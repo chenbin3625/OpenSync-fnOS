@@ -44,8 +44,6 @@ type systemSettingsPatch struct {
 	CopyConcurrency           *int    `json:"copyConcurrency"`
 	ScanConcurrency           *int    `json:"scanConcurrency"`
 	MaxRetries                *int    `json:"maxRetries"`
-	ScheduledFullSyncConfirm  *int    `json:"scheduledFullSyncConfirm"`
-	FullSyncApprovalTimeout   *int    `json:"fullSyncApprovalTimeout"`
 	EngineHealthCheckInterval *int    `json:"engineHealthCheckInterval"`
 	DefaultBwLimit            *string `json:"defaultBwLimit"`
 	ProxyURL                  *string `json:"proxyUrl"`
@@ -71,8 +69,6 @@ func (p systemSettingsPatch) applyTo(current config.SystemSettings) config.Syste
 		{p.CopyConcurrency, &next.CopyConcurrency},
 		{p.ScanConcurrency, &next.ScanConcurrency},
 		{p.MaxRetries, &next.MaxRetries},
-		{p.ScheduledFullSyncConfirm, &next.ScheduledFullSyncConfirm},
-		{p.FullSyncApprovalTimeout, &next.FullSyncApprovalTimeout},
 		{p.EngineHealthCheckInterval, &next.EngineHealthCheckInterval},
 		{p.LocalMaxConcurrentJobs, &next.LocalMaxConcurrentJobs},
 		{p.MinFreeSpaceMB, &next.MinFreeSpaceMB},

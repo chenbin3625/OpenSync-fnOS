@@ -4,10 +4,12 @@ async function routeLayoutFixtures(
   page: Page,
   {
     engines = [],
+    remotes = [],
     jobs = [],
     notifications = [],
   }: {
     engines?: Record<string, unknown>[];
+    remotes?: Record<string, unknown>[];
     jobs?: Record<string, unknown>[];
     notifications?: Record<string, unknown>[];
   },
@@ -34,9 +36,11 @@ async function routeLayoutFixtures(
         copyConcurrency: 5,
         scanConcurrency: 16,
         maxRetries: 2,
-        scheduledFullSyncConfirm: 0,
       });
     if (url.pathname.endsWith("/alist")) return success(engines);
+    if (url.pathname.endsWith("/native/storage")) {
+      return success({ engineId: engines[0]?.id || 0, enabled: true, rcloneAvailable: true, remotes, localRoots: [] });
+    }
     if (url.pathname.endsWith("/notify")) return success(notifications);
     if (url.pathname.endsWith("/job") && url.searchParams.has("current"))
       return success(null);
@@ -292,7 +296,7 @@ test("task tabs and page commands share an integrated toolbar row", async ({
   await expect(toolbar).toBeVisible();
   await expect(toolbar.locator(".semi-tabs-bar")).toHaveCount(0);
   const addEngineButton = toolbar.getByRole("button", {
-    name: "添加引擎",
+    name: "添加远程存储",
     exact: true,
   });
   await expect(addEngineButton).toBeVisible();
@@ -395,14 +399,13 @@ test("primary surface, cards and controls use consistent radii and full width", 
   const pageBox = await page.locator(".page").boundingBox();
   const sectionBox = await section.boundingBox();
   expect(sectionBox!.width).toBeGreaterThan(pageBox!.width - 60);
-  // 六个设置项合并成两张分组卡片，条目不再各自成卡。
-  await expect(page.locator(".settings-card")).toHaveCount(2);
+  await expect(section.getByRole("heading", { name: "任务执行与安全保护" })).toBeVisible();
   await expect(page.locator(".settings-card").first()).toHaveCSS(
     "border-top-width",
     "1px",
   );
   const rows = page.locator(".settings-card-body .setting-row");
-  await expect(rows).toHaveCount(6);
+  await expect(rows.first()).toBeVisible();
   await expect(page.locator(".settings-card .settings-card")).toHaveCount(0);
   // 分组标题不带图标，卡片内部也不画分隔线。
   await expect(page.locator(".settings-card .item-symbol")).toHaveCount(0);
@@ -442,6 +445,7 @@ test("data fixture renders inspectable engine, task and notification rows", asyn
         userName: "layout-engine",
       },
     ],
+    remotes: [{ name, type: "webdav", summary: "WebDAV", options: {}, configuredSecrets: [], usedByJobs: [], usedByCrypts: [] }],
     jobs: [
       {
         id: jobId,
@@ -479,10 +483,10 @@ test("data fixture renders inspectable engine, task and notification rows", asyn
     .locator(".engine-item")
     .filter({ hasText: name })
     .first();
-  await expect(engineCard.getByRole("heading", { name, exact: true })).toBeVisible();
+  await expect(engineCard.getByRole("heading")).toContainText(name);
   await expect(engineCard.locator(".item-symbol")).toHaveCount(0);
   await expect(
-    engineCard.getByRole("button", { name: "测试引擎", exact: true }),
+    engineCard.getByRole("button", { name: `测试连接 ${name}`, exact: true }),
   ).toBeVisible();
 
   await page.goto(`/app/opensync/tasks?jobId=${jobId}`);
@@ -578,9 +582,9 @@ test("task cards follow the reference card style and fill the detail pane", asyn
   await expect(
     summary.getByText("/dav/nas/docker", { exact: true }),
   ).toBeVisible();
-  // 「⋯」菜单里的操作与参考稿一致
+  await expect(summary.getByRole("button", { name: "编辑任务", exact: true })).toBeVisible();
   await menu.click();
-  for (const label of ["设置", "删除"]) {
+  for (const label of ["复制任务", "删除"]) {
     await expect(
       page.locator(".semi-dropdown-menu").getByText(label, { exact: true }),
     ).toBeVisible();
@@ -601,6 +605,8 @@ test("empty pages render the reference folder asset", async ({ page }) => {
     if (url.pathname.endsWith("/job"))
       return success({ dataList: [], count: 0 });
     if (url.pathname.endsWith("/alist")) return success([]);
+    if (url.pathname.endsWith("/native/storage"))
+      return success({ engineId: 1, enabled: true, rcloneAvailable: true, remotes: [], localRoots: [] });
     if (url.pathname.endsWith("/notify")) return success([]);
     return success(null);
   });
@@ -610,7 +616,7 @@ test("empty pages render the reference folder asset", async ({ page }) => {
     topOffset: number;
     imageOffset: number;
   }> = [];
-  for (const path of ["tasks", "engines", "notifications"]) {
+  for (const path of ["tasks", "notifications"]) {
     await page.goto(`/app/opensync/${path}`);
     const toolbarBox = await page.locator(".page-toolbar").boundingBox();
     const empty = page.getByRole("status", { name: "空空如也", exact: true });
@@ -635,6 +641,9 @@ test("empty pages render the reference folder asset", async ({ page }) => {
         ),
     ).toBe(true);
   }
+  await page.goto("/app/opensync/engines");
+  await expect(page.locator(".storage-card--local").getByRole("heading")).toContainText("本地授权目录");
+  await expect(page.getByText(/^尚未添加远程存储/)).toBeVisible();
   const [reference, ...others] = layouts;
   for (const layout of others) {
     expect.soft(layout.height, `${layout.path} empty height`).toBe(reference.height);
@@ -653,16 +662,16 @@ test("empty pages render the reference folder asset", async ({ page }) => {
   }
 });
 
-test("editor is 454px on desktop and remains within the viewport", async ({
+test("storage editor is 660px on desktop and remains within the viewport", async ({
   page,
 }) => {
   await page.goto("/app/opensync/engines");
-  await page.getByRole("button", { name: "添加引擎", exact: true }).click();
+  await page.getByRole("button", { name: "添加远程存储", exact: true }).click();
   const dialog = page.getByRole("dialog");
   await expect(dialog).toBeVisible();
   await expect
     .poll(async () => (await dialog.boundingBox())?.width)
-    .toBe(page.viewportSize()!.width <= 640 ? page.viewportSize()!.width : 454);
+    .toBe(page.viewportSize()!.width <= 640 ? page.viewportSize()!.width : 660);
   await expect(page.locator(".semi-modal-mask")).toHaveCSS(
     "background-color",
     "rgba(255, 255, 255, 0.65)",
@@ -670,7 +679,7 @@ test("editor is 454px on desktop and remains within the viewport", async ({
   const bounds = await dialog.boundingBox();
   const viewport = page.viewportSize()!;
   expect(bounds!.width).toBe(
-    viewport.width <= 640 ? viewport.width : 454,
+    viewport.width <= 640 ? viewport.width : 660,
   );
   expect(bounds!.x).toBeGreaterThanOrEqual(0);
   expect(bounds!.y).toBeGreaterThanOrEqual(0);
@@ -684,7 +693,7 @@ test("editor is 454px on desktop and remains within the viewport", async ({
     Math.abs(bounds!.y + bounds!.height / 2 - viewport.height / 2),
   ).toBeLessThanOrEqual(1);
   await expect(
-    dialog.getByRole("button", { name: "保存", exact: true }),
+    dialog.getByRole("button", { name: "保存存储", exact: true }),
   ).toBeVisible();
   if (process.env.PLAYWRIGHT_SCREENSHOTS === "1")
     await page.screenshot({
@@ -694,9 +703,9 @@ test("editor is 454px on desktop and remains within the viewport", async ({
 
 test("dirty-confirm dialog is centered", async ({ page }) => {
   await page.goto("/app/opensync/engines");
-  await page.getByRole("button", { name: "添加引擎", exact: true }).click();
+  await page.getByRole("button", { name: "添加远程存储", exact: true }).click();
   await page
-    .getByRole("textbox", { name: "引擎名称", exact: true })
+    .getByRole("textbox", { name: "存储名称", exact: true })
     .fill("dirty");
   await page.getByRole("button", { name: "取消", exact: true }).click();
   const dialog = page

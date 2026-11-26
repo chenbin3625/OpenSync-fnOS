@@ -8,6 +8,35 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+func TestGetLatestTaskPerJobScopesResultsAndBreaksTies(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	defer SetDBForTest(db)()
+	_, err = db.Exec(`
+		CREATE TABLE job(id INTEGER PRIMARY KEY);
+		CREATE TABLE job_task(id INTEGER PRIMARY KEY, jobId INTEGER, status INTEGER, errMsg TEXT,
+			runTime INTEGER, taskNum TEXT, createTime INTEGER);
+		CREATE INDEX idx_job_task_job_time ON job_task(jobId, createTime DESC, id DESC);
+		INSERT INTO job VALUES (1), (2), (3);
+		INSERT INTO job_task(id, jobId, createTime) VALUES
+			(10, 1, 20), (11, 1, 20), (12, 1, 10), (13, 2, 20);
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	all, err := GetLatestTaskPerJob()
+	if err != nil || len(all) != 2 || all[1]["id"] != int64(11) || all[2]["id"] != int64(13) {
+		t.Fatalf("latest tasks: %v, %v", all, err)
+	}
+	page, err := GetLatestTaskPerJob(2, 3)
+	if err != nil || len(page) != 1 || page[2]["id"] != int64(13) {
+		t.Fatalf("latest tasks for requested page: %v, %v", page, err)
+	}
+}
+
 func TestGetJobTaskListAppliesHistoryFilters(t *testing.T) {
 	testDB, err := sql.Open("sqlite", ":memory:")
 	if err != nil {

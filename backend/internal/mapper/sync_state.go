@@ -18,8 +18,7 @@ func syncSchemaStatements() []string {
 		 updatedAt INTEGER NOT NULL DEFAULT 0, lastSuccess INTEGER NOT NULL DEFAULT 0,
 		 lastPoll INTEGER NOT NULL DEFAULT 0, lastAudit INTEGER NOT NULL DEFAULT 0,
 		 failures INTEGER NOT NULL DEFAULT 0, retryAt INTEGER NOT NULL DEFAULT 0,
-		 error TEXT NOT NULL DEFAULT '', bisyncInitialized INTEGER NOT NULL DEFAULT 0,
-		 bisyncNeedsRebuild INTEGER NOT NULL DEFAULT 0)`,
+		 error TEXT NOT NULL DEFAULT '')`,
 		`CREATE TABLE IF NOT EXISTS sync_file_state (
 		 jobId INTEGER NOT NULL, root TEXT NOT NULL, path TEXT NOT NULL,
 		 size INTEGER NOT NULL, modTime INTEGER NOT NULL, hash TEXT NOT NULL,
@@ -33,7 +32,7 @@ func syncSchemaStatements() []string {
 type SyncState struct {
 	JobID, Generation, UpdatedAt, LastSuccess, LastPoll, LastAudit, RetryAt int64
 	Fingerprint, Error                                                      string
-	Pending, FullScan, BisyncInitialized, BisyncNeedsRebuild                bool
+	Pending, FullScan                                                       bool
 	Failures                                                                int
 	Paths                                                                   []string
 }
@@ -43,7 +42,7 @@ func readSyncState(row interface{ Scan(...interface{}) error }) (SyncState, erro
 	var paths string
 	err := row.Scan(&s.JobID, &s.Fingerprint, &s.Generation, &s.Pending, &s.FullScan,
 		&paths, &s.UpdatedAt, &s.LastSuccess, &s.LastPoll, &s.LastAudit,
-		&s.Failures, &s.RetryAt, &s.Error, &s.BisyncInitialized, &s.BisyncNeedsRebuild)
+		&s.Failures, &s.RetryAt, &s.Error)
 	if err == nil {
 		err = json.Unmarshal([]byte(paths), &s.Paths)
 	}
@@ -51,11 +50,22 @@ func readSyncState(row interface{ Scan(...interface{}) error }) (SyncState, erro
 }
 
 func GetSyncState(jobID int64) (SyncState, error) {
-	return readSyncState(GetDB().QueryRow("SELECT * FROM sync_state WHERE jobId=?", jobID))
+	return readSyncState(GetDB().QueryRow(`SELECT jobId,fingerprint,generation,pending,fullScan,
+		paths,updatedAt,lastSuccess,lastPoll,lastAudit,failures,retryAt,error
+		FROM sync_state WHERE jobId=?`, jobID))
 }
 
-func ListSyncStates() (map[int64]SyncState, error) {
-	rows, err := GetDB().Query("SELECT * FROM sync_state")
+func ListSyncStates(jobIDs ...int64) (map[int64]SyncState, error) {
+	query := `SELECT jobId,fingerprint,generation,pending,fullScan,
+		paths,updatedAt,lastSuccess,lastPoll,lastAudit,failures,retryAt,error
+		FROM sync_state`
+	var args []interface{}
+	if len(jobIDs) > 0 {
+		var clause string
+		clause, args = int64InClause(jobIDs)
+		query += " WHERE jobId IN (" + clause + ")"
+	}
+	rows, err := GetDB().Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -89,13 +99,15 @@ func EnsureSyncState(jobID int64, fingerprint string) error {
 		}
 		_, err := tx.Exec(`UPDATE sync_state SET fingerprint=?, generation=generation+1,
 		 pending=1, fullScan=1, paths='[]', updatedAt=?, retryAt=0, failures=0, error='',
-		 lastSuccess=0, lastPoll=0, lastAudit=0, bisyncNeedsRebuild=bisyncInitialized WHERE jobId=?`, fingerprint, time.Now().Unix(), jobID)
+		 lastSuccess=0, lastPoll=0, lastAudit=0 WHERE jobId=?`, fingerprint, time.Now().Unix(), jobID)
 		return err
 	})
 }
 
 func enqueueSyncChanges(tx *sql.Tx, jobID int64, paths []string, full bool) error {
-	s, err := readSyncState(tx.QueryRow("SELECT * FROM sync_state WHERE jobId=?", jobID))
+	s, err := readSyncState(tx.QueryRow(`SELECT jobId,fingerprint,generation,pending,fullScan,
+		paths,updatedAt,lastSuccess,lastPoll,lastAudit,failures,retryAt,error
+		FROM sync_state WHERE jobId=?`, jobID))
 	if err != nil {
 		return err
 	}
@@ -154,7 +166,14 @@ func RecordSyncError(jobID int64, message string) error {
 }
 
 func MarkSyncPoll(jobID int64) error {
-	return ExecuteUpdate("UPDATE sync_state SET lastPoll=? WHERE jobId=?", time.Now().Unix(), jobID)
+	now := time.Now().Unix()
+	return withTx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec("DELETE FROM sync_file_state WHERE jobId=? AND deleted=1 AND observedAt<?", jobID, now-30*86400); err != nil {
+			return err
+		}
+		_, err := tx.Exec("UPDATE sync_state SET lastPoll=? WHERE jobId=?", now, jobID)
+		return err
+	})
 }
 
 func RequestSyncAudit(jobID int64) error {
@@ -165,11 +184,6 @@ func RequestSyncAudit(jobID int64) error {
 	 pending=1,fullScan=1,lastAudit=? WHERE jobId=?`, now, now, jobID)
 }
 
-func MarkBisyncInitialized(jobID int64) error {
-	err := ExecuteUpdate("UPDATE sync_state SET bisyncInitialized=1,bisyncNeedsRebuild=0 WHERE jobId=?", jobID)
-	return err
-}
-
 type SyncFile struct {
 	Path          string
 	Size, ModTime int64
@@ -177,72 +191,121 @@ type SyncFile struct {
 	IsDir         bool
 }
 
+type syncTreeChanges struct {
+	upserts []SyncFile
+	deleted map[string]SyncFile
+	paths   []string
+	full    bool
+}
+
+func compareSyncTree(tx *sql.Tx, jobID int64, root string, files []SyncFile, partial bool) (syncTreeChanges, error) {
+	var changes syncTreeChanges
+	rows, err := tx.Query(`SELECT path,size,modTime,hash,isDir FROM sync_file_state
+	 WHERE jobId=? AND root=? AND deleted=0`, jobID, root)
+	if err != nil {
+		return changes, err
+	}
+	defer rows.Close()
+	old := make(map[string]SyncFile)
+	for rows.Next() {
+		var f SyncFile
+		if err := rows.Scan(&f.Path, &f.Size, &f.ModTime, &f.Hash, &f.IsDir); err != nil {
+			return changes, err
+		}
+		old[f.Path] = f
+	}
+	if err := rows.Err(); err != nil {
+		return changes, err
+	}
+
+	_, initialized := old[""]
+	delete(old, "")
+	changes.full = !initialized
+	if !initialized {
+		changes.upserts = append(changes.upserts, SyncFile{IsDir: true})
+	}
+	for _, f := range files {
+		if f.Path == "" {
+			continue
+		}
+		previous, ok := old[f.Path]
+		delete(old, f.Path)
+		if ok && previous == f {
+			continue
+		}
+		if !f.IsDir && initialized {
+			changes.paths = append(changes.paths, path.Join(root, f.Path))
+		}
+		changes.full = changes.full || !partial || f.IsDir || previous.IsDir
+		changes.upserts = append(changes.upserts, f)
+	}
+	changes.deleted = old
+	changes.full = changes.full || len(old) > 0
+	return changes, nil
+}
+
 // ObserveSyncTree commits the observed index and its inbox changes atomically.
 // The index describes observations, not successful transfers; only CompleteSyncRun
 // advances the successful-sync checkpoint. Deleted entries remain as tombstones.
 func ObserveSyncTree(jobID int64, root string, files []SyncFile, partial bool) error {
+	const versionSQL = "SELECT generation,fingerprint FROM sync_state WHERE jobId=?"
+	var generation int64
+	var fingerprint string
+	var changes syncTreeChanges
+	if err := withReadTx(func(tx *sql.Tx) error {
+		if err := tx.QueryRow(versionSQL, jobID).Scan(&generation, &fingerprint); err != nil {
+			return err
+		}
+		var err error
+		changes, err = compareSyncTree(tx, jobID, root, files, partial)
+		return err
+	}); err != nil {
+		return err
+	}
+	if !changes.full && len(changes.paths) == 0 {
+		return nil
+	}
 	return withTx(func(tx *sql.Tx) error {
-		rows, err := tx.Query(`SELECT path,size,modTime,hash,isDir FROM sync_file_state
-		 WHERE jobId=? AND root=? AND deleted=0`, jobID, root)
-		if err != nil {
+		var currentGeneration int64
+		var currentFingerprint string
+		if err := tx.QueryRow(versionSQL, jobID).Scan(&currentGeneration, &currentFingerprint); err != nil {
 			return err
 		}
-		old := make(map[string]SyncFile)
-		for rows.Next() {
-			var f SyncFile
-			if err := rows.Scan(&f.Path, &f.Size, &f.ModTime, &f.Hash, &f.IsDir); err != nil {
-				rows.Close()
+		if currentFingerprint != fingerprint {
+			return errors.New("同步配置已变更，请重新扫描")
+		}
+		if currentGeneration != generation {
+			// Another observer or a filesystem event changed the inbox. Recheck
+			// under the write lock before committing the matching observation.
+			var err error
+			changes, err = compareSyncTree(tx, jobID, root, files, partial)
+			if err != nil {
 				return err
 			}
-			old[f.Path] = f
+			if !changes.full && len(changes.paths) == 0 {
+				return nil
+			}
 		}
-		if err := errors.Join(rows.Err(), rows.Close()); err != nil {
-			return err
-		}
-		_, initialized := old[""]
-		delete(old, "")
-		full := !initialized
-		var changed []string
 		now := time.Now().Unix()
-		stmt, err := tx.Prepare(`INSERT INTO sync_file_state(jobId,root,path,size,modTime,hash,isDir,deleted,observedAt)
-		 VALUES(?,?,?,?,?,?,?,0,?) ON CONFLICT(jobId,root,path) DO UPDATE SET
-		 size=excluded.size,modTime=excluded.modTime,hash=excluded.hash,isDir=excluded.isDir,deleted=0,observedAt=excluded.observedAt`)
-		if err != nil {
-			return err
-		}
-		defer stmt.Close()
-		files = append(files, SyncFile{IsDir: true}) // Root sentinel also represents an empty tree.
-		for _, f := range files {
-			previous, ok := old[f.Path]
-			if (f.Path == "" && initialized) || (ok && previous == f) {
-				delete(old, f.Path)
-				continue
-			}
-			if f.Path != "" && (!ok || previous != f) {
-				if !f.IsDir && initialized {
-					changed = append(changed, path.Join(root, f.Path))
-				}
-				if !partial || f.IsDir || (ok && previous.IsDir) {
-					full = true
-				}
-			}
-			delete(old, f.Path)
-			if _, err := stmt.Exec(jobID, root, f.Path, f.Size, f.ModTime, f.Hash, f.IsDir, now); err != nil {
+		if len(changes.upserts) > 0 {
+			stmt, err := tx.Prepare(`INSERT INTO sync_file_state(jobId,root,path,size,modTime,hash,isDir,deleted,observedAt)
+			 VALUES(?,?,?,?,?,?,?,0,?) ON CONFLICT(jobId,root,path) DO UPDATE SET
+			 size=excluded.size,modTime=excluded.modTime,hash=excluded.hash,isDir=excluded.isDir,deleted=0,observedAt=excluded.observedAt`)
+			if err != nil {
 				return err
 			}
+			defer stmt.Close()
+			for _, f := range changes.upserts {
+				if _, err := stmt.Exec(jobID, root, f.Path, f.Size, f.ModTime, f.Hash, f.IsDir, now); err != nil {
+					return err
+				}
+			}
 		}
-		for p := range old {
-			full = true // Deletions use the existing mirror/bisync safety checks.
+		for p := range changes.deleted {
 			if _, err := tx.Exec(`UPDATE sync_file_state SET deleted=1,observedAt=? WHERE jobId=? AND root=? AND path=?`, now, jobID, root, p); err != nil {
 				return err
 			}
 		}
-		if _, err := tx.Exec("DELETE FROM sync_file_state WHERE jobId=? AND deleted=1 AND observedAt<?", jobID, now-30*86400); err != nil {
-			return err
-		}
-		if full || len(changed) > 0 {
-			return enqueueSyncChanges(tx, jobID, changed, full)
-		}
-		return nil
+		return enqueueSyncChanges(tx, jobID, changes.paths, changes.full)
 	})
 }

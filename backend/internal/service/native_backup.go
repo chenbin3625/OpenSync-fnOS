@@ -17,6 +17,7 @@ import (
 	"opensync/internal/config"
 	"opensync/internal/mapper"
 	"opensync/internal/native"
+	"opensync/internal/pan123"
 	"opensync/pkg/util"
 )
 
@@ -47,7 +48,13 @@ func persistRefreshedNativeTokens(updates map[string]native.TokenUpdate) {
 		}
 		changed := false
 		for k, v := range update.Fields {
-			if k != "token" && k != "client_access_token" && k != "client_refresh_token" && k != "cookie" {
+			switch k {
+			case "token", "client_access_token", "client_refresh_token", "cookie":
+			case "access_token", "token_expires_at":
+				if c[canonical]["type"] != "pan123" {
+					continue
+				}
+			default:
 				continue
 			}
 			if v != "" && c[canonical][k] != v {
@@ -487,6 +494,7 @@ func mergeEditRemoteParams(oldParams, incoming map[string]string, clearSecrets [
 			clearSet[k] = true
 		}
 	}
+	explicitToken := merged["access_token"] != ""
 	skipObscure := map[string]bool{}
 	for _, key := range native.SecretFields {
 		if merged[key] == "" && !clearSet[key] && oldParams[key] != "" {
@@ -494,6 +502,25 @@ func mergeEditRemoteParams(oldParams, incoming map[string]string, clearSecrets [
 			if native.IsObscuredFieldForType(oldType, key) {
 				skipObscure[key] = true
 			}
+		}
+	}
+	if oldType == "pan123" {
+		protocol := pan123.NormalizeProtocol(merged["protocol"])
+		changed := protocol != pan123.NormalizeProtocol(oldParams["protocol"])
+		if protocol == pan123.ProtocolWeb {
+			changed = changed || merged["web_user"] != oldParams["web_user"] || merged["web_password"] != oldParams["web_password"]
+		} else {
+			changed = changed || merged["client_id"] != oldParams["client_id"] || merged["client_secret"] != oldParams["client_secret"]
+		}
+		if changed && !explicitToken {
+			delete(merged, "access_token")
+		}
+		if changed || clearSet["access_token"] || explicitToken {
+			if !explicitToken || merged["token_expires_at"] == oldParams["token_expires_at"] {
+				delete(merged, "token_expires_at")
+			}
+		} else if merged["token_expires_at"] == "" && oldParams["token_expires_at"] != "" {
+			merged["token_expires_at"] = oldParams["token_expires_at"]
 		}
 	}
 	if oldType == "sftp" && merged["known_hosts"] == "" && !clearSet["known_hosts"] && oldParams["known_hosts"] != "" {

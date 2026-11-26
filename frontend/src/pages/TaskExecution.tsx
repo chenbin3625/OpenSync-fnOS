@@ -144,7 +144,7 @@ export const Realtime = memo(function Realtime({
         <p className="muted">
           {syncStatus?.state === "paused"
             ? "持续同步当前已暂停，恢复同步后将自动检测变更并在此显示文件传输明细。"
-            : syncStatus?.state === "error" || syncStatus?.state === "needs_rebuild"
+            : syncStatus?.state === "error"
               ? syncStatus.error || `当前状态：${syncStatusLabels[syncStatus.state]}`
               : "持续同步正在后台监控本地与远端变更，检测到新变更触发同步后将自动显示逐文件进度。"}
         </p>
@@ -1180,8 +1180,8 @@ function FileDetails({
       setPage(1);
     };
 
-  const triggerExport = (format: "csv" | "txt") => {
-    const url = api.exportTaskItemsUrl(taskId, format, {
+  const triggerExport = () => {
+    const url = api.exportTaskItemsUrl(taskId, {
       type,
       isPath: object,
       hasError,
@@ -1189,7 +1189,7 @@ function FileDetails({
     });
     const link = document.createElement("a");
     link.href = url;
-    link.download = `opensync-task-${taskId}.${format}`;
+    link.download = `opensync-task-${taskId}.csv`;
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -1288,17 +1288,9 @@ function FileDetails({
               size="small"
               type="tertiary"
               icon={<IconDownload aria-hidden="true" />}
-              onClick={() => triggerExport("csv")}
+              onClick={triggerExport}
             >
               导出 CSV
-            </Button>
-            <Button
-              size="small"
-              type="tertiary"
-              icon={<IconDownload aria-hidden="true" />}
-              onClick={() => triggerExport("txt")}
-            >
-              导出 TXT
             </Button>
           </div>
         </div>

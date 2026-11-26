@@ -20,10 +20,10 @@ test.beforeEach(async ({ page }) => {
   );
 });
 
-test("opens dashboard by default at root path", async ({ page }) => {
+test("opens the sync task list by default at root path", async ({ page }) => {
   await page.goto("/app/opensync/");
-  await expect(page).toHaveURL(/\/app\/opensync\/dashboard$/);
-  await expect(page.getByRole("heading", { name: "总览看板" })).toBeVisible();
+  await expect(page).toHaveURL(/\/app\/opensync\/sync$/);
+  await expect(page.getByRole("heading", { name: "同步任务", exact: true })).toBeVisible();
 });
 
 test("opens usable task workspace without a second login", async ({ page }) => {
@@ -41,6 +41,8 @@ test("opens task editor with step navigation", async ({ page }) => {
   await page.getByRole("button", { name: "新建任务", exact: true }).click();
   const dialog = page.getByRole("dialog");
   await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "选择网盘", exact: true })).toBeVisible();
+  await dialog.getByRole("button", { name: "高级设置", exact: true }).click();
   await expect(
     page.getByRole("heading", { name: "新建持续同步任务", exact: true }),
   ).toBeVisible();
@@ -77,7 +79,6 @@ test("four modules fit desktop and mobile windows", async ({ page }) => {
   for (const path of ["tasks", "engines", "notifications", "settings"]) {
     await page.goto(`/app/opensync/${path}`);
     await expect(page.locator(".page-toolbar")).toBeVisible();
-    await expect(page.getByRole("button", { name: /刷新/ })).toHaveCount(0);
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= window.innerWidth,

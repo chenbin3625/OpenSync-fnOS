@@ -6,7 +6,6 @@ import (
 	"opensync/internal/config"
 	"opensync/internal/mapper"
 	"opensync/internal/native"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -62,27 +61,17 @@ func TestPureRcloneEngineLifecycleAndLegacyFiltering(t *testing.T) {
 		t.Fatalf("GetClientList() = %#v, want only built-in rclone engine", list)
 	}
 
-	// Adding external OpenList engine via AddClient is rejected.
-	if err := AddClient(map[string]interface{}{
-		"remark": "external",
-		"url":    "http://127.0.0.1:5244",
-		"token":  "tok",
-	}); err == nil {
-		t.Fatal("AddClient() unexpectedly accepted external OpenList engine")
-	}
-
 	// Built-in engine cannot be deleted.
 	if err := RemoveClient(id1); err == nil {
 		t.Fatal("RemoveClient() unexpectedly deleted built-in rclone engine")
 	}
 
 	// Updating built-in engine remark and maxConcurrentJobs succeeds.
-	if err := UpdateClient(map[string]interface{}{
-		"id":                id1,
-		"remark":            "我的内置存储",
-		"maxConcurrentJobs": 3,
+	remark, maxConcurrent := "我的内置存储", 3
+	if _, err := SaveNativeEngine(context.Background(), NativeEngineInput{
+		Remark: &remark, MaxConcurrentJobs: &maxConcurrent,
 	}); err != nil {
-		t.Fatalf("UpdateClient() error = %v", err)
+		t.Fatalf("SaveNativeEngine() error = %v", err)
 	}
 	row, err := mapper.GetAlistByID(id1)
 	if err != nil {
@@ -329,13 +318,13 @@ func TestLegacyOpenListJobsAutoDisabledAndBlocked(t *testing.T) {
 		t.Fatalf("AddAlist legacy: %v", err)
 	}
 	jobID, err := mapper.AddJob(map[string]interface{}{
-		"enable":  1,
-		"remark":  "旧版同步任务",
-		"srcPath": `["/old-src"]`,
-		"dstPath": `["/old-dst"]`,
-		"alistId": legacyID,
-		"method":  0,
-		"isCron":  0,
+		"enable":   1,
+		"remark":   "旧版同步任务",
+		"srcPath":  `["/old-src"]`,
+		"dstPath":  `["/old-dst"]`,
+		"alistId":  legacyID,
+		"method":   0,
+		"isCron":   0,
 		"interval": 60,
 	})
 	if err != nil {
@@ -394,14 +383,14 @@ func TestLegacyOpenListJobsAutoDisabledAndBlocked(t *testing.T) {
 		"DoJobManual": DoJobManual(jobID),
 		"ContinueJob": ContinueJob(jobID),
 		"EditJobClient": EditJobClient(map[string]interface{}{
-			"id":       jobID,
-			"alistId":  nativeID,
-			"remark":   "企图编辑旧任务",
-			"srcPath":  []string{"/a"},
-			"dstPath":  []string{"/b"},
-			"method":   0,
-			"isCron":   2,
-			"enable":   1,
+			"id":      jobID,
+			"alistId": nativeID,
+			"remark":  "企图编辑旧任务",
+			"srcPath": []string{"/a"},
+			"dstPath": []string{"/b"},
+			"method":  0,
+			"isCron":  2,
+			"enable":  1,
 		}),
 		"RetryFailedTask": RetryFailedTaskItems(taskID, nil),
 	} {
@@ -422,7 +411,7 @@ func TestLegacyOpenListJobsAutoDisabledAndBlocked(t *testing.T) {
 	}
 }
 
-func TestRenameNativeStorageRewritesDstMapAndCleansBisyncWorkDir(t *testing.T) {
+func TestRenameNativeStorageRewritesDstMapAndClearsBisyncState(t *testing.T) {
 	defer setupPureRcloneServiceTestDB(t)()
 
 	nativeID, err := EnsureNativeEngine()
@@ -466,11 +455,7 @@ func TestRenameNativeStorageRewritesDstMapAndCleansBisyncWorkDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateJobClient bisync: %v", err)
 	}
-	workDir := bisyncWorkDir(biID)
-	if err := os.MkdirAll(workDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(workDir, "listing.lst"), []byte("old"), 0o600); err != nil {
+	if err := mapper.UpsertBisyncEntry(mapper.BisyncEntry{JobID: biID, RelPath: "listing.txt", State: mapper.BisyncStateSynced}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -493,8 +478,8 @@ func TestRenameNativeStorageRewritesDstMapAndCleansBisyncWorkDir(t *testing.T) {
 	if got := storedMap.Map[wantKey]; got != "/s3dst2/target/b1/photos/" {
 		t.Fatalf("dstMap.Map[%q] = %q, want /s3dst2/target/b1/photos/", wantKey, got)
 	}
-	if _, err := os.Stat(workDir); !os.IsNotExist(err) {
-		t.Fatalf("expected bisync workdir %s cleaned after rename, stat err=%v", workDir, err)
+	if entries, err := mapper.ListBisyncEntries(biID); err != nil || len(entries) != 0 {
+		t.Fatalf("expected bisync baseline cleared after rename, got %v (%v)", entries, err)
 	}
 }
 

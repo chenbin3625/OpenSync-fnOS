@@ -13,9 +13,12 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
+
+	"opensync/internal/pan123"
 )
 
 type localRoot struct {
@@ -379,7 +382,7 @@ func (c Config) resolveEndpoint(v string, allowFile bool) (Endpoint, error) {
 		IsCrypt:           isCrypt,
 		ReadOnly:          backend == "http" || isReadOnlyWrapper,
 		AllowHashCheck:    allowHashCheck,
-		UnreliableModTime: backend == "quark" || (backend == "webdav" && !webdavVendorHasReliableModTime(vendor)),
+		UnreliableModTime: backend == "quark" || backend == "pan123" || (backend == "webdav" && !webdavVendorHasReliableModTime(vendor)),
 	}
 
 	// Never include credentials or access keys in a path identity. Aliases of
@@ -547,6 +550,22 @@ func resolveBackendLocation(backend, remoteName string, options map[string]strin
 			return acct + "/root/" + rf
 		}
 		return strings.ToLower(remoteName) + "/root/" + rf
+	case "pan123":
+		rf := strings.TrimSpace(options["root_folder_id"])
+		if id, err := pan123.ParseRootFolderID(rf); err == nil {
+			rf = strconv.FormatInt(id, 10)
+		}
+		idPart := strings.ToLower(strings.TrimSpace(options["account_name"]))
+		if idPart == "" {
+			idPart = strings.ToLower(strings.TrimSpace(options["web_user"]))
+		}
+		if idPart == "" {
+			idPart = strings.ToLower(strings.TrimSpace(options["client_id"]))
+		}
+		if idPart == "" {
+			idPart = strings.ToLower(remoteName)
+		}
+		return idPart + "/root/" + rf
 	default:
 		return strings.ToLower(remoteName)
 	}
@@ -660,6 +679,22 @@ func (c Config) ListWithOptions(ctx context.Context, v string, opts SessionOptio
 		if !ok || !cleanRelative(sub) {
 			return nil, errors.New("远端路径无效")
 		}
+		if typ := c[canonical]["type"]; typ == "quark" || typ == "pan123" {
+			entries, _, exists, err := c.BrowseDirEntries(ctx, v, false, "", false, opts)
+			if err != nil {
+				return nil, err
+			}
+			if !exists {
+				return nil, errors.New("目录不存在")
+			}
+			for _, entry := range entries {
+				if entry.IsDir {
+					push(entry.Name, entry.Path)
+				}
+			}
+			slices.SortFunc(result, func(a, b map[string]string) int { return strings.Compare(a["name"], b["name"]) })
+			return result, nil
+		}
 		session, e := c.SessionFor([]SessionSpec{{Name: canonical, Mode: diskReadOnly}}, opts)
 		if e != nil {
 			return nil, e
@@ -688,4 +723,64 @@ func (c Config) ListWithOptions(ctx context.Context, v string, opts SessionOptio
 	}
 	slices.SortFunc(result, func(a, b map[string]string) int { return strings.Compare(a["name"], b["name"]) })
 	return result, nil
+}
+
+// LocalFilesystemID returns the stable kernel fsid for a local virtual path.
+func (c Config) LocalFilesystemID(virtualPath string) (int32, int32, bool) {
+	ep, err := c.Resolve(virtualPath)
+	if err != nil || !ep.IsLocal || ep.LocalPath == "" {
+		return 0, 0, false
+	}
+	hi, lo := filesystemID(ep.LocalPath)
+	if hi == 0 && lo == 0 {
+		return 0, 0, false
+	}
+	return hi, lo, true
+}
+
+// IsCaseInsensitive reports whether this endpoint's storage backend treats
+// filenames differing only in letter case as the same path.
+func (e Endpoint) IsCaseInsensitive() bool {
+	if e.IsCrypt {
+		// Standard rclone crypt encodes filenames in base32/base64, which preserves
+		// case distinction logically at the decrypted layer.
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(e.Backend)) {
+	case "onedrive", "dropbox", "box", "smb", "quark", "azurefiles", "iclouddrive", "pcloud", "hidrive":
+		return true
+	default:
+		return false
+	}
+}
+
+// InvalidFilenameReason checks whether relPath contains path segments that
+// cannot be safely stored on this endpoint (e.g., trailing spaces/dots or
+// forbidden characters on Windows/OneDrive/SMB/Quark).
+func (e Endpoint) InvalidFilenameReason(relPath string) string {
+	if e.IsCrypt {
+		return ""
+	}
+	strictWin := false
+	switch strings.ToLower(strings.TrimSpace(e.Backend)) {
+	case "onedrive", "smb", "azurefiles", "dropbox", "box", "quark", "iclouddrive":
+		strictWin = true
+	}
+	for _, seg := range strings.Split(strings.Trim(relPath, "/"), "/") {
+		if seg == "" {
+			continue
+		}
+		if strings.ContainsRune(seg, 0) {
+			return "文件名包含空字符"
+		}
+		if strictWin {
+			if strings.HasSuffix(seg, " ") || strings.HasSuffix(seg, ".") {
+				return "目标存储不支持文件名以空格或句点结尾"
+			}
+			if strings.ContainsAny(seg, `<>:"|?*`) {
+				return "目标存储不支持文件名包含特殊字符（< > : \" | ? *）"
+			}
+		}
+	}
+	return ""
 }

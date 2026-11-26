@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/url"
 	"opensync/internal/mapper"
 	"opensync/internal/msg"
@@ -148,91 +147,6 @@ func validateHTTPURLHostPort(u *url.URL) bool {
 	return true
 }
 
-func normalizeAlistMaxConcurrentJobs(alist map[string]interface{}) (int, bool, error) {
-	raw, ok := alist["maxConcurrentJobs"]
-	if !ok || raw == nil {
-		return 0, false, nil
-	}
-	n, valid := parseStrictNonNegativeInt(raw)
-	if !valid || n < 0 || n > 50 {
-		return 0, false, publicError(msg.T(msg.MaxConcurrentJobsInvalid))
-	}
-	return n, true, nil
-}
-
-func parseStrictNonNegativeInt(raw interface{}) (int, bool) {
-	switch v := raw.(type) {
-	case int:
-		return v, v >= 0
-	case int64:
-		return int(v), v >= 0
-	case float64:
-		if v != float64(int64(v)) || v < 0 {
-			return 0, false
-		}
-		return int(v), true
-	case string:
-		s := strings.TrimSpace(v)
-		if s == "" {
-			return 0, true
-		}
-		n, err := strconv.Atoi(s)
-		if err != nil || n < 0 {
-			return 0, false
-		}
-		return n, true
-	default:
-		return 0, false
-	}
-}
-
-// UpdateClient updates the built-in rclone engine's remark and concurrency cap.
-func UpdateClient(alist map[string]interface{}) error {
-	alistID := util.ToInt64(alist["id"])
-	maxConcurrentJobs, hasMaxConcurrent, err := normalizeAlistMaxConcurrentJobs(alist)
-	if err != nil {
-		return err
-	}
-
-	alistOld, err := mapper.GetAlistByID(alistID)
-	if err != nil {
-		if err := publicErrorIf(err, msg.T(msg.AlistNotFound)); err != nil {
-			return err
-		}
-	}
-	if util.StringValue(alistOld["url"]) != native.EngineURL {
-		return publicError("当前版本仅支持内置 rclone 存储引擎")
-	}
-
-	remarkStr := defaultNativeRemark(util.StringValue(alistOld["remark"]))
-	if remark, ok := alist["remark"]; ok && remark != nil {
-		trimmed := strings.TrimSpace(fmt.Sprintf("%v", remark))
-		if trimmed != "" {
-			remarkStr = trimmed
-		}
-	}
-	var maxConcurrentPtr *int
-	if hasMaxConcurrent {
-		maxConcurrentPtr = &maxConcurrentJobs
-	}
-
-	alistMutationMu.Lock()
-	err = mapper.UpdateAlistWithConcurrency(alistID, remarkStr, native.EngineURL, nil, maxConcurrentPtr)
-	alistMutationMu.Unlock()
-	if err != nil {
-		return fmt.Errorf("update built-in engine: %w", err)
-	}
-	if hasMaxConcurrent {
-		engineQueue.RefreshLimit(alistID, maxConcurrentJobs)
-	}
-	return nil
-}
-
-// AddClient is disabled in pure-rclone mode; remote storages are managed via /svr/native/*.
-func AddClient(_ map[string]interface{}) error {
-	return publicError("当前版本仅支持内置 rclone 存储，请在存储管理中添加远程存储")
-}
-
 // RemoveClient refuses to delete the built-in rclone engine while still allowing
 // cleanup of unused legacy rows if requested.
 func RemoveClient(alistID int64) error {
@@ -257,53 +171,6 @@ func RemoveClient(alistID int64) error {
 	}
 	RemoveEngineHealth(alistID)
 	return nil
-}
-
-// TestClient tests connectivity to the built-in rclone storage engine.
-func TestClient(ctx context.Context, alistID int64) error {
-	_, err := TestClientWithHealth(ctx, alistID)
-	return err
-}
-
-// TestClientWithHealth probes the built-in rclone engine and all configured
-// storages, updates the health cache, and returns the EngineHealth snapshot.
-func TestClientWithHealth(ctx context.Context, alistID int64) (*EngineHealth, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if alistID <= 0 {
-		id, err := EnsureNativeEngine()
-		if err != nil {
-			return nil, err
-		}
-		alistID = id
-	}
-	alist, err := alistDeps.GetAlistByID(alistID)
-	if err != nil {
-		if err := publicErrorIf(err, msg.T(msg.AlistNotFound)); err != nil {
-			return nil, err
-		}
-	}
-	urlStr := util.StringValue(alist["url"])
-	if urlStr != native.EngineURL {
-		return nil, publicError("旧版 OpenList 引擎已不再支持")
-	}
-	row := make(map[string]interface{}, len(alist)+1)
-	for k, v := range alist {
-		row[k] = v
-	}
-	if util.ToInt64(row["id"]) == 0 && alistID > 0 {
-		row["id"] = alistID
-	}
-	health := probeEngineRow(ctx, row, false)
-	if health.Status != "online" {
-		log.Printf("native storage engine test failed: alistID=%d: %s", alistID, health.Error)
-		if strings.TrimSpace(health.Error) != "" {
-			return health, publicError(health.Error)
-		}
-		return health, publicError(msg.T(msg.AlistConnectFail))
-	}
-	return health, nil
 }
 
 // GetChildPath gets child directory paths for the path selector via built-in rclone.

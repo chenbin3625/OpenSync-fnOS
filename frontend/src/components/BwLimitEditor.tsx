@@ -34,7 +34,6 @@ import {
   parseHHMM,
   resolveBwLimitAt,
   serializeBwLimit,
-  serializeRateValue,
   validateBwLimitExpression,
   type BwDayPreset,
   type BwLimitModel,

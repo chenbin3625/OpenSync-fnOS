@@ -51,6 +51,20 @@ func writeConfigForTest(t *testing.T, content string) string {
 	return path
 }
 
+func TestLegacyFullSyncDeleteGuardConfig(t *testing.T) {
+	withTempConfigDir(t)
+	t.Setenv("OPENSYNC_SCHEDULED_FULL_SYNC_CONFIRM", "1")
+	envConfig, err := loadServerConfig("test")
+	if err != nil || envConfig.ScheduledFullSyncConfirm != 1 {
+		t.Fatalf("legacy environment setting lost: %v (%v)", envConfig.ScheduledFullSyncConfirm, err)
+	}
+	writeConfigForTest(t, "[opensync]\nscheduled_full_sync_confirm=0\n")
+	fileConfig, err := loadServerConfig("test")
+	if err != nil || fileConfig.ScheduledFullSyncConfirm != 0 {
+		t.Fatalf("config.ini did not override the legacy environment setting: %v (%v)", fileConfig.ScheduledFullSyncConfirm, err)
+	}
+}
+
 func TestConfigFileInvalidNumbersKeepDefaults(t *testing.T) {
 	withTempConfigDir(t)
 	writeConfigForTest(t, "[opensync]\ntask_timeout=also-bad\n")

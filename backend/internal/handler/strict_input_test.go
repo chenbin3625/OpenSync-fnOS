@@ -168,8 +168,6 @@ func TestHandlersRejectJSONNullBodyWithoutNilMapPanic(t *testing.T) {
 		handler gin.HandlerFunc
 	}{
 		{"AddJob", http.MethodPost, "/svr/job", AddJob},
-		{"AddAlist", http.MethodPost, "/svr/alist", AddAlist},
-		{"UpdateAlist", http.MethodPut, "/svr/alist", UpdateAlist},
 		{"UpdateNotify", http.MethodPut, "/svr/notify", UpdateNotify},
 	}
 	for _, tc := range cases {

@@ -191,7 +191,7 @@ func endpointSupportsNativeMD5(ep Endpoint) bool {
 		return false
 	}
 	switch ep.Backend {
-	case "local", "s3", "azureblob", "googlecloudstorage", "swift", "drive", "pcloud", "quark":
+	case "local", "s3", "azureblob", "googlecloudstorage", "swift", "drive", "pcloud", "quark", "pan123":
 		return true
 	case "webdav":
 		return ep.Vendor == "owncloud" || ep.Vendor == "nextcloud"
@@ -207,7 +207,7 @@ func webdavVendorHasReliableModTime(vendor string) bool {
 }
 
 func endpointHasReliableModTime(ep Endpoint) bool {
-	if ep.UnreliableModTime || ep.Backend == "quark" {
+	if ep.UnreliableModTime || ep.Backend == "quark" || ep.Backend == "pan123" {
 		return false
 	}
 	if ep.Backend != "webdav" {
@@ -440,7 +440,8 @@ func (c Config) Copy(ctx context.Context, src, dst string, opt CopyOptions, emit
 	var pending []PendingFile
 
 	useQuarkFastPath := srcEp.IsLocal && !destEp.IsLocal && destEp.Backend == "quark" && !destEp.IsCrypt && !opt.DryRun && !deep
-	useDirectStream := opt.DirectStream && !useQuarkFastPath && len(opt.OnlyFiles) == 0 && !opt.ResumeEnable && !deep && !opt.DryRun && !opt.CreateEmptySrcDirs
+	usePan123FastPath := srcEp.IsLocal && !destEp.IsLocal && destEp.Backend == "pan123" && !destEp.IsCrypt && !opt.DryRun && !deep
+	useDirectStream := opt.DirectStream && !useQuarkFastPath && !usePan123FastPath && len(opt.OnlyFiles) == 0 && !opt.ResumeEnable && !deep && !opt.DryRun && !opt.CreateEmptySrcDirs
 	if useDirectStream {
 		emit(Event{ScanDirs: 1, ScanFiles: 0, ScanDone: true})
 	} else if len(opt.OnlyFiles) > 0 {
@@ -512,6 +513,36 @@ func (c Config) Copy(ctx context.Context, src, dst string, opt CopyOptions, emit
 				quarkOpt := opt
 				quarkOpt.Compare = effectiveCompare
 				upErr := directUploadFilesToQuark(ctx, srcSub, qCanonical, c[qCanonical], dstSub, quarkFiles, quarkOpt, emit)
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				if upErr == nil && opt.CreateEmptySrcDirs && len(emptyDirs) > 0 {
+					return handleEmptyDirs(ctx, s, destEp, dstSub, destArg, emptyDirs, opt, emit)
+				}
+				return upErr
+			}
+		}
+	}
+
+	// Fast path: local -> 123Pan (non-crypt) uses pure-Go MD5 rapid upload,
+	// single-step small-file upload (OpenAPI), concurrent multipart upload with
+	// persistent resume state, and live pause/throttle control.
+	if usePan123FastPath && count > 0 {
+		if pCanonical, ok := c.FindKey(dstName); ok && canUsePan123DirectUpload(c[pCanonical]) {
+			var pan123Files []resumeFileMeta
+			for _, rel := range slices.Sorted(func(yield func(string) bool) {
+				for k := range fileMeta {
+					if !yield(k) {
+						return
+					}
+				}
+			}) {
+				pan123Files = append(pan123Files, fileMeta[rel])
+			}
+			if len(pan123Files) > 0 {
+				pan123Opt := opt
+				pan123Opt.Compare = effectiveCompare
+				upErr := directUploadFilesToPan123(ctx, srcSub, pCanonical, c[pCanonical], dstSub, pan123Files, pan123Opt, emit)
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}

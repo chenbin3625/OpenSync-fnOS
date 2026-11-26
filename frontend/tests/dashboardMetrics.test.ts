@@ -64,7 +64,6 @@ describe("dashboardMetrics", () => {
         enabledJobs: 2,
         runningJobs: 2,
         queuedJobs: 0,
-        pendingApprovals: 0,
         totalEngines: 1,
         onlineEngines: 1,
         offlineEngines: 0,
@@ -77,7 +76,6 @@ describe("dashboardMetrics", () => {
         totalFiles: 100,
         totalBytes: 1024 * 1024 * 100,
       },
-      pendingApprovals: [],
       jobs: [
         makeJob({
           id: 1,

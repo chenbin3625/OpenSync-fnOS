@@ -115,82 +115,6 @@ func TestFullSyncPlanTrackRenamesPass2(t *testing.T) {
 	}
 }
 
-func TestSelectiveExcludePendingDeleteApproval(t *testing.T) {
-	defer setupNativeTestDB(t)()
-	pendingDeleteApprovals.ResetForTest()
-	defer pendingDeleteApprovals.ResetForTest()
-
-	tmp := t.TempDir()
-	srcDir := filepath.Join(tmp, "src")
-	dstDir := filepath.Join(tmp, "dst")
-	for _, p := range []string{srcDir, dstDir} {
-		if err := os.MkdirAll(p, 0700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Setenv("TRIM_DATA_ACCESSIBLE_PATHS", srcDir+":"+dstDir)
-	t.Setenv("TRIM_PKGTMP", "")
-
-	engineID, err := EnsureNativeEngine()
-	if err != nil {
-		t.Fatalf("EnsureNativeEngine: %v", err)
-	}
-	srcV := testVirtualLocalRoot(t, srcDir)
-	dstV := testVirtualLocalRoot(t, dstDir)
-	jobID, err := mapper.AddJob(map[string]interface{}{
-		"alistId": engineID,
-		"srcPath": srcV,
-		"dstPath": dstV,
-		"method":  1,
-		"isCron":  2,
-		"enable":  1,
-		"exclude": "*.tmp",
-		"remark":  "selective-approval-test",
-	})
-	if err != nil {
-		t.Fatalf("AddJob: %v", err)
-	}
-	jobCfg, err := mapper.GetJobByID(jobID)
-	if err != nil {
-		t.Fatalf("GetJobByID: %v", err)
-	}
-
-	jt := &JobTask{
-		TaskID: 9001,
-		Job:    jobCfg,
-	}
-	targets := []pendingDeleteTarget{
-		{SrcRoot: srcV + "/", DstRoot: dstV + "/", SrcDir: srcV + "/", DstDir: dstV + "/", Name: "keep-me.txt", Size: 100, Modified: 1000, Count: 1},
-		{SrcRoot: srcV + "/", DstRoot: dstV + "/", SrcDir: srcV + "/", DstDir: dstV + "/", Name: "remove-me.txt", Size: 200, Modified: 1000, Count: 1},
-	}
-	pendingDeleteApprovals.Stage(jt, targets)
-
-	// Exclude "keep-me.txt": should append rule to job exclude and leave "remove-me.txt" pending.
-	excludedCount, err := pendingDeleteApprovals.ExcludeByTaskIDPaths(9001, []string{dstV + "/keep-me.txt"})
-	if err != nil {
-		t.Fatalf("ExcludeByTaskIDPaths: %v", err)
-	}
-	if excludedCount != 1 {
-		t.Fatalf("expected 1 excluded path, got %d", excludedCount)
-	}
-	updatedJob, err := mapper.GetJobByID(jobID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(util.StringValue(updatedJob["exclude"]), "keep-me.txt") {
-		t.Fatalf("expected job exclude to contain keep-me.txt, got %q", util.StringValue(updatedJob["exclude"]))
-	}
-	rem := pendingDeleteApprovals.GetByJobID(jobID)
-	if rem == nil || len(rem.Paths) != 1 || rem.Paths[0].Path != dstV+"/remove-me.txt" {
-		t.Fatalf("expected only remove-me.txt remaining in approval, got %#v", rem)
-	}
-
-	// Approving empty selection must fail cleanly.
-	if err := pendingDeleteApprovals.ApproveByTaskIDPaths(9001, nil); err == nil {
-		t.Fatalf("expected error on empty ApproveByTaskIDPaths")
-	}
-}
-
 func TestCheckDestinationFreeSpaceGuard(t *testing.T) {
 	defer setupNativeTestDB(t)()
 	tmp := t.TempDir()
@@ -266,12 +190,8 @@ func TestExportJobCheckReportAndCSVFormulaSanitization(t *testing.T) {
 		t.Fatalf("expected missing file in CSV output")
 	}
 
-	txtName, _, txtData, err := ExportJobCheckReport(jobID, "txt")
-	if err != nil {
-		t.Fatalf("ExportJobCheckReport(txt): %v", err)
-	}
-	if !strings.HasSuffix(txtName, ".txt") || !strings.Contains(string(txtData), "一致: 10") {
-		t.Fatalf("unexpected txt report: %s\n%s", txtName, string(txtData))
+	if _, _, _, err := ExportJobCheckReport(jobID, "txt"); err == nil {
+		t.Fatal("expected TXT format to be rejected")
 	}
 }
 

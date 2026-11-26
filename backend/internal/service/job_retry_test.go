@@ -89,7 +89,7 @@ func TestRetryFailedTaskReturnsErrorWhenNoUnfinishedItems(t *testing.T) {
 	_, taskID := setupRetryFailedTaskTest(t, 1)
 	addRetryTestItem(t, taskID, "ok.txt", taskStatusSuccess.Int())
 
-	err := RetryFailedTask(taskID)
+	err := RetryFailedTaskItems(taskID, nil)
 	if err == nil {
 		t.Fatalf("RetryFailedTask did not return error when there are no unfinished items")
 	}
@@ -103,7 +103,7 @@ func TestRetryFailedTaskReturnsErrorWhenJobBusy(t *testing.T) {
 	}
 	t.Cleanup(func() { client.markDone() })
 
-	err := RetryFailedTask(taskID)
+	err := RetryFailedTaskItems(taskID, nil)
 	if err == nil {
 		t.Fatalf("RetryFailedTask did not return error when job is busy")
 	}
@@ -113,7 +113,7 @@ func TestRetryFailedTaskReturnsErrorWhenJobDisabled(t *testing.T) {
 	_, taskID := setupRetryFailedTaskTest(t, 0)
 	addRetryTestItem(t, taskID, "bad.txt", taskStatusFailed.Int())
 
-	err := RetryFailedTask(taskID)
+	err := RetryFailedTaskItems(taskID, nil)
 	if err == nil {
 		t.Fatalf("RetryFailedTask did not return error when job is disabled")
 	}

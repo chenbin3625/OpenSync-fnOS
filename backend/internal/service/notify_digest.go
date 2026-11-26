@@ -44,7 +44,6 @@ func BuildDigestSummary(period string) (title, content string, vars map[string]s
 		return "", "", nil, err
 	}
 
-	pendingCount := len(pendingDeleteApprovals.ListAll())
 	jobs, _ := mapper.GetJobListAll()
 	enabledCount := 0
 	for _, j := range jobs {
@@ -55,23 +54,21 @@ func BuildDigestSummary(period string) (title, content string, vars map[string]s
 
 	title = fmt.Sprintf("[OpenSync] %s备份摘要 (%s)", label, now.Format("2006-01-02"))
 	content = fmt.Sprintf(
-		"统计周期：%s（截至 %s）\n启用任务：%d / %d\n执行次数：%d（成功 %d / 失败或异常 %d / 中止 %d）\n同步文件：%d 个\n传输总量：%s\n待确认删除：%d 项",
+		"统计周期：%s（截至 %s）\n启用任务：%d / %d\n执行次数：%d（成功 %d / 失败或异常 %d / 中止 %d）\n同步文件：%d 个\n传输总量：%s",
 		label,
 		now.Format("2006-01-02 15:04"),
 		enabledCount, len(jobs),
 		totalRuns, successRuns, failRuns, stoppedRuns,
 		totalFiles,
 		util.ConvertBytes(totalBytes),
-		pendingCount,
 	)
 	vars = map[string]string{
-		"period":       period,
-		"totalRuns":    fmt.Sprintf("%d", totalRuns),
-		"successRuns":  fmt.Sprintf("%d", successRuns),
-		"failRuns":     fmt.Sprintf("%d", failRuns),
-		"totalFiles":   fmt.Sprintf("%d", totalFiles),
-		"totalBytes":   util.ConvertBytes(totalBytes),
-		"pendingCount": fmt.Sprintf("%d", pendingCount),
+		"period":      period,
+		"totalRuns":   fmt.Sprintf("%d", totalRuns),
+		"successRuns": fmt.Sprintf("%d", successRuns),
+		"failRuns":    fmt.Sprintf("%d", failRuns),
+		"totalFiles":  fmt.Sprintf("%d", totalFiles),
+		"totalBytes":  util.ConvertBytes(totalBytes),
 	}
 	return title, content, vars, nil
 }

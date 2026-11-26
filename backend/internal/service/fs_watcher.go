@@ -140,7 +140,7 @@ func (w *jobWatcher) stop() {
 
 // watchLocalRootsPolling is a portable fallback watcher that detects file/dir
 // creations, modifications, and deletions by comparing periodic snapshots.
-func watchLocalRootsPolling(ctx context.Context, roots []watchLocalRoot, onEvent func(relPath string, overflow bool)) {
+func watchLocalRootsPolling(ctx context.Context, roots []watchLocalRoot, onEvents func(paths []string, fullScan bool)) {
 	type fileSig struct {
 		size  int64
 		mtime int64
@@ -195,20 +195,25 @@ func watchLocalRootsPolling(ctx context.Context, roots []watchLocalRoot, onEvent
 			if ctx.Err() != nil {
 				return
 			}
+			var changed []string
+			fullScan := false
 			for k, curSig := range curr {
 				if prevSig, ok := prev[k]; !ok || prevSig != curSig {
 					_, rel, _ := strings.Cut(k, "\x00")
 					if curSig.isDir {
-						onEvent("", true)
+						fullScan = true
 					} else {
-						onEvent(rel, false)
+						changed = append(changed, rel)
 					}
 				}
 			}
 			for k := range prev {
 				if _, ok := curr[k]; !ok {
-					onEvent("", true)
+					fullScan = true
 				}
+			}
+			if fullScan || len(changed) > 0 {
+				onEvents(changed, fullScan)
 			}
 			prev = curr
 		}

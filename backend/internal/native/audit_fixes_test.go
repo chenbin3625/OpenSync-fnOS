@@ -258,65 +258,6 @@ func TestListDirEntriesWithHashLocal(t *testing.T) {
 	}
 }
 
-func TestBisyncCompareMode2IgnoresModtime(t *testing.T) {
-	// Verify rclone bisync flags built for Compare=2:
-	// - with MD5-capable endpoints -> --compare size,checksum (no modtime)
-	// - with hashless endpoint -> --compare size,checksum --download-hash
-	tmp := t.TempDir()
-	fakeRclone := filepath.Join(tmp, "rclone")
-	argsLog := filepath.Join(tmp, "args.txt")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"" + argsLog + "\"\nexit 0\n"
-	if err := os.WriteFile(fakeRclone, []byte(script), 0755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("OPENSYNC_RCLONE_BIN", fakeRclone)
-
-	dirA := filepath.Join(tmp, "a")
-	dirB := filepath.Join(tmp, "b")
-	_ = os.MkdirAll(dirA, 0755)
-	_ = os.MkdirAll(dirB, 0755)
-	t.Setenv("TRIM_DATA_ACCESSIBLE_PATHS", dirA+":"+dirB)
-	t.Setenv("TRIM_PKGTMP", "")
-	roots := AuthorizedRoots()
-
-	c := Config{
-		"dav": {"type": "webdav", "url": "http://127.0.0.1:5244/dav", "vendor": "other"},
-	}
-
-	// Local <-> Local (both support native MD5): expect --compare size,checksum without --download-hash.
-	work1 := filepath.Join(tmp, "w1")
-	_, err := c.Bisync(context.Background(), "/"+Local+"/"+roots[0].ID, "/"+Local+"/"+roots[1].ID, BisyncOptions{
-		WorkDir: work1,
-		Compare: 2,
-	}, nil)
-	if err != nil {
-		t.Fatalf("bisync local-local: %v", err)
-	}
-	rawArgs, _ := os.ReadFile(argsLog)
-	args := splitNonEmptyLines(string(rawArgs))
-	if !containsPair(args, "--compare", "size,checksum") {
-		t.Fatalf("expected --compare size,checksum, got %v", args)
-	}
-	if slices.Contains(args, "--download-hash") {
-		t.Fatalf("did not expect --download-hash when both endpoints support MD5: %v", args)
-	}
-
-	// Local <-> Standard WebDAV (hashless): expect --compare size,checksum --download-hash.
-	work2 := filepath.Join(tmp, "w2")
-	_, err = c.Bisync(context.Background(), "/"+Local+"/"+roots[0].ID, "/dav/sub", BisyncOptions{
-		WorkDir: work2,
-		Compare: 2,
-	}, nil)
-	if err != nil {
-		t.Fatalf("bisync local-webdav: %v", err)
-	}
-	rawArgs, _ = os.ReadFile(argsLog)
-	args = splitNonEmptyLines(string(rawArgs))
-	if !containsPair(args, "--compare", "size,checksum") || !slices.Contains(args, "--download-hash") {
-		t.Fatalf("expected --compare size,checksum --download-hash for hashless bisync, got %v", args)
-	}
-}
-
 func TestEffectiveCompareModeForOpenListAndWrappers(t *testing.T) {
 	tmp := t.TempDir()
 	srcDir := filepath.Join(tmp, "src")

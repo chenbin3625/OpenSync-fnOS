@@ -652,13 +652,8 @@ export function NativeStorageAuthWizard({
           <li>
             点击下方按钮在新标签页登录 <strong>{remoteLabel}</strong> 并同意授权。
           </li>
-          <li>
-            授权成功后浏览器会自动跳转到 <code className="mono">{redirectHint}</code>
-            （远程访问 NAS 时页面提示“无法访问此网站 / 拒绝连接”属于正常现象，授权码已包含在地址栏中）。
-          </li>
-          <li>
-            复制跳转后浏览器地址栏中的<strong>完整网址</strong>粘贴到下方并提交；若在 NAS 本机浏览器操作，授权后将自动继续。
-          </li>
+          <li>授权后返回此页，向导检测到结果后会自动继续。</li>
+          <li>如果授权后打开了无法访问的页面，请复制地址栏里的<strong>完整网址</strong>，回到这里粘贴并提交。</li>
         </ol>
 
         <div className="native-auth-actions">

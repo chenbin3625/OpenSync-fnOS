@@ -171,10 +171,10 @@ export function CheckModal({
     onClose();
   };
 
-  const handleExport = (format: "csv" | "txt") => {
+  const handleExport = () => {
     const link = document.createElement("a");
-    link.href = api.exportJobCheckUrl(jobId, format);
-    link.download = `check-report-job-${jobId}.${format}`;
+    link.href = api.exportJobCheckUrl(jobId);
+    link.download = `check-report-job-${jobId}.csv`;
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -259,16 +259,9 @@ export function CheckModal({
               <Button
                 type="tertiary"
                 icon={<IconDownload aria-hidden="true" />}
-                onClick={() => handleExport("csv")}
+                onClick={handleExport}
               >
                 导出 CSV
-              </Button>
-              <Button
-                type="tertiary"
-                icon={<IconDownload aria-hidden="true" />}
-                onClick={() => handleExport("txt")}
-              >
-                导出 TXT
               </Button>
               {result.differCount + result.missingOnDstCount > 0 && (
                 <Button

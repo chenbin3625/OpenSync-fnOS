@@ -23,7 +23,6 @@ import {
   IconInfoCircle,
   IconPlusStroked,
   IconRefresh,
-  IconSettingStroked,
   IconTickCircle,
   IconUpload,
 } from "@douyinfe/semi-icons";
@@ -32,7 +31,6 @@ import {
   Field,
   IconButton,
   InlineNotice,
-  confirmAction,
   confirmDelete,
   errorToast,
 } from "./common";
@@ -45,12 +43,9 @@ import { formatSize } from "../pages/Home/homeUtils";
 import { formatTimestamp } from "../utils/date";
 import type {
   AlistItem,
-  NativeAboutInfo,
   NativeBrowseResult,
-  NativeDedupeResult,
   NativeDirEntry,
   NativeImportPreview,
-  NativeLinkResult,
   NativeRemoteItem,
   NativeSizeInfo,
   NativeStorageState,
@@ -63,6 +58,7 @@ type RemoteFormType =
   | "s3"
   | "webdav"
   | "quark"
+  | "pan123"
   | "sftp"
   | "smb"
   | "ftp"
@@ -105,19 +101,17 @@ type RemoteFormType =
   | "combine";
 
 export type NativeEditorMode =
-  | "overview"
   | "local"
   | "form"
   | "import"
   | "export"
   | "browse";
 
-type PanelView = NativeEditorMode;
-
 export const remoteTypeLabels: Record<string, string> = {
   s3: "S3 兼容存储",
   webdav: "WebDAV",
   quark: "夸克网盘",
+  pan123: "123云盘",
   sftp: "SFTP",
   smb: "SMB",
   ftp: "FTP / FTPS",
@@ -182,6 +176,7 @@ export const remoteTypeGroups: readonly RemoteTypeGroup[] = [
     label: "公有网盘",
     types: [
       "quark",
+      "pan123",
       "onedrive",
       "drive",
       "dropbox",
@@ -232,6 +227,7 @@ const formTypes: RemoteFormType[] = [
   "s3",
   "webdav",
   "quark",
+  "pan123",
   "sftp",
   "smb",
   "ftp",
@@ -299,6 +295,7 @@ const proxyCapableTypes = new Set<RemoteFormType>([
   "s3",
   "webdav",
   "quark",
+  "pan123",
   "http",
   "b2",
   "onedrive",
@@ -334,6 +331,7 @@ const tlsSkipCapableTypes = new Set<RemoteFormType>([
   "s3",
   "webdav",
   "quark",
+  "pan123",
   "ftp",
   "http",
   "b2",
@@ -400,6 +398,8 @@ const allSecretKeys = new Set([
   "file_password",
   "folder_password",
   "access_token",
+  "web_password",
+  "direct_link_key",
 ]);
 
 const s3Providers: Record<string, string> = {
@@ -572,6 +572,10 @@ export function buildRemoteOptions(draft: RemoteFormDraft): Record<string, strin
   if (draft.type === "webdav" && draft.vendor) {
     settings.vendor = draft.vendor;
   }
+  if (draft.type === "pan123") {
+    const proto = (draft.options.protocol || "").trim().toLowerCase() === "web" ? "web" : "open_api";
+    settings.protocol = proto;
+  }
   if (draft.type === "sftp") {
     // Backend enforces shell_type exclusively from allow_hashcheck (unix vs none).
     delete settings.shell_type;
@@ -665,6 +669,23 @@ export function validateRemoteDraft(
     }
   };
 
+  const checkUploadOptions = () => {
+    const conc = (draft.options.upload_concurrency || "").trim();
+    if (conc) {
+      const n = Number(conc);
+      if (!/^\d+$/.test(conc) || !Number.isInteger(n) || n < 1 || n > 8) {
+        errs.upload_concurrency = "分片上传并发数需为 1–8 的整数";
+      }
+    }
+    const tps = (draft.options.tps_limit || "").trim();
+    if (tps) {
+      const v = Number(tps);
+      if (!Number.isFinite(v) || v <= 0 || v > 20) {
+        errs.tps_limit = "接口限流速率需为大于 0 且不超过 20 的数值";
+      }
+    }
+  };
+
   const checkHttpUrl = (raw: string | undefined, key: string, label: string) => {
     const trimmed = (raw || "").trim();
     if (!trimmed) {
@@ -696,18 +717,48 @@ export function validateRemoteDraft(
     if (!hasSecret("cookie")) {
       errs.cookie = "请使用上方夸克 App 扫码登录，或粘贴夸克网盘 Cookie";
     }
-    const conc = (draft.options.upload_concurrency || "").trim();
-    if (conc) {
-      const n = Number(conc);
-      if (!/^\d+$/.test(conc) || !Number.isInteger(n) || n < 1 || n > 8) {
-        errs.upload_concurrency = "分片上传并发数需为 1–8 的整数";
+    checkUploadOptions();
+  } else if (draft.type === "pan123") {
+    const proto =
+      (draft.options.protocol || "").trim().toLowerCase() === "web"
+        ? "web"
+        : "open_api";
+    const hasToken = hasSecret("access_token");
+    if (proto === "open_api") {
+      const hasClientPair =
+        Boolean((draft.options.client_id || "").trim()) &&
+        hasSecret("client_secret");
+      if (!hasToken && !hasClientPair) {
+        if (!(draft.options.client_id || "").trim()) {
+          errs.client_id = "请输入开放平台 Client ID，或在下方直接粘贴 Access Token";
+        }
+        if (!hasSecret("client_secret")) {
+          errs.client_secret = "请输入开放平台 Client Secret，或在下方直接粘贴 Access Token";
+        }
+      }
+    } else {
+      const hasUserPass =
+        Boolean((draft.options.web_user || "").trim()) &&
+        hasSecret("web_password");
+      if (!hasToken && !hasUserPass) {
+        if (!(draft.options.web_user || "").trim()) {
+          errs.web_user = "请输入 123云盘手机号或邮箱，或在下方直接粘贴 Web Access Token";
+        }
+        if (!hasSecret("web_password")) {
+          errs.web_password = "请输入账号密码，或在下方直接粘贴 Web Access Token";
+        }
       }
     }
-    const tps = (draft.options.tps_limit || "").trim();
-    if (tps) {
-      const v = Number(tps);
-      if (!Number.isFinite(v) || v <= 0 || v > 20) {
-        errs.tps_limit = "接口限流速率需为大于 0 且不超过 20 的数值";
+    const rf = (draft.options.root_folder_id || "").trim();
+    if (rf && !/^\d+$/.test(rf)) {
+      errs.root_folder_id = "根目录 ID 需为非负整数（留空默认 0）";
+    }
+    checkUploadOptions();
+    const ttl = (draft.options.direct_link_ttl || "").trim();
+    if (ttl) {
+      const n = Number(ttl);
+      if (!/^\d+$/.test(ttl) || !Number.isInteger(n) || n < 1 || n > 10080) {
+        errs.direct_link_ttl = "直链签名有效期需为 1–10080 分钟的整数";
       }
     }
   } else if (draft.type === "http") {
@@ -925,7 +976,7 @@ export function validateRemoteDraft(
 
 export function NativeStorageEditor({
   engine,
-  mode = "overview",
+  mode: view,
   editRemote = null,
   initialBrowsePath = "/",
   onClose,
@@ -933,44 +984,26 @@ export function NativeStorageEditor({
   onChanged,
 }: {
   engine?: AlistItem;
-  mode?: NativeEditorMode;
+  mode: NativeEditorMode;
   editRemote?: NativeRemoteItem | null;
   initialBrowsePath?: string;
   onClose: () => void;
-  onSaved?: () => void;
+  onSaved?: (remoteName?: string) => void;
   onChanged?: () => void;
 }) {
-  const focusedMode = mode !== "overview";
-  const [view, setView] = useState<PanelView>(mode);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [state, setState] = useState<NativeStorageState | null>(null);
 
-  // Overview / Local engine settings
+  // Local engine settings
   const [remark, setRemark] = useState(engine?.remark || "内置存储");
   const [maxConcurrentJobs, setMaxConcurrentJobs] = useState(
     String(engine?.maxConcurrentJobs ?? 0),
   );
-  const [localMaxConcurrentJobs, setLocalMaxConcurrentJobs] = useState("0");
   const [savingEngine, setSavingEngine] = useState(false);
-  const [deletingName, setDeletingName] = useState<string | null>(null);
-  const [testingRemoteName, setTestingRemoteName] = useState<string | null>(null);
-  const [remoteTestResults, setRemoteTestResults] = useState<
-    Record<string, NativeStorageTestResult>
-  >({});
-  const [aboutLoadingName, setAboutLoadingName] = useState<string | null>(null);
-  const [aboutResults, setAboutResults] = useState<
-    Record<string, NativeAboutInfo>
-  >({});
-
-  // Rename modal state
-  const [renameTarget, setRenameTarget] = useState<string | null>(null);
-  const [renameNewName, setRenameNewName] = useState("");
-  const [renaming, setRenaming] = useState(false);
-
   // Single remote add/edit form
   const initialDraftValue = useMemo(
-    () => (mode === "form" && editRemote ? draftFromRemote(editRemote) : emptyDraft("s3")),
+    () => (view === "form" && editRemote ? draftFromRemote(editRemote) : emptyDraft("s3")),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
   );
@@ -1035,6 +1068,7 @@ export function NativeStorageEditor({
   const [browsePath, setBrowsePath] = useState("/");
   const [browseData, setBrowseData] = useState<NativeBrowseResult | null>(null);
   const [browsing, setBrowsing] = useState(false);
+  const [browsePaging, setBrowsePaging] = useState(false);
   const [browseError, setBrowseError] = useState("");
   const browseRequestRef = useRef(0);
   const browseAbortRef = useRef<AbortController | null>(null);
@@ -1043,7 +1077,6 @@ export function NativeStorageEditor({
   const [restoreSubPath, setRestoreSubPath] = useState("");
   const [restoreOverwrite, setRestoreOverwrite] = useState(false);
   const [restoring, setRestoring] = useState(false);
-  const [cleaningName, setCleaningName] = useState<string | null>(null);
   const [sizeInfo, setSizeInfo] = useState<NativeSizeInfo | null>(null);
   const [sizing, setSizing] = useState(false);
   const [mkdirOpen, setMkdirOpen] = useState(false);
@@ -1052,26 +1085,6 @@ export function NativeStorageEditor({
   const [moveTarget, setMoveTarget] = useState<NativeDirEntry | null>(null);
   const [moveDstPath, setMoveDstPath] = useState("");
   const [moveBusy, setMoveBusy] = useState(false);
-  const [copyUrlOpen, setCopyUrlOpen] = useState(false);
-  const [copyUrlTarget, setCopyUrlTarget] = useState("");
-  const [copyUrlName, setCopyUrlName] = useState("");
-  const [copyUrlAutoName, setCopyUrlAutoName] = useState(true);
-  const [copyUrlNoClobber, setCopyUrlNoClobber] = useState(true);
-  const [copyUrlBusy, setCopyUrlBusy] = useState(false);
-  const [dedupeOpen, setDedupeOpen] = useState(false);
-  const [dedupeMode, setDedupeMode] = useState("newest");
-  const [dedupeByHash, setDedupeByHash] = useState(false);
-  const [dedupeDryRun, setDedupeDryRun] = useState(true);
-  const [dedupeBusy, setDedupeBusy] = useState(false);
-  const [dedupeResult, setDedupeResult] = useState<NativeDedupeResult | null>(null);
-  const [linkResult, setLinkResult] = useState<{
-    path: string;
-    res: NativeLinkResult;
-  } | null>(null);
-  const [linkingPath, setLinkingPath] = useState<string | null>(null);
-  const [setTierTarget, setSetTierTarget] = useState<NativeDirEntry | null>(null);
-  const [setTierValue, setSetTierValue] = useState("");
-  const [setTierBusy, setSetTierBusy] = useState(false);
   const [deletingEntryPath, setDeletingEntryPath] = useState<string | null>(null);
   const [browseSearch, setBrowseSearch] = useState("");
   const [browseSort, setBrowseSort] = useState<
@@ -1105,15 +1118,14 @@ export function NativeStorageEditor({
       setState(next);
       setRemark(next.remark || "内置存储");
       setMaxConcurrentJobs(String(next.maxConcurrentJobs ?? 0));
-      setLocalMaxConcurrentJobs(String(next.localMaxConcurrentJobs ?? 0));
-      if (mode === "export") {
+      if (view === "export") {
         setSelectedExports(
           (next.remotes || [])
             .filter((r) => r.type !== "local")
             .map((r) => r.name),
         );
       }
-      if (mode === "browse" && next.localRoots.length > 0) {
+      if (view === "browse" && next.localRoots.length > 0) {
         setRestoreLocalRoot((prev) => prev || next.localRoots[0].path);
       }
     } catch (err) {
@@ -1122,7 +1134,7 @@ export function NativeStorageEditor({
     } finally {
       if (!signal?.aborted) setLoading(false);
     }
-  }, [mode]);
+  }, [view]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1134,11 +1146,9 @@ export function NativeStorageEditor({
     if (!state) return false;
     return (
       remark.trim() !== (state.remark || "内置存储") ||
-      (maxConcurrentJobs.trim() || "0") !== String(state.maxConcurrentJobs ?? 0) ||
-      (localMaxConcurrentJobs.trim() || "0") !==
-        String(state.localMaxConcurrentJobs ?? 0)
+      (maxConcurrentJobs.trim() || "0") !== String(state.maxConcurrentJobs ?? 0)
     );
-  }, [state, remark, maxConcurrentJobs, localMaxConcurrentJobs]);
+  }, [state, remark, maxConcurrentJobs]);
 
   const formDirty = useMemo(
     () => view === "form" && snapshotDraft(draft) !== initialDraftSnap,
@@ -1159,22 +1169,14 @@ export function NativeStorageEditor({
     importing ||
     previewingImport ||
     exporting ||
-    renaming ||
     restoring ||
-    cleaningName !== null ||
     sizing ||
     mkdirBusy ||
     moveBusy ||
-    copyUrlBusy ||
-    dedupeBusy ||
-    setTierBusy ||
-    linkingPath !== null ||
-    deletingEntryPath !== null ||
-    deletingName !== null ||
-    testingRemoteName !== null;
+    deletingEntryPath !== null;
 
   const modalDirty =
-    view === "overview" || view === "local"
+    view === "local"
       ? engineSettingsDirty
       : view === "form"
         ? formDirty
@@ -1200,33 +1202,18 @@ export function NativeStorageEditor({
       Toast.warning("最大并发任务数请输入 0–50 的整数");
       return;
     }
-    const rawLocalMc = localMaxConcurrentJobs.trim() || "0";
-    const parsedLocalMc = Number(rawLocalMc);
-    if (
-      !/^\d+$/.test(rawLocalMc) ||
-      !Number.isInteger(parsedLocalMc) ||
-      parsedLocalMc < 0 ||
-      parsedLocalMc > 50
-    ) {
-      Toast.warning("本地存储最大并发任务数请输入 0–50 的整数");
-      return;
-    }
     setSavingEngine(true);
     try {
       const updated = await api.saveNativeEngine({
         remark: trimmedRemark,
         maxConcurrentJobs: parsedMc,
-        localMaxConcurrentJobs: parsedLocalMc,
       });
       setState(updated);
       setRemark(updated.remark || "内置存储");
       setMaxConcurrentJobs(String(updated.maxConcurrentJobs ?? 0));
-      setLocalMaxConcurrentJobs(String(updated.localMaxConcurrentJobs ?? 0));
       Toast.success("本地目录与引擎设置已保存");
       notifyParent();
-      if (focusedMode) {
-        onSaved ? onSaved() : onClose();
-      }
+      onSaved ? onSaved() : onClose();
     } catch (err) {
       errorToast(err);
     } finally {
@@ -1234,205 +1221,61 @@ export function NativeStorageEditor({
     }
   };
 
-  // --- Overview remote actions ---
-  const openAddForm = (type: RemoteFormType = "s3") => {
-    if (draft.authSessionId) {
-      void api.cancelNativeStorageAuth(draft.authSessionId).catch(() => undefined);
-    }
-    const next = emptyDraft(type);
-    setDraft(next);
-    setInitialDraftSnap(snapshotDraft(next));
-    setFieldErrors({});
-    setFormTestResult(null);
-    setAdvancedOpen(false);
-    setOauthAdvancedOpen(false);
-    setView("form");
-  };
-
-  const openEditForm = (item: NativeRemoteItem) => {
-    if (draft.authSessionId) {
-      void api.cancelNativeStorageAuth(draft.authSessionId).catch(() => undefined);
-    }
-    const next = draftFromRemote(item);
-    setDraft(next);
-    setInitialDraftSnap(snapshotDraft(next));
-    setFieldErrors({});
-    setFormTestResult(null);
-    setAdvancedOpen(
-      Boolean(
-        next.options.proxy_url ||
-          next.options.insecure_skip_verify ||
-          next.options.storage_class ||
-          next.options.chunk_size ||
-          next.options.allow_hashcheck ||
-          next.options.filename_encryption ||
-          next.options.description,
-      ),
-    );
-    setOauthAdvancedOpen(
-      Boolean(
-        next.options.client_id ||
-          next.configuredSecrets.includes("client_secret"),
-      ),
-    );
-    setView("form");
-  };
-
-  const openImportView = () => {
-    setImportFileName("");
-    setImportContent("");
-    setImportPassword("");
-    setImportPreview(null);
-    setImportPreviewError("");
-    setImportReplace(false);
-    setSelectedImports([]);
-    if (fileInputRef.current) fileInputRef.current.value = "";
-    setView("import");
-  };
-
-  const openExportView = () => {
-    const names = (state?.remotes || [])
-      .filter((r) => r.type !== "local")
-      .map((r) => r.name);
-    setSelectedExports(names);
-    setExportPassword("");
-    setView("export");
-  };
-
-  const loadBrowse = useCallback(async (targetPath: string) => {
+  const loadBrowse = useCallback(async (
+    targetPath: string,
+    options: { cursor?: string; full?: boolean; fresh?: boolean } = {},
+  ) => {
     const requestId = ++browseRequestRef.current;
     browseAbortRef.current?.abort();
     const controller = new AbortController();
     browseAbortRef.current = controller;
     setBrowsing(true);
+    setBrowsePaging(Boolean(options.cursor));
     setBrowseError("");
-    setBrowsePath(targetPath);
-    setRestoreEntry(null);
-    setSizeInfo(null);
-    setLinkResult(null);
+    if (!options.cursor) {
+      setBrowsePath(targetPath);
+      setRestoreEntry(null);
+      setSizeInfo(null);
+    }
     try {
-      const res = await api.browseNativeStorage(targetPath, controller.signal);
+      // A replaced browse effect can abort this request before any network IO.
+      await Promise.resolve();
+      if (controller.signal.aborted) return;
+      const res = await api.browseNativeStorage(targetPath, controller.signal, {
+        paged: !options.full,
+        cursor: options.cursor,
+        fresh: options.fresh,
+      });
       if (controller.signal.aborted || requestId !== browseRequestRef.current) return;
-      setBrowseData(res);
+      setBrowseData((prev) => {
+        if (!options.cursor && !res.nextCursor) return res;
+        const entriesByPath = new Map(
+          options.cursor && prev ? prev.entries.map((entry) => [entry.path, entry]) : [],
+        );
+        for (const entry of res.entries) {
+          const old = entriesByPath.get(entry.path);
+          if (!old || entry.modTime > old.modTime) entriesByPath.set(entry.path, entry);
+        }
+        return { ...res, entries: [...entriesByPath.values()] };
+      });
       setBrowsePath(res.path || targetPath);
     } catch (err) {
       if (controller.signal.aborted || requestId !== browseRequestRef.current) return;
-      setBrowseData(null);
+      if (!options.cursor) setBrowseData(null);
       setBrowseError(err instanceof Error ? err.message : "读取目录失败");
     } finally {
-      if (requestId === browseRequestRef.current) setBrowsing(false);
+      if (requestId === browseRequestRef.current) {
+        setBrowsing(false);
+        setBrowsePaging(false);
+      }
     }
   }, []);
 
-  const openBrowseView = (initialPath: string) => {
-    setRestoreEntry(null);
-    setRestoreLocalRoot(state?.localRoots?.[0]?.path || "");
-    setRestoreSubPath("");
-    setRestoreOverwrite(false);
-    setView("browse");
-    void loadBrowse(initialPath);
-  };
-
   useEffect(() => {
-    if (mode === "browse") {
+    if (view === "browse") {
       void loadBrowse(initialBrowsePath || "/");
     }
-  }, [mode, initialBrowsePath, loadBrowse]);
-
-  const backToOverview = () => {
-    const leave = () => {
-      if (draft.authSessionId) {
-        void api.cancelNativeStorageAuth(draft.authSessionId).catch(() => undefined);
-        setDraft((prev) => ({
-          ...prev,
-          authSessionId: undefined,
-          authPublicOptions: undefined,
-          authConfiguredSecrets: undefined,
-        }));
-      }
-      setFieldErrors({});
-      setFormTestResult(null);
-      setRestoreEntry(null);
-      setView("overview");
-    };
-    if ((view === "form" && formDirty) || (view === "import" && importDirty)) {
-      confirmAction({
-        title: "返回存储列表？",
-        content: "当前表单中的未保存内容将被放弃。",
-        okText: "放弃并返回",
-        onOk: leave,
-      });
-      return;
-    }
-    leave();
-  };
-
-  const handleTestSavedRemote = async (remoteName: string) => {
-    setTestingRemoteName(remoteName);
-    try {
-      const res = await api.testNativeStorage({ name: remoteName });
-      setRemoteTestResults((prev) => ({ ...prev, [remoteName]: res }));
-      if (res.ok && res.warning) {
-        Toast.warning(res.message);
-      } else if (res.ok) {
-        Toast.success(`${remoteName}：${res.message}（${res.latencyMs}ms）`);
-      } else {
-        Toast.error(`${remoteName}：${res.message}`);
-      }
-    } catch (err) {
-      errorToast(err);
-    } finally {
-      setTestingRemoteName(null);
-    }
-  };
-
-  const handleAboutRemote = async (remoteName: string) => {
-    setAboutLoadingName(remoteName);
-    try {
-      const info = await api.aboutNativeStorage(remoteName);
-      setAboutResults((prev) => ({ ...prev, [remoteName]: info }));
-      if (!info.supported) {
-        Toast.info(info.message || `${remoteName} 不支持空间配额查询`);
-      }
-    } catch (err) {
-      errorToast(err);
-    } finally {
-      setAboutLoadingName(null);
-    }
-  };
-
-  const handleExecuteRename = async () => {
-    if (!renameTarget) return;
-    const trimmed = renameNewName.trim();
-    const nameErr = validateRemoteName(trimmed);
-    if (nameErr) {
-      Toast.warning(nameErr);
-      return;
-    }
-    setRenaming(true);
-    try {
-      const res = await api.renameNativeStorage({
-        oldName: renameTarget,
-        newName: trimmed,
-      });
-      Toast.success(
-        res.updatedJobs > 0
-          ? `已重命名为「${res.newName}」，并自动更新了 ${res.updatedJobs} 个关联任务`
-          : `已重命名为「${res.newName}」`,
-      );
-      setRenameTarget(null);
-      setRenameNewName("");
-      setRemoteTestResults({});
-      setAboutResults({});
-      await loadState();
-      notifyParent();
-      window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
-    } catch (err) {
-      errorToast(err);
-    } finally {
-      setRenaming(false);
-    }
-  };
+  }, [view, initialBrowsePath, loadBrowse]);
 
   const handleExecuteExport = async () => {
     if (selectedExports.length === 0) {
@@ -1514,6 +1357,14 @@ export function NativeStorageEditor({
     setTrashItems([]);
   }, [browsePath]);
 
+  const browseNeedsFullList = browseSearch.trim() !== "" || browseSort !== "name_asc";
+  useEffect(() => {
+    if (view === "browse" && !trashOpen && !browsing && !browseError &&
+        browseNeedsFullList && browseData?.nextCursor && browseData.path === browsePath) {
+      void loadBrowse(browsePath, { full: true });
+    }
+  }, [view, trashOpen, browsing, browseError, browseNeedsFullList, browseData, browsePath, loadBrowse]);
+
   const filteredBrowseEntries = useMemo(() => {
     const entries = browseData?.entries || [];
     const kw = browseSearch.trim().toLowerCase();
@@ -1547,7 +1398,7 @@ export function NativeStorageEditor({
     try {
       const res = await api.uploadNativeStorageFile(browsePath, file);
       Toast.success(`已上传「${res.fileName}」（${formatSize(res.size)}）`);
-      await loadBrowse(browsePath);
+      await loadBrowse(browsePath, { fresh: true, full: browseNeedsFullList });
     } catch (err) {
       errorToast(err);
     } finally {
@@ -1581,7 +1432,7 @@ export function NativeStorageEditor({
       });
       Toast.success(`已将「${item.name}」还原至 ${item.originalPath}`);
       setTrashItems((prev) => prev.filter((x) => x.trashPath !== item.trashPath));
-      await loadBrowse(browsePath);
+      await loadBrowse(browsePath, { fresh: true, full: browseNeedsFullList });
     } catch (err) {
       errorToast(err);
     } finally {
@@ -1703,26 +1554,6 @@ export function NativeStorageEditor({
     }
   };
 
-  const handleCleanupRemote = (remoteName: string) => {
-    confirmAction({
-      title: `清理存储「${remoteName}」？`,
-      content:
-        "将调用 rclone cleanup 清空远端回收站或残留的分片上传碎片（具体行为取决于远端存储）。此操作不可撤销。",
-      okText: "确认清理",
-      onOk: async () => {
-        setCleaningName(remoteName);
-        try {
-          await api.cleanupNativeStorage(remoteName);
-          Toast.success(`已完成「${remoteName}」清理`);
-        } catch (err) {
-          errorToast(err);
-        } finally {
-          setCleaningName(null);
-        }
-      },
-    });
-  };
-
   const handleSizeBrowse = async () => {
     if (browsePath === "/") return;
     setSizing(true);
@@ -1749,7 +1580,7 @@ export function NativeStorageEditor({
       Toast.success(`已创建目录 ${clean}`);
       setMkdirOpen(false);
       setMkdirName("");
-      await loadBrowse(browsePath);
+      await loadBrowse(browsePath, { fresh: true, full: browseNeedsFullList });
     } catch (err) {
       errorToast(err);
     } finally {
@@ -1774,7 +1605,7 @@ export function NativeStorageEditor({
       Toast.success(`已移动到 ${dst}`);
       setMoveTarget(null);
       setMoveDstPath("");
-      await loadBrowse(browsePath);
+      await loadBrowse(browsePath, { fresh: true, full: browseNeedsFullList });
     } catch (err) {
       errorToast(err);
     } finally {
@@ -1793,7 +1624,7 @@ export function NativeStorageEditor({
             isDir: entry.isDir,
           });
           Toast.success(`已删除「${entry.name}」`);
-          await loadBrowse(browsePath);
+          await loadBrowse(browsePath, { fresh: true, full: browseNeedsFullList });
         } catch (err) {
           errorToast(err);
         } finally {
@@ -1803,147 +1634,6 @@ export function NativeStorageEditor({
       entry.isDir
         ? "将调用 rclone purge 递归删除该目录及其全部内容，操作不可撤销。"
         : "将调用 rclone deletefile 永久删除该远端文件，操作不可撤销。",
-    );
-  };
-
-  const handleExecuteCopyUrl = async () => {
-    const targetUrl = copyUrlTarget.trim();
-    if (!targetUrl) {
-      Toast.warning("请输入要拉取的 HTTP / HTTPS 文件 URL");
-      return;
-    }
-    setCopyUrlBusy(true);
-    try {
-      await api.startAsyncCopyUrlNativeStorage({
-        url: targetUrl,
-        dstDir: browsePath,
-        fileName: copyUrlAutoName ? undefined : copyUrlName.trim(),
-        autoFilename: copyUrlAutoName,
-        noClobber: copyUrlNoClobber,
-      });
-      Toast.success("已加入后台离线下载队列（支持断点续传与实时进度）");
-      setCopyUrlOpen(false);
-      setCopyUrlTarget("");
-      setCopyUrlName("");
-      setTransfersOpen(true);
-      await refreshTransfers();
-    } catch (err) {
-      errorToast(err);
-    } finally {
-      setCopyUrlBusy(false);
-    }
-  };
-
-  const handleExecuteDedupe = async () => {
-    setDedupeBusy(true);
-    try {
-      const res = await api.dedupeNativeStorage({
-        path: browsePath,
-        mode: dedupeMode,
-        byHash: dedupeByHash,
-        dryRun: dedupeDryRun,
-      });
-      setDedupeResult(res);
-      Toast.success(dedupeDryRun ? "去重预览完成" : "去重执行完成");
-      if (!dedupeDryRun) {
-        await loadBrowse(browsePath);
-      }
-    } catch (err) {
-      errorToast(err);
-    } finally {
-      setDedupeBusy(false);
-    }
-  };
-
-  const handleLinkEntry = async (entry: NativeDirEntry, unlink = false) => {
-    setLinkingPath(entry.path);
-    try {
-      const res = await api.linkNativeStorage({
-        path: entry.path,
-        unlink,
-      });
-      if (unlink) {
-        Toast.success("已取消公开分享链接");
-        setLinkResult(null);
-      } else {
-        setLinkResult({ path: entry.path, res });
-        if (res.url) {
-          void navigator.clipboard?.writeText(res.url).catch(() => undefined);
-        }
-      }
-    } catch (err) {
-      errorToast(err);
-    } finally {
-      setLinkingPath(null);
-    }
-  };
-
-  const handleExecuteSetTier = async () => {
-    if (!setTierTarget) return;
-    const tier = setTierValue.trim();
-    if (!tier) {
-      Toast.warning("请输入目标存储类别 (Tier)");
-      return;
-    }
-    setSetTierBusy(true);
-    try {
-      await api.setTierNativeStorage({
-        path: setTierTarget.path,
-        tier,
-      });
-      Toast.success(`已将「${setTierTarget.name}」存储类别设为 ${tier}`);
-      setSetTierTarget(null);
-      setSetTierValue("");
-    } catch (err) {
-      errorToast(err);
-    } finally {
-      setSetTierBusy(false);
-    }
-  };
-
-  const handleDeleteRemote = (item: NativeRemoteItem) => {
-    if (item.usedByCrypts.length > 0) {
-      const refs = item.usedByCrypts;
-      const allCrypt = refs.every(
-        (name) =>
-          (state?.remotes || []).find((r) => r.name === name)?.type === "crypt",
-      );
-      Toast.warning(
-        allCrypt
-          ? `存储「${item.name}」正被加密存储（${refs.join("、")}）引用，请先删除或修改对应加密存储`
-          : `存储「${item.name}」正被其他存储（${refs.join("、")}）引用，请先删除或修改对应存储`,
-      );
-      return;
-    }
-    if (item.usedByJobs.length > 0) {
-      Toast.warning(
-        `存储「${item.name}」正被同步任务（${item.usedByJobs.join("、")}）使用，请先修改或删除关联任务`,
-      );
-      return;
-    }
-    confirmDelete(
-      `删除原生存储「${item.name}」？`,
-      async () => {
-        setDeletingName(item.name);
-        try {
-          await api.deleteNativeStorage(item.name);
-          setRemoteTestResults((prev) => {
-            const copy = { ...prev };
-            delete copy[item.name];
-            return copy;
-          });
-          setAboutResults((prev) => {
-            const copy = { ...prev };
-            delete copy[item.name];
-            return copy;
-          });
-          await loadState();
-          notifyParent();
-        } finally {
-          setDeletingName(null);
-        }
-      },
-      "仅删除 OpenSync 中保存的连接配置，不会删除远端文件。",
     );
   };
 
@@ -2098,18 +1788,9 @@ export function NativeStorageEditor({
         completedAuthRef.current = undefined;
         Toast.success(`存储「${trimmedName}」已添加`);
       }
-      setRemoteTestResults((prev) => {
-        const copy = { ...prev };
-        delete copy[trimmedName];
-        return copy;
-      });
       await loadState();
       notifyParent();
-      if (focusedMode) {
-        onSaved ? onSaved() : onClose();
-      } else {
-        setView("overview");
-      }
+      onSaved ? onSaved(trimmedName) : onClose();
     } catch (err) {
       errorToast(err);
     } finally {
@@ -2205,14 +1886,9 @@ export function NativeStorageEditor({
       if (res.imported?.length) parts.push(`新增 ${res.imported.length} 个`);
       if (res.replaced?.length) parts.push(`覆盖 ${res.replaced.length} 个`);
       Toast.success(`导入完成（${parts.join("，") || "已保存"}）`);
-      setRemoteTestResults({});
       await loadState();
       notifyParent();
-      if (focusedMode) {
-        onSaved ? onSaved() : onClose();
-      } else {
-        setView("overview");
-      }
+      onSaved ? onSaved() : onClose();
     } catch (err) {
       errorToast(err);
     } finally {
@@ -2248,7 +1924,7 @@ export function NativeStorageEditor({
       if (stack.has(lower)) return false;
       const cur = byLower.get(lower);
       if (!cur) return false;
-      if (cur.type === "quark") {
+      if (cur.type === "quark" || cur.type === "pan123") {
         memo.set(lower, true);
         return true;
       }
@@ -2288,29 +1964,6 @@ export function NativeStorageEditor({
     [state, builtInDriverNames],
   );
 
-  const renderAboutSummary = (info?: NativeAboutInfo) => {
-    if (!info) return null;
-    if (!info.supported) {
-      return (
-        <span className="native-about-line muted">
-          {info.message || "该存储不支持空间用量统计"}
-        </span>
-      );
-    }
-    const parts: string[] = [];
-    if (info.used !== undefined) parts.push(`已用 ${formatSize(info.used)}`);
-    if (info.free !== undefined) parts.push(`可用 ${formatSize(info.free)}`);
-    if (info.total !== undefined) parts.push(`总计 ${formatSize(info.total)}`);
-    if (info.trashed !== undefined && info.trashed > 0) {
-      parts.push(`回收站 ${formatSize(info.trashed)}`);
-    }
-    return (
-      <span className="native-about-line muted">
-        空间配额：{parts.join(" · ") || "无数据"}
-      </span>
-    );
-  };
-
   const browseParentPath = useMemo(() => {
     const clean = browsePath.replace(/\/+$/, "");
     if (!clean || clean === "/") return null;
@@ -2321,17 +1974,15 @@ export function NativeStorageEditor({
   const modalTitle =
     view === "local"
       ? "配置本地目录"
-      : view === "overview"
-        ? "存储配置管理"
-        : view === "import"
-          ? "导入 rclone.conf"
-          : view === "export"
-            ? "导出 rclone.conf"
-            : view === "browse"
-              ? `浏览与恢复 · ${browsePath}`
-              : draft.editing
-                ? `编辑远程存储 · ${draft.name}`
-                : "添加远程存储";
+      : view === "import"
+        ? "导入 rclone.conf"
+        : view === "export"
+          ? "导出 rclone.conf"
+          : view === "browse"
+            ? `浏览与恢复 · ${browsePath}`
+            : draft.editing
+              ? `编辑远程存储 · ${draft.name}`
+              : "添加远程存储";
 
   const secretPlaceholder = (key: string, emptyHint: string) =>
     draft.editing &&
@@ -2378,20 +2029,9 @@ export function NativeStorageEditor({
           if (view === "form") {
             return (
               <div className="editor-actions">
-                {focusedMode ? (
-                  <Button type="tertiary" onClick={close} disabled={anyBusy}>
-                    取消
-                  </Button>
-                ) : (
-                  <Button
-                    type="tertiary"
-                    className="editor-actions-start"
-                    onClick={backToOverview}
-                    disabled={anyBusy}
-                  >
-                    返回列表
-                  </Button>
-                )}
+                <Button type="tertiary" onClick={close} disabled={anyBusy}>
+                  取消
+                </Button>
                 <Button
                   type="tertiary"
                   icon={<IconChainStroked aria-hidden="true" />}
@@ -2416,20 +2056,9 @@ export function NativeStorageEditor({
           if (view === "import") {
             return (
               <div className="editor-actions">
-                {focusedMode ? (
-                  <Button type="tertiary" onClick={close} disabled={anyBusy}>
-                    取消
-                  </Button>
-                ) : (
-                  <Button
-                    type="tertiary"
-                    className="editor-actions-start"
-                    onClick={backToOverview}
-                    disabled={anyBusy}
-                  >
-                    返回列表
-                  </Button>
-                )}
+                <Button type="tertiary" onClick={close} disabled={anyBusy}>
+                  取消
+                </Button>
                 <Button
                   type="primary"
                   theme="solid"
@@ -2447,20 +2076,9 @@ export function NativeStorageEditor({
           if (view === "export") {
             return (
               <div className="editor-actions">
-                {focusedMode ? (
-                  <Button type="tertiary" onClick={close} disabled={anyBusy}>
-                    取消
-                  </Button>
-                ) : (
-                  <Button
-                    type="tertiary"
-                    className="editor-actions-start"
-                    onClick={backToOverview}
-                    disabled={anyBusy}
-                  >
-                    返回列表
-                  </Button>
-                )}
+                <Button type="tertiary" onClick={close} disabled={anyBusy}>
+                  取消
+                </Button>
                 <Button
                   type="primary"
                   theme="solid"
@@ -2477,16 +2095,6 @@ export function NativeStorageEditor({
           if (view === "browse") {
             return (
               <div className="editor-actions">
-                {!focusedMode && (
-                  <Button
-                    type="tertiary"
-                    className="editor-actions-start"
-                    onClick={backToOverview}
-                    disabled={restoring}
-                  >
-                    返回列表
-                  </Button>
-                )}
                 <Button type="tertiary" onClick={close} disabled={restoring}>
                   关闭
                 </Button>
@@ -2606,366 +2214,7 @@ export function NativeStorageEditor({
                     placeholder="0"
                   />
                 </Field>
-                <Field
-                  label="本地磁盘并发上限"
-                  hint="限制同时读写本地磁盘的任务数，防硬盘过载（0–50）"
-                >
-                  <Input
-                    inputMode="numeric"
-                    value={localMaxConcurrentJobs}
-                    onChange={setLocalMaxConcurrentJobs}
-                    placeholder="0"
-                  />
-                </Field>
               </div>
-            </section>
-          </div>
-        ) : view === "overview" && state ? (
-          <div className="editor-form native-panel">
-            {!state.rcloneAvailable && (
-              <InlineNotice
-                role="alert"
-                icon={<IconAlertTriangle aria-hidden="true" size="small" />}
-                message={`内置 rclone 不可用：${state.rcloneError || "未找到可执行文件"}`}
-              />
-            )}
-
-            {/* Section 1: Engine status + concurrency + fnOS authorized local directories */}
-            <section className="native-panel-section">
-              <div className="native-section-head">
-                <div className="native-section-title">
-                  <h3>内置存储引擎</h3>
-                  <Tag
-                    size="small"
-                    type="light"
-                    color={state.enabled ? "green" : "grey"}
-                  >
-                    {state.enabled ? "已启用" : "未启用"}
-                  </Tag>
-                  {state.rcloneVersion && (
-                    <Tag size="small" type="light" color="cyan">
-                      rclone {state.rcloneVersion}
-                    </Tag>
-                  )}
-                </div>
-                <Button
-                  size="small"
-                  type="primary"
-                  theme={state.enabled ? "light" : "solid"}
-                  loading={savingEngine}
-                  disabled={state.enabled && !engineSettingsDirty}
-                  onClick={() => void saveEngineSettings()}
-                >
-                  {state.enabled ? "保存引擎设置" : "启用内置存储"}
-                </Button>
-              </div>
-
-              <div className="form-grid form-grid--two">
-                <Field label="引擎名称" required>
-                  <Input
-                    value={remark}
-                    onChange={setRemark}
-                    maxLength={200}
-                    placeholder="内置存储"
-                  />
-                </Field>
-                <Field
-                  label="最大并发任务数"
-                  hint="0 不限；1 表示串行排队（0–50）"
-                >
-                  <Input
-                    inputMode="numeric"
-                    value={maxConcurrentJobs}
-                    onChange={setMaxConcurrentJobs}
-                    placeholder="1"
-                  />
-                </Field>
-              </div>
-
-              <div className="native-local-block">
-                <div className="native-local-head">
-                  <span className="native-local-title">
-                    <IconFolderStroked aria-hidden="true" size="small" />
-                    <span>飞牛本地授权目录</span>
-                    <Tag
-                      size="small"
-                      type="light"
-                      color={state.localRoots.length > 0 ? "green" : "orange"}
-                    >
-                      {state.localRoots.length > 0
-                        ? `已授权 ${state.localRoots.length} 个`
-                        : "未授权"}
-                    </Tag>
-                  </span>
-                  <div className="native-section-actions">
-                    {state.localRoots.length > 0 && (
-                      <>
-                        <Button
-                          size="small"
-                          type="tertiary"
-                          theme="borderless"
-                          icon={<IconBarChartVStroked aria-hidden="true" />}
-                          loading={aboutLoadingName === "本地"}
-                          onClick={() => void handleAboutRemote("本地")}
-                        >
-                          空间
-                        </Button>
-                        <Button
-                          size="small"
-                          type="tertiary"
-                          theme="borderless"
-                          icon={<IconFolderStroked aria-hidden="true" />}
-                          onClick={() => openBrowseView("/本地")}
-                        >
-                          浏览
-                        </Button>
-                      </>
-                    )}
-                    <Button
-                      size="small"
-                      type="tertiary"
-                      theme="borderless"
-                      icon={<IconRefresh aria-hidden="true" />}
-                      loading={loading}
-                      onClick={() => void loadState()}
-                    >
-                      刷新
-                    </Button>
-                  </div>
-                </div>
-                {renderAboutSummary(aboutResults["本地"])}
-                {state.localRoots.length > 0 ? (
-                  <div className="native-local-roots">
-                    {state.localRoots.map((root) => (
-                      <span
-                        key={root.id}
-                        className="native-local-chip mono"
-                        title={root.path}
-                      >
-                        {root.path}
-                      </span>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="sync-method-banner is-warning">
-                    <IconAlertTriangle aria-hidden="true" size="small" />
-                    <span>
-                      未检测到本地授权目录。如需同步或恢复到本地磁盘，请在飞牛「应用设置 → 文件夹访问权限」中为 OpenSync 授权文件夹后点击刷新。
-                    </span>
-                  </div>
-                )}
-              </div>
-            </section>
-
-            {/* Section 2: Configured remote storages */}
-            <section className="native-panel-section">
-              <div className="native-section-head">
-                <div className="native-section-title">
-                  <h3>远端存储配置</h3>
-                  <Tag size="small" type="light" color="blue">
-                    {state.remotes.length} 个
-                  </Tag>
-                </div>
-                <div className="native-section-actions">
-                  {exportableRemotes.length > 0 && (
-                    <Button
-                      size="small"
-                      type="tertiary"
-                      icon={<IconDownload aria-hidden="true" />}
-                      disabled={anyBusy}
-                      onClick={openExportView}
-                    >
-                      导出配置
-                    </Button>
-                  )}
-                  <Button
-                    size="small"
-                    type="tertiary"
-                    icon={<IconUpload aria-hidden="true" />}
-                    disabled={anyBusy}
-                    onClick={openImportView}
-                  >
-                    导入 rclone.conf
-                  </Button>
-                  <Button
-                    size="small"
-                    type="primary"
-                    theme="solid"
-                    icon={<IconPlusStroked aria-hidden="true" />}
-                    disabled={anyBusy}
-                    onClick={() => openAddForm("s3")}
-                  >
-                    添加存储
-                  </Button>
-                </div>
-              </div>
-
-              {state.remotes.length === 0 ? (
-                <div className="sync-method-banner">
-                  <IconInfoCircle aria-hidden="true" size="small" />
-                  <span>
-                    尚未配置远端存储。支持 30 种常见协议、公有网盘与对象存储（S3、WebDAV、SFTP、SMB、FTP、OneDrive、Google Drive、Dropbox、Backblaze B2、Azure、GCS 等），可直接添加或导入 rclone.conf。
-                  </span>
-                </div>
-              ) : (
-                <div className="native-remote-list">
-                  {state.remotes.map((item) => {
-                    const testRes = remoteTestResults[item.name];
-                    const aboutRes = aboutResults[item.name];
-                    const isLocked =
-                      item.usedByJobs.length > 0 || item.usedByCrypts.length > 0;
-                    const allRefsAreCrypt =
-                      item.usedByCrypts.length > 0 &&
-                      item.usedByCrypts.every(
-                        (name) =>
-                          state.remotes.find((r) => r.name === name)?.type ===
-                          "crypt",
-                      );
-                    const lockHint =
-                      item.usedByCrypts.length > 0
-                        ? allRefsAreCrypt
-                          ? `正被加密存储 ${item.usedByCrypts.join("、")} 引用`
-                          : `正被其他存储 ${item.usedByCrypts.join("、")} 引用`
-                        : item.usedByJobs.length > 0
-                          ? `正被任务 ${item.usedByJobs.join("、")} 使用`
-                          : "";
-                    return (
-                      <div key={item.name} className="native-remote-row">
-                        <div className="native-remote-info">
-                          <span className="native-remote-head">
-                            <strong>{item.name}</strong>
-                            <Tag
-                              size="small"
-                              type="light"
-                              color={item.type === "crypt" ? "violet" : "blue"}
-                            >
-                              {remoteTypeLabels[item.type] || item.type}
-                            </Tag>
-                            {item.usedByJobs.length > 0 && (
-                              <Tag size="small" type="light" color="cyan">
-                                {item.usedByJobs.length} 个任务
-                              </Tag>
-                            )}
-                            {item.usedByCrypts.length > 0 && (
-                              <Tag size="small" type="light" color="violet">
-                                {allRefsAreCrypt ? "已关联加密存储" : "被其他存储引用"}
-                              </Tag>
-                            )}
-                          </span>
-                          {item.summary && (
-                            <span
-                              className="muted native-remote-summary"
-                              title={item.summary}
-                            >
-                              {item.summary}
-                            </span>
-                          )}
-                          {renderAboutSummary(aboutRes)}
-                          {testRes && (
-                            <div
-                              className={`native-inline-test ${
-                                testRes.ok
-                                  ? testRes.warning
-                                    ? "is-warn"
-                                    : "is-ok"
-                                  : "is-error"
-                              }`}
-                            >
-                              <span>
-                                {testRes.message}（{testRes.latencyMs}ms）
-                              </span>
-                              {testRes.warning && (
-                                <span className="native-inline-test-sub">
-                                  {testRes.warning}
-                                </span>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                        <div className="native-remote-actions">
-                          <IconButton
-                            label={
-                              testingRemoteName === item.name
-                                ? "测试中…"
-                                : `测试存储 ${item.name}`
-                            }
-                            size="small"
-                            icon={<IconChainStroked aria-hidden="true" />}
-                            disabled={anyBusy}
-                            ariaBusy={testingRemoteName === item.name}
-                            onClick={() => void handleTestSavedRemote(item.name)}
-                          />
-                          <IconButton
-                            label={`浏览与恢复 ${item.name}`}
-                            size="small"
-                            icon={<IconFolderStroked aria-hidden="true" />}
-                            disabled={anyBusy}
-                            onClick={() => openBrowseView(`/${item.name}`)}
-                          />
-                          <IconButton
-                            label={
-                              aboutLoadingName === item.name
-                                ? "查询空间中…"
-                                : `查看空间配额 ${item.name}`
-                            }
-                            size="small"
-                            icon={<IconBarChartVStroked aria-hidden="true" />}
-                            disabled={anyBusy}
-                            ariaBusy={aboutLoadingName === item.name}
-                            onClick={() => void handleAboutRemote(item.name)}
-                          />
-                          {item.type !== "local" && (
-                            <IconButton
-                              label={
-                                cleaningName === item.name
-                                  ? "清理中…"
-                                  : `清理回收站与碎片 ${item.name}`
-                              }
-                              size="small"
-                              icon={<IconRefresh aria-hidden="true" />}
-                              disabled={anyBusy}
-                              ariaBusy={cleaningName === item.name}
-                              onClick={() => handleCleanupRemote(item.name)}
-                            />
-                          )}
-                          <IconButton
-                            label={`重命名存储 ${item.name}`}
-                            size="small"
-                            icon={<IconSettingStroked aria-hidden="true" />}
-                            disabled={anyBusy}
-                            onClick={() => {
-                              setRenameTarget(item.name);
-                              setRenameNewName(item.name);
-                            }}
-                          />
-                          {item.type !== "local" && (
-                            <IconButton
-                              label={`编辑存储 ${item.name}`}
-                              size="small"
-                              icon={<IconEditStroked aria-hidden="true" />}
-                              disabled={anyBusy}
-                              onClick={() => openEditForm(item)}
-                            />
-                          )}
-                          <IconButton
-                            label={
-                              isLocked
-                                ? `无法删除：${lockHint}`
-                                : `删除存储 ${item.name}`
-                            }
-                            size="small"
-                            danger
-                            icon={<IconDeleteStroked aria-hidden="true" />}
-                            disabled={anyBusy}
-                            ariaBusy={deletingName === item.name}
-                            onClick={() => handleDeleteRemote(item)}
-                          />
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
             </section>
           </div>
         ) : view === "form" ? (
@@ -2993,6 +2242,10 @@ export function NativeStorageEditor({
                     {
                       label: "夸克网盘",
                       apply: () => handleFormTypeChange("quark"),
+                    },
+                    {
+                      label: "123云盘",
+                      apply: () => handleFormTypeChange("pan123"),
                     },
                     {
                       label: "阿里云 OSS (S3)",
@@ -3390,6 +2643,181 @@ export function NativeStorageEditor({
                 </div>
               </>
             )}
+
+            {draft.type === "pan123" && (() => {
+              const pan123Protocol =
+                (draft.options.protocol || "").trim().toLowerCase() === "web"
+                  ? "web"
+                  : "open_api";
+              return (
+                <>
+                  <Field
+                    label="接入协议（protocol）"
+                    hint={
+                      pan123Protocol === "open_api"
+                        ? "开放平台 OpenAPI：协议官方稳定、支持 V2 单步小文件上传与多片并发上传、可选直链下载，需在 123云盘开放平台申请凭证"
+                        : "个人盘 Web 协议：无需开发者资质、支持 16/32 MiB 批量预签并发上传与严格分页一致性保护；建议优先粘贴 Web Token 避免 NAS IP 账密登录风控"
+                    }
+                  >
+                    <Select
+                      value={pan123Protocol}
+                      onChange={(v) =>
+                        updateDraftOption("protocol", String(v || "open_api"))
+                      }
+                      style={{ width: "100%" }}
+                      optionList={[
+                        {
+                          value: "open_api",
+                          label: "开放平台 OpenAPI（推荐，官方接口更稳定）",
+                        },
+                        {
+                          value: "web",
+                          label: "个人盘 Web 协议（免开发者资质）",
+                        },
+                      ]}
+                    />
+                  </Field>
+
+                  {pan123Protocol === "open_api" ? (
+                    <>
+                      <div className="form-grid form-grid--two">
+                        <Field
+                          label="Client ID"
+                          error={fieldErrors.client_id}
+                          hint="在 123云盘开放平台应用详情中获取；若直接填写下方 Access Token 可留空"
+                        >
+                          <Input
+                            value={draft.options.client_id || ""}
+                            onChange={(v) => updateDraftOption("client_id", v)}
+                            placeholder="例如 your_client_id"
+                          />
+                        </Field>
+                        <Field
+                          label="Client Secret"
+                          error={fieldErrors.client_secret}
+                          hint="自动换取并持久化续期 Access Token，避免同 Client ID 反复签发踢下线"
+                        >
+                          <Input
+                            mode="password"
+                            value={draft.options.client_secret || ""}
+                            onChange={(v) =>
+                              updateDraftOption("client_secret", v)
+                            }
+                            placeholder={secretPlaceholder(
+                              "client_secret",
+                              "请输入 Client Secret",
+                            )}
+                          />
+                        </Field>
+                      </div>
+
+                      <Field
+                        label="Access Token（可选，与 Client ID/Secret 二选一）"
+                        error={fieldErrors.access_token}
+                        hint={
+                          draft.editing &&
+                          draft.configuredSecrets.includes("access_token") &&
+                          !draft.clearSecrets.includes("access_token")
+                            ? "已保存 Access Token。留空会沿用当前令牌，更换凭据时会重新获取。"
+                            : "若已自行获取开放平台 Access Token 可直接粘贴，填写 Client ID/Secret 时无需手动填写"
+                        }
+                      >
+                        <TextArea
+                          aria-label="123云盘开放平台 Access Token"
+                          autosize={{ minRows: 2, maxRows: 3 }}
+                          value={draft.options.access_token || ""}
+                          onChange={(v) => updateDraftOption("access_token", v)}
+                          placeholder={secretPlaceholder(
+                            "access_token",
+                            "留空由 Client ID/Secret 自动获取，或直接粘贴 Access Token",
+                          )}
+                        />
+                      </Field>
+                    </>
+                  ) : (
+                    <>
+                      <div className="form-grid form-grid--two">
+                        <Field
+                          label="账号（手机号或邮箱）"
+                          error={fieldErrors.web_user}
+                          hint="用于个人盘 Web 登录；若已在下方直接粘贴 Web Token 可留空"
+                        >
+                          <Input
+                            value={draft.options.web_user || ""}
+                            onChange={(v) => updateDraftOption("web_user", v)}
+                            placeholder="手机号或邮箱"
+                          />
+                        </Field>
+                        <Field
+                          label="账号密码"
+                          error={fieldErrors.web_password}
+                          hint="如遇异地登录风控或短信验证提示，请在官网验证后改用下方 Web Token"
+                        >
+                          <Input
+                            mode="password"
+                            value={draft.options.web_password || ""}
+                            onChange={(v) =>
+                              updateDraftOption("web_password", v)
+                            }
+                            placeholder={secretPlaceholder(
+                              "web_password",
+                              "请输入登录密码",
+                            )}
+                          />
+                        </Field>
+                      </div>
+
+                      <Field
+                        label="Web Access Token（推荐，可替代账密登录）"
+                        error={fieldErrors.access_token}
+                        hint={
+                          draft.editing &&
+                          draft.configuredSecrets.includes("access_token") &&
+                          !draft.clearSecrets.includes("access_token")
+                            ? "已保存 Web Access Token。留空会沿用当前登录态，更换账号或密码时会重新登录。"
+                            : "在浏览器登录 yun.123pan.cn 后，从请求头 Authorization 复制 Bearer 后的 JWT 粘贴到此处，可有效规避密码登录风控"
+                        }
+                      >
+                        <TextArea
+                          aria-label="123云盘 Web Access Token"
+                          autosize={{ minRows: 2, maxRows: 3 }}
+                          value={draft.options.access_token || ""}
+                          onChange={(v) => updateDraftOption("access_token", v)}
+                          placeholder={secretPlaceholder(
+                            "access_token",
+                            "不含 Bearer 前缀的 JWT Token（与账号密码二选一）",
+                          )}
+                        />
+                      </Field>
+                    </>
+                  )}
+
+                  <div className="form-grid form-grid--two">
+                    <Field
+                      label="根目录 ID（root_folder_id，可选）"
+                      error={fieldErrors.root_folder_id}
+                      hint="留空默认为 0（网盘根目录）；可填入子目录数字 ID 仅同步该目录"
+                    >
+                      <Input
+                        value={draft.options.root_folder_id || ""}
+                        onChange={(v) => updateDraftOption("root_folder_id", v)}
+                        placeholder="默认 0（网盘根目录）"
+                      />
+                    </Field>
+                    <Field
+                      label="账号昵称 / 备注（可选）"
+                      hint="仅用于列表展示与路径归属标识"
+                    >
+                      <Input
+                        value={draft.options.account_name || ""}
+                        onChange={(v) => updateDraftOption("account_name", v)}
+                        placeholder="例如 个人 123云盘"
+                      />
+                    </Field>
+                  </div>
+                </>
+              );
+            })()}
 
             {draft.type === "sftp" && (
               <>
@@ -5597,6 +5025,116 @@ export function NativeStorageEditor({
                     </>
                   )}
 
+                  {draft.type === "pan123" && (() => {
+                    const pan123Protocol =
+                      (draft.options.protocol || "").trim().toLowerCase() === "web"
+                        ? "web"
+                        : "open_api";
+                    return (
+                      <>
+                        <div className="form-grid form-grid--two">
+                          <Field
+                            label="分片上传并发数（upload_concurrency）"
+                            error={fieldErrors.upload_concurrency}
+                            hint="单文件大文件同时上传的分片并发数（1–8，默认 3）"
+                          >
+                            <Input
+                              inputMode="numeric"
+                              value={draft.options.upload_concurrency || ""}
+                              onChange={(v) =>
+                                updateDraftOption("upload_concurrency", v)
+                              }
+                              placeholder="默认 3（1–8）"
+                            />
+                          </Field>
+                          <Field
+                            label="接口限流速率（tps_limit，可选）"
+                            error={fieldErrors.tps_limit}
+                            hint="留空自动按 123云盘各接口安全 QPS 限流；可手动设为 1–20"
+                          >
+                            <Input
+                              value={draft.options.tps_limit || ""}
+                              onChange={(v) => updateDraftOption("tps_limit", v)}
+                              placeholder="留空按接口自动限流"
+                            />
+                          </Field>
+                        </div>
+
+                        {pan123Protocol === "open_api" ? (
+                          <>
+                            <Checkbox
+                              checked={draft.options.use_direct_link === "true"}
+                              onChange={(e) =>
+                                updateDraftOption(
+                                  "use_direct_link",
+                                  e.target.checked ? "true" : "",
+                                )
+                              }
+                            >
+                              优先使用开放平台直链下载（use_direct_link，需开通直链空间权益）
+                            </Checkbox>
+                            {draft.options.use_direct_link === "true" && (
+                              <div className="form-grid form-grid--two">
+                                <Field
+                                  label="直链 URL 鉴权私钥（direct_link_key，可选）"
+                                  hint="若直链空间开启了 URL 鉴权请填写私钥"
+                                >
+                                  <Input
+                                    mode="password"
+                                    value={draft.options.direct_link_key || ""}
+                                    onChange={(v) =>
+                                      updateDraftOption("direct_link_key", v)
+                                    }
+                                    placeholder={secretPlaceholder(
+                                      "direct_link_key",
+                                      "留空不签名",
+                                    )}
+                                  />
+                                </Field>
+                                <Field
+                                  label="直链签名有效期（分钟）"
+                                  error={fieldErrors.direct_link_ttl}
+                                  hint="默认 30 分钟（1–10080）"
+                                >
+                                  <Input
+                                    inputMode="numeric"
+                                    value={draft.options.direct_link_ttl || ""}
+                                    onChange={(v) =>
+                                      updateDraftOption("direct_link_ttl", v)
+                                    }
+                                    placeholder="默认 30"
+                                  />
+                                </Field>
+                              </div>
+                            )}
+                          </>
+                        ) : (
+                          <Field
+                            label="Web 协议平台头（platform，可选）"
+                            hint="留空默认 web"
+                          >
+                            <Input
+                              value={draft.options.platform || ""}
+                              onChange={(v) => updateDraftOption("platform", v)}
+                              placeholder="默认 web"
+                            />
+                          </Field>
+                        )}
+
+                        <Field
+                          label="自定义 User-Agent（可选）"
+                          hint="留空使用内置桌面浏览器 UA"
+                        >
+                          <Input
+                            value={draft.options.user_agent || ""}
+                            onChange={(v) => updateDraftOption("user_agent", v)}
+                            placeholder="留空默认"
+                          />
+                        </Field>
+                      </>
+                    );
+                  })()}
+
                   {draft.type === "sftp" && (
                     <>
                       <div className="form-grid form-grid--three">
@@ -6475,7 +6013,7 @@ export function NativeStorageEditor({
                     icon={<IconRefresh aria-hidden="true" />}
                     loading={browsing}
                     disabled={restoring}
-                    onClick={() => void loadBrowse(browsePath)}
+                    onClick={() => void loadBrowse(browsePath, { fresh: true, full: browseNeedsFullList })}
                   >
                     刷新
                   </Button>
@@ -6517,19 +6055,6 @@ export function NativeStorageEditor({
                   <Button
                     size="small"
                     type="tertiary"
-                    icon={<IconUpload aria-hidden="true" />}
-                    disabled={browsing || anyBusy}
-                    onClick={() => {
-                      setCopyUrlTarget("");
-                      setCopyUrlName("");
-                      setCopyUrlOpen(true);
-                    }}
-                  >
-                    URL 拉取
-                  </Button>
-                  <Button
-                    size="small"
-                    type="tertiary"
                     disabled={browsing || anyBusy}
                     onClick={() =>
                       trashOpen ? setTrashOpen(false) : void handleLoadTrash()
@@ -6546,17 +6071,6 @@ export function NativeStorageEditor({
                     onClick={() => void handleSizeBrowse()}
                   >
                     统计大小
-                  </Button>
-                  <Button
-                    size="small"
-                    type="tertiary"
-                    disabled={browsing || anyBusy}
-                    onClick={() => {
-                      setDedupeResult(null);
-                      setDedupeOpen(true);
-                    }}
-                  >
-                    去重
                   </Button>
                 </div>
               )}
@@ -6660,7 +6174,7 @@ export function NativeStorageEditor({
                 </div>
                 {transfers.length === 0 ? (
                   <div className="muted native-transfer-empty">
-                    暂无后台传输任务；恢复、URL 离线下载或批量操作均会自动在此展示实时进度。
+                    暂无后台传输任务；恢复和批量操作均会自动在此展示实时进度。
                   </div>
                 ) : (
                   <div className="native-transfer-list">
@@ -6747,22 +6261,11 @@ export function NativeStorageEditor({
               />
             )}
 
-            {linkResult && (
-              <InlineNotice
-                icon={<IconChainStroked aria-hidden="true" size="small" />}
-                message={
-                  linkResult.res.url
-                    ? `分享链接（${linkResult.path}）：${linkResult.res.url}`
-                    : linkResult.res.message || "分享链接操作完成"
-                }
-              />
-            )}
-
             {browseError && (
               <InlineNotice
                 role="alert"
                 message={browseError}
-                onRetry={() => void loadBrowse(browsePath)}
+                onRetry={() => void loadBrowse(browsePath, { fresh: true, full: browseNeedsFullList })}
               />
             )}
 
@@ -6809,11 +6312,11 @@ export function NativeStorageEditor({
                   ))}
                 </div>
               )
-            ) : browsing ? (
+            ) : browsing && !browsePaging ? (
               <div className="native-loading-panel">
                 <Spin />
               </div>
-            ) : browseData && filteredBrowseEntries.length === 0 ? (
+            ) : browseData && filteredBrowseEntries.length === 0 && !browseData.nextCursor ? (
               <div className="sync-method-banner">
                 <IconInfoCircle aria-hidden="true" size="small" />
                 <span>{browseSearch.trim() ? "没有匹配的文件或目录" : "当前目录为空"}</span>
@@ -6909,26 +6412,6 @@ export function NativeStorageEditor({
                           }}
                         />
                         <IconButton
-                          label={`生成分享链接 ${entry.name}`}
-                          size="small"
-                          icon={<IconChainStroked aria-hidden="true" />}
-                          disabled={anyBusy}
-                          ariaBusy={linkingPath === entry.path}
-                          onClick={() => void handleLinkEntry(entry, false)}
-                        />
-                        {!entry.isDir && (
-                          <IconButton
-                            label={`设置存储类别 ${entry.name}`}
-                            size="small"
-                            icon={<IconSettingStroked aria-hidden="true" />}
-                            disabled={anyBusy}
-                            onClick={() => {
-                              setSetTierTarget(entry);
-                              setSetTierValue("");
-                            }}
-                          />
-                        )}
-                        <IconButton
                           label={`删除 ${entry.name}`}
                           size="small"
                           danger
@@ -6944,6 +6427,18 @@ export function NativeStorageEditor({
                 })}
               </div>
             ) : null}
+
+            {!trashOpen && !browseNeedsFullList && browseData?.nextCursor && (
+              <Button
+                size="small"
+                type="tertiary"
+                loading={browsePaging}
+                disabled={browsing || anyBusy}
+                onClick={() => void loadBrowse(browsePath, { cursor: browseData.nextCursor })}
+              >
+                加载更多
+              </Button>
+            )}
 
             {batchRestoreOpen && (
               <Modal
@@ -7247,36 +6742,6 @@ export function NativeStorageEditor({
         )}
       </Editor>
 
-      {renameTarget && (
-        <Modal
-          visible
-          centered
-          width={440}
-          title={`重命名存储 · ${renameTarget}`}
-          onCancel={() => {
-            if (!renaming) setRenameTarget(null);
-          }}
-          okText="确认重命名"
-          confirmLoading={renaming}
-          onOk={() => void handleExecuteRename()}
-        >
-          <div className="editor-form">
-            <Field
-              label="新存储名称"
-              required
-              hint="重命名将自动级联更新关联的加密存储及同步任务的源/目标路径"
-            >
-              <Input
-                value={renameNewName}
-                maxLength={64}
-                onChange={setRenameNewName}
-                placeholder="输入新的存储名称"
-              />
-            </Field>
-          </div>
-        </Modal>
-      )}
-
       {mkdirOpen && (
         <Modal
           visible
@@ -7331,138 +6796,6 @@ export function NativeStorageEditor({
         </Modal>
       )}
 
-      {copyUrlOpen && (
-        <Modal
-          visible
-          centered
-          width={480}
-          title={`从 URL 拉取文件 · ${browsePath}`}
-          onCancel={() => {
-            if (!copyUrlBusy) setCopyUrlOpen(false);
-          }}
-          okText="开始拉取"
-          confirmLoading={copyUrlBusy}
-          onOk={() => void handleExecuteCopyUrl()}
-        >
-          <div className="editor-form">
-            <Field label="源文件 URL" required hint="仅支持公共 http:// 或 https:// 资源">
-              <Input
-                value={copyUrlTarget}
-                onChange={setCopyUrlTarget}
-                placeholder="https://example.com/archive.tar.gz"
-              />
-            </Field>
-            <div className="native-checkbox-group">
-              <Checkbox
-                checked={copyUrlAutoName}
-                onChange={(e) => setCopyUrlAutoName(Boolean(e.target.checked))}
-              >
-                自动从 URL / 响应头探测文件名（--auto-filename）
-              </Checkbox>
-              <Checkbox
-                checked={copyUrlNoClobber}
-                onChange={(e) => setCopyUrlNoClobber(Boolean(e.target.checked))}
-              >
-                目标已存在同名文件时跳过覆盖（--no-clobber）
-              </Checkbox>
-            </div>
-            {!copyUrlAutoName && (
-              <Field label="保存文件名">
-                <Input
-                  value={copyUrlName}
-                  onChange={setCopyUrlName}
-                  placeholder="archive.tar.gz"
-                />
-              </Field>
-            )}
-          </div>
-        </Modal>
-      )}
-
-      {dedupeOpen && (
-        <Modal
-          visible
-          centered
-          width={520}
-          title={`重复文件清理 · ${browsePath}`}
-          onCancel={() => {
-            if (!dedupeBusy) setDedupeOpen(false);
-          }}
-          okText={dedupeDryRun ? "执行预览" : "执行去重"}
-          confirmLoading={dedupeBusy}
-          onOk={() => void handleExecuteDedupe()}
-        >
-          <div className="editor-form">
-            <Field label="去重策略（--dedupe-mode）">
-              <Select
-                value={dedupeMode}
-                optionList={[
-                  { value: "newest", label: "newest（保留最新修改，删除其余副本）" },
-                  { value: "oldest", label: "oldest（保留最旧文件）" },
-                  { value: "largest", label: "largest（保留体积最大）" },
-                  { value: "smallest", label: "smallest（保留体积最小）" },
-                  { value: "rename", label: "rename（对同名冲突追加编号后缀）" },
-                  { value: "first", label: "first（仅保留首个副本）" },
-                  { value: "list", label: "list（仅列出重复项，不改动）" },
-                ]}
-                onChange={(v) => setDedupeMode(String(v))}
-              />
-            </Field>
-            <div className="native-checkbox-group">
-              <Checkbox
-                checked={dedupeDryRun}
-                onChange={(e) => setDedupeDryRun(Boolean(e.target.checked))}
-              >
-                试运行预览，不实际修改或删除文件（--dry-run）
-              </Checkbox>
-              <Checkbox
-                checked={dedupeByHash}
-                onChange={(e) => setDedupeByHash(Boolean(e.target.checked))}
-              >
-                按文件内容哈希查重而非仅按同名查重（--by-hash）
-              </Checkbox>
-            </div>
-            {dedupeResult && dedupeResult.logs.length > 0 && (
-              <Field label="执行日志输出">
-                <TextArea
-                  readOnly
-                  autosize={{ minRows: 3, maxRows: 8 }}
-                  value={dedupeResult.logs.join("\n")}
-                />
-              </Field>
-            )}
-          </div>
-        </Modal>
-      )}
-
-      {setTierTarget && (
-        <Modal
-          visible
-          centered
-          width={420}
-          title={`设置存储类别 · ${setTierTarget.name}`}
-          onCancel={() => {
-            if (!setTierBusy) setSetTierTarget(null);
-          }}
-          okText="确认应用"
-          confirmLoading={setTierBusy}
-          onOk={() => void handleExecuteSetTier()}
-        >
-          <div className="editor-form">
-            <Field
-              label="目标存储分级（Tier）"
-              required
-              hint="例如 STANDARD / STANDARD_IA / GLACIER / ARCHIVE / Cool / Cold"
-            >
-              <Input
-                value={setTierValue}
-                onChange={setSetTierValue}
-                placeholder="STANDARD_IA"
-              />
-            </Field>
-          </div>
-        </Modal>
-      )}
     </>
   );
 }

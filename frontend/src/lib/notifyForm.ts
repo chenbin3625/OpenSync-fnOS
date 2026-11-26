@@ -22,7 +22,7 @@ export const supportedWebhookMethods = ["POST", "GET", "PUT"] as const;
 
 export const notifyEventModeOptions = [
   { value: "all", label: "全部事件" },
-  { value: "errors_only", label: "仅异常 / 失败 / 待审批" },
+  { value: "errors_only", label: "仅异常 / 失败" },
   { value: "custom", label: "自定义事件" },
 ] as const;
 
@@ -33,7 +33,6 @@ export const notifyEventOptions = [
   { value: "fail", label: "同步失败" },
   { value: "stopped", label: "已停止" },
   { value: "timeout", label: "任务超时" },
-  { value: "approval", label: "全量删除待审批" },
   { value: "engine_alert", label: "存储引擎健康告警" },
   { value: "check_alert", label: "定时一致性校验差异告警" },
   { value: "digest", label: "定时汇总摘要（日报/周报）" },
@@ -49,8 +48,6 @@ export const notifyTemplateVariables = [
   { token: "{sumSize}", label: "传输大小" },
   { token: "{duration}", label: "耗时" },
   { token: "{errSummary}", label: "失败原因摘要" },
-  { token: "{deleteCount}", label: "待删数量" },
-  { token: "{deleteSize}", label: "待删大小" },
   { token: "{time}", label: "当前时间" },
 ] as const;
 
@@ -146,7 +143,7 @@ export function defaultNotifyForm(): NotifyForm {
     enable: true,
     notSendNull: false,
     eventMode: "all",
-    events: ["fail", "partial_fail", "timeout", "approval", "engine_alert"],
+    events: ["fail", "partial_fail", "timeout", "engine_alert"],
     titleTemplate: "",
     contentTemplate: "",
     httpMethod: "POST",
@@ -355,8 +352,9 @@ export function notifyToForm(
   item: Pick<NotifyItem, "id" | "method" | "enable" | "params">,
 ): NotifyForm {
   const params = parseStoredNotifyParams(item.params);
+  const validEventSet = new Set<string>(notifyEventOptions.map((o) => o.value));
   const events = Array.isArray(params.events)
-    ? params.events.map((v) => String(v))
+    ? params.events.map((v) => String(v)).filter((ev) => validEventSet.has(ev))
     : defaultNotifyForm().events;
   return {
     ...defaultNotifyForm(),

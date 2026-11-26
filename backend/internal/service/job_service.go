@@ -69,7 +69,6 @@ func InitJobs() {
 		return
 	}
 	legacyEngineIDs := legacyOpenListAlistIDs()
-	var legacyJobIDs []int64
 	for _, item := range jobList {
 		jobID := util.ToInt64(item["id"])
 		alistID := util.ToInt64(item["alistId"])
@@ -81,17 +80,12 @@ func InitJobs() {
 					logger.Printf("Disabled legacy OpenList job %d (alistId=%d); user must delete and recreate it", jobID, alistID)
 				}
 			}
-			legacyJobIDs = append(legacyJobIDs, jobID)
 			continue
 		}
 		logger.Printf("Adding jobId %v", item["id"])
 		if err := AddJobClient(item, true); err != nil {
 			logger.Printf("Error adding job: %v", err)
 		}
-	}
-	pendingDeleteApprovals.LoadFromDB()
-	for _, jobID := range legacyJobIDs {
-		pendingDeleteApprovals.ClearForJob(jobID)
 	}
 	// Start filesystem watchers for enabled jobs configured with watchEnable.
 	jobClientListMu.RLock()
@@ -244,7 +238,6 @@ func ShutdownJobs(ctx context.Context) {
 	case <-done:
 	case <-ctx.Done():
 	}
-	pendingDeleteApprovals.Shutdown(ctx)
 	// Pending debounced progress publishes read the database; the caller closes
 	// it right after ShutdownJobs returns, so their timers must be cancelled
 	// here (same reason as the persist flush timers).
@@ -307,9 +300,6 @@ func activeProtectedHistoryTaskIDs() []int64 {
 			add(cur.TaskID)
 		}
 		add(client.retrySource())
-	}
-	for _, approval := range pendingDeleteApprovals.ListAll() {
-		add(approval.TaskID)
 	}
 	return ids
 }
@@ -1308,11 +1298,8 @@ func EditJobClient(job map[string]interface{}) error {
 	if oldScheduler != nil {
 		oldScheduler.Stop()
 	}
-	if jobConfigInvalidatesPendingDeletes(prevConfig, job) {
-		pendingDeleteApprovals.ClearForJob(jobID)
-	}
 	if jobConfigInvalidatesBisyncState(prevConfig, job) {
-		cleanupBisyncWorkDir(jobID)
+		clearBisyncRuntimeAndState(jobID)
 	}
 	jobFSWatchers.SyncJob(client)
 	return nil
@@ -1322,39 +1309,10 @@ func jobConfigInvalidatesBisyncState(prev, next map[string]interface{}) bool {
 	if prev == nil {
 		return false
 	}
+	// Only structural identity changes (method, paths, engine) invalidate the
+	// SQLite 3-way baseline. Changing filters, trash, conflict policy, compare
+	// mode, or throttling transitions smoothly without resetting baseline state.
 	for _, key := range []string{"method", "srcPath", "dstPath", "alistId"} {
-		if fmt.Sprint(prev[key]) != fmt.Sprint(next[key]) {
-			return true
-		}
-	}
-	if util.ToInt(next["method"]) != 3 {
-		return false
-	}
-	for _, key := range []string{
-		"exclude", "include", "filterMode",
-		"minFileSize", "maxFileSize", "minFileAgeMinutes", "olderThanDays", "newerThanDays",
-		"trashEnable", "trashDir", "followSymlinks", "compareMode",
-	} {
-		if fmt.Sprint(prev[key]) != fmt.Sprint(next[key]) {
-			return true
-		}
-	}
-	return false
-}
-
-func jobConfigInvalidatesPendingDeletes(prev, next map[string]interface{}) bool {
-	if util.ToInt(next["method"]) != 1 {
-		return true
-	}
-	if prev == nil {
-		return false
-	}
-	for _, key := range []string{
-		"alistId", "method", "srcPath", "dstPath", "dstMap",
-		"exclude", "include", "filterMode",
-		"minFileSize", "maxFileSize", "minFileAgeMinutes", "olderThanDays", "newerThanDays",
-		"compareMode", "conflictPolicy", "followSymlinks", "modifyWindow",
-	} {
 		if fmt.Sprint(prev[key]) != fmt.Sprint(next[key]) {
 			return true
 		}
@@ -1419,8 +1377,7 @@ func RemoveJobClient(jobID int64) error {
 		if err := removeJobRow(jobID); err != nil {
 			return fmt.Errorf("delete job: %w", err)
 		}
-		pendingDeleteApprovals.ClearForJob(jobID)
-		cleanupBisyncWorkDir(jobID)
+		bisyncEchoSuppress.ClearJob(jobID)
 		return nil
 	}
 	// Release loadMu before pausing and waiting for idle: holding loadMu across
@@ -1481,8 +1438,7 @@ func RemoveJobClient(jobID int64) error {
 		}
 		jobClientListMu.Unlock()
 		loadMu.Unlock()
-		pendingDeleteApprovals.ClearForJob(jobID)
-		cleanupBisyncWorkDir(jobID)
+		bisyncEchoSuppress.ClearJob(jobID)
 		jobFSWatchers.Stop(jobID)
 		return nil
 	}
@@ -1649,39 +1605,6 @@ func ApplyGlobalDefaultBwLimitAsync(rate string) {
 	}()
 }
 
-func ApproveFullSyncTask(taskID int64) error {
-	return pendingDeleteApprovals.ApproveByTaskID(taskID)
-}
-
-func ApproveFullSyncTaskPaths(taskID int64, selectedPaths []string) error {
-	return pendingDeleteApprovals.ApproveByTaskIDPaths(taskID, selectedPaths)
-}
-
-func ExcludeFullSyncApprovalPaths(taskID int64, selectedPaths []string) (int, error) {
-	return pendingDeleteApprovals.ExcludeByTaskIDPaths(taskID, selectedPaths)
-}
-
-func RejectFullSyncTask(taskID int64) error {
-	return pendingDeleteApprovals.RejectByTaskID(taskID)
-}
-
-func GetPendingApproval(jobID int64) *FullSyncApproval {
-	return pendingDeleteApprovals.GetByJobID(jobID)
-}
-
-func GetPendingApprovalFiltered(jobID int64, offset, limit int, query, kind string) *FullSyncApproval {
-	return pendingDeleteApprovals.GetByJobIDFiltered(jobID, offset, limit, query, kind)
-}
-
-func ListPendingApprovals() []*FullSyncApproval {
-	return pendingDeleteApprovals.ListAll()
-}
-
-// RetryFailedTask replays all non-success items of a historical task.
-func RetryFailedTask(taskID int64) error {
-	return RetryFailedTaskItems(taskID, nil)
-}
-
 // RetryFailedTaskItems replays either all non-success items (when itemIDs is
 // empty) or only the selected item IDs of a historical task.
 func RetryFailedTaskItems(taskID int64, itemIDs []int64) error {
@@ -1731,17 +1654,20 @@ func addJobNextRunTimes(result map[string]interface{}) {
 		return
 	}
 	clients := make(map[int64]*JobClient, len(rows))
+	jobIDs := make([]int64, 0, len(rows))
 	jobClientListMu.RLock()
 	for _, row := range rows {
 		jobID := util.ToInt64(row["id"])
+		jobIDs = append(jobIDs, jobID)
 		if client, exists := jobClientList[jobID]; exists {
 			clients[jobID] = client
 		}
 	}
 	jobClientListMu.RUnlock()
 	queuedSet := engineQueue.AllQueuedJobIDs()
-	latestTasks, _ := mapper.GetLatestTaskPerJob()
-	syncStates, syncStateErr := mapper.ListSyncStates()
+	latestTasks, _ := mapper.GetLatestTaskPerJob(jobIDs...)
+	syncStates, syncStateErr := mapper.ListSyncStates(jobIDs...)
+	conflictCounts, _ := mapper.ListUnresolvedBisyncConflictCounts(jobIDs...)
 	legacyEngineIDs := legacyOpenListAlistIDs()
 	for _, row := range rows {
 		jobID := util.ToInt64(row["id"])
@@ -1767,10 +1693,9 @@ func addJobNextRunTimes(result map[string]interface{}) {
 		row["running"] = running
 		row["paused"] = running && paused
 		row["queued"] = !legacyOpenList && queuedSet[jobID]
-		row["pendingApproval"] = !legacyOpenList && pendingDeleteApprovals.Has(jobID)
 		row["watching"] = !legacyOpenList && jobFSWatchers.IsWatching(jobID)
 		if !legacyOpenList {
-			addSyncStatus(row, syncStates[jobID], syncStateErr, clients[jobID])
+			addSyncStatus(row, syncStates[jobID], syncStateErr, conflictCounts[jobID], clients[jobID])
 		}
 		row["checkRunning"] = !legacyOpenList && IsJobCheckRunning(jobID)
 		if latest, ok := latestTasks[jobID]; ok {

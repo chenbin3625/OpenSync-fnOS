@@ -36,6 +36,7 @@ import {
   Field,
   InlineNotice,
   SettingRow,
+  confirmAction,
   errorToast,
 } from "../components/common";
 import { BwLimitEditor } from "../components/BwLimitEditor";
@@ -102,12 +103,14 @@ import type {
   JobItem,
   NativeRemoteItem,
 } from "../types";
+import { QuickSyncEditor } from "./QuickSyncEditor";
 
 export { parseIntervalInput };
 export { hasPendingFileSizeDraftChange, mergeFileSizeDrafts };
 
 export interface TaskEditorSavedResult {
   createdId?: number;
+  mirrorPreviewId?: number;
   runNow?: boolean;
   method: number;
 }
@@ -170,7 +173,7 @@ const directionCards: Array<{
     key: "bidirectional",
     title: "双向同步",
     route: "目录 A ⇄ 目录 B",
-    desc: "双端新增、修改与删除实时互相同步（rclone bisync）",
+    desc: "双端的新增、修改和删除会互相同步，检测到冲突时可在冲突中心处理",
     icon: "bidirectional",
   },
   {
@@ -209,9 +212,39 @@ function parsePositiveIntDraft(raw: string): number {
   return Number(trimmed);
 }
 
-export default function TaskEditor({
+type TaskEditorProps = {
+  job: JobItem | null;
+  initialDraft?: JobForm;
+  initialRemote?: string;
+  engines: AlistItem[];
+  existingJobs?: JobItem[];
+  enginesError?: string;
+  onRetryEngines?: () => void;
+  onNavigateEngines?: () => void;
+  onClose: () => void;
+  onSaved: (result: TaskEditorSavedResult) => void;
+};
+
+export default function TaskEditor(props: TaskEditorProps) {
+  const [advancedDraft, setAdvancedDraft] = useState<JobForm>();
+  if (props.job || props.initialDraft || advancedDraft) {
+    return <AdvancedTaskEditor {...props} advancedDraft={advancedDraft} />;
+  }
+  return (
+    <QuickSyncEditor
+      initialRemote={props.initialRemote}
+      existingJobs={props.existingJobs}
+      onAdvanced={setAdvancedDraft}
+      onClose={props.onClose}
+      onSaved={props.onSaved}
+    />
+  );
+}
+
+function AdvancedTaskEditor({
   job,
   initialDraft,
+  advancedDraft,
   engines,
   existingJobs,
   enginesError,
@@ -219,19 +252,7 @@ export default function TaskEditor({
   onNavigateEngines,
   onClose,
   onSaved,
-}: {
-  job: JobItem | null;
-  /** Optional pre-populated draft for cloning an existing job. */
-  initialDraft?: JobForm;
-  engines: AlistItem[];
-  existingJobs?: JobItem[];
-  /** Load error of the engine list; the select would otherwise just be empty. */
-  enginesError?: string;
-  onRetryEngines?: () => void;
-  onNavigateEngines?: () => void;
-  onClose: () => void;
-  onSaved: (result: TaskEditorSavedResult) => void;
-}) {
+}: TaskEditorProps & { advancedDraft?: JobForm }) {
   const defaultEngineId = engines[0]?.id;
   const seedForm = useMemo(
     () =>
@@ -244,7 +265,7 @@ export default function TaskEditor({
           }
         : job
           ? { ...jobToForm(job), alistId: job.alistId || defaultEngineId }
-          : defaultJobForm(defaultEngineId),
+          : advancedDraft ?? defaultJobForm(defaultEngineId),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
   );
@@ -289,7 +310,7 @@ export default function TaskEditor({
 
   const effectiveDirty =
     dirty ||
-    Boolean(initialDraft) ||
+    Boolean(initialDraft || advancedDraft?.srcPath.length || advancedDraft?.dstPath.length) ||
     hasPendingFileSizeDraftChange(form, fileSizeDrafts);
 
   const [policyOpen, setPolicyOpen] = useState<boolean>(() =>
@@ -300,7 +321,7 @@ export default function TaskEditor({
     ),
   );
   const [compareModeSource, setCompareModeSource] = useState<CompareModeSource>(
-    () => (seedForm.compareMode !== 0 ? "manual" : "default"),
+    () => (seedForm.compareMode === 0 ? "default" : advancedDraft ? "auto" : "manual"),
   );
   const [advancedOpen, setAdvancedOpen] = useState<boolean>(() =>
     Boolean(
@@ -340,7 +361,6 @@ export default function TaskEditor({
         Number(seedForm.extraFlags?.postSyncJobId || 0) > 0 ||
         seedForm.extraFlags?.checkSchedule ||
         seedForm.extraFlags?.directStream ||
-        seedForm.extraFlags?.bisyncResyncMode ||
         Number(seedForm.extraFlags?.bisyncMaxDelete || 0) > 0 ||
         seedForm.extraFlags?.bisyncForce,
     ),
@@ -488,8 +508,14 @@ export default function TaskEditor({
       scrollToFirstError();
       return;
     }
-    const payload = buildJobPayload(mergedForm);
-    void action.run(async () => {
+    const pathsChanged =
+      mergedForm.alistId !== seedForm.alistId ||
+      JSON.stringify(mergedForm.srcPath) !== JSON.stringify(seedForm.srcPath) ||
+      JSON.stringify(mergedForm.dstPath) !== JSON.stringify(seedForm.dstPath);
+    const reviewMirror = mergedForm.isCron === 3 && mergedForm.method === 1 &&
+      (!job || job.method !== 1 || pathsChanged);
+    const payload = buildJobPayload(reviewMirror ? { ...mergedForm, enable: false } : mergedForm);
+    const persist = () => action.run(async () => {
       try {
         const result = await api.saveJob(payload);
         setFileSizeDrafts({});
@@ -499,14 +525,17 @@ export default function TaskEditor({
             ? result.id
             : undefined;
         Toast.success(
-          job
-            ? "保存成功，持续同步已按新配置生效"
-            : mergedForm.enable
-              ? "持续同步任务已创建并开始监控"
-              : "持续同步任务已创建（当前暂停）",
+          reviewMirror
+            ? "镜像任务已保存，请先预览影响"
+            : job
+              ? "任务设置已保存"
+              : mergedForm.enable
+                ? "持续同步任务已创建并开始监控"
+                : "持续同步任务已创建（当前暂停）",
         );
         onSaved({
           createdId,
+          mirrorPreviewId: reviewMirror ? createdId ?? job?.id : undefined,
           runNow: false,
           method: payload.method,
         });
@@ -514,6 +543,16 @@ export default function TaskEditor({
         errorToast(err);
       }
     });
+    if (job?.method === 3 && mergedForm.method === 3 && pathsChanged) {
+      confirmAction({
+        title: "保存新的双向同步目录？",
+        content: "下次运行会比对新目录中的现有文件，建立新的双向同步记录。",
+        okText: "确认保存",
+        onOk: persist,
+      });
+      return;
+    }
+    void persist();
   };
 
   const handleDirectionSelect = (direction: SyncDirectionKey) => {
@@ -703,9 +742,10 @@ export default function TaskEditor({
   );
 
   const activeDirection = activeDirectionFromForm(form);
+  const legacySchedule = Boolean(job && form.isCron !== 3);
   const srcMultiple = form.method !== 3 || form.srcPath.length > 1;
-  const dstMultiple = form.method !== 3 || form.dstPath.length > 1;
-  const isDestructiveDirection = form.method === 1 || form.method === 3;
+  const dstMultiple = (form.method !== 3 && form.method !== 2) || form.dstPath.length > 1;
+  const isDestructiveDirection = form.method !== 0;
 
   const srcFieldLabel =
     activeDirection === "bidirectional"
@@ -727,8 +767,10 @@ export default function TaskEditor({
   const directionSummaryText =
     activeDirection === "bidirectional"
       ? "双端文件的新增、修改和删除会互相同步；首次运行时将自动建立双向基线，建议保留「保留双方冲突副本」与双端回收站。"
-      : form.method === 1
-        ? "单向持续镜像：源端新增、修改会持续同步至目标端；源端删除时目标端也会同步清理（自动触发删除确认与回收站保护）。"
+      : form.method === 2
+        ? "此任务会在文件移动到目标目录后删除源文件。"
+        : form.method === 1
+        ? "镜像会清理目标端独有的文件，包括任务创建前已存在的文件。首次开启镜像时先查看模拟运行，再确认启动。"
         : "单向持续增量：源端新增与修改的文件会持续同步至目标端，不会删除目标端已有文件，适合安全备份。";
 
   const effectivePollSec = form.extraFlags?.syncPollIntervalSec || 60;
@@ -769,7 +811,6 @@ export default function TaskEditor({
     (Number(form.extraFlags?.postSyncJobId || 0) > 0 ? 1 : 0) +
     (form.extraFlags?.checkSchedule?.trim() ? 1 : 0) +
     (form.extraFlags?.directStream ? 1 : 0) +
-    (form.extraFlags?.bisyncResyncMode?.trim() ? 1 : 0) +
     (Number(form.extraFlags?.bisyncMaxDelete || 0) > 0 ? 1 : 0) +
     (form.extraFlags?.bisyncForce ? 1 : 0) +
     (Number(form.copyConcurrency || 0) > 0 ? 1 : 0) +
@@ -834,7 +875,7 @@ export default function TaskEditor({
   return (
     <RemoteDirCacheProvider cache={dirCacheRef.current}>
       <Editor
-        title={job ? "编辑持续同步任务" : initialDraft ? "复制同步任务" : "新建持续同步任务"}
+        title={job ? legacySchedule ? "编辑同步任务" : "编辑持续同步任务" : initialDraft ? "复制同步任务" : "新建持续同步任务"}
         visible
         busy={action.busy}
         onClose={onClose}
@@ -1037,14 +1078,14 @@ export default function TaskEditor({
                     </div>
                   </Field>
 
-                  {activeDirection !== "bidirectional" && (
+                  {activeDirection !== "bidirectional" && form.method !== 2 && !legacySchedule && (
                     <SettingRow
-                      label="同步删除"
+                      label="镜像对齐"
                       variant="bordered"
-                      tip="开启后，源端删除文件会传播到目标端，并沿用删除保护与回收站；关闭则永久保留目标端已有文件。"
+                      tip="开启后，目标端独有的文件会被清理，沿用删除保护与回收站。关闭时保留这些文件。"
                     >
                       <Switch
-                        aria-label="同步删除"
+                        aria-label="镜像对齐"
                         checked={form.method === 1}
                         onChange={(v) => change("method", v ? 1 : 0)}
                       />
@@ -1371,19 +1412,21 @@ export default function TaskEditor({
 
               {panelMounted("schedule") && (
                 <div className="form-section" style={panelStyle("schedule")}>
-                  <SettingRow
-                    label="启用持续同步"
+                  {form.isCron !== 2 && <SettingRow
+                    label={legacySchedule ? "启用任务" : "启用持续同步"}
                     variant="bordered"
-                    tip="开启后保存即自动启动本地实时监听与远端轮询，并立即执行首次对账；关闭则仅保存配置，可随时在总览恢复。"
+                    tip={legacySchedule ? "按现有执行计划运行。" : "保存后开始监听并检查两端目录。"}
                   >
                     <Switch
-                      aria-label="启用持续同步"
+                      aria-label={legacySchedule ? "启用任务" : "启用持续同步"}
                       checked={form.enable}
                       onChange={(value) => change("enable", value)}
                     />
-                  </SettingRow>
+                  </SettingRow>}
 
-                  <div className="continuous-sync-panel">
+                  {legacySchedule ? (
+                    <InlineNotice message={form.isCron === 2 ? "此任务按原配置手动执行。" : "此任务按原配置定时执行。"} />
+                  ) : <><div className="continuous-sync-panel">
                     {matchedQuarkNames.length > 0 && effectivePollSec < 300 && (
                       <div className="sync-method-banner is-warning" role="note">
                         <IconAlertTriangle aria-hidden="true" size="small" />
@@ -1561,6 +1604,7 @@ export default function TaskEditor({
                     )}
                   </div>
 
+                  </>}
                   <SettingRow
                     label="限制允许运行时间窗口"
                     variant="bordered"
@@ -1623,7 +1667,7 @@ export default function TaskEditor({
                     <Field
                       label="选择通知渠道"
                       error={showStepError(1, "notifyIds")}
-                      hint="该任务的异常、完成与删除确认通知仅发送到所选渠道"
+                      hint="该任务的异常与完成通知仅发送到所选渠道"
                     >
                       <Select
                         multiple
@@ -2317,31 +2361,8 @@ export default function TaskEditor({
                             <div className="advanced-option-group-title">双向同步保护策略</div>
                             <div className="form-grid form-grid--two">
                               <Field
-                                label="双向基线冲突策略（--resync-mode）"
-                                hint="首次同步或重建基线 (--resync) 时生效"
-                              >
-                                <Select
-                                  value={form.extraFlags?.bisyncResyncMode || ""}
-                                  optionList={[
-                                    { label: "默认 (newer，保留最新修改)", value: "" },
-                                    { label: "path1（以左侧为准）", value: "path1" },
-                                    { label: "path2（以右侧为准）", value: "path2" },
-                                    { label: "newer（保留最新修改）", value: "newer" },
-                                    { label: "older（保留较旧文件）", value: "older" },
-                                    { label: "larger（保留较大文件）", value: "larger" },
-                                    { label: "smaller（保留较小文件）", value: "smaller" },
-                                  ]}
-                                  onChange={(v) =>
-                                    change("extraFlags", {
-                                      ...form.extraFlags,
-                                      bisyncResyncMode: String(v || ""),
-                                    })
-                                  }
-                                />
-                              </Field>
-                              <Field
-                                label="单次删除比例上限（--max-delete，%）"
-                                hint="0 表示使用 rclone 默认值（50%），1–100 按删除占比触发安全保护"
+                                label="单次删除比例上限（%）"
+                                hint="0 表示使用默认值（50%），1–100 按单端删除占比触发安全保护，防止误删全盘"
                               >
                                 <Input
                                   inputMode="numeric"
@@ -2368,7 +2389,7 @@ export default function TaskEditor({
                                   })
                                 }
                               >
-                                超限删除仍强制执行（--force，谨慎启用）
+                                超限删除仍强制执行（谨慎启用）
                               </Checkbox>
                             </div>
                           </div>

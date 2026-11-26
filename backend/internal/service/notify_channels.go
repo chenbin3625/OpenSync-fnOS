@@ -33,7 +33,6 @@ var validNotifyEvents = map[string]struct{}{
 	"fail":         {},
 	"stopped":      {},
 	"timeout":      {},
-	"approval":     {},
 	"engine_alert": {},
 	"check_alert":  {},
 	"digest":       {},
@@ -44,7 +43,6 @@ var errorNotifyEvents = map[string]struct{}{
 	"partial_fail": {},
 	"fail":         {},
 	"timeout":      {},
-	"approval":     {},
 	"engine_alert": {},
 	"check_alert":  {},
 }

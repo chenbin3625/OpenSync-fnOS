@@ -41,8 +41,6 @@ const (
 	DisabledJobCannotRun    = "DisabledJobCannotRun"
 	CannotDisableManualJob  = "CannotDisableManualJob"
 	TaskNotRunningStop        = "TaskNotRunningStop"
-	FullSyncPending           = "FullSyncPending"
-	FullSyncApprovalExecuting = "FullSyncApprovalExecuting"
 	NoFailedTaskItems         = "NoFailedTaskItems"
 	NotifyTestMsg           = "NotifyTestMsg"
 	NotifyURLInvalid        = "NotifyURLInvalid"
@@ -58,8 +56,6 @@ const (
 	SettingsCopyConcurrency = "SettingsCopyConcurrency"
 	SettingsScanConcurrency = "SettingsScanConcurrency"
 	SettingsMaxRetries          = "SettingsMaxRetries"
-	SettingsSchedConfirm        = "SettingsSchedConfirm"
-	SettingsApprovalTimeout     = "SettingsApprovalTimeout"
 	SettingsHealthCheckInterval = "SettingsHealthCheckInterval"
 	SettingsDefaultBwLimit      = "SettingsDefaultBwLimit"
 	SettingsProxyURL            = "SettingsProxyURL"
@@ -111,8 +107,6 @@ const (
 	ExtraFlagsInvalid        = "ExtraFlagsInvalid"
 
 	// Localized notification labels
-	NotifyApprovalTitle         = "NotifyApprovalTitle"
-	NotifyApprovalContent       = "NotifyApprovalContent"
 	NotifyEngineOfflineTitle    = "NotifyEngineOfflineTitle"
 	NotifyEngineOnlineTitle     = "NotifyEngineOnlineTitle"
 	NotifyEngineStorageErrTitle = "NotifyEngineStorageErrTitle"
@@ -137,7 +131,6 @@ const (
 	FmtUnsafeDeleteTarget      = "FmtUnsafeDeleteTarget"
 	FmtScanError               = "FmtScanError"
 	FmtJobDstConflict          = "FmtJobDstConflict"
-	FmtFullSyncApprovalTimeout = "FmtFullSyncApprovalTimeout"
 	FmtAlistFailCodeReason     = "FmtAlistFailCodeReason"
 	FmtNotifyError             = "FmtNotifyError"
 	FmtSettingsRangeError      = "FmtSettingsRangeError"
@@ -182,8 +175,6 @@ var translations = map[string]map[string]string{
 		DisabledJobCannotRun:    "禁用的作业不能运行",
 		CannotDisableManualJob:  "不可禁用仅手动任务",
 		TaskNotRunningStop:        "任务未在运行中，无法停止",
-		FullSyncPending:           "当前没有待确认的删除项",
-		FullSyncApprovalExecuting: "待确认删除正在后台执行中，请勿重复操作",
 		NoFailedTaskItems:         "没有可重试的未完成项",
 		NotifyTestMsg:           "这是一条由您自己发送的OpenSync测试消息，当你看到这条消息，说明你的配置是正确可用的。",
 		NotifyURLInvalid:        "Webhook URL必须是有效的 HTTP 或 HTTPS URL",
@@ -199,8 +190,6 @@ var translations = map[string]map[string]string{
 		SettingsCopyConcurrency: "操作并发数",
 		SettingsScanConcurrency: "扫描并发数",
 		SettingsMaxRetries:          "最大重试次数",
-		SettingsSchedConfirm:        "定时全量同步删除确认",
-		SettingsApprovalTimeout:     "全量同步审批超时",
 		SettingsHealthCheckInterval: "引擎健康检查间隔",
 		SettingsDefaultBwLimit:      "默认传输限速",
 		SettingsProxyURL:            "全局代理地址",
@@ -249,8 +238,6 @@ var translations = map[string]map[string]string{
 		MultiThreadStreamsInvalid: "单文件多线程流数必须是 0 到 64 之间的整数",
 		ExtraFlagsInvalid:        "扩展传输参数格式无效或包含不受支持的选项",
 
-		NotifyApprovalTitle:         "待确认删除",
-		NotifyApprovalContent:       "任务「%s」已完成同步，检测到目标端存在 %d 个待删除项（%d 个文件，%d 个目录），不影响后续同步任务。请在 OpenSync 中查看清单并确认或跳过删除。",
 		NotifyEngineOfflineTitle:    "存储引擎连接异常",
 		NotifyEngineOnlineTitle:     "存储引擎已恢复在线",
 		NotifyEngineStorageErrTitle: "存储引擎挂载状态异常",
@@ -272,7 +259,6 @@ var translations = map[string]map[string]string{
 		FmtUnsafeDeleteTarget:      "已拒绝删除 %q（位于 %q）：名称不是单个文件或目录",
 		FmtScanError:               "%s目录扫描失败，原因为: %s",
 		FmtJobDstConflict:          "目标目录 %s 已被其他同步任务使用，两个任务会互相覆盖或删除对方写入的文件，请调整目标目录",
-		FmtFullSyncApprovalTimeout: "全量同步确认等待超时，本次只执行了新增和更新，未删除目标端多余文件；请确认后手动执行一次全量同步",
 		FmtAlistFailCodeReason:     "AList返回%d错误，原因为：%s",
 		FmtNotifyError:             "发送通知过程中失败，原因为：%s",
 		FmtSettingsRangeError:      "%s必须在%d到%d之间",
@@ -310,8 +296,6 @@ var translations = map[string]map[string]string{
 		DisabledJobCannotRun:    "Disabled jobs cannot be run",
 		CannotDisableManualJob:  "Cannot disable manual-only jobs",
 		TaskNotRunningStop:        "Task is not running and cannot be stopped",
-		FullSyncPending:           "No pending deletions awaiting approval",
-		FullSyncApprovalExecuting: "Pending deletions are already executing",
 		NoFailedTaskItems:         "No failed items available to retry",
 		NotifyTestMsg:           "This is a test message sent by OpenSync. If you see this, your configuration is working correctly.",
 		NotifyURLInvalid:        "Webhook URL must be a valid HTTP or HTTPS URL",
@@ -327,8 +311,6 @@ var translations = map[string]map[string]string{
 		SettingsCopyConcurrency: "Copy concurrency",
 		SettingsScanConcurrency: "Scan concurrency",
 		SettingsMaxRetries:          "Max retries",
-		SettingsSchedConfirm:        "Scheduled full-sync deletion confirmation",
-		SettingsApprovalTimeout:     "Full-sync approval timeout",
 		SettingsHealthCheckInterval: "Engine health check interval",
 		SettingsDefaultBwLimit:      "Default bandwidth limit",
 		SettingsProxyURL:            "Global proxy URL",
@@ -377,8 +359,6 @@ var translations = map[string]map[string]string{
 		MultiThreadStreamsInvalid: "Multi-thread streams must be an integer between 0 and 64",
 		ExtraFlagsInvalid:         "Invalid or unsupported extra transfer options",
 
-		NotifyApprovalTitle:         "Deletions Awaiting Approval",
-		NotifyApprovalContent:       "Job \"%s\" finished syncing with %d destination items pending deletion (%d files, %d folders). Syncing is not blocked; open OpenSync to review and confirm or skip deletion.",
 		NotifyEngineOfflineTitle:    "Storage Engine Offline",
 		NotifyEngineOnlineTitle:     "Storage Engine Recovered",
 		NotifyEngineStorageErrTitle: "Storage Mount Alert",
@@ -400,7 +380,6 @@ var translations = map[string]map[string]string{
 		FmtUnsafeDeleteTarget:      "Refused to delete %q in %q: the name is not a single file or directory",
 		FmtScanError:               "%s directory scan failed: %s",
 		FmtJobDstConflict:          "Destination directory %s is already used by another sync job; the two jobs would overwrite or delete each other's files, please adjust the destination",
-		FmtFullSyncApprovalTimeout: "Full sync approval timed out; this run only copied new and changed files and deleted nothing. Review the plan and run a full sync again",
 		FmtAlistFailCodeReason:     "AList returned error %d: %s",
 		FmtNotifyError:             "Notification failed: %s",
 		FmtSettingsRangeError:      "%s must be between %d and %d",
@@ -489,12 +468,6 @@ func ScanError(srcOrDst, reason string) string {
 // JobDstConflict reports a destination root shared with another job.
 func JobDstConflict(path string) string {
 	return fmt.Sprintf(T(FmtJobDstConflict), path)
-}
-
-// FullSyncApprovalTimeout reports that a full sync ran copies only because the
-// destructive plan was never confirmed.
-func FullSyncApprovalTimeout() string {
-	return T(FmtFullSyncApprovalTimeout)
 }
 
 func AlistFailCodeReason(code int, message string) string {

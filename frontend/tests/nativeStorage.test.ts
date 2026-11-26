@@ -210,8 +210,8 @@ describe("native storage mock API lifecycle", () => {
     expect(browse.code).toBe(200);
     expect(browse.data.entries.length).toBeGreaterThan(0);
 
-    const restored = await json<null>(
-      await fetch(`${apiUrl}/native/storage/restore`, {
+    const restored = await json<{ id: string; kind: string; status: string }>(
+      await fetch(`${apiUrl}/native/storage/transfers/restore`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -223,6 +223,15 @@ describe("native storage mock API lifecycle", () => {
       }),
     );
     expect(restored.code).toBe(200);
+    expect(restored.data).toMatchObject({
+      id: expect.any(String), kind: "restore", status: "completed",
+    });
+    const transfers = await json<Array<{ id: string; status: string }>>(
+      await fetch(`${apiUrl}/native/storage/transfers`),
+    );
+    expect(transfers.data).toContainEqual(expect.objectContaining({
+      id: restored.data.id, status: "completed",
+    }));
 
     // 10. Create a bisync job with rclone tuning options and run consistency check
     const createdJob = await json<{ id: number }>(
@@ -262,7 +271,7 @@ describe("native storage mock API lifecycle", () => {
     expect(checkRes.data.download).toBe(true);
     expect(checkRes.data.matchedCount).toBeGreaterThan(0);
 
-    // 11. Extended backends (combine / azurefiles), browse write ops, cryptcheck, and bisync resync
+    // 11. Extended backends, browse write ops, cryptcheck, and the conflict list
     const cryptCheckRes = await json<{
       status: string;
       mode?: string;
@@ -280,14 +289,11 @@ describe("native storage mock API lifecycle", () => {
     expect(cryptCheckRes.data.cryptCheck).toBe(true);
     expect(cryptCheckRes.data.download).toBe(false);
 
-    const resyncRes = await json<null>(
-      await fetch(`${apiUrl}/job/bisync/resync`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: createdJob.data.id, runNow: false }),
-      }),
+    const conflictsRes = await json<unknown[]>(
+      await fetch(`${apiUrl}/job/conflicts?id=${createdJob.data.id}`),
     );
-    expect(resyncRes.code).toBe(200);
+    expect(conflictsRes.code).toBe(200);
+    expect(conflictsRes.data).toEqual([]);
 
     const mkdirRes = await json<null>(
       await fetch(`${apiUrl}/native/storage/mkdir`, {
@@ -308,50 +314,6 @@ describe("native storage mock API lifecycle", () => {
     expect(sizeRes.code).toBe(200);
     expect(sizeRes.data.count).toBeGreaterThan(0);
 
-    const copyUrlBlocked = await json<null>(
-      await fetch(`${apiUrl}/native/storage/copyurl`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          url: "http://127.0.0.1/secret",
-          dstDir: "/ArchiveV2",
-        }),
-      }),
-    );
-    expect(copyUrlBlocked.code).not.toBe(200);
-
-    const copyUrlOk = await json<{ fileName: string }>(
-      await fetch(`${apiUrl}/native/storage/copyurl`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          url: "https://example.com/archive.tar.gz",
-          dstDir: "/ArchiveV2",
-          autoFilename: true,
-        }),
-      }),
-    );
-    expect(copyUrlOk.code).toBe(200);
-    expect(copyUrlOk.data.fileName).toBe("archive.tar.gz");
-
-    const linkRes = await json<{ url: string }>(
-      await fetch(`${apiUrl}/native/storage/link`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: "/ArchiveV2/backup-report.txt" }),
-      }),
-    );
-    expect(linkRes.code).toBe(200);
-    expect(linkRes.data.url).toContain("ArchiveV2");
-
-    const cleanupRes = await json<null>(
-      await fetch(`${apiUrl}/native/storage/cleanup`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: "ArchiveV2" }),
-      }),
-    );
-    expect(cleanupRes.code).toBe(200);
   });
 
   it("supports GUI-guided cloud drive auth flows (OneDrive OAuth + drive picker, Jottacloud token, iCloud 2FA)", async () => {

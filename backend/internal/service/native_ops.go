@@ -46,12 +46,16 @@ type NativeAboutInput struct {
 }
 
 type NativeBrowseInput struct {
-	Path string `json:"path"`
+	Path   string `json:"path"`
+	Paged  bool   `json:"paged"`
+	Cursor string `json:"cursor"`
+	Fresh  bool   `json:"fresh"`
 }
 
 type NativeBrowseResult struct {
-	Path    string            `json:"path"`
-	Entries []native.DirEntry `json:"entries"`
+	Path       string            `json:"path"`
+	Entries    []native.DirEntry `json:"entries"`
+	NextCursor string            `json:"nextCursor,omitempty"`
 }
 
 type NativeRestoreInput struct {
@@ -74,42 +78,6 @@ type NativeMovePathInput struct {
 type NativeDeletePathInput struct {
 	Path  string `json:"path"`
 	IsDir bool   `json:"isDir"`
-}
-
-type NativeDedupeInput struct {
-	Path     string `json:"path"`
-	Mode     string `json:"mode"`
-	ByHash   bool   `json:"byHash"`
-	SizeOnly bool   `json:"sizeOnly"`
-	DryRun   bool   `json:"dryRun"`
-}
-
-type NativeLinkInput struct {
-	Path   string `json:"path"`
-	Expire string `json:"expire,omitempty"`
-	Unlink bool   `json:"unlink,omitempty"`
-}
-
-type NativeLinkResult struct {
-	URL     string `json:"url"`
-	Message string `json:"message,omitempty"`
-}
-
-type NativeCopyURLInput struct {
-	URL          string `json:"url"`
-	DstDir       string `json:"dstDir"`
-	FileName     string `json:"fileName,omitempty"`
-	AutoFilename bool   `json:"autoFilename,omitempty"`
-	NoClobber    bool   `json:"noClobber,omitempty"`
-}
-
-type NativeCopyURLResult struct {
-	FileName string `json:"fileName"`
-}
-
-type NativeSetTierInput struct {
-	Path string `json:"path"`
-	Tier string `json:"tier"`
 }
 
 // RenameNativeStorage atomically renames a remote and cascades the new name
@@ -359,9 +327,8 @@ func RenameNativeStorage(ctx context.Context, in NativeRenameInput) (*NativeRena
 				jc.Job = cloneJobConfig(u.job)
 				jc.mu.Unlock()
 			}
-			pendingDeleteApprovals.ClearForJob(u.id)
 			if util.ToInt(u.job["method"]) == 3 {
-				cleanupBisyncWorkDir(u.id)
+				clearBisyncRuntimeAndState(u.id)
 			}
 		}
 		RemoveEngineHealth(id)
@@ -432,7 +399,7 @@ func BrowseNativeStorage(ctx context.Context, in NativeBrowseInput) (*NativeBrow
 	}
 	browseCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
-	entries, exists, err := c.ListDirEntries(browseCtx, vPath, native.SessionOptions{ProxyURL: globalNativeProxyURL()})
+	entries, next, exists, err := c.BrowseDirEntries(browseCtx, vPath, in.Paged, in.Cursor, in.Fresh, native.SessionOptions{ProxyURL: globalNativeProxyURL()})
 	if err != nil {
 		return nil, publicError(err.Error())
 	}
@@ -443,34 +410,10 @@ func BrowseNativeStorage(ctx context.Context, in NativeBrowseInput) (*NativeBrow
 		entries = []native.DirEntry{}
 	}
 	return &NativeBrowseResult{
-		Path:    vPath,
-		Entries: entries,
+		Path:       vPath,
+		Entries:    entries,
+		NextCursor: next,
 	}, nil
-}
-
-// RestoreNativeFile restores a remote file or folder into an fnOS-authorized local directory.
-func RestoreNativeFile(ctx context.Context, in NativeRestoreInput) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	src := strings.TrimSpace(in.SrcPath)
-	dst := strings.TrimSpace(in.DstLocalDir)
-	if src == "" || dst == "" {
-		return publicError("请提供要恢复的远端路径和本地目标目录")
-	}
-	_, c, err := loadExistingNativeRow()
-	if err != nil {
-		return err
-	}
-	restoreCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
-	defer cancel()
-	if err := c.Restore(restoreCtx, src, dst, in.IsDir, in.Overwrite, native.SessionOptions{
-		ProxyURL: globalNativeProxyURL(),
-		BwLimit:  globalDefaultBwLimit(),
-	}); err != nil {
-		return publicError(err.Error())
-	}
-	return nil
 }
 
 // MkdirNativeStorage creates a directory at in.Path.
@@ -557,162 +500,6 @@ func SizeNativeStorage(ctx context.Context, in NativePathInput) (*native.SizeInf
 		return nil, publicError(err.Error())
 	}
 	return info, nil
-}
-
-// DedupeNativeStorage finds or resolves duplicates at in.Path via `rclone dedupe`.
-func DedupeNativeStorage(ctx context.Context, in NativeDedupeInput) (*native.DedupeResult, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	vPath := strings.TrimSpace(in.Path)
-	if vPath == "" {
-		return nil, publicError("请提供要去重的目录路径")
-	}
-	_, c, err := loadExistingNativeRow()
-	if err != nil {
-		return nil, err
-	}
-	opCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-	defer cancel()
-	res, err := c.Dedupe(opCtx, vPath, native.DedupeOptions{
-		Mode:     in.Mode,
-		ByHash:   in.ByHash,
-		SizeOnly: in.SizeOnly,
-		DryRun:   in.DryRun,
-	}, native.SessionOptions{ProxyURL: globalNativeProxyURL()})
-	if err != nil {
-		return nil, publicError(err.Error())
-	}
-	return res, nil
-}
-
-// CleanupNativeStorage empties remote trash or incomplete uploads via `rclone cleanup`.
-func CleanupNativeStorage(ctx context.Context, in NativeAboutInput) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	name := strings.TrimSpace(in.Name)
-	if name == "" {
-		return publicError("请指定要清理的远端存储名称")
-	}
-	_, c, err := loadExistingNativeRow()
-	if err != nil {
-		return err
-	}
-	opCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	defer cancel()
-	if err := c.Cleanup(opCtx, name, native.SessionOptions{ProxyURL: globalNativeProxyURL()}); err != nil {
-		return publicError(err.Error())
-	}
-	return nil
-}
-
-// LinkNativeStorage generates or revokes a public share link via `rclone link`.
-func LinkNativeStorage(ctx context.Context, in NativeLinkInput) (*NativeLinkResult, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	vPath := strings.TrimSpace(in.Path)
-	if vPath == "" {
-		return nil, publicError("请提供要生成分享链接的路径")
-	}
-	_, c, err := loadExistingNativeRow()
-	if err != nil {
-		return nil, err
-	}
-	opCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	out, err := c.Link(opCtx, vPath, in.Expire, in.Unlink, native.SessionOptions{ProxyURL: globalNativeProxyURL()})
-	if err != nil {
-		return nil, publicError(err.Error())
-	}
-	if in.Unlink {
-		return &NativeLinkResult{Message: out}, nil
-	}
-	return &NativeLinkResult{URL: out}, nil
-}
-
-// CopyURLNativeStorage pulls an HTTP(S) file directly into dstDir via `rclone copyurl`.
-func CopyURLNativeStorage(ctx context.Context, in NativeCopyURLInput) (*NativeCopyURLResult, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	rawURL := strings.TrimSpace(in.URL)
-	dstDir := strings.TrimSpace(in.DstDir)
-	if rawURL == "" || dstDir == "" {
-		return nil, publicError("请提供下载链接与目标目录")
-	}
-	_, c, err := loadExistingNativeRow()
-	if err != nil {
-		return nil, err
-	}
-	opCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
-	defer cancel()
-	savedName, err := c.CopyURL(opCtx, rawURL, dstDir, native.CopyURLOptions{
-		FileName:     in.FileName,
-		AutoFilename: in.AutoFilename,
-		NoClobber:    in.NoClobber,
-	}, native.SessionOptions{
-		ProxyURL: globalNativeProxyURL(),
-		BwLimit:  globalDefaultBwLimit(),
-	})
-	if err != nil {
-		return nil, publicError(err.Error())
-	}
-	return &NativeCopyURLResult{FileName: savedName}, nil
-}
-
-// SetTierNativeStorage changes storage class/tier on supported object storages via `rclone settier`.
-func SetTierNativeStorage(ctx context.Context, in NativeSetTierInput) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	vPath := strings.TrimSpace(in.Path)
-	tier := strings.TrimSpace(in.Tier)
-	if vPath == "" || tier == "" {
-		return publicError("请提供路径和目标存储类别")
-	}
-	_, c, err := loadExistingNativeRow()
-	if err != nil {
-		return err
-	}
-	opCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	defer cancel()
-	if err := c.SetTier(opCtx, vPath, tier, native.SessionOptions{ProxyURL: globalNativeProxyURL()}); err != nil {
-		return publicError(err.Error())
-	}
-	return nil
-}
-
-// ResetBisyncJob marks a native bisync job for baseline resync (--resync) and optionally starts it.
-func ResetBisyncJob(jobID int64, runNow bool) error {
-	job, err := mapper.GetJobByID(jobID)
-	if err != nil {
-		return publicErrorIf(err, msg.T(msg.JobNotFound))
-	}
-	if util.ToInt(job["method"]) != 3 {
-		return publicError("仅双向同步任务支持重建基线")
-	}
-	cfg, err := loadNative(util.ToInt64(job["alistId"]))
-	if err != nil {
-		return err
-	}
-	if cfg == nil {
-		return publicError(legacyOpenListJobDisabledMsg)
-	}
-	jobClientListMu.RLock()
-	jc := jobClientList[jobID]
-	jobClientListMu.RUnlock()
-	if jc != nil && jc.isBusy() {
-		return publicError("任务正在执行中，请等待当前任务结束后再重置基线")
-	}
-	if err := native.MarkBisyncResyncPending(bisyncWorkDir(jobID)); err != nil {
-		return err
-	}
-	if runNow {
-		return DoJobManual(jobID)
-	}
-	return nil
 }
 
 // --- Async Consistency Check (`rclone check`) Manager ---
@@ -890,31 +677,31 @@ func StartJobCheck(jobID int64, download, cryptCheck bool) (*JobCheckResult, err
 				dst := jobDstForSrc(job, src, base)
 				var pairChecked, pairTotal int64
 				res, err := cfg.Check(ctx, src, dst, native.CheckOptions{
-					Download:      download,
-					CryptCheck:    cryptCheck,
-					Compare:       util.ToInt(job["compareMode"]),
-					OneWay:        method == 0,
-					Checkers:      limits.ScanConcurrency,
-					Retries:       limits.MaxRetries,
-					FilterLines:   filters,
-					MinSize:       util.ToInt64(job["minFileSize"]),
-					MaxSize:       util.ToInt64(job["maxFileSize"]),
-					MinAgeMinutes: util.ToInt(job["minFileAgeMinutes"]),
-					OlderThanDays: util.ToInt(job["olderThanDays"]),
-					NewerThanDays: util.ToInt(job["newerThanDays"]),
-					BwLimit:       effectiveJobBwLimit(job),
-					TPSLimit:      jobFloat64(job["tpsLimit"]),
-					TPSLimitBurst: util.ToInt(job["tpsLimitBurst"]),
-					ModifyWindow:   strings.TrimSpace(util.StringValue(job["modifyWindow"])),
-					FastList:       util.ToInt(job["fastList"]) == 1,
-					FollowSymlinks: util.ToInt(job["followSymlinks"]) == 1,
+					Download:        download,
+					CryptCheck:      cryptCheck,
+					Compare:         util.ToInt(job["compareMode"]),
+					OneWay:          method == 0,
+					Checkers:        limits.ScanConcurrency,
+					Retries:         limits.MaxRetries,
+					FilterLines:     filters,
+					MinSize:         util.ToInt64(job["minFileSize"]),
+					MaxSize:         util.ToInt64(job["maxFileSize"]),
+					MinAgeMinutes:   util.ToInt(job["minFileAgeMinutes"]),
+					OlderThanDays:   util.ToInt(job["olderThanDays"]),
+					NewerThanDays:   util.ToInt(job["newerThanDays"]),
+					BwLimit:         effectiveJobBwLimit(job),
+					TPSLimit:        jobFloat64(job["tpsLimit"]),
+					TPSLimitBurst:   util.ToInt(job["tpsLimitBurst"]),
+					ModifyWindow:    strings.TrimSpace(util.StringValue(job["modifyWindow"])),
+					FastList:        util.ToInt(job["fastList"]) == 1,
+					FollowSymlinks:  util.ToInt(job["followSymlinks"]) == 1,
 					UserAgent:       extra.UserAgent,
 					IOTimeout:       extra.IOTimeout,
 					ConTimeout:      extra.ConTimeout,
 					LowLevelRetries: extra.LowLevelRetries,
 					RetriesSleep:    extra.RetriesSleep,
 					ProxyURL:        globalNativeProxyURL(),
-					MaxItems:      capLimit,
+					MaxItems:        capLimit,
 				}, func(st *native.Stats) {
 					if st == nil {
 						return
@@ -1009,8 +796,11 @@ func IsJobCheckRunning(jobID int64) bool {
 	return sess.snapshot().Status == "running"
 }
 
-// ExportJobCheckReport formats the latest consistency check result for jobID as CSV or TXT.
+// ExportJobCheckReport formats the latest consistency check result for jobID as CSV.
 func ExportJobCheckReport(jobID int64, format string) (string, string, []byte, error) {
+	if format := strings.ToLower(strings.TrimSpace(format)); format != "" && format != "csv" {
+		return "", "", nil, publicError("仅支持 CSV 导出")
+	}
 	res, err := GetJobCheck(jobID)
 	if err != nil {
 		return "", "", nil, err
@@ -1018,34 +808,7 @@ func ExportJobCheckReport(jobID int64, format string) (string, string, []byte, e
 	if res == nil {
 		return "", "", nil, publicError("暂无可导出的一致性校验报告")
 	}
-	format = strings.ToLower(strings.TrimSpace(format))
-	if format != "txt" {
-		format = "csv"
-	}
 	ts := time.Now().Format("20060102-150405")
-	if format == "txt" {
-		var b strings.Builder
-		fmt.Fprintf(&b, "OpenSync 一致性校验报告 (任务 #%d, 模式: %s, 状态: %s)\n", res.JobID, res.Mode, res.Status)
-		fmt.Fprintf(&b, "一致: %d | 差异: %d | 目标缺失: %d | 源端缺失: %d | 错误: %d\n\n",
-			res.MatchedCount, res.DifferCount, res.MissingOnDstCount, res.MissingOnSrcCount, res.ErrorCount)
-		writeSection := func(title string, items []string) {
-			if len(items) == 0 {
-				return
-			}
-			fmt.Fprintf(&b, "=== %s (%d) ===\n", title, len(items))
-			for _, item := range items {
-				b.WriteString(item)
-				b.WriteByte('\n')
-			}
-			b.WriteByte('\n')
-		}
-		writeSection("内容差异", res.Differ)
-		writeSection("目标缺失（源有目标无）", res.MissingOnDst)
-		writeSection("源端缺失（目标多余）", res.MissingOnSrc)
-		writeSection("校验错误", res.Errors)
-		return fmt.Sprintf("check-report-job-%d-%s.txt", jobID, ts), "text/plain; charset=utf-8", []byte(b.String()), nil
-	}
-
 	var buf bytes.Buffer
 	buf.WriteString("\xEF\xBB\xBF") // UTF-8 BOM for Excel compatibility
 	w := csv.NewWriter(&buf)

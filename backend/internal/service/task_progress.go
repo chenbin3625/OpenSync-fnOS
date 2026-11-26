@@ -106,7 +106,6 @@ type streamDoingPatch struct {
 type jobCurrentPayload struct {
 	TaskID      int64                `json:"taskId"`
 	ScanFinish  bool                 `json:"scanFinish"`
-	Approval    *FullSyncApproval    `json:"approval"`
 	Scan        *scanProgressPayload `json:"scan,omitempty"`
 	// Full snapshots must retain an empty slice in JSON. The frontend uses a
 	// missing doingTask only for patch frames; omitting an empty snapshot would
@@ -468,7 +467,7 @@ func (jt *JobTask) getCurrentPayload() jobCurrentPayload {
 func (jt *JobTask) GetCurrent() map[string]interface{} {
 	payload := jt.getCurrentPayload()
 	result := map[string]interface{}{
-		"taskId": payload.TaskID, "scanFinish": payload.ScanFinish, "approval": payload.Approval,
+		"taskId": payload.TaskID, "scanFinish": payload.ScanFinish,
 		"doingTask": payload.DoingTask, "createTime": payload.CreateTime,
 		"duration": payload.Duration, "firstSync": nil,
 		"num":      map[string]int{"wait": payload.Num.Wait, "running": payload.Num.Running, "success": payload.Num.Success, "fail": payload.Num.Fail, "other": payload.Num.Other},

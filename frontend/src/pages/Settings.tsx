@@ -67,23 +67,6 @@ const fields = [
     tip: "单个文件操作失败后的最大重试次数",
   },
   {
-    key: "scheduledFullSyncConfirm",
-    label: "定时全量删除确认",
-    min: 0,
-    max: 1,
-    unit: "",
-    kind: "switch",
-    tip: "开启后，定时全量同步完成文件同步后将目标端待删除项转入待确认清单，不阻塞同步任务；手动全量同步的删除始终需确认后才执行",
-  },
-  {
-    key: "fullSyncApprovalTimeout",
-    label: "删除审批超时",
-    min: 0,
-    max: 1440,
-    unit: "分钟",
-    tip: "待确认删除清单的有效期，超时未确认将自动过期并保留目标端文件（不影响已完成的同步任务）；0 表示永不过期直至手动处理",
-  },
-  {
     key: "taskTimeout",
     label: "任务超时",
     min: 0,
@@ -112,7 +95,7 @@ const fields = [
     label: "全局总带宽限制",
     kind: "text",
     placeholder: "如 10M 或 08:00,5M 23:00,off（留空不限速）",
-    tip: "对所有未单独设置限速的同步任务、双向同步、一致性校验、恢复与离线下载共享总带宽上限；多任务或多配对并发传输时自动按活跃传输流动态均分额度，修改保存后立即生效",
+    tip: "对所有未单独设置限速的同步任务、双向同步、一致性校验与恢复共享总带宽上限；多任务或多配对并发传输时自动按活跃传输流动态均分额度，修改保存后立即生效",
   },
   {
     key: "proxyUrl",
@@ -212,8 +195,6 @@ const cardGroups = [
       "localMaxConcurrentJobs",
       "minFreeSpaceMB",
       "autoResumeInterrupted",
-      "scheduledFullSyncConfirm",
-      "fullSyncApprovalTimeout",
     ] as const,
   },
   {
@@ -564,7 +545,7 @@ export default function Settings() {
               </Tag>
             </div>
             <p className="settings-bw-desc muted">
-              作为系统全局默认规则，对所有未单独配置限速的同步任务、双向同步、一致性校验、文件恢复与离线下载生效；保存后将实时推送至正在运行的跟随任务（同时运行多个任务时按单任务分别限速）。
+              作为系统全局默认规则，对所有未单独配置限速的同步任务、双向同步、一致性校验与文件恢复生效；保存后将实时推送至正在运行的跟随任务（同时运行多个任务时按单任务分别限速）。
             </p>
           </div>
           <BwLimitEditor

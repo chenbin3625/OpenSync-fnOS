@@ -112,9 +112,6 @@ func TestSyncObservedIndexQueuesOnlyChangesAndRetainsDeletionTombstones(t *testi
 	if !state.FullScan || !deleted {
 		t.Fatalf("deletion was not protected: %+v, tombstone=%v", state, deleted)
 	}
-	if err := MarkBisyncInitialized(id); err != nil {
-		t.Fatal(err)
-	}
 	if err := EnsureSyncState(id, "config-b"); err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +120,7 @@ func TestSyncObservedIndexQueuesOnlyChangesAndRetainsDeletionTombstones(t *testi
 	if err := GetDB().QueryRow("SELECT COUNT(*) FROM sync_file_state WHERE jobId=?", id).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 0 || !state.FullScan || !state.BisyncInitialized || !state.BisyncNeedsRebuild {
+	if count != 0 || !state.FullScan {
 		t.Fatalf("configuration invalidation lost safety state: %+v, count=%d", state, count)
 	}
 }
@@ -143,6 +140,35 @@ func TestSyncIndexAndInboxCommitAtomically(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatal("index committed without durable inbox")
+	}
+}
+
+func TestUnchangedSyncTreeDoesNotWaitForSQLiteWriter(t *testing.T) {
+	id := setupSyncStateTest(t)
+	files := []SyncFile{{Path: "same.txt", Size: 1}}
+	if err := ObserveSyncTree(id, "/source", files, true); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := GetDB().Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Rollback()
+	if _, err := writer.Exec("UPDATE sync_state SET lastPoll=1 WHERE jobId=?", id); err != nil {
+		t.Fatal(err)
+	}
+
+	result := make(chan error, 1)
+	go func() { result <- ObserveSyncTree(id, "/source", files, true) }()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		_ = writer.Rollback()
+		<-result
+		t.Fatal("unchanged sync observation waited for the write lock")
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -70,16 +71,15 @@ func TestSystemSettingsPatchKeepsOmittedFields(t *testing.T) {
 		t.Fatal("empty patch changed settings")
 	}
 	full := systemSettingsPatch{
-		TaskTimeout:              intPtr(1),
-		TaskSave:                 intPtr(2),
-		CopyConcurrency:          intPtr(3),
-		ScanConcurrency:          intPtr(4),
-		MaxRetries:               intPtr(5),
-		ScheduledFullSyncConfirm: intPtr(1),
+		TaskTimeout:     intPtr(1),
+		TaskSave:        intPtr(2),
+		CopyConcurrency: intPtr(3),
+		ScanConcurrency: intPtr(4),
+		MaxRetries:      intPtr(5),
 	}.applyTo(current)
 	if full != (config.SystemSettings{
 		TaskTimeout: 1, TaskSave: 2, CopyConcurrency: 3,
-		ScanConcurrency: 4, MaxRetries: 5, ScheduledFullSyncConfirm: 1,
+		ScanConcurrency: 4, MaxRetries: 5,
 	}) {
 		t.Fatalf("full patch = %+v", full)
 	}
@@ -318,7 +318,10 @@ func TestValidateJobFieldsRejectsParentPathSegments(t *testing.T) {
 func TestTestNotifyTimesOutAndAnswersWithGenericFailure(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	release := make(chan struct{})
-	defer close(release)
+	defer func() {
+		close(release)
+		notifyTestWG.Wait()
+	}()
 	oldTimeout, oldService := notifyTestTimeout, testNotifyService
 	notifyTestTimeout = 50 * time.Millisecond
 	testNotifyService = func(map[string]interface{}) error {
@@ -483,6 +486,8 @@ func TestTestNotifyRecoversFromPanicAndReleasesConcurrencySlot(t *testing.T) {
 func TestTestNotifyEnforcesConcurrencyLimit(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	release := make(chan struct{})
+	releaseAll := sync.OnceFunc(func() { close(release) })
+	defer releaseAll()
 	entered := make(chan struct{}, maxConcurrentNotifyTests)
 	old := testNotifyService
 	testNotifyService = func(map[string]interface{}) error {
@@ -506,7 +511,13 @@ func TestTestNotifyEnforcesConcurrencyLimit(t *testing.T) {
 			router.ServeHTTP(w, req)
 			done <- w.Code
 		}()
-		<-entered
+		select {
+		case <-entered:
+		case status := <-done:
+			t.Fatalf("request returned %d before entering notification service", status)
+		case <-time.After(5 * time.Second):
+			t.Fatal("request did not enter notification service")
+		}
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/svr/notify/test", strings.NewReader(`{"notify":{"method":1}}`))
@@ -514,10 +525,9 @@ func TestTestNotifyEnforcesConcurrencyLimit(t *testing.T) {
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 	if w.Code != http.StatusTooManyRequests {
-		close(release)
 		t.Fatalf("status when pool full = %d, want 429", w.Code)
 	}
-	close(release)
+	releaseAll()
 	for i := 0; i < maxConcurrentNotifyTests; i++ {
 		if code := <-done; code != http.StatusOK {
 			t.Fatalf("in-flight request %d status = %d, want 200", i, code)

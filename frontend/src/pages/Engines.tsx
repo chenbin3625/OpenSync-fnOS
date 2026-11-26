@@ -35,7 +35,6 @@ import {
   InlineNotice,
   LoadState,
   ResourceCard,
-  confirmAction,
   confirmDelete,
   errorToast,
 } from "../components/common";
@@ -83,7 +82,6 @@ export default function Engines() {
   const [aboutResults, setAboutResults] = useState<
     Record<string, NativeAboutInfo>
   >({});
-  const [cleaningName, setCleaningName] = useState<string | null>(null);
   const [deletingName, setDeletingName] = useState<string | null>(null);
   const [renameTarget, setRenameTarget] = useState<string | null>(null);
   const [renameNewName, setRenameNewName] = useState("");
@@ -112,7 +110,6 @@ export default function Engines() {
     checkingAll ||
     testingName !== null ||
     aboutLoadingName !== null ||
-    cleaningName !== null ||
     deletingName !== null ||
     renaming;
 
@@ -172,26 +169,6 @@ export default function Engines() {
     } finally {
       setAboutLoadingName(null);
     }
-  };
-
-  const handleCleanupRemote = (name: string) => {
-    confirmAction({
-      title: `清理远程存储「${name}」回收站与碎片？`,
-      content:
-        "将调用 rclone cleanup 清空远端回收站或残留的分片上传碎片（具体行为取决于远端存储）。此操作不可撤销。",
-      okText: "确认清理",
-      onOk: async () => {
-        setCleaningName(name);
-        try {
-          await api.cleanupNativeStorage(name);
-          Toast.success(`已完成「${name}」清理`);
-        } catch (err) {
-          errorToast(err);
-        } finally {
-          setCleaningName(null);
-        }
-      },
-    });
   };
 
   const handleDeleteRemote = (item: NativeRemoteItem) => {
@@ -470,12 +447,6 @@ export default function Engines() {
                     ariaBusy={aboutLoadingName === "本地"}
                     onClick={() => void handleAboutStorage("本地")}
                   />
-                  <IconButton
-                    label="配置本地目录"
-                    icon={<IconSettingStroked aria-hidden="true" />}
-                    disabled={anyBusy}
-                    onClick={() => setModal({ mode: "local" })}
-                  />
                 </>
               }
             />
@@ -663,19 +634,6 @@ export default function Engines() {
                           icon={<IconLockStroked aria-hidden="true" />}
                           disabled={anyBusy}
                           onClick={() => setCryptSourceRemote(item)}
-                        />
-                      )}
-                      {item.type !== "local" && (
-                        <IconButton
-                          label={
-                            cleaningName === item.name
-                              ? "清理中…"
-                              : `清理回收站与碎片 ${item.name}`
-                          }
-                          icon={<IconRefresh aria-hidden="true" />}
-                          disabled={anyBusy}
-                          ariaBusy={cleaningName === item.name}
-                          onClick={() => handleCleanupRemote(item.name)}
                         />
                       )}
                       <IconButton

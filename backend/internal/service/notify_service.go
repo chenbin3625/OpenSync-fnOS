@@ -1204,48 +1204,6 @@ func TestNotify(notify map[string]interface{}) error {
 	return nil
 }
 
-func buildApprovalNotifyVars(taskID, jobID int64, job map[string]interface{}, approval *FullSyncApproval) map[string]string {
-	jobName := ""
-	srcPath := ""
-	dstPath := ""
-	methodLabel := localizedMethodLabel(1)
-	if job != nil {
-		if r := strings.TrimSpace(util.StringValue(job["remark"])); r != "" {
-			jobName = r
-		}
-		srcPath = strings.Join(parsePathList(job["srcPath"]), "、")
-		dstPath = strings.Join(parsePathList(job["dstPath"]), "、")
-		methodLabel = localizedMethodLabel(util.ToInt(job["method"]))
-	}
-	if jobName == "" {
-		jobName = fmt.Sprintf("#%d", jobID)
-	}
-	deleteFiles := 0
-	deleteDirs := 0
-	for _, p := range approval.Paths {
-		if p.IsPath {
-			deleteDirs++
-		} else {
-			deleteFiles++
-		}
-	}
-	return map[string]string{
-		"jobName":     jobName,
-		"jobId":       strconv.FormatInt(jobID, 10),
-		"taskId":      strconv.FormatInt(taskID, 10),
-		"method":      methodLabel,
-		"status":      msg.T(msg.NotifyApprovalTitle),
-		"event":       "approval",
-		"srcPath":     srcPath,
-		"dstPath":     dstPath,
-		"deleteCount": strconv.Itoa(approval.DeleteCount),
-		"deleteFiles": strconv.Itoa(deleteFiles),
-		"deleteDirs":  strconv.Itoa(deleteDirs),
-		"deleteSize":  util.ConvertBytes(approval.DeleteSize),
-		"time":        time.Now().In(schedulerLocation()).Format("2006-01-02 15:04:05"),
-	}
-}
-
 func buildFailedErrorSummary(taskID int64) string {
 	items, err := mapper.GetTopFailedTaskItems(taskID, 3)
 	if err != nil || len(items) == 0 {
@@ -1385,28 +1343,6 @@ func SendTaskNotification(taskID int64, status int, taskNum map[string]interface
 	sendNotifyFanOutWithEvent(notifyList, title, content, event, vars, needNotSync)
 }
 
-func deliverApprovalNotification(job notifyJob) {
-	if notifyBaseContext().Err() != nil {
-		return
-	}
-	notifyList, err := mapper.GetNotifyList(true)
-	if err != nil || len(notifyList) == 0 {
-		return
-	}
-	notifyList = filterNotifyListForJob(notifyList, job.jobData)
-	if len(notifyList) == 0 {
-		return
-	}
-	vars := job.vars
-	jobName := vars["jobName"]
-	deleteCount, _ := strconv.Atoi(vars["deleteCount"])
-	deleteFiles, _ := strconv.Atoi(vars["deleteFiles"])
-	deleteDirs, _ := strconv.Atoi(vars["deleteDirs"])
-	title := fmt.Sprintf("OpenSync - %s: %s", jobName, msg.T(msg.NotifyApprovalTitle))
-	content := fmt.Sprintf(msg.T(msg.NotifyApprovalContent), jobName, deleteCount, deleteFiles, deleteDirs)
-	sendNotifyFanOutWithEvent(notifyList, title, content, "approval", vars, false)
-}
-
 func deliverSystemAlertNotification(job notifyJob) {
 	if notifyBaseContext().Err() != nil {
 		return
@@ -1419,11 +1355,9 @@ func deliverSystemAlertNotification(job notifyJob) {
 }
 
 // deliverTaskNotification is the dispatcher worker's entry point: it dispatches
-// task completion, full-sync approval, and system alert notifications.
+// task completion and system alert notifications.
 func deliverTaskNotification(job notifyJob) {
 	switch job.kind {
-	case "approval":
-		deliverApprovalNotification(job)
 	case "system_alert":
 		deliverSystemAlertNotification(job)
 	default:

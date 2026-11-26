@@ -441,16 +441,4 @@ describe("mocks store & handlers alignment", () => {
     controller.abort();
     await reader.cancel().catch(() => {});
   });
-
-  it("aligns mirror approval pathCount to 2 matching paths.length", () => {
-    const store = createMockStore({
-      jobs: [{ id: 10, remark: "镜像", method: 1, enable: 1 }],
-    });
-    const task = store.runJob(10);
-    expect(task.approval).toBeUndefined();
-    const approval = store.getPendingApproval(10);
-    expect(approval).not.toBeNull();
-    expect(approval?.pathCount).toBe(2);
-    expect(approval?.paths).toHaveLength(2);
-  });
 });

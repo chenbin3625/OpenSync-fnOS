@@ -8,7 +8,6 @@ import (
 	"opensync/internal/msg"
 	"opensync/internal/service"
 	"opensync/pkg/util"
-	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -227,7 +226,6 @@ func UpdateJob(c *gin.Context) {
 		Abort   *bool        `json:"abort"`
 		ItemIDs []flexibleID `json:"itemIds"`
 		BwLimit *string      `json:"bwLimit"`
-		Paths   []string     `json:"paths"`
 	}
 	if !bindJSONStrict(c, &req) {
 		return
@@ -243,10 +241,6 @@ func UpdateJob(c *gin.Context) {
 			return
 		}
 		if req.BwLimit != nil && *req.Action != "bwlimit" {
-			respondError(c, msg.T(msg.LostPart))
-			return
-		}
-		if len(req.Paths) > 0 && *req.Action != "approve" {
 			respondError(c, msg.T(msg.LostPart))
 			return
 		}
@@ -282,21 +276,13 @@ func UpdateJob(c *gin.Context) {
 				}
 			}
 			handleServiceVoid(c, func() error { return service.RetryFailedTaskItems(taskID, itemIDs) })
-		case "approve":
-			if len(req.Paths) > 0 {
-				handleServiceVoid(c, func() error { return service.ApproveFullSyncTaskPaths(taskID, req.Paths) })
-			} else {
-				handleServiceVoid(c, func() error { return service.ApproveFullSyncTask(taskID) })
-			}
-		case "reject":
-			handleServiceVoid(c, func() error { return service.RejectFullSyncTask(taskID) })
 		default:
 			respondError(c, msg.T(msg.LostPart))
 		}
 		return
 	}
 
-	if req.Action != nil || len(req.ItemIDs) > 0 || req.BwLimit != nil || len(req.Paths) > 0 {
+	if req.Action != nil || len(req.ItemIDs) > 0 || req.BwLimit != nil {
 		respondError(c, msg.T(msg.LostPart))
 		return
 	}
@@ -556,26 +542,46 @@ func StartJobCheck(c *gin.Context) {
 	})
 }
 
-// ResetBisyncJob handles POST /svr/job/bisync/resync
-func ResetBisyncJob(c *gin.Context) {
+// GetJobConflicts handles GET /svr/job/conflicts?id=<jobId>&includeResolved=0|1
+func GetJobConflicts(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	jobID, err := parseRequiredID(c.Query("id"))
+	if err != nil {
+		respondError(c, err.Error())
+		return
+	}
+	includeResolved := c.Query("includeResolved") == "1" || strings.EqualFold(c.Query("includeResolved"), "true")
+	handleService(c, func() (interface{}, error) {
+		return service.ListJobBisyncConflicts(jobID, includeResolved)
+	})
+}
+
+// ResolveJobConflict handles POST /svr/job/conflicts/resolve
+func ResolveJobConflict(c *gin.Context) {
 	var req struct {
-		ID     *flexibleID `json:"id"`
-		RunNow bool        `json:"runNow"`
+		JobID      *flexibleID `json:"jobId"`
+		ConflictID *flexibleID `json:"conflictId"`
+		Action     string      `json:"action"`
 	}
 	if !bindJSONStrict(c, &req) {
 		return
 	}
-	if req.ID == nil {
+	if req.JobID == nil || req.ConflictID == nil || strings.TrimSpace(req.Action) == "" {
 		respondError(c, msg.T(msg.LostPart))
 		return
 	}
-	jobID, err := req.ID.parse()
+	jobID, err := req.JobID.parse()
+	if err != nil {
+		respondError(c, err.Error())
+		return
+	}
+	conflictID, err := req.ConflictID.parse()
 	if err != nil {
 		respondError(c, err.Error())
 		return
 	}
 	handleServiceVoid(c, func() error {
-		return service.ResetBisyncJob(jobID, req.RunNow)
+		return service.ResolveJobBisyncConflict(c.Request.Context(), jobID, conflictID, req.Action)
 	})
 }
 
@@ -647,33 +653,6 @@ func RepairJobCheck(c *gin.Context) {
 	})
 }
 
-// ExcludePendingApproval handles POST /svr/job/approval/exclude
-func ExcludePendingApproval(c *gin.Context) {
-	var req struct {
-		TaskID *flexibleID `json:"taskId"`
-		Paths  []string    `json:"paths"`
-	}
-	if !bindJSONStrict(c, &req) {
-		return
-	}
-	if req.TaskID == nil || len(req.Paths) == 0 {
-		respondError(c, msg.T(msg.LostPart))
-		return
-	}
-	taskID, err := req.TaskID.parse()
-	if err != nil {
-		respondError(c, err.Error())
-		return
-	}
-	handleService(c, func() (interface{}, error) {
-		added, exErr := service.ExcludeFullSyncApprovalPaths(taskID, req.Paths)
-		if exErr != nil {
-			return nil, exErr
-		}
-		return gin.H{"excludedCount": added}, nil
-	})
-}
-
 // TestJobFilter handles POST /svr/job/filter/test
 func TestJobFilter(c *gin.Context) {
 	var req map[string]interface{}
@@ -686,39 +665,5 @@ func TestJobFilter(c *gin.Context) {
 	}
 	handleService(c, func() (interface{}, error) {
 		return service.TestJobFilter(req)
-	})
-}
-
-// GetPendingApproval handles GET /svr/job/approval.
-// With jobId it returns that job's pending deletion approval (or null);
-// optional query params offset, limit, q, type filter and paginate the target paths.
-// Without jobId it returns all pending deletion approvals.
-func GetPendingApproval(c *gin.Context) {
-	c.Header("Cache-Control", "no-store")
-	if rawJobID := c.Query("jobId"); rawJobID != "" {
-		jobID, err := parseRequiredID(rawJobID)
-		if err != nil {
-			respondError(c, err.Error())
-			return
-		}
-		rawOffset := strings.TrimSpace(c.Query("offset"))
-		rawLimit := strings.TrimSpace(c.Query("limit"))
-		query := strings.TrimSpace(c.Query("q"))
-		kind := strings.TrimSpace(c.Query("type"))
-		if rawOffset != "" || rawLimit != "" || query != "" || kind != "" {
-			offset, _ := strconv.Atoi(rawOffset)
-			limit, _ := strconv.Atoi(rawLimit)
-			handleService(c, func() (interface{}, error) {
-				return service.GetPendingApprovalFiltered(jobID, offset, limit, query, kind), nil
-			})
-			return
-		}
-		handleService(c, func() (interface{}, error) {
-			return service.GetPendingApproval(jobID), nil
-		})
-		return
-	}
-	handleService(c, func() (interface{}, error) {
-		return service.ListPendingApprovals(), nil
 	})
 }

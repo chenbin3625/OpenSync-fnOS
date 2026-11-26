@@ -156,16 +156,6 @@ func BrowseNativeStorage(c *gin.Context) {
 	})
 }
 
-func RestoreNativeFile(c *gin.Context) {
-	var in service.NativeRestoreInput
-	if !bindJSONStrict(c, &in) {
-		return
-	}
-	handleServiceVoid(c, func() error {
-		return service.RestoreNativeFile(c.Request.Context(), in)
-	})
-}
-
 func MkdirNativeStorage(c *gin.Context) {
 	var in service.NativePathInput
 	if !bindJSONStrict(c, &in) {
@@ -204,57 +194,6 @@ func SizeNativeStorage(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
 	handleService(c, func() (interface{}, error) {
 		return service.SizeNativeStorage(c.Request.Context(), in)
-	})
-}
-
-func DedupeNativeStorage(c *gin.Context) {
-	var in service.NativeDedupeInput
-	if !bindJSONStrict(c, &in) {
-		return
-	}
-	handleService(c, func() (interface{}, error) {
-		return service.DedupeNativeStorage(c.Request.Context(), in)
-	})
-}
-
-func CleanupNativeStorage(c *gin.Context) {
-	var in service.NativeAboutInput
-	if !bindJSONStrict(c, &in) {
-		return
-	}
-	handleServiceVoid(c, func() error {
-		return service.CleanupNativeStorage(c.Request.Context(), in)
-	})
-}
-
-func LinkNativeStorage(c *gin.Context) {
-	var in service.NativeLinkInput
-	if !bindJSONStrict(c, &in) {
-		return
-	}
-	c.Header("Cache-Control", "no-store")
-	handleService(c, func() (interface{}, error) {
-		return service.LinkNativeStorage(c.Request.Context(), in)
-	})
-}
-
-func CopyURLNativeStorage(c *gin.Context) {
-	var in service.NativeCopyURLInput
-	if !bindJSONStrict(c, &in) {
-		return
-	}
-	handleService(c, func() (interface{}, error) {
-		return service.CopyURLNativeStorage(c.Request.Context(), in)
-	})
-}
-
-func SetTierNativeStorage(c *gin.Context) {
-	var in service.NativeSetTierInput
-	if !bindJSONStrict(c, &in) {
-		return
-	}
-	handleServiceVoid(c, func() error {
-		return service.SetTierNativeStorage(c.Request.Context(), in)
 	})
 }
 
@@ -326,16 +265,6 @@ func StartAsyncRestoreNativeFile(c *gin.Context) {
 	}
 	handleService(c, func() (interface{}, error) {
 		return service.StartAsyncRestoreNativeFile(in)
-	})
-}
-
-func StartAsyncCopyURLNativeStorage(c *gin.Context) {
-	var in service.NativeCopyURLInput
-	if !bindJSONStrict(c, &in) {
-		return
-	}
-	handleService(c, func() (interface{}, error) {
-		return service.StartAsyncCopyURLNativeStorage(in)
 	})
 }
 
@@ -454,53 +383,6 @@ func UploadNativeStorageFile(c *gin.Context) {
 			return nil, err
 		}
 		return gin.H{"fileName": fileName, "size": written}, nil
-	})
-}
-
-// AddAlist handles POST /svr/alist
-func AddAlist(c *gin.Context) {
-	var req map[string]interface{}
-	if !bindJSON(c, &req) {
-		return
-	}
-	if req == nil {
-		respondError(c, msg.T(msg.LostPart))
-		return
-	}
-	handleServiceVoid(c, func() error {
-		return service.AddClient(req)
-	})
-}
-
-// UpdateAlist handles PUT /svr/alist
-func UpdateAlist(c *gin.Context) {
-	var req map[string]interface{}
-	if !bindJSON(c, &req) {
-		return
-	}
-	if req == nil {
-		respondError(c, msg.T(msg.LostPart))
-		return
-	}
-	handleServiceVoid(c, func() error {
-		return service.UpdateClient(req)
-	})
-}
-
-// TestAlist handles POST /svr/alist/test
-func TestAlist(c *gin.Context) {
-	idStr := c.Query("id")
-	if idStr == "" {
-		respondError(c, msg.T(msg.LostPart))
-		return
-	}
-	id, err := parseRequiredID(idStr)
-	if err != nil {
-		respondError(c, err.Error())
-		return
-	}
-	handleService(c, func() (interface{}, error) {
-		return service.TestClientWithHealth(c.Request.Context(), id)
 	})
 }
 

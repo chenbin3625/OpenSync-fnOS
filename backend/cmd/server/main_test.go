@@ -421,7 +421,7 @@ func TestOpenListenerRefusesWhileLockIsHeld(t *testing.T) {
 func TestBodyLimitMiddlewareAnswers413ForChunkedBody(t *testing.T) {
 	router := newRouter(true, nil)
 	body := `{"name":"` + strings.Repeat("x", (1<<20)+1024) + `"}`
-	req := httptest.NewRequest(http.MethodPost, "/app/opensync/svr/alist", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/app/opensync/svr/native/storage", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.ContentLength = -1
 	w := httptest.NewRecorder()

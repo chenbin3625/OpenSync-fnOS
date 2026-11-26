@@ -54,7 +54,7 @@ export const methodOptions = [
   {
     name: "全量同步",
     description:
-      "目标目录与源目录保持一致，会清理目标端多余文件；同步过程先完成新增、更新与同端移动而不阻塞任务，手动执行（及开启定时确认时）会把待删除项后置到待确认清单，确认后再执行删除。",
+      "目标目录与源目录保持一致，完成新增、更新与同端移动后直接清理目标端多余文件（开启回收站时优先移入回收站）。",
   },
   {
     name: "移动",
@@ -64,7 +64,7 @@ export const methodOptions = [
   {
     name: "双向同步",
     description:
-      "基于 rclone bisync 在一对源目录和目标目录之间双向同步新增、修改与删除（仅原生 rclone 引擎支持）；首次运行自动执行基线初始化（--resync），后续按变更增量同步。",
+      "在两个目录之间双向同步新增、修改与删除。首次运行建立同步基线，后续根据两端变更同步，冲突可在任务概览中处理。",
   },
 ];
 export const methodNames = methodOptions.map((method) => method.name);

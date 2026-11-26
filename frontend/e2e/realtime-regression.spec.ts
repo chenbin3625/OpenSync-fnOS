@@ -1078,23 +1078,25 @@ test("engine connectivity checks are serialized", async ({ page }) => {
       });
     if (url.pathname.endsWith("/session"))
       return success({ uid: 1, development: false, version: "test" });
-    if (url.pathname.endsWith("/alist/test")) {
+    if (url.pathname.endsWith("/native/storage/test")) {
       releaseRequest?.();
       await requestCanFinish;
-      return success(null);
+      return success({ ok: true });
     }
-    if (url.pathname.endsWith("/alist"))
-      return success([
-        { id: 1, remark: "引擎 A", url: "https://a.test", userName: "a" },
-        { id: 2, remark: "引擎 B", url: "https://b.test", userName: "b" },
-      ]);
+    if (url.pathname.endsWith("/native/storage"))
+      return success({
+        engineId: 1, enabled: true, rcloneAvailable: true, localRoots: [],
+        remotes: ["远程 A", "远程 B"].map((name) => ({
+          name, type: "webdav", summary: "WebDAV", options: {}, configuredSecrets: [], usedByJobs: [], usedByCrypts: [],
+        })),
+      });
     if (url.pathname.endsWith("/job"))
       return success({ dataList: [], count: 0 });
     return success(null);
   });
 
   await page.goto("/app/opensync/engines");
-  const buttons = page.getByRole("button", { name: "测试引擎", exact: true });
+  const buttons = page.getByRole("button", { name: /^测试连接 远程/ });
   await buttons.first().click();
   await requestStarted;
   // The active engine shows progress feedback and every button is disabled so
@@ -1345,7 +1347,7 @@ test("completed execution details omit file status filtering", async ({ page }) 
     .getByRole("button", { name: "查看执行明细", exact: true })
     .click();
   const details = page.getByRole("dialog");
-  await expect(details.getByText("执行明细", { exact: true })).toBeVisible();
+  await expect(details.getByText(/^执行明细 · 任务 #/)).toBeVisible();
   const visibleDetails = details.locator(
     ".desktop-data:visible, .mobile-data:visible",
   );
@@ -1382,6 +1384,7 @@ test("remote path load errors remain actionable", async ({ page }) => {
 
   await page.goto("/app/opensync/tasks");
   await page.getByRole("button", { name: "新建任务", exact: true }).click();
+  await page.getByRole("button", { name: "高级设置", exact: true }).click();
   await expect(page.getByText("目录暂时不可用").first()).toBeVisible();
   await expect(page.getByRole("button", { name: "重试" }).first()).toBeVisible();
 });

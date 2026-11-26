@@ -404,50 +404,6 @@ func TestExportImportEncryptedAboutBrowseRestoreCheckAndBisync(t *testing.T) {
 		t.Fatalf("unexpected check file lists: %+v", chk)
 	}
 
-	// 5. Bisync (`rclone bisync`): 1st run auto-resyncs both ways, 2nd run incrementally syncs new files both ways
-	biA := filepath.Join(base, "biA")
-	biB := filepath.Join(base, "biB")
-	workDir := filepath.Join(base, "bisync_work")
-	_ = os.MkdirAll(biA, 0755)
-	_ = os.MkdirAll(biB, 0755)
-	t.Setenv("TRIM_DATA_ACCESSIBLE_PATHS", biA+":"+biB)
-	vBiA, _ := virtualLocal(biA)
-	vBiB, _ := virtualLocal(biB)
-
-	_ = os.WriteFile(filepath.Join(biA, "from_a.txt"), []byte("AAA"), 0644)
-	_ = os.WriteFile(filepath.Join(biB, "from_b.txt"), []byte("BBB"), 0644)
-
-	res1, err := cfg.Bisync(ctx, vBiA, vBiB, BisyncOptions{WorkDir: workDir, Transfers: 2, Checkers: 2}, nil)
-	if err != nil {
-		t.Fatalf("Bisync run 1 failed: %v", err)
-	}
-	if !res1.Resynced {
-		t.Fatal("expected run 1 to trigger initial resync")
-	}
-	if got, err := os.ReadFile(filepath.Join(biB, "from_a.txt")); err != nil || string(got) != "AAA" {
-		t.Fatalf("from_a.txt not synced to biB: %q (%v)", got, err)
-	}
-	if got, err := os.ReadFile(filepath.Join(biA, "from_b.txt")); err != nil || string(got) != "BBB" {
-		t.Fatalf("from_b.txt not synced to biA: %q (%v)", got, err)
-	}
-
-	// Add new files on both sides and run 2nd incremental bisync (must NOT resync!)
-	_ = os.WriteFile(filepath.Join(biA, "inc_a.txt"), []byte("INC-A"), 0644)
-	_ = os.WriteFile(filepath.Join(biB, "inc_b.txt"), []byte("INC-B"), 0644)
-	res2, err := cfg.Bisync(ctx, vBiA, vBiB, BisyncOptions{WorkDir: workDir, Transfers: 2, Checkers: 2}, nil)
-	if err != nil {
-		t.Fatalf("Bisync run 2 failed: %v", err)
-	}
-	if res2.Resynced {
-		t.Fatal("expected run 2 to use existing listing state without resync")
-	}
-	if got, err := os.ReadFile(filepath.Join(biB, "inc_a.txt")); err != nil || string(got) != "INC-A" {
-		t.Fatalf("inc_a.txt not synced to biB on run 2: %q (%v)", got, err)
-	}
-	if got, err := os.ReadFile(filepath.Join(biA, "inc_b.txt")); err != nil || string(got) != "INC-B" {
-		t.Fatalf("inc_b.txt not synced to biA on run 2: %q (%v)", got, err)
-	}
-
 	// Verify Version() returns non-empty version string
 	ver, err := Version(ctx)
 	if err != nil || ver == "" {
@@ -541,12 +497,6 @@ func TestExtendedBackendsCombineAliasArchiveAndNewOps(t *testing.T) {
 	if err := ValidateOrderBy("invalid,asc"); err == nil {
 		t.Fatal("expected invalid order-by field rejected")
 	}
-	if err := validateCopyURLTarget("http://127.0.0.1:8080/secret"); err == nil {
-		t.Fatal("expected loopback copyurl rejected")
-	}
-	if err := validateCopyURLTarget("https://example.com/file.bin"); err != nil {
-		t.Fatalf("expected valid https copyurl accepted, got: %v", err)
-	}
 
 	requireRclone(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -596,7 +546,7 @@ func TestExtendedBackendsCombineAliasArchiveAndNewOps(t *testing.T) {
 		t.Fatalf("expected 1 matched file with MinSize=10, got %+v", chkFiltered)
 	}
 
-	// Size & Dedupe list on crypt remote
+	// Size on crypt remote
 	szLocal, err := rtCfg.Size(ctx, vSrc, SessionOptions{})
 	if err != nil || szLocal.Count != 2 || szLocal.Bytes != 18 {
 		t.Fatalf("Size(vSrc) unexpected: %+v (%v)", szLocal, err)
@@ -604,30 +554,5 @@ func TestExtendedBackendsCombineAliasArchiveAndNewOps(t *testing.T) {
 	szVault, err := rtCfg.Size(ctx, "/vault", SessionOptions{})
 	if err != nil || szVault.Count != 2 || szVault.Bytes != 18 {
 		t.Fatalf("Size(/vault) unexpected: %+v (%v)", szVault, err)
-	}
-	dedupeRes, err := rtCfg.Dedupe(ctx, "/vault", DedupeOptions{Mode: "list", DryRun: true}, SessionOptions{})
-	if err != nil || !dedupeRes.DryRun {
-		t.Fatalf("Dedupe list failed: %+v (%v)", dedupeRes, err)
-	}
-
-	// Bisync pending resync marker triggers --resync
-	workDir := filepath.Join(base, "bi_work")
-	biA := filepath.Join(base, "biA")
-	biB := filepath.Join(base, "biB")
-	_ = os.MkdirAll(biA, 0755)
-	_ = os.MkdirAll(biB, 0755)
-	t.Setenv("TRIM_DATA_ACCESSIBLE_PATHS", biA+":"+biB)
-	vBiA, _ := virtualLocal(biA)
-	vBiB, _ := virtualLocal(biB)
-	_ = os.WriteFile(filepath.Join(biA, "a.txt"), []byte("A"), 0644)
-	if _, err := rtCfg.Bisync(ctx, vBiA, vBiB, BisyncOptions{WorkDir: workDir, Transfers: 2, Checkers: 2}, nil); err != nil {
-		t.Fatalf("initial bisync failed: %v", err)
-	}
-	if err := MarkBisyncResyncPending(workDir); err != nil {
-		t.Fatalf("MarkBisyncResyncPending failed: %v", err)
-	}
-	res2, err := rtCfg.Bisync(ctx, vBiA, vBiB, BisyncOptions{WorkDir: workDir, ResyncMode: "newer", Transfers: 2, Checkers: 2}, nil)
-	if err != nil || !res2.Resynced {
-		t.Fatalf("expected bisync with pending marker to resync, got %+v (%v)", res2, err)
 	}
 }

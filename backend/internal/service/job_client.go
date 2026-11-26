@@ -690,8 +690,6 @@ func (jc *JobClient) runMarkedJobWithOptions(opts markedJobRunOptions) {
 	task.SyncChangedFiles = append([]string(nil), opts.syncChangedFiles...)
 	task.SyncPartial = opts.syncPartial
 	task.SyncFullScan = opts.syncGeneration > 0 && !opts.syncPartial
-	task.RequireFullSyncApproval = manual ||
-		(sourceTaskID == 0 && config.GetConfig().Server.ScheduledFullSyncConfirm == 1)
 	if !jc.trySetCurrentTaskIfActive(task) {
 		// The job was paused or deleted while newJobTask initialized: record the
 		// task as stopped instead of starting transfers that pause/delete
@@ -817,25 +815,6 @@ func (jc *JobClient) DoManual() error {
 	}
 	go jc.runMarkedManualJob()
 	return nil
-}
-
-// DoWatchSync triggers an incremental sync from the filesystem watcher.
-// Returns false when the job is already busy so the watcher can requeue changes.
-func (jc *JobClient) DoWatchSync(changedPaths []string) bool {
-	if jc.isClosing() || !jc.enabled() {
-		return true
-	}
-	if !jc.tryMarkDoing() {
-		return false
-	}
-	if jc.isClosing() || !jc.enabled() {
-		jc.markDone()
-		return true
-	}
-	go jc.runMarkedJobWithOptions(markedJobRunOptions{
-		onlyFiles: changedPaths,
-	})
-	return true
 }
 
 // DoRepairFiles launches a targeted force-overwrite copy for specific relative

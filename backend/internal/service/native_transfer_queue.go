@@ -23,7 +23,7 @@ const (
 
 type NativeTransferTask struct {
 	ID             string  `json:"id"`
-	Kind           string  `json:"kind"` // restore | copyurl | batch_restore | batch_delete | batch_move | trash_restore
+	Kind           string  `json:"kind"` // restore | batch_restore | batch_delete | batch_move | trash_restore
 	Label          string  `json:"label"`
 	Status         string  `json:"status"` // running | completed | failed | cancelled
 	DoneBytes      int64   `json:"doneBytes"`
@@ -241,56 +241,6 @@ func StartAsyncRestoreNativeFile(in NativeRestoreInput) (*NativeTransferTask, er
 			t.CompletedItems = 1
 			t.Percent = 100
 			t.Detail = fmt.Sprintf("已恢复至 %s", dst)
-		})
-		return nil
-	})
-}
-
-// StartAsyncCopyURLNativeStorage launches a background HTTP(S) offline download with Range resume & progress.
-func StartAsyncCopyURLNativeStorage(in NativeCopyURLInput) (*NativeTransferTask, error) {
-	rawURL := strings.TrimSpace(in.URL)
-	dstDir := strings.TrimSpace(in.DstDir)
-	if rawURL == "" || dstDir == "" {
-		return nil, publicError("请提供下载链接与目标目录")
-	}
-	_, c, err := loadExistingNativeRow()
-	if err != nil {
-		return nil, err
-	}
-	nameHint := strings.TrimSpace(in.FileName)
-	if nameHint == "" {
-		nameHint = path.Base(strings.Split(rawURL, "?")[0])
-	}
-	label := fmt.Sprintf("离线下载 %s → %s", nameHint, dstDir)
-	return nativeTransfers.start("copyurl", label, 1, func(ctx context.Context, update func(func(*NativeTransferTask))) error {
-		savedName, copyErr := c.CopyURLWithProgress(ctx, rawURL, dstDir, native.CopyURLOptions{
-			FileName:     in.FileName,
-			AutoFilename: in.AutoFilename,
-			NoClobber:    in.NoClobber,
-		}, native.SessionOptions{
-			ProxyURL: globalNativeProxyURL(),
-			BwLimit:  globalDefaultBwLimit(),
-		}, func(doneBytes, totalBytes int64, speed float64) {
-			update(func(t *NativeTransferTask) {
-				t.DoneBytes = doneBytes
-				t.TotalBytes = totalBytes
-				t.Speed = speed
-				if totalBytes > 0 {
-					pct := float64(doneBytes) * 100.0 / float64(totalBytes)
-					if pct > 100 {
-						pct = 100
-					}
-					t.Percent = pct
-				}
-			})
-		})
-		if copyErr != nil {
-			return copyErr
-		}
-		update(func(t *NativeTransferTask) {
-			t.CompletedItems = 1
-			t.Percent = 100
-			t.Detail = fmt.Sprintf("已保存为 %s", savedName)
 		})
 		return nil
 	})

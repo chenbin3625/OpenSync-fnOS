@@ -326,13 +326,13 @@ func TestLargeDatasetExportAndDashboardOverviewExceeding10000Rows(t *testing.T) 
 		t.Fatalf("bulk insert job_task_item: %v", err)
 	}
 
-	_, _, txtData, err := ExportTaskItems(map[string]interface{}{"taskId": firstTaskID}, "txt")
+	_, _, csvData, err := ExportTaskItems(map[string]interface{}{"taskId": firstTaskID}, "csv")
 	if err != nil {
-		t.Fatalf("ExportTaskItems(txt, %d rows) error: %v", count, err)
+		t.Fatalf("ExportTaskItems(csv, %d rows) error: %v", count, err)
 	}
-	lines := strings.Split(strings.TrimSpace(string(txtData)), "\n")
-	if len(lines) != count {
-		t.Fatalf("exported txt lines = %d, want %d", len(lines), count)
+	lines := strings.Split(strings.TrimSpace(string(csvData)), "\n")
+	if len(lines) != count+1 {
+		t.Fatalf("exported CSV lines = %d, want %d", len(lines), count+1)
 	}
 
 	overview, err := GetDashboardOverview()

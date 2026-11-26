@@ -1,13 +1,17 @@
 import { http, HttpResponse, type DefaultBodyType } from "msw";
 import { MockStore, createMockStore, type MockStoreSeed } from "./store";
+import type { NativeTransferTask } from "../types";
 import { validateBwLimitExpression } from "../lib/bwLimit";
 
 const apiBase = "*/app/opensync/svr";
+
+const nativeTransfers: NativeTransferTask[] = [];
 
 export let mockStore = createMockStore();
 
 export function resetMockStore(seed?: MockStoreSeed): MockStore {
   mockStore = createMockStore(seed);
+  nativeTransfers.length = 0;
   return mockStore;
 }
 
@@ -34,10 +38,8 @@ const systemSettingRanges: Record<string, { name: string; min: number; max: numb
   copyConcurrency: { name: "操作并发数", min: 1, max: 100 },
   scanConcurrency: { name: "扫描并发数", min: 1, max: 50 },
   maxRetries: { name: "失败重试次数", min: 0, max: 10 },
-  scheduledFullSyncConfirm: { name: "定时全量同步删除确认", min: 0, max: 1 },
   taskTimeout: { name: "任务超时时间", min: 0, max: 8760 },
   taskSave: { name: "历史任务保留", min: 0, max: 3650 },
-  fullSyncApprovalTimeout: { name: "删除审批超时时间", min: 0, max: 1440 },
   engineHealthCheckInterval: { name: "引擎健康检查周期", min: 0, max: 1440 },
 };
 
@@ -287,14 +289,37 @@ export const handlers = [
     );
     return typeof res === "string" ? fail(res) : ok(res);
   }),
-  http.post(`${apiBase}/native/storage/restore`, async ({ request }) => {
+  http.post(`${apiBase}/native/storage/transfers/restore`, async ({ request }) => {
     const body = await readBody(request);
     if (!body) return fail("请求内容无效");
     const err = mockStore.restoreNativeFile({
       srcPath: typeof body.srcPath === "string" ? body.srcPath : "",
       dstLocalDir: typeof body.dstLocalDir === "string" ? body.dstLocalDir : "",
     });
-    return err ? fail(err) : ok(null);
+    if (err) return fail(err);
+    const now = Math.floor(Date.now() / 1000);
+    const task: NativeTransferTask = {
+      id: crypto.randomUUID(),
+      kind: "restore",
+      label: "恢复到本地",
+      status: "completed",
+      doneBytes: 0,
+      totalBytes: 0,
+      speed: 0,
+      startedAt: now,
+      finishedAt: now,
+      percent: 100,
+      totalItems: 1,
+      completedItems: 1,
+    };
+    nativeTransfers.push(task);
+    return ok(task);
+  }),
+  http.get(`${apiBase}/native/storage/transfers`, () => ok(nativeTransfers)),
+  http.delete(`${apiBase}/native/storage/transfers`, ({ request }) => {
+    const id = new URL(request.url).searchParams.get("id");
+    if (!id) nativeTransfers.length = 0;
+    return ok(null);
   }),
   http.post(`${apiBase}/native/storage/mkdir`, async ({ request }) => {
     const body = await readBody(request);
@@ -328,57 +353,6 @@ export const handlers = [
     if (!body || typeof body.path !== "string") return fail("缺少路径");
     const res = mockStore.sizeNativeStorage(body.path);
     return typeof res === "string" ? fail(res) : ok(res);
-  }),
-  http.post(`${apiBase}/native/storage/dedupe`, async ({ request }) => {
-    const body = await readBody(request);
-    if (!body || typeof body.path !== "string") return fail("缺少路径");
-    const res = mockStore.dedupeNativeStorage({
-      path: body.path,
-      mode: typeof body.mode === "string" ? body.mode : "newest",
-      dryRun: Boolean(body.dryRun),
-    });
-    return typeof res === "string" ? fail(res) : ok(res);
-  }),
-  http.post(`${apiBase}/native/storage/cleanup`, async ({ request }) => {
-    const body = await readBody(request);
-    if (!body || typeof body.name !== "string") return fail("缺少存储名称");
-    const err = mockStore.cleanupNativeStorage(body.name);
-    return err ? fail(err) : ok(null);
-  }),
-  http.post(`${apiBase}/native/storage/link`, async ({ request }) => {
-    const body = await readBody(request);
-    if (!body || typeof body.path !== "string") return fail("缺少路径");
-    const res = mockStore.linkNativeStorage({
-      path: body.path,
-      expire: typeof body.expire === "string" ? body.expire : undefined,
-      unlink: Boolean(body.unlink),
-    });
-    return typeof res === "string" ? fail(res) : ok(res);
-  }),
-  http.post(`${apiBase}/native/storage/copyurl`, async ({ request }) => {
-    const body = await readBody(request);
-    if (!body || typeof body.url !== "string" || typeof body.dstDir !== "string") {
-      return fail("缺少参数");
-    }
-    const res = mockStore.copyUrlNativeStorage({
-      url: body.url,
-      dstDir: body.dstDir,
-      fileName: typeof body.fileName === "string" ? body.fileName : undefined,
-      autoFilename: Boolean(body.autoFilename),
-      noClobber: Boolean(body.noClobber),
-    });
-    return typeof res === "string" ? fail(res) : ok(res);
-  }),
-  http.post(`${apiBase}/native/storage/settier`, async ({ request }) => {
-    const body = await readBody(request);
-    if (!body || typeof body.path !== "string" || typeof body.tier !== "string") {
-      return fail("缺少参数");
-    }
-    const err = mockStore.setTierNativeStorage({
-      path: body.path,
-      tier: body.tier,
-    });
-    return err ? fail(err) : ok(null);
   }),
   http.post(`${apiBase}/native/storage/auth/start`, async ({ request }) => {
     const body = await readBody(request);
@@ -459,18 +433,6 @@ export const handlers = [
     if (engineId !== undefined && path !== null) return ok(mockStore.listPaths(path));
     return ok(mockStore.listEngines());
   }),
-  http.post(`${apiBase}/alist`, async ({ request }) => {
-    const body = await readBody(request);
-    if (!body) return fail("请求内容无效");
-    mockStore.saveEngine(body);
-    return ok(null);
-  }),
-  http.put(`${apiBase}/alist`, async ({ request }) => {
-    const body = await readBody(request);
-    if (!body) return fail("请求内容无效");
-    mockStore.saveEngine(body);
-    return ok(null);
-  }),
   http.get(`${apiBase}/alist/health`, ({ request }) => {
     const query = new URL(request.url).searchParams;
     const id = numberParam(query, "id");
@@ -481,14 +443,6 @@ export const handlers = [
       return ok(mockStore.getEngineHealth(id, refresh));
     }
     return ok(mockStore.listAllEngineHealth(refresh));
-  }),
-  http.post(`${apiBase}/alist/test`, ({ request }) => {
-    const query = new URL(request.url).searchParams;
-    const id = numberParam(query, "id");
-    if (id === undefined) return fail("缺少引擎 ID");
-    return mockStore.listEngines().some((engine) => engine.id === id)
-      ? ok(mockStore.getEngineHealth(id, true))
-      : fail("引擎不存在", 404);
   }),
   http.delete(`${apiBase}/alist`, ({ request }) => {
     const id = numberParam(new URL(request.url).searchParams, "id");
@@ -523,17 +477,16 @@ export const handlers = [
     const query = new URL(request.url).searchParams;
     const taskId = numberParam(query, "taskId");
     if (taskId === undefined) return fail("缺少任务 ID");
-    const format = query.get("format") === "txt" ? "txt" : "csv";
+    const format = query.get("format")?.trim().toLowerCase();
+    if (format && format !== "csv") return fail("仅支持 CSV 导出");
     const rows = mockStore.listTaskItems(taskId, { pageNum: 1, pageSize: 500 }).dataList;
     const text =
-      format === "csv"
-        ? "\uFEFF文件名,源路径,目标路径,大小,状态\n" +
-          rows.map((r) => `${r.fileName || ""},${r.srcPath || ""},${r.dstPath || ""},${r.fileSize || 0},${r.status}`).join("\n")
-        : rows.map((r) => `${r.fileName || ""} -> ${r.dstPath || ""}`).join("\n");
+      "\uFEFF文件名,源路径,目标路径,大小,状态\n" +
+      rows.map((r) => `${r.fileName || ""},${r.srcPath || ""},${r.dstPath || ""},${r.fileSize || 0},${r.status}`).join("\n");
     return new HttpResponse(text, {
       headers: {
-        "Content-Type": format === "csv" ? "text/csv; charset=utf-8" : "text/plain; charset=utf-8",
-        "Content-Disposition": `attachment; filename="task-${taskId}.${format}"`,
+        "Content-Type": "text/csv; charset=utf-8",
+        "Content-Disposition": `attachment; filename="task-${taskId}.csv"`,
       },
     });
   }),
@@ -564,10 +517,23 @@ export const handlers = [
     );
     return res ? ok(res) : fail("任务不存在");
   }),
-  http.post(`${apiBase}/job/bisync/resync`, async ({ request }) => {
+  http.get(`${apiBase}/job/conflicts`, ({ request }) => {
+    const query = new URL(request.url).searchParams;
+    const id = numberParam(query, "id");
+    if (id === undefined) return fail("缺少任务 ID");
+    const includeResolved = query.get("includeResolved") === "1";
+    return ok(mockStore.listJobConflicts(id, includeResolved));
+  }),
+  http.post(`${apiBase}/job/conflicts/resolve`, async ({ request }) => {
     const body = await readBody(request);
-    if (!body || body.id === undefined) return fail("缺少任务 ID");
-    const err = mockStore.resetBisyncJob(Number(body.id), Boolean(body.runNow));
+    if (!body || body.jobId === undefined || body.conflictId === undefined) {
+      return fail("缺少必要参数");
+    }
+    const err = mockStore.resolveJobConflict(
+      Number(body.jobId),
+      Number(body.conflictId),
+      String(body.action || ""),
+    );
     return err ? fail(err) : ok(null);
   }),
   http.get(`${apiBase}/job/check`, ({ request }) => {
@@ -585,18 +551,6 @@ export const handlers = [
     const body = await readBody(request);
     if (!body) return fail("请求内容无效");
     return ok(mockStore.testJobFilter(body));
-  }),
-  http.get(`${apiBase}/job/approval`, ({ request }) => {
-    const query = new URL(request.url).searchParams;
-    const rawJobId = query.get("jobId");
-    if (rawJobId !== null && rawJobId !== "") {
-      const jobId = numberParam(query, "jobId");
-      if (jobId === undefined || !Number.isInteger(jobId) || jobId <= 0) {
-        return fail("缺少必要参数");
-      }
-      return ok(mockStore.getPendingApproval(jobId));
-    }
-    return ok(mockStore.listPendingApprovals());
   }),
   http.get(`${apiBase}/job/stream`, ({ request }) => {
     const query = new URL(request.url).searchParams;

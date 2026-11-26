@@ -24,8 +24,6 @@ export interface SystemSettings {
   copyConcurrency: number;
   scanConcurrency: number;
   maxRetries: number;
-  scheduledFullSyncConfirm: number;
-  fullSyncApprovalTimeout: number;
   engineHealthCheckInterval: number;
   defaultBwLimit?: string;
   proxyUrl?: string;
@@ -158,27 +156,13 @@ export interface NativeDirEntry {
 export interface NativeBrowseResult {
   path: string;
   entries: NativeDirEntry[];
+  nextCursor?: string;
 }
 
 export interface NativeSizeInfo {
   count: number;
   bytes: number;
   sizeless: number;
-}
-
-export interface NativeDedupeResult {
-  mode: string;
-  dryRun: boolean;
-  logs: string[];
-}
-
-export interface NativeLinkResult {
-  url: string;
-  message?: string;
-}
-
-export interface NativeCopyURLResult {
-  fileName: string;
 }
 
 export interface NativeExtraFlags {
@@ -215,19 +199,36 @@ export interface NativeExtraFlags {
   checkSchedule?: string;
   missedCatchUp?: boolean;
   directStream?: boolean;
-  bisyncResyncMode?: string;
   bisyncMaxDelete?: number;
   bisyncForce?: boolean;
 }
 
+export interface BisyncConflict {
+  id: number;
+  jobId: number;
+  relPath: string;
+  conflictType: "content" | "case" | "type" | "invalid_name" | string;
+  conflictCopyPath: string;
+  winnerSide: "A" | "B" | "" | string;
+  aSize: number;
+  aModTime: number;
+  bSize: number;
+  bModTime: number;
+  detail: string;
+  resolved: boolean;
+  createdAt: number;
+}
+
 export interface SyncStatus {
-  state: "monitoring" | "pending" | "scanning" | "syncing" | "synced" | "waiting_window" | "waiting_approval" | "paused" | "error" | "needs_rebuild";
+  state: "monitoring" | "pending" | "scanning" | "syncing" | "synced" | "waiting_window" | "paused" | "error";
   pendingChanges: number;
+  conflictCount?: number;
   lastSuccess: number;
   lastPoll: number;
   nextPoll: number;
   error: string;
   failures: number;
+  retryAt?: number;
   direction?: string;
   pollIntervalSec?: number;
   auditIntervalMin?: number;
@@ -406,7 +407,6 @@ export interface JobItem {
   running?: boolean;
   paused?: boolean;
   queued?: boolean;
-  pendingApproval?: boolean;
   watching?: boolean;
   checkRunning?: boolean;
   lastStatus?: number;
@@ -472,41 +472,9 @@ export interface ScanProgress {
   totalFiles?: number;
 }
 
-export interface FullSyncApprovalPath {
-  path: string;
-  isPath: boolean;
-  count: number;
-  size: number;
-  action: "删除" | "移动" | string;
-}
-
-export interface FullSyncApproval {
-  jobId?: number;
-  jobName?: string;
-  taskId?: number;
-  deleteCount: number;
-  deleteSize: number;
-  pathCount: number;
-  filteredCount?: number;
-  hasMore?: boolean;
-  paths: FullSyncApprovalPath[];
-  status?: "pending" | "executing" | string;
-  createdAt?: number;
-  expiresAt?: number;
-  planChanged?: boolean;
-  lastError?: string;
-  execPhase?: "verifying" | "deleting" | string;
-  execDone?: number;
-  execTotal?: number;
-  execFailed?: number;
-  execCurrent?: string;
-  execStartedAt?: number;
-}
-
 export interface CurrentTaskData {
   taskId: number;
   scanFinish: boolean;
-  approval?: FullSyncApproval | null;
   scan?: ScanProgress;
   doingTask?: TaskItem[];
   doingPatch?: TaskItem[];
@@ -550,7 +518,6 @@ export interface DashboardKPI {
   enabledJobs: number;
   runningJobs: number;
   queuedJobs: number;
-  pendingApprovals: number;
   totalEngines: number;
   onlineEngines: number;
   offlineEngines: number;
@@ -563,26 +530,6 @@ export interface DashboardRecent7d {
   stoppedRuns: number;
   totalFiles: number;
   totalBytes: number;
-}
-
-export interface DashboardPendingApproval {
-  jobId: number;
-  jobName: string;
-  taskId: number;
-  deleteCount: number;
-  deleteSize: number;
-  pathCount: number;
-  status?: "pending" | "executing" | string;
-  createdAt?: number;
-  expiresAt?: number;
-  planChanged?: boolean;
-  lastError?: string;
-  execPhase?: "verifying" | "deleting" | string;
-  execDone?: number;
-  execTotal?: number;
-  execFailed?: number;
-  execCurrent?: string;
-  execStartedAt?: number;
 }
 
 export interface DashboardJobItem {
@@ -604,7 +551,6 @@ export interface DashboardJobItem {
   watching?: boolean;
   checkRunning?: boolean;
   currentTaskId: number;
-  pendingApproval?: FullSyncApproval | null;
   liveNum?: Record<TaskNumKey, number> | null;
   liveProgress: number;
   liveDoneSize?: number;
@@ -677,7 +623,6 @@ export interface DashboardOverview {
   kpi: DashboardKPI;
   realtime?: DashboardRealtime;
   recent7d: DashboardRecent7d;
-  pendingApprovals: DashboardPendingApproval[];
   jobs: DashboardJobItem[];
   dailyTrend?: DashboardDailyTrend[];
   storageQuotas?: DashboardQuotaItem[];
