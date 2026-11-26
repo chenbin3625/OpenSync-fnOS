@@ -23,8 +23,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -33,13 +31,103 @@ const (
 	throttleChunkBytes = 64 << 10 // 64 KiB for smooth live bwlimit & progress reporting
 )
 
+type ossErrorXML struct {
+	Code    string `xml:"Code"`
+	Message string `xml:"Message"`
+}
+
+type ossPartError struct {
+	PartNumber int
+	StatusCode int
+	Code       string
+	Body       string
+}
+
+func (e *ossPartError) Error() string {
+	return fmt.Sprintf("夸克 OSS 分片 #%d 上传失败 (HTTP %d: %s)", e.PartNumber, e.StatusCode, e.Body)
+}
+
+type ossCommitError struct {
+	StatusCode int
+	Code       string
+	Body       string
+}
+
+func (e *ossCommitError) Error() string {
+	if e.StatusCode < 200 || e.StatusCode >= 300 {
+		return fmt.Sprintf("夸克分片合并失败 (HTTP %d: %s)", e.StatusCode, e.Body)
+	}
+	return fmt.Sprintf("夸克分片合并返回错误: %s", e.Body)
+}
+
+func parseOSSErrorCode(body []byte) string {
+	var parsed ossErrorXML
+	if err := xml.Unmarshal(body, &parsed); err == nil {
+		return strings.TrimSpace(parsed.Code)
+	}
+	return ""
+}
+
+// isOSSSessionInvalidError reports whether err indicates a poisoned, expired,
+// or out-of-sync sequential multipart upload session on Alibaba Cloud OSS that
+// cannot be resumed with the same uploadId and must be restarted via /file/upload/pre.
+func isOSSSessionInvalidError(err error) bool {
+	var pe *ossPartError
+	if errors.As(err, &pe) {
+		switch pe.Code {
+		case "PartNotSequential", "PartAlreadyExist", "NoSuchUpload", "InvalidPart", "InvalidPartOrder":
+			return true
+		}
+		if pe.StatusCode == http.StatusNotFound || pe.StatusCode == http.StatusConflict {
+			return true
+		}
+	}
+	var ce *ossCommitError
+	if errors.As(err, &ce) {
+		switch ce.Code {
+		case "PartNotSequential", "PartAlreadyExist", "NoSuchUpload", "InvalidPart", "InvalidPartOrder":
+			return true
+		}
+		if ce.StatusCode == http.StatusNotFound {
+			return true
+		}
+	}
+	return false
+}
+
+// contiguousETagPrefix validates that etags forms an unbroken 1..k prefix for
+// Alibaba Cloud OSS sequential multipart uploads.
+func contiguousETagPrefix(etags map[int]string, totalParts int) (map[int]string, bool) {
+	clean := make(map[int]string, len(etags))
+	if len(etags) == 0 {
+		return clean, true
+	}
+	maxPart := 0
+	for k, v := range etags {
+		v = strings.TrimSpace(v)
+		if k < 1 || k > totalParts || v == "" {
+			return nil, false
+		}
+		if k > maxPart {
+			maxPart = k
+		}
+		clean[k] = v
+	}
+	for i := 1; i <= maxPart; i++ {
+		if _, ok := clean[i]; !ok {
+			return nil, false
+		}
+	}
+	return clean, true
+}
+
 // UploadFileOptions configures a direct local-file upload to Quark/UC with
-// rapid-upload (MD5+SHA1), concurrent OSS multipart transfer, and resume state.
+// rapid-upload (MD5+SHA1), sequential OSS multipart transfer, and resume state.
 type UploadFileOptions struct {
 	File            *os.File
 	Size            int64
 	ModTime         time.Time
-	Concurrency     int
+	Concurrency     int // Retained for API compatibility; Quark OSS requires sequential parts (1).
 	ResumeStatePath string
 	Overwrite       bool
 	WaitIfPaused    func(context.Context) error
@@ -315,7 +403,12 @@ func (c *Client) uploadPartBytes(
 			if sentInAttempt > 0 && onChunk != nil {
 				onChunk(-int(sentInAttempt))
 			}
-			lastErr = fmt.Errorf("夸克 OSS 分片 #%d 上传失败 (HTTP %d: %s)", partNumber, resp.StatusCode, strings.TrimSpace(string(respBody)))
+			lastErr = &ossPartError{
+				PartNumber: partNumber,
+				StatusCode: resp.StatusCode,
+				Code:       parseOSSErrorCode(respBody),
+				Body:       strings.TrimSpace(string(respBody)),
+			}
 			if resp.StatusCode == http.StatusForbidden || resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
 				continue
 			}
@@ -445,10 +538,18 @@ func (c *Client) upCommit(ctx context.Context, sess uploadSessionParams, etags m
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	_ = resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("夸克分片合并失败 (HTTP %d: %s)", resp.StatusCode, strings.TrimSpace(string(body)))
+		return &ossCommitError{
+			StatusCode: resp.StatusCode,
+			Code:       parseOSSErrorCode(body),
+			Body:       strings.TrimSpace(string(body)),
+		}
 	}
 	if bytes.Contains(body, []byte("<Error>")) {
-		return fmt.Errorf("夸克分片合并返回错误: %s", strings.TrimSpace(string(body)))
+		return &ossCommitError{
+			StatusCode: resp.StatusCode,
+			Code:       parseOSSErrorCode(body),
+			Body:       strings.TrimSpace(string(body)),
+		}
 	}
 	return nil
 }
@@ -526,8 +627,9 @@ func saveUploadResumeState(statePath string, st uploadResumeState) error {
 }
 
 // UploadFile uploads a local file directly to relPath on Quark/UC with single-pass
-// MD5+SHA1 calculation, rapid upload (秒传), concurrent OSS multipart transfer,
-// persistent part-level resume state, and atomic overwrite replacement.
+// MD5+SHA1 calculation, rapid upload (秒传), sequential OSS multipart transfer
+// (required by Alibaba Cloud OSS sequential multipart mode), persistent part-level
+// resume state, automatic stale-session recovery, and atomic overwrite replacement.
 func (c *Client) UploadFile(ctx context.Context, relPath string, opt UploadFileOptions) (*UploadResult, error) {
 	if opt.File == nil {
 		return nil, errors.New("缺少待上传的本地文件句柄")
@@ -571,124 +673,289 @@ func (c *Client) UploadFile(ctx context.Context, relPath string, opt UploadFileO
 	}
 
 	mimeType := detectMimeType(targetName)
-	uploadName := targetName
-	usingTempName := oldFID != ""
-	if usingTempName {
-		uploadName = ".opensync-up-" + randomHex(6) + "-" + targetName
-	}
+	startTime := time.Now()
 
-	var (
-		sess          uploadSessionParams
-		etags         map[int]string
-		resumed       bool
-		rapidFinished bool
-		finalFID      string
-	)
+	// Allow at most one automatic fresh-session restart if an existing OSS upload
+	// session turns out to be poisoned, expired, or out-of-sync (e.g. HTTP 409
+	// PartAlreadyExist, 400 PartNotSequential, or 404 NoSuchUpload).
+	for sessionAttempt := 0; sessionAttempt < 2; sessionAttempt++ {
+		uploadName := targetName
+		usingTempName := oldFID != ""
+		if usingTempName {
+			uploadName = ".opensync-up-" + randomHex(6) + "-" + targetName
+		}
 
-	// Attempt to resume a matching interrupted upload session.
-	if opt.ResumeStatePath != "" {
-		if st, loadErr := loadUploadResumeState(opt.ResumeStatePath); loadErr == nil {
-			age := time.Since(time.Unix(st.UpdatedAtSec, 0))
-			if age >= 0 && age < uploadResumeMaxAge &&
-				st.PdirFID == parentFID &&
-				st.FileSize == opt.Size &&
-				st.MD5 == md5Hex &&
-				st.SHA1 == sha1Hex &&
-				st.TaskID != "" &&
-				st.UploadID != "" &&
-				st.PartSize > 0 {
-				sess = uploadSessionParams{
-					TaskID:     st.TaskID,
-					UploadID:   st.UploadID,
-					ObjKey:     st.ObjKey,
-					UploadURL:  st.UploadURL,
-					Bucket:     st.Bucket,
-					AuthInfo:   st.AuthInfo,
-					FormatType: st.FormatType,
-					Callback:   st.Callback,
-					PartSize:   st.PartSize,
+		var (
+			sess          uploadSessionParams
+			etags         map[int]string
+			resumed       bool
+			rapidFinished bool
+			finalFID      string
+		)
+
+		// Attempt to resume a matching interrupted upload session on the first attempt.
+		if sessionAttempt == 0 && opt.ResumeStatePath != "" {
+			if st, loadErr := loadUploadResumeState(opt.ResumeStatePath); loadErr == nil {
+				age := time.Since(time.Unix(st.UpdatedAtSec, 0))
+				stTotalParts := 1
+				if opt.Size > 0 && st.PartSize > 0 {
+					stTotalParts = int((opt.Size + st.PartSize - 1) / st.PartSize)
 				}
-				etags = st.ETags
-				if st.UploadName != "" {
-					uploadName = st.UploadName
-					usingTempName = uploadName != targetName
+				validETags, contiguous := contiguousETagPrefix(st.ETags, stTotalParts)
+				if age >= 0 && age < uploadResumeMaxAge &&
+					st.PdirFID == parentFID &&
+					st.FileSize == opt.Size &&
+					st.MD5 == md5Hex &&
+					st.SHA1 == sha1Hex &&
+					st.TaskID != "" &&
+					st.UploadID != "" &&
+					st.PartSize > 0 &&
+					contiguous {
+					sess = uploadSessionParams{
+						TaskID:     st.TaskID,
+						UploadID:   st.UploadID,
+						ObjKey:     st.ObjKey,
+						UploadURL:  st.UploadURL,
+						Bucket:     st.Bucket,
+						AuthInfo:   st.AuthInfo,
+						FormatType: st.FormatType,
+						Callback:   st.Callback,
+						PartSize:   st.PartSize,
+					}
+					etags = validETags
+					if st.UploadName != "" {
+						uploadName = st.UploadName
+						usingTempName = uploadName != targetName
+					}
+					resumed = true
+				} else {
+					_ = os.Remove(opt.ResumeStatePath)
 				}
-				resumed = true
-			} else {
-				_ = os.Remove(opt.ResumeStatePath)
 			}
 		}
-	}
 
-	if !resumed {
-		pre, err := c.upPre(ctx, parentFID, uploadName, mimeType, opt.Size, opt.ModTime)
-		if err != nil {
-			return nil, err
-		}
-		if pre.Data.Finish {
-			rapidFinished = true
-			finalFID = pre.Data.FID
-		} else {
-			hashResp, err := c.upHash(ctx, pre.Data.TaskID, md5Hex, sha1Hex)
+		if !resumed {
+			pre, err := c.upPre(ctx, parentFID, uploadName, mimeType, opt.Size, opt.ModTime)
 			if err != nil {
 				return nil, err
 			}
-			if hashResp.Data.Finish {
+			if pre.Data.Finish {
 				rapidFinished = true
-				finalFID = hashResp.Data.FID
-				if finalFID == "" {
-					finalFID = pre.Data.FID
-				}
+				finalFID = pre.Data.FID
 			} else {
-				partSize := pre.Metadata.PartSize
-				if partSize <= 0 {
-					partSize = DefaultPartSize
+				hashResp, err := c.upHash(ctx, pre.Data.TaskID, md5Hex, sha1Hex)
+				if err != nil {
+					return nil, err
 				}
-				if c.partSizeOverride > 0 && c.partSizeOverride < partSize {
-					partSize = c.partSizeOverride
+				if hashResp.Data.Finish {
+					rapidFinished = true
+					finalFID = hashResp.Data.FID
+					if finalFID == "" {
+						finalFID = pre.Data.FID
+					}
+				} else {
+					partSize := pre.Metadata.PartSize
+					if partSize <= 0 {
+						partSize = DefaultPartSize
+					}
+					if c.partSizeOverride > 0 && c.partSizeOverride < partSize {
+						partSize = c.partSizeOverride
+					}
+					fmtType := pre.Data.FormatType
+					if fmtType == "" {
+						fmtType = mimeType
+					}
+					sess = uploadSessionParams{
+						TaskID:     pre.Data.TaskID,
+						UploadID:   pre.Data.UploadID,
+						ObjKey:     pre.Data.ObjKey,
+						UploadURL:  pre.Data.UploadURL,
+						Bucket:     pre.Data.Bucket,
+						AuthInfo:   pre.Data.AuthInfo,
+						FormatType: fmtType,
+						Callback:   pre.Data.Callback,
+						PartSize:   partSize,
+					}
+					etags = map[int]string{}
+					_ = saveUploadResumeState(opt.ResumeStatePath, uploadResumeState{
+						RelPath:    clean,
+						UploadName: uploadName,
+						PdirFID:    parentFID,
+						FileSize:   opt.Size,
+						MD5:        md5Hex,
+						SHA1:       sha1Hex,
+						FormatType: sess.FormatType,
+						TaskID:     sess.TaskID,
+						UploadID:   sess.UploadID,
+						ObjKey:     sess.ObjKey,
+						UploadURL:  sess.UploadURL,
+						Bucket:     sess.Bucket,
+						AuthInfo:   sess.AuthInfo,
+						Callback:   sess.Callback,
+						PartSize:   sess.PartSize,
+						ETags:      etags,
+					})
 				}
-				fmtType := pre.Data.FormatType
-				if fmtType == "" {
-					fmtType = mimeType
-				}
-				sess = uploadSessionParams{
-					TaskID:     pre.Data.TaskID,
-					UploadID:   pre.Data.UploadID,
-					ObjKey:     pre.Data.ObjKey,
-					UploadURL:  pre.Data.UploadURL,
-					Bucket:     pre.Data.Bucket,
-					AuthInfo:   pre.Data.AuthInfo,
-					FormatType: fmtType,
-					Callback:   pre.Data.Callback,
-					PartSize:   partSize,
-				}
-				etags = map[int]string{}
-				_ = saveUploadResumeState(opt.ResumeStatePath, uploadResumeState{
-					RelPath:    clean,
-					UploadName: uploadName,
-					PdirFID:    parentFID,
-					FileSize:   opt.Size,
-					MD5:        md5Hex,
-					SHA1:       sha1Hex,
-					FormatType: sess.FormatType,
-					TaskID:     sess.TaskID,
-					UploadID:   sess.UploadID,
-					ObjKey:     sess.ObjKey,
-					UploadURL:  sess.UploadURL,
-					Bucket:     sess.Bucket,
-					AuthInfo:   sess.AuthInfo,
-					Callback:   sess.Callback,
-					PartSize:   sess.PartSize,
-					ETags:      etags,
-				})
 			}
 		}
-	}
 
-	if rapidFinished {
-		if opt.OnProgress != nil {
-			opt.OnProgress(opt.Size, 0, true)
+		if rapidFinished {
+			if opt.OnProgress != nil {
+				opt.OnProgress(opt.Size, 0, true)
+			}
+			finalFID, err = c.finalizeOverwriteSwap(ctx, parentFID, parentRel, clean, targetName, uploadName, oldFID, finalFID, usingTempName)
+			if err != nil {
+				return nil, err
+			}
+			if opt.ResumeStatePath != "" {
+				_ = os.Remove(opt.ResumeStatePath)
+			}
+			return &UploadResult{
+				FID:   finalFID,
+				Name:  targetName,
+				Size:  opt.Size,
+				MD5:   md5Hex,
+				SHA1:  sha1Hex,
+				Rapid: true,
+			}, nil
 		}
+
+		// Upload missing parts strictly sequentially to OSS. Quark/UC PDS OSS
+		// enables sequential multipart uploads, so out-of-order or concurrent
+		// part PUTs are rejected with HTTP 400 PartNotSequential / 409 PartAlreadyExist.
+		totalParts := 1
+		if opt.Size > 0 {
+			totalParts = int((opt.Size + sess.PartSize - 1) / sess.PartSize)
+		}
+		var alreadyBytes int64
+		var missing []int
+		for partNum := 1; partNum <= totalParts; partNum++ {
+			if etag, ok := etags[partNum]; ok && etag != "" {
+				alreadyBytes += partLength(opt.Size, sess.PartSize, partNum)
+			} else {
+				missing = append(missing, partNum)
+			}
+		}
+
+		uploadedBytes := alreadyBytes
+		var sessionBytes int64
+		attemptStart := time.Now()
+		var lastReport time.Time
+		if opt.OnProgress != nil {
+			opt.OnProgress(alreadyBytes, 0, false)
+		}
+
+		var sessionErr error
+		if len(missing) > 0 {
+			bufSize := sess.PartSize
+			if opt.Size < bufSize {
+				bufSize = opt.Size
+			}
+			if bufSize < 0 {
+				bufSize = 0
+			}
+			buf := make([]byte, bufSize)
+
+			for _, partNum := range missing {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+				c.MaybeKeepalive(ctx)
+				offset := int64(partNum-1) * sess.PartSize
+				pLen := partLength(opt.Size, sess.PartSize, partNum)
+				partBuf := buf[:pLen]
+				if pLen > 0 {
+					n, readErr := opt.File.ReadAt(partBuf, offset)
+					if readErr != nil && !errors.Is(readErr, io.EOF) {
+						return nil, fmt.Errorf("读取本地文件分片 #%d 失败: %w", partNum, readErr)
+					}
+					if int64(n) != pLen {
+						return nil, fmt.Errorf("本地文件在上传期间大小发生变化（分片 #%d 期望 %d 字节，读取 %d 字节）", partNum, pLen, n)
+					}
+				}
+
+				etag, upErr := c.uploadPartBytes(ctx, sess, partNum, partBuf, opt.WaitIfPaused, opt.ThrottleBytes, func(delta int) {
+					uploadedBytes += int64(delta)
+					sessionBytes += int64(delta)
+					if opt.OnProgress == nil {
+						return
+					}
+					now := time.Now()
+					if lastReport.IsZero() || now.Sub(lastReport) >= 250*time.Millisecond {
+						lastReport = now
+						elapsed := now.Sub(attemptStart).Seconds()
+						speed := 0.0
+						if elapsed > 0 && sessionBytes > 0 {
+							speed = float64(sessionBytes) / elapsed
+						}
+						cur := uploadedBytes
+						if cur < 0 {
+							cur = 0
+						}
+						opt.OnProgress(cur, speed, false)
+					}
+				})
+				if upErr != nil {
+					sessionErr = upErr
+					break
+				}
+
+				etags[partNum] = etag
+				if opt.ResumeStatePath != "" {
+					snapshot := make(map[int]string, len(etags))
+					for k, v := range etags {
+						snapshot[k] = v
+					}
+					_ = saveUploadResumeState(opt.ResumeStatePath, uploadResumeState{
+						RelPath:    clean,
+						UploadName: uploadName,
+						PdirFID:    parentFID,
+						FileSize:   opt.Size,
+						MD5:        md5Hex,
+						SHA1:       sha1Hex,
+						FormatType: sess.FormatType,
+						TaskID:     sess.TaskID,
+						UploadID:   sess.UploadID,
+						ObjKey:     sess.ObjKey,
+						UploadURL:  sess.UploadURL,
+						Bucket:     sess.Bucket,
+						AuthInfo:   sess.AuthInfo,
+						Callback:   sess.Callback,
+						PartSize:   sess.PartSize,
+						ETags:      snapshot,
+					})
+				}
+			}
+		}
+
+		if sessionErr == nil {
+			sessionErr = c.upCommit(ctx, sess, etags)
+		}
+		if sessionErr != nil {
+			if isOSSSessionInvalidError(sessionErr) {
+				if opt.ResumeStatePath != "" {
+					_ = os.Remove(opt.ResumeStatePath)
+				}
+				if sessionAttempt == 0 && ctx.Err() == nil {
+					continue
+				}
+			}
+			return nil, sessionErr
+		}
+
+		finalFID, err = c.upFinish(ctx, sess.ObjKey, sess.TaskID)
+		if err != nil {
+			return nil, err
+		}
+		if opt.OnProgress != nil {
+			elapsed := time.Since(startTime).Seconds()
+			speed := 0.0
+			if elapsed > 0 && sessionBytes > 0 {
+				speed = float64(sessionBytes) / elapsed
+			}
+			opt.OnProgress(opt.Size, speed, false)
+		}
+
 		finalFID, err = c.finalizeOverwriteSwap(ctx, parentFID, parentRel, clean, targetName, uploadName, oldFID, finalFID, usingTempName)
 		if err != nil {
 			return nil, err
@@ -702,190 +969,11 @@ func (c *Client) UploadFile(ctx context.Context, relPath string, opt UploadFileO
 			Size:  opt.Size,
 			MD5:   md5Hex,
 			SHA1:  sha1Hex,
-			Rapid: true,
+			Rapid: false,
 		}, nil
 	}
 
-	// Upload missing parts concurrently to OSS.
-	totalParts := 1
-	if opt.Size > 0 {
-		totalParts = int((opt.Size + sess.PartSize - 1) / sess.PartSize)
-	}
-	var alreadyBytes int64
-	var missing []int
-	for partNum := 1; partNum <= totalParts; partNum++ {
-		if etag, ok := etags[partNum]; ok && etag != "" {
-			alreadyBytes += partLength(opt.Size, sess.PartSize, partNum)
-		} else {
-			missing = append(missing, partNum)
-		}
-	}
-
-	var uploadedBytes atomic.Int64
-	uploadedBytes.Store(alreadyBytes)
-	var sessionBytes atomic.Int64
-	startTime := time.Now()
-	var lastReportNano atomic.Int64
-	if opt.OnProgress != nil {
-		opt.OnProgress(alreadyBytes, 0, false)
-	}
-
-	concurrency := opt.Concurrency
-	if concurrency <= 0 {
-		concurrency = c.uploadConcurrency
-	}
-	if concurrency < 1 {
-		concurrency = 1
-	}
-	if concurrency > 8 {
-		concurrency = 8
-	}
-	if concurrency > len(missing) && len(missing) > 0 {
-		concurrency = len(missing)
-	}
-
-	if len(missing) > 0 {
-		workCtx, cancelWork := context.WithCancel(ctx)
-		defer cancelWork()
-
-		partCh := make(chan int, len(missing))
-		for _, pn := range missing {
-			partCh <- pn
-		}
-		close(partCh)
-
-		var (
-			etagMu   sync.Mutex
-			firstErr error
-			errOnce  sync.Once
-			wg       sync.WaitGroup
-		)
-		setErr := func(e error) {
-			errOnce.Do(func() {
-				firstErr = e
-				cancelWork()
-			})
-		}
-
-		for w := 0; w < concurrency; w++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for partNum := range partCh {
-					if workCtx.Err() != nil {
-						return
-					}
-					c.MaybeKeepalive(workCtx)
-					offset := int64(partNum-1) * sess.PartSize
-					pLen := partLength(opt.Size, sess.PartSize, partNum)
-					buf := make([]byte, pLen)
-					if pLen > 0 {
-						n, readErr := opt.File.ReadAt(buf, offset)
-						if readErr != nil && !errors.Is(readErr, io.EOF) {
-							setErr(fmt.Errorf("读取本地文件分片 #%d 失败: %w", partNum, readErr))
-							return
-						}
-						if int64(n) != pLen {
-							setErr(fmt.Errorf("本地文件在上传期间大小发生变化（分片 #%d 期望 %d 字节，读取 %d 字节）", partNum, pLen, n))
-							return
-						}
-					}
-
-					etag, upErr := c.uploadPartBytes(workCtx, sess, partNum, buf, opt.WaitIfPaused, opt.ThrottleBytes, func(delta int) {
-						cur := uploadedBytes.Add(int64(delta))
-						sent := sessionBytes.Add(int64(delta))
-						if opt.OnProgress == nil {
-							return
-						}
-						now := time.Now()
-						prev := lastReportNano.Load()
-						if now.UnixNano()-prev >= int64(250*time.Millisecond) && lastReportNano.CompareAndSwap(prev, now.UnixNano()) {
-							elapsed := now.Sub(startTime).Seconds()
-							speed := 0.0
-							if elapsed > 0 && sent > 0 {
-								speed = float64(sent) / elapsed
-							}
-							if cur < 0 {
-								cur = 0
-							}
-							opt.OnProgress(cur, speed, false)
-						}
-					})
-					if upErr != nil {
-						setErr(upErr)
-						return
-					}
-
-					etagMu.Lock()
-					etags[partNum] = etag
-					if opt.ResumeStatePath != "" {
-						snapshot := make(map[int]string, len(etags))
-						for k, v := range etags {
-							snapshot[k] = v
-						}
-						_ = saveUploadResumeState(opt.ResumeStatePath, uploadResumeState{
-							RelPath:    clean,
-							UploadName: uploadName,
-							PdirFID:    parentFID,
-							FileSize:   opt.Size,
-							MD5:        md5Hex,
-							SHA1:       sha1Hex,
-							FormatType: sess.FormatType,
-							TaskID:     sess.TaskID,
-							UploadID:   sess.UploadID,
-							ObjKey:     sess.ObjKey,
-							UploadURL:  sess.UploadURL,
-							Bucket:     sess.Bucket,
-							AuthInfo:   sess.AuthInfo,
-							Callback:   sess.Callback,
-							PartSize:   sess.PartSize,
-							ETags:      snapshot,
-						})
-					}
-					etagMu.Unlock()
-				}
-			}()
-		}
-		wg.Wait()
-		if firstErr != nil {
-			return nil, firstErr
-		}
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-	}
-
-	if err := c.upCommit(ctx, sess, etags); err != nil {
-		return nil, err
-	}
-	finalFID, err = c.upFinish(ctx, sess.ObjKey, sess.TaskID)
-	if err != nil {
-		return nil, err
-	}
-	if opt.OnProgress != nil {
-		elapsed := time.Since(startTime).Seconds()
-		speed := 0.0
-		if elapsed > 0 && sessionBytes.Load() > 0 {
-			speed = float64(sessionBytes.Load()) / elapsed
-		}
-		opt.OnProgress(opt.Size, speed, false)
-	}
-
-	finalFID, err = c.finalizeOverwriteSwap(ctx, parentFID, parentRel, clean, targetName, uploadName, oldFID, finalFID, usingTempName)
-	if err != nil {
-		return nil, err
-	}
-	if opt.ResumeStatePath != "" {
-		_ = os.Remove(opt.ResumeStatePath)
-	}
-	return &UploadResult{
-		FID:   finalFID,
-		Name:  targetName,
-		Size:  opt.Size,
-		MD5:   md5Hex,
-		SHA1:  sha1Hex,
-		Rapid: false,
-	}, nil
+	return nil, errors.New("夸克文件上传失败")
 }
 
 func partLength(fileSize, partSize int64, partNum int) int64 {

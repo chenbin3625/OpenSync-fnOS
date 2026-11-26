@@ -33,9 +33,9 @@ func quarkResumeStatePath(stateDir, remoteName, dstRel string) string {
 }
 
 // directUploadFilesToQuark transfers local files directly to Quark Cloud Drive
-// using single-pass MD5+SHA1 rapid upload (秒传), concurrent Alibaba OSS
-// multipart upload, persistent part-level resume state, and live RCController
-// pause/resume + bandwidth throttling.
+// using single-pass MD5+SHA1 rapid upload (秒传), sequential Alibaba Cloud OSS
+// multipart upload per file with multi-file worker concurrency, persistent
+// part-level resume state, and live RCController pause/resume + throttling.
 func directUploadFilesToQuark(
 	ctx context.Context,
 	srcSub string,
@@ -75,14 +75,19 @@ func directUploadFilesToQuark(
 		stateDir = filepath.Join(nativeTempDir(), "opensync-quark-resume")
 	}
 
-	partConcurrency := quark.DefaultUploadConcurrency
-	if uc, err := strconv.Atoi(strings.TrimSpace(remoteParams["upload_concurrency"])); err == nil && uc >= 1 && uc <= 8 {
-		partConcurrency = uc
-	}
+	// Quark/UC OSS enforces sequential multipart upload within a single file, so
+	// per-file part uploads must always be sequential (1). Multi-file parallelism
+	// is governed by opt.Transfers, optionally capped by remote upload_concurrency.
+	partConcurrency := 1
 
 	fileWorkers := opt.Transfers
 	if fileWorkers <= 0 {
 		fileWorkers = 2
+	}
+	if uc, err := strconv.Atoi(strings.TrimSpace(remoteParams["upload_concurrency"])); err == nil && uc >= 1 && uc <= 8 {
+		if uc < fileWorkers {
+			fileWorkers = uc
+		}
 	}
 	if fileWorkers > 4 {
 		fileWorkers = 4

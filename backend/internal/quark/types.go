@@ -12,7 +12,7 @@ const (
 
 	DefaultRootFolderID      = "0"
 	DefaultTPSLimit          = 3.5
-	DefaultUploadConcurrency = 4
+	DefaultUploadConcurrency = 1 // Quark OSS enforces sequential multipart upload per file
 	DefaultPartSize          = 10 << 20 // 10 MiB fallback if server omits part_size
 	DefaultCacheTTL          = 30 * time.Second
 	DefaultDownloadURLTTL    = 5 * time.Minute

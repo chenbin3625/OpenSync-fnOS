@@ -69,6 +69,7 @@ type mockUpload struct {
 	Size      int64
 	MD5       string
 	Parts     map[int][]byte
+	PartOrder []int
 	Committed bool
 	Finished  bool
 	FID       string
@@ -594,7 +595,8 @@ func (m *mockQuarkServer) handleOSS(w http.ResponseWriter, r *http.Request) {
 	}
 	m.mu.Unlock()
 	if up == nil {
-		http.Error(w, "unknown uploadId", http.StatusNotFound)
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><Error><Code>NoSuchUpload</Code><Message>The specified upload does not exist.</Message></Error>`))
 		return
 	}
 
@@ -605,10 +607,26 @@ func (m *mockQuarkServer) handleOSS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		data, _ := io.ReadAll(r.Body)
-		m.putPartCalls.Add(1)
 		m.mu.Lock()
+		// Enforce Alibaba Cloud OSS sequential multipart upload semantics:
+		// parts must arrive strictly in order 1, 2, 3... with no duplicates.
+		if _, exists := up.Parts[partNum]; exists {
+			m.mu.Unlock()
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><Error><Code>PartAlreadyExist</Code><Message>For sequential multipart upload, you can't overwrite uploaded parts.</Message></Error>`))
+			return
+		}
+		expectedNext := len(up.Parts) + 1
+		if partNum != expectedNext {
+			m.mu.Unlock()
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><Error><Code>PartNotSequential</Code><Message>For sequential multipart upload, you must upload or complete parts with sequential part number.</Message></Error>`))
+			return
+		}
 		up.Parts[partNum] = data
+		up.PartOrder = append(up.PartOrder, partNum)
 		m.mu.Unlock()
+		m.putPartCalls.Add(1)
 		sum := md5.Sum(data)
 		w.Header().Set("ETag", fmt.Sprintf(`"%x"`, sum))
 		w.WriteHeader(http.StatusOK)
@@ -1095,5 +1113,197 @@ func TestUCProviderProfileConfigurable(t *testing.T) {
 	qk := ProfileFor("")
 	if qk.Name != ProviderQuark || qk.PR != "ucpro" || !strings.Contains(qk.APIURL, "quark.cn") {
 		t.Fatalf("unexpected default Quark profile: %+v", qk)
+	}
+}
+
+func TestUploadFileSequentialEnforcementAndStaleSessionRecovery(t *testing.T) {
+	srv := newMockQuarkServer(t)
+	client := srv.newClient(func(o *Options) {
+		o.UploadConcurrency = 4
+	})
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	// 1. Even with Concurrency=4, a 5-part file (~300 KiB with 64 KiB parts) must
+	// upload strictly in order 1, 2, 3, 4, 5 to satisfy Alibaba Cloud OSS sequential mode.
+	data := bytes.Repeat([]byte("SEQ-PART-TEST-0123456789ABCDEF!!"), 9600) // 307,200 bytes -> 5 parts
+	filePath := filepath.Join(tmpDir, "seq.bin")
+	if err := os.WriteFile(filePath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(filePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := client.UploadFile(ctx, "seq/video.bin", UploadFileOptions{
+		File:        f,
+		Size:        int64(len(data)),
+		Concurrency: 4,
+		Overwrite:   true,
+	})
+	_ = f.Close()
+	if err != nil {
+		t.Fatalf("sequential UploadFile with Concurrency=4 failed: %v", err)
+	}
+	if res.Size != int64(len(data)) {
+		t.Fatalf("unexpected size: %+v", res)
+	}
+	srv.mu.Lock()
+	var gotOrder []int
+	for _, up := range srv.uploads {
+		if up.FileName == "video.bin" && up.Finished {
+			gotOrder = append([]int(nil), up.PartOrder...)
+		}
+	}
+	srv.mu.Unlock()
+	wantOrder := []int{1, 2, 3, 4, 5}
+	if len(gotOrder) != len(wantOrder) {
+		t.Fatalf("unexpected part order: got %v want %v", gotOrder, wantOrder)
+	}
+	for i := range wantOrder {
+		if gotOrder[i] != wantOrder[i] {
+			t.Fatalf("parts were not uploaded sequentially: got %v want %v", gotOrder, wantOrder)
+		}
+	}
+
+	// 2. Stale resume session where OSS already received Part #1 while local etags is empty
+	// (reproducing HTTP 409 PartAlreadyExist from older concurrent-part sessions).
+	parentFID, err := client.MkdirAll(ctx, "recover")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mSum := md5.Sum(data)
+	sSum := sha1.Sum(data)
+	md5Hex := hex.EncodeToString(mSum[:])
+	sha1Hex := hex.EncodeToString(sSum[:])
+
+	staleTaskID := "stale_task_409"
+	staleUploadID := "stale_upload_409"
+	srv.mu.Lock()
+	srv.uploads[staleTaskID] = &mockUpload{
+		TaskID:   staleTaskID,
+		UploadID: staleUploadID,
+		ObjKey:   "obj/stale/part_exists.bin",
+		PdirFID:  parentFID,
+		FileName: "part_exists.bin",
+		Size:     int64(len(data)),
+		Parts:    map[int][]byte{1: data[:64<<10]}, // OSS already has part #1
+	}
+	srv.mu.Unlock()
+
+	resume409 := filepath.Join(tmpDir, "resume409.json")
+	if err := saveUploadResumeState(resume409, uploadResumeState{
+		RelPath:    "recover/part_exists.bin",
+		UploadName: "part_exists.bin",
+		PdirFID:    parentFID,
+		FileSize:   int64(len(data)),
+		MD5:        md5Hex,
+		SHA1:       sha1Hex,
+		FormatType: "application/octet-stream",
+		TaskID:     staleTaskID,
+		UploadID:   staleUploadID,
+		ObjKey:     "obj/stale/part_exists.bin",
+		UploadURL:  srv.server.URL,
+		Bucket:     "mock-bucket",
+		AuthInfo:   "mock-auth-info",
+		PartSize:   64 << 10,
+		ETags:      map[int]string{}, // local state missed part #1 -> triggers 409 PartAlreadyExist
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	f409, _ := os.Open(filePath)
+	res409, err := client.UploadFile(ctx, "recover/part_exists.bin", UploadFileOptions{
+		File:            f409,
+		Size:            int64(len(data)),
+		ResumeStatePath: resume409,
+		Overwrite:       true,
+	})
+	_ = f409.Close()
+	if err != nil {
+		t.Fatalf("expected automatic recovery from 409 PartAlreadyExist, got: %v", err)
+	}
+	if res409.Size != int64(len(data)) {
+		t.Fatalf("unexpected recovered size: %+v", res409)
+	}
+	if _, statErr := os.Stat(resume409); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected resume409 cleaned up after recovery, got %v", statErr)
+	}
+
+	// 3. Corrupted resume state with non-contiguous ETags (missing part #1, only part #2 present)
+	// must be discarded before hitting OSS and restarted cleanly.
+	resumeGap := filepath.Join(tmpDir, "resume_gap.json")
+	if err := saveUploadResumeState(resumeGap, uploadResumeState{
+		RelPath:    "recover/gap.bin",
+		UploadName: "gap.bin",
+		PdirFID:    parentFID,
+		FileSize:   int64(len(data)),
+		MD5:        md5Hex,
+		SHA1:       sha1Hex,
+		FormatType: "application/octet-stream",
+		TaskID:     "bogus_gap_task",
+		UploadID:   "bogus_gap_upload",
+		ObjKey:     "obj/gap/gap.bin",
+		UploadURL:  srv.server.URL,
+		Bucket:     "mock-bucket",
+		AuthInfo:   "mock-auth-info",
+		PartSize:   64 << 10,
+		ETags:      map[int]string{2: `"deadbeef"`},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fGap, _ := os.Open(filePath)
+	resGap, err := client.UploadFile(ctx, "recover/gap.bin", UploadFileOptions{
+		File:            fGap,
+		Size:            int64(len(data)),
+		ResumeStatePath: resumeGap,
+		Overwrite:       true,
+	})
+	_ = fGap.Close()
+	if err != nil || resGap.Size != int64(len(data)) {
+		t.Fatalf("expected clean upload after discarding non-contiguous resume state, got res=%+v err=%v", resGap, err)
+	}
+
+	// 4. Stale resume session whose uploadId expired on OSS (404 NoSuchUpload)
+	// must automatically restart with a fresh upload session and succeed.
+	resume404 := filepath.Join(tmpDir, "resume404.json")
+	if err := saveUploadResumeState(resume404, uploadResumeState{
+		RelPath:    "recover/expired.bin",
+		UploadName: "expired.bin",
+		PdirFID:    parentFID,
+		FileSize:   int64(len(data)),
+		MD5:        md5Hex,
+		SHA1:       sha1Hex,
+		FormatType: "application/octet-stream",
+		TaskID:     "expired_task_404",
+		UploadID:   "expired_upload_404",
+		ObjKey:     "obj/expired/expired.bin",
+		UploadURL:  srv.server.URL,
+		Bucket:     "mock-bucket",
+		AuthInfo:   "mock-auth-info",
+		PartSize:   64 << 10,
+		ETags:      map[int]string{1: `"part1etag"`},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f404, _ := os.Open(filePath)
+	res404, err := client.UploadFile(ctx, "recover/expired.bin", UploadFileOptions{
+		File:            f404,
+		Size:            int64(len(data)),
+		ResumeStatePath: resume404,
+		Overwrite:       true,
+	})
+	_ = f404.Close()
+	if err != nil || res404.Size != int64(len(data)) {
+		t.Fatalf("expected automatic recovery from 404 NoSuchUpload, got res=%+v err=%v", res404, err)
+	}
+	rc, _, _, err := client.DownloadStream(ctx, "recover/expired.bin", "", "")
+	if err != nil {
+		t.Fatalf("DownloadStream recovered file: %v", err)
+	}
+	got, _ := io.ReadAll(rc)
+	_ = rc.Close()
+	if !bytes.Equal(got, data) {
+		t.Fatalf("recovered file content mismatch: got %d want %d", len(got), len(data))
 	}
 }

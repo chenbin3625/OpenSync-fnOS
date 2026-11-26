@@ -181,10 +181,22 @@ func (m *testQuarkMock) handle(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPut {
 			pn, _ := strconv.Atoi(r.URL.Query().Get("partNumber"))
 			data, _ := io.ReadAll(r.Body)
-			m.putPartCalls.Add(1)
 			m.mu.Lock()
+			if _, exists := up.Parts[pn]; exists {
+				m.mu.Unlock()
+				w.WriteHeader(http.StatusConflict)
+				_, _ = w.Write([]byte(`<Error><Code>PartAlreadyExist</Code><Message>For sequential multipart upload, you can't overwrite uploaded parts.</Message></Error>`))
+				return
+			}
+			if pn != len(up.Parts)+1 {
+				m.mu.Unlock()
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`<Error><Code>PartNotSequential</Code><Message>For sequential multipart upload, you must upload or complete parts with sequential part number.</Message></Error>`))
+				return
+			}
 			up.Parts[pn] = data
 			m.mu.Unlock()
+			m.putPartCalls.Add(1)
 			sum := md5.Sum(data)
 			w.Header().Set("ETag", fmt.Sprintf(`"%x"`, sum))
 			w.WriteHeader(http.StatusOK)

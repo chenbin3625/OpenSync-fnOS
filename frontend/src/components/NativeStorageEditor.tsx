@@ -5547,9 +5547,9 @@ export function NativeStorageEditor({
                     <>
                       <div className="form-grid form-grid--two">
                         <Field
-                          label="分片上传并发数（upload_concurrency）"
+                          label="上传文件并发上限（upload_concurrency）"
                           error={fieldErrors.upload_concurrency}
-                          hint="单文件分片直传并发数，支持 1–8，默认 4"
+                          hint="夸克 OSS 要求单文件分片顺序上传，此项控制多文件同时直传的并发上限（1–8，默认 4）"
                         >
                           <Input
                             inputMode="numeric"
