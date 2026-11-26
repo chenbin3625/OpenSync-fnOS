@@ -170,11 +170,11 @@ func TestFlushStopsRetryingWhenTaskIsStopped(t *testing.T) {
 	}
 }
 
-// Stopping a task with a large queued backlog triggers markWaitingAsAborted
-// (>persistBatchSize) on an already-broken/cancelled task. Transient SQLITE_BUSY
-// must be retried in bounded chunks during persistRemainingTaskItems instead of
-// latching PersistErr and turning a clean Stop into SystemFailed.
-func TestStoppedMarkWaitingAsAbortedRecoversFromTransientBusy(t *testing.T) {
+// Stopping a task with a large buffered item backlog (>persistBatchSize) on an
+// already-broken/cancelled task must still retry transient SQLITE_BUSY in
+// bounded chunks during persistRemainingTaskItems instead of latching
+// PersistErr and turning a clean Stop into SystemFailed.
+func TestStoppedFinalFlushRecoversFromTransientBusy(t *testing.T) {
 	withFastBusyRetry(t)
 	var calls atomic.Int32
 	var persisted []map[string]interface{}
@@ -194,19 +194,20 @@ func TestStoppedMarkWaitingAsAbortedRecoversFromTransientBusy(t *testing.T) {
 	defer restore()
 
 	const total = 250
-	jt := &JobTask{TaskID: 99, Waiting: newCopyQueueWithCapacity(total)}
+	jt := &JobTask{TaskID: 99}
 	jt.initRuntime()
 	for i := 0; i < total; i++ {
-		jt.Waiting.pushWait(context.Background(), &CopyItem{
+		jt.persistBuffer = append(jt.persistBuffer, JobTaskItem{
+			TaskID:   99,
 			SrcPath:  "/src/",
 			DstPath:  "/dst/",
 			FileName: fmt.Sprintf("file-%d.txt", i),
 			FileSize: int64(1),
+			Status:   taskStatusStopped,
 		})
 	}
 
 	jt.requestBreak()
-	jt.markWaitingAsAborted()
 
 	if err := jt.persistRemainingTaskItems(); err != nil {
 		t.Fatalf("persistRemainingTaskItems() error = %v, want nil after busy recovery", err)

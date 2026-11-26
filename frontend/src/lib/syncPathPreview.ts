@@ -39,6 +39,7 @@ export interface ExistingJobPathSummary {
   id: number;
   remark?: string | null;
   alistId: number;
+  method?: number;
   srcPath: string | readonly string[];
   dstPath: string | readonly string[];
   dstMap?: string | null;
@@ -475,6 +476,19 @@ export function resolveJobDestinationPaths(
   return resolved;
 }
 
+/** Mirrors writablePathsForJob in backend/internal/service/job_paths.go. */
+export function resolveJobWritablePaths(
+  job: Pick<ExistingJobPathSummary, "srcPath" | "dstPath" | "dstMap" | "method">,
+): string[] {
+  const paths = resolveJobDestinationPaths(job);
+  if (job.method === 3) {
+    for (const src of cleanPathList(parseJobPathInput(job.srcPath))) {
+      paths.push(normalizeDirPath(src));
+    }
+  }
+  return paths;
+}
+
 export function buildSyncPathPreview({
   srcPaths,
   dstPaths,
@@ -695,24 +709,42 @@ export function buildSyncPathPreview({
     for (const other of existingJobs) {
       if (other.id === currentJobId || other.alistId !== engineId) continue;
       const otherName = other.remark?.trim() || `同步任务 #${other.id}`;
-      const otherDsts = resolveJobDestinationPaths(other);
-      for (const otherDst of otherDsts) {
-        let hit = false;
+      const otherWritable = resolveJobWritablePaths(other);
+      for (const otherPath of otherWritable) {
+        let hitDst = false;
+        let hitBisyncSrc = false;
         for (const item of items) {
           if (
-            syncPathContains(item.resolvedDst, otherDst) ||
-            syncPathContains(otherDst, item.resolvedDst)
+            syncPathContains(item.resolvedDst, otherPath) ||
+            syncPathContains(otherPath, item.resolvedDst)
           ) {
             item.hasConflict = true;
-            hit = true;
+            hitDst = true;
+          }
+          if (
+            method === 3 &&
+            (syncPathContains(item.srcDir, otherPath) ||
+              syncPathContains(otherPath, item.srcDir))
+          ) {
+            item.hasConflict = true;
+            hitBisyncSrc = true;
           }
         }
-        if (hit) {
-          const msgKey = `${other.id}:${otherDst}`;
+        if (hitDst) {
+          const msgKey = `dst:${other.id}:${otherPath}`;
           if (!reported.has(msgKey)) {
             reported.add(msgKey);
             conflicts.push(
-              `目标目录与任务「${otherName}」的目标位置冲突（${formatDisplayPath(otherDst)}）`,
+              `目标目录与任务「${otherName}」的目标位置冲突（${formatDisplayPath(otherPath)}）`,
+            );
+          }
+        }
+        if (hitBisyncSrc) {
+          const msgKey = `src:${other.id}:${otherPath}`;
+          if (!reported.has(msgKey)) {
+            reported.add(msgKey);
+            conflicts.push(
+              `双向同步源目录与任务「${otherName}」的目标位置冲突（${formatDisplayPath(otherPath)}）`,
             );
           }
         }

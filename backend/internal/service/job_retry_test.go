@@ -3,6 +3,7 @@ package service
 import (
 	"opensync/internal/config"
 	"opensync/internal/mapper"
+	"opensync/internal/native"
 	"path/filepath"
 	"testing"
 	"time"
@@ -33,7 +34,7 @@ func setupRetryFailedTaskTest(t *testing.T, enable int) (*JobClient, int64) {
 	// AddJobClient validates that the engine exists before inserting the job.
 	ad := *alistDeps
 	ad.GetAlistByID = func(alistID int64) (map[string]interface{}, error) {
-		return map[string]interface{}{"id": alistID, "url": "https://alist.test", "token": "t"}, nil
+		return map[string]interface{}{"id": alistID, "url": native.EngineURL, "token": `{"src":{"type":"webdav","url":"https://src.test"},"dst":{"type":"webdav","url":"https://dst.test"}}`}, nil
 	}
 	restoreAlistDeps := SetAlistDepsForTest(&ad)
 	t.Cleanup(restoreAlistDeps)

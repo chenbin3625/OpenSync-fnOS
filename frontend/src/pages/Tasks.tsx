@@ -15,6 +15,7 @@ import Tag from "@douyinfe/semi-ui/lib/es/tag";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
 import {
+  IconAlertTriangle,
   IconChevronRightStroked,
   IconCloudStroked,
   IconCopy,
@@ -60,6 +61,7 @@ import {
 } from "../lib/syncPathPreview";
 import {
   cloneJobToForm,
+  isLegacyOpenListJob,
   resolveJobSelection,
   resolveTaskTab,
   summarizeJobFilters,
@@ -139,10 +141,8 @@ export default function Tasks() {
   const deletedJobIdsRef = useRef<Set<number>>(new Set());
   const hasCryptRemote = useMemo(() => {
     if (!selected || !engines.data) return false;
-    const eng = engines.data.find((e) => e.id === selected.alistId);
-    if (!eng || (eng.kind !== "rclone" && eng.url !== "rclone://native")) {
-      return false;
-    }
+    const eng = engines.data.find((e) => e.id === selected.alistId) ?? engines.data[0];
+    if (!eng) return false;
     const paths = [
       ...parseJobPathList(selected.srcPath),
       ...parseJobPathList(selected.dstPath),
@@ -371,14 +371,14 @@ export default function Tasks() {
     !engines.loading && !engines.error && (engines.data?.length ?? 0) === 0 ? (
       <div className="empty-guide">
         <span className="muted">
-          还没有配置存储引擎，先添加引擎即可创建同步任务
+          存储服务尚未就绪，请先前往存储管理检查本地目录或添加远程存储
         </span>
         <Button
           type="primary"
           theme="solid"
           onClick={() => navigate("/engines")}
         >
-          前往添加存储引擎
+          前往存储管理
         </Button>
       </div>
     ) : !engines.loading ? (
@@ -468,7 +468,7 @@ export default function Tasks() {
         <InlineNotice
           className="engine-load-error"
           role="alert"
-          message={`存储引擎加载失败：${engines.error}`}
+          message={`存储配置加载失败：${engines.error}`}
           onRetry={() => void engines.refresh()}
         />
       )}
@@ -662,6 +662,10 @@ export default function Tasks() {
                       jobId={selected.id}
                       currentTaskId={currentTask.data?.taskId}
                       refreshKey={historyRefreshKey}
+                      disableRetry={
+                        isLegacyOpenListJob(selected, engines.data) ||
+                        selected.method === 3
+                      }
                       onOpenRealtime={handleOpenRealtime}
                     />
                   </Suspense>
@@ -784,23 +788,15 @@ function Overview({
     firstRunKey.current = runKey;
     void refreshLatest(true);
   }, [runKey, refreshLatest]);
-  const engine = engines.find((e) => e.id === job.alistId);
-  const engineName = engine
-    ? engine.remark || engine.userName
-    : `引擎 #${job.alistId}`;
-  const isNativeEngine =
-    engine?.kind === "rclone" || engine?.url === "rclone://native";
-  const engineHost = engine
-    ? isNativeEngine
-      ? "rclone"
-      : engineHostOf(engine.url)
-    : "";
-  const enabled = job.enable === 1;
+  const legacy = isLegacyOpenListJob(job, engines);
+  const engine = legacy
+    ? undefined
+    : (engines.find((e) => e.id === job.alistId) ?? engines[0]);
+  const engineName = legacy
+    ? "旧版 OpenList（已失效）"
+    : engine?.remark || "内置存储";
+  const enabled = !legacy && job.enable === 1;
   const filterSummaries = useMemo(() => summarizeJobFilters(job), [job]);
-  const cacheLabels = [
-    job.useCacheS ? "源端缓存" : "",
-    job.useCacheT ? "目标缓存" : "",
-  ].filter(Boolean);
   const extraFlagLabels = useMemo(() => {
     const raw = job.extraFlags;
     if (!raw) return [] as string[];
@@ -858,14 +854,12 @@ function Overview({
       list.push(`基线策略 ${obj.bisyncResyncMode.trim()}`);
     }
     if (Number(obj.bisyncMaxDelete || 0) > 0) {
-      list.push(`最多删除 ${obj.bisyncMaxDelete}`);
+      list.push(`最多删除 ${obj.bisyncMaxDelete}%`);
     }
     if (obj.bisyncForce) list.push("强制(--force)");
     return list;
   }, [job.extraFlags]);
   const throttleLabels = [
-    Number(job.scanIntervalS || 0) > 0 ? `源扫描间隔 ${job.scanIntervalS}s` : "",
-    Number(job.scanIntervalT || 0) > 0 ? `目标扫描间隔 ${job.scanIntervalT}s` : "",
     Number(job.copyConcurrency || 0) > 0 ? `操作并发 ${job.copyConcurrency}` : "",
     Number(job.scanConcurrency || 0) > 0 ? `扫描并发 ${job.scanConcurrency}` : "",
     job.maxRetries !== undefined && Number(job.maxRetries) >= 0
@@ -899,47 +893,52 @@ function Overview({
   const showPathMapping =
     pathPreview.items.length > 1 ||
     pathPreview.items.some((item) => Boolean(item.appendedSuffix));
-  const menu: MenuAction[] = [
-    {
-      label: "模拟运行预览",
-      icon: <IconEyeOpenedStroked aria-hidden="true" />,
-      onClick: onDryRun,
-    },
-    ...(isNativeEngine
-      ? [
-          {
-            label: "数据一致性校验",
-            icon: <IconTickCircle aria-hidden="true" />,
-            onClick: onCheck,
-          },
-          ...(job.method === 3
-            ? [
-                {
-                  label: "重建双向基线（--resync）",
-                  icon: <IconRefresh aria-hidden="true" />,
-                  onClick: onResyncBisync,
-                },
-              ]
-            : []),
-        ]
-      : []),
-    {
-      label: "复制任务",
-      icon: <IconCopy aria-hidden="true" />,
-      onClick: onClone,
-    },
-    {
-      label: "设置",
-      icon: <IconSettingStroked aria-hidden="true" />,
-      onClick: onEdit,
-    },
-    {
-      label: "删除",
-      icon: <IconDeleteStroked aria-hidden="true" />,
-      onClick: onDelete,
-      danger: true,
-    },
-  ];
+  const menu: MenuAction[] = legacy
+    ? [
+        {
+          label: "删除",
+          icon: <IconDeleteStroked aria-hidden="true" />,
+          onClick: onDelete,
+          danger: true,
+        },
+      ]
+    : [
+        {
+          label: "模拟运行预览",
+          icon: <IconEyeOpenedStroked aria-hidden="true" />,
+          onClick: onDryRun,
+        },
+        {
+          label: "数据一致性校验",
+          icon: <IconTickCircle aria-hidden="true" />,
+          onClick: onCheck,
+        },
+        ...(job.method === 3
+          ? [
+              {
+                label: "重建双向基线（--resync）",
+                icon: <IconRefresh aria-hidden="true" />,
+                onClick: onResyncBisync,
+              },
+            ]
+          : []),
+        {
+          label: "复制任务",
+          icon: <IconCopy aria-hidden="true" />,
+          onClick: onClone,
+        },
+        {
+          label: "设置",
+          icon: <IconSettingStroked aria-hidden="true" />,
+          onClick: onEdit,
+        },
+        {
+          label: "删除",
+          icon: <IconDeleteStroked aria-hidden="true" />,
+          onClick: onDelete,
+          danger: true,
+        },
+      ];
   const runActionLabel = running
     ? "停止任务"
     : !enabled
@@ -973,63 +972,88 @@ function Overview({
         title={
           <span className="engine-title-row">
             <h2 title={getJobName(job)}>{getJobName(job)}</h2>
-            {job.queued && (
+            {legacy && (
+              <Tag size="small" type="solid" color="red">
+                旧版已停用
+              </Tag>
+            )}
+            {!legacy && job.queued && (
               <Tag size="small" type="light" color="cyan">
-                同引擎排队等待中
+                排队等待中
               </Tag>
             )}
           </span>
         }
         extra={
           <div className="overview-head-actions">
-            {job.isCron !== 2 && (
-              <Switch
-                aria-label="启用任务"
-                checked={enabled}
-                disabled={busy}
-                onChange={() => onToggle()}
-              />
-            )}
-            <IconButton
-              label="模拟运行预览（只读）"
-              icon={<IconEyeOpenedStroked aria-hidden="true" />}
-              disabled={busy}
-              onClick={onDryRun}
-            />
-            {isNativeEngine && (
-              <IconButton
-                label="数据一致性校验（rclone check）"
-                icon={<IconTickCircle aria-hidden="true" />}
-                disabled={busy}
-                onClick={onCheck}
-              />
-            )}
-            <Tooltip content={runActionLabel} position="top">
+            {legacy ? (
               <Button
-                aria-label={runActionLabel}
-                icon={
-                  running ? (
-                    <IconPause aria-hidden="true" />
-                  ) : (
-                    <IconPlay aria-hidden="true" />
-                  )
-                }
-                type={running ? "danger" : "tertiary"}
-                theme="borderless"
-                disabled={busy || (!running && !enabled)}
-                onClick={running ? onStop : onRun}
-              />
-            </Tooltip>
-            <IconButton
-              label="编辑任务"
-              icon={<IconEditStroked aria-hidden="true" />}
-              disabled={busy}
-              onClick={onEdit}
-            />
-            <ActionMenu actions={menu} disabled={busy} />
+                size="small"
+                type="danger"
+                theme="solid"
+                icon={<IconDeleteStroked aria-hidden="true" />}
+                disabled={busy}
+                onClick={onDelete}
+              >
+                删除任务
+              </Button>
+            ) : (
+              <>
+                {job.isCron !== 2 && (
+                  <Switch
+                    aria-label="启用任务"
+                    checked={enabled}
+                    disabled={busy}
+                    onChange={() => onToggle()}
+                  />
+                )}
+                <IconButton
+                  label="模拟运行预览（只读）"
+                  icon={<IconEyeOpenedStroked aria-hidden="true" />}
+                  disabled={busy}
+                  onClick={onDryRun}
+                />
+                <IconButton
+                  label="数据一致性校验（rclone check）"
+                  icon={<IconTickCircle aria-hidden="true" />}
+                  disabled={busy}
+                  onClick={onCheck}
+                />
+                <Tooltip content={runActionLabel} position="top">
+                  <Button
+                    aria-label={runActionLabel}
+                    icon={
+                      running ? (
+                        <IconPause aria-hidden="true" />
+                      ) : (
+                        <IconPlay aria-hidden="true" />
+                      )
+                    }
+                    type={running ? "danger" : "tertiary"}
+                    theme="borderless"
+                    disabled={busy || (!running && !enabled)}
+                    onClick={running ? onStop : onRun}
+                  />
+                </Tooltip>
+                <IconButton
+                  label="编辑任务"
+                  icon={<IconEditStroked aria-hidden="true" />}
+                  disabled={busy}
+                  onClick={onEdit}
+                />
+                <ActionMenu actions={menu} disabled={busy} />
+              </>
+            )}
           </div>
         }
       >
+        {legacy && (
+          <InlineNotice
+            role="alert"
+            icon={<IconAlertTriangle aria-hidden="true" size="small" />}
+            message="该任务关联旧版 OpenList 引擎，升级后已自动停用且无法运行或编辑。请删除此任务后，在「存储管理」接入对应存储并重新创建同步任务。"
+          />
+        )}
         <div className="overview-flow">
           <div className="flow-node">
             <div className="flow-name">
@@ -1042,7 +1066,7 @@ function Overview({
           </div>
           <IconChevronRightStroked className="flow-arrow" aria-hidden="true" />
           <div className="flow-node">
-            <div className="flow-name" title={engineHost || engineName}>
+            <div className="flow-name" title={engineName}>
               <IconCloudStroked aria-hidden="true" />
               目标目录
             </div>
@@ -1052,16 +1076,20 @@ function Overview({
           </div>
           <div className="flow-node flow-next">
             <div className="flow-name">下次执行</div>
-            <div className="flow-sub">{formatNextRun(job)}</div>
+            <div className="flow-sub">
+              {legacy ? "已停用（需删除重建）" : formatNextRun(job)}
+            </div>
           </div>
         </div>
         <div className="overview-sections">
           <section className="info-section">
             <h3>规则与调度</h3>
-            <Info label="存储引擎">
+            <Info label="执行引擎">
               <span className="overview-engine">
-                <span>{engineName}</span>
-                {engineHost && <span className="muted">{engineHost}</span>}
+                <span>{legacy ? "旧版 OpenList" : engineName}</span>
+                <span className="muted">
+                  {legacy ? "已不再支持，请删除重建" : "内置 rclone"}
+                </span>
               </span>
             </Info>
             <Info label="同步方式">{methodLabel(job.method)}</Info>
@@ -1072,15 +1100,19 @@ function Overview({
                 {job.windowStopOutside ? "（超出窗口自动停止）" : ""}
               </Info>
             )}
-            {(Number(job.compareMode || 0) !== 0 ||
-              Number(job.conflictPolicy || 0) !== 0) && (
-              <Info label="比对与冲突">
-                {compareModeLabel(job.compareMode)} ·{" "}
-                {conflictPolicyLabel(job.conflictPolicy)}
-              </Info>
-            )}
-            {Boolean(job.trashEnable) && (
-              <Info label="目标回收站">
+            {job.method === 2
+              ? Number(job.compareMode || 0) !== 0 && (
+                  <Info label="文件比对">{compareModeLabel(job.compareMode)}</Info>
+                )
+              : (Number(job.compareMode || 0) !== 0 ||
+                  Number(job.conflictPolicy || 0) !== 0) && (
+                  <Info label="比对与冲突">
+                    {compareModeLabel(job.compareMode)} ·{" "}
+                    {conflictPolicyLabel(job.conflictPolicy)}
+                  </Info>
+                )}
+            {job.method !== 2 && Boolean(job.trashEnable) && (
+              <Info label={job.method === 3 ? "双端回收站" : "目标回收站"}>
                 已开启（目录 {job.trashDir || ".opensync-trash"}
                 {Number(job.trashRetentionDays ?? 30) > 0
                   ? `，保留 ${job.trashRetentionDays ?? 30} 天`
@@ -1116,11 +1148,8 @@ function Overview({
                 <span className="muted">未启用过滤</span>
               )}
             </Info>
-            {cacheLabels.length > 0 && (
-              <Info label="目录缓存">{cacheLabels.join("、")}</Info>
-            )}
             {throttleLabels.length > 0 && (
-              <Info label="并发与限流">{throttleLabels.join(" · ")}</Info>
+              <Info label="并发与调优">{throttleLabels.join(" · ")}</Info>
             )}
             {notifyBindingText && (
               <Info label="通知绑定">{notifyBindingText}</Info>
@@ -1170,12 +1199,3 @@ function LatestExecution({
     </div>
   );
 }
-
-/** 引擎卡片只展示主机名，完整地址留给悬浮提示。 */
-const engineHostOf = (url: string) => {
-  try {
-    return new URL(url).host;
-  } catch {
-    return url;
-  }
-};

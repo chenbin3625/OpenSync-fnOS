@@ -36,23 +36,22 @@ func ExportSystemBackup(includeSecrets bool) (*SystemBackupPayload, error) {
 	}
 	engines := make([]map[string]interface{}, 0, len(rawEngines))
 	for _, row := range rawEngines {
+		rawURL := util.StringValue(row["url"])
+		if rawURL != native.EngineURL {
+			continue
+		}
 		item := map[string]interface{}{
 			"id":                util.ToInt64(row["id"]),
 			"remark":            util.StringValue(row["remark"]),
-			"url":               util.StringValue(row["url"]),
+			"url":               rawURL,
 			"userName":          util.StringValue(row["userName"]),
 			"maxConcurrentJobs": util.ToInt(row["maxConcurrentJobs"]),
 		}
-		rawURL := util.StringValue(row["url"])
 		tokenVal := util.StringValue(row["token"])
 		if includeSecrets || isNativeEmptyConfig(rawURL, tokenVal) {
 			item["token"] = tokenVal
-		} else if rawURL == native.EngineURL {
-			if redacted, _, err := native.RedactConfigForBackup(tokenVal); err == nil {
-				item["token"] = redacted
-			} else {
-				item["token"] = ""
-			}
+		} else if redacted, _, err := native.RedactConfigForBackup(tokenVal); err == nil {
+			item["token"] = redacted
 		} else {
 			item["token"] = ""
 		}
@@ -164,15 +163,20 @@ func ImportSystemBackup(payload SystemBackupPayload, conflictMode string) (map[s
 		if maxConcurrent < 0 || maxConcurrent > 50 {
 			maxConcurrent = 0
 		}
-		if err := nativeBackupKey(rawURL, userName, token); err != nil {
-			warnings = append(warnings, fmt.Sprintf("跳过无效地址的引擎 %q", rawURL))
+		if rawURL != native.EngineURL {
+			warnings = append(warnings, fmt.Sprintf("已跳过不再支持的旧版 OpenList/AList 引擎 %q (%s)；如需继续同步该网盘，请在存储管理中通过 WebDAV 添加", remark, rawURL))
 			enginesSkipped++
 			continue
 		}
-		if rawURL == "rclone://native" && remark == "" {
-			remark = "原生备份"
+		if err := nativeBackupKey(rawURL, userName, token); err != nil {
+			warnings = append(warnings, fmt.Sprintf("跳过无效的内置存储配置 %q：%v", remark, err))
+			enginesSkipped++
+			continue
 		}
-		hasRedactedNative := rawURL == native.EngineURL && native.ConfigContainsRedactedSecrets(token)
+		if remark == "" {
+			remark = "内置存储"
+		}
+		hasRedactedNative := native.ConfigContainsRedactedSecrets(token)
 		key := engineBackupKey(rawURL, userName)
 		if existing, exists := engineByKey[key]; exists {
 			existingID := util.ToInt64(existing["id"])
@@ -185,14 +189,14 @@ func ImportSystemBackup(payload SystemBackupPayload, conflictMode string) (map[s
 					t := token
 					tokenPtr = &t
 				} else if hasRedactedNative {
-					warnings = append(warnings, fmt.Sprintf("原生引擎 %q 的导出配置已脱敏，已保留当前已保存的远端凭据", remark))
+					warnings = append(warnings, fmt.Sprintf("内置存储 %q 的导出配置已脱敏，已保留当前已保存的远端凭据", remark))
 				}
 				mc := maxConcurrent
 				if err := mapper.UpdateAlistWithConcurrency(existingID, remark, rawURL, tokenPtr, &mc); err != nil {
-					warnings = append(warnings, fmt.Sprintf("更新引擎 %q 失败：%v", rawURL, err))
+					warnings = append(warnings, fmt.Sprintf("更新内置存储 %q 失败：%v", remark, err))
 					enginesSkipped++
 				} else {
-					removeCachedAlistClient(existingID)
+					RemoveEngineHealth(existingID)
 					engineQueue.RefreshLimit(existingID, maxConcurrent)
 					enginesUpdated++
 				}

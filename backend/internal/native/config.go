@@ -631,7 +631,7 @@ func validateKnownHosts(raw string) error {
 // inputs are never persisted or emitted into temporary rclone configs.
 func NormalizeParams(raw map[string]string) map[string]string {
 	out := make(map[string]string, len(raw))
-	typ := strings.TrimSpace(raw["type"])
+	typ := canonicalRemoteType(strings.TrimSpace(raw["type"]))
 	if typ != "" {
 		out["type"] = typ
 	}
@@ -696,6 +696,17 @@ func NormalizeParams(raw map[string]string) map[string]string {
 		}
 	}
 	return out
+}
+
+func canonicalRemoteType(typ string) string {
+	switch strings.ToLower(strings.TrimSpace(typ)) {
+	case "gcs":
+		return "googlecloudstorage"
+	case "oos":
+		return "oracleobjectstorage"
+	default:
+		return strings.TrimSpace(typ)
+	}
 }
 
 func normalizeCryptRemote(raw string) string {
@@ -1180,10 +1191,42 @@ func (c Config) ExportINI(ctx context.Context, names []string, encryptPassword s
 	if len(selected) == 0 {
 		return "", errors.New("请至少选择一个要导出的存储配置")
 	}
-
 	var b strings.Builder
 	for _, name := range slices.Sorted(maps.Keys(selected)) {
-		p := c[name]
+		p := maps.Clone(c[name])
+		if IsWrapperType(p["type"]) {
+			target, err := c.exportLocalTarget(p["remote"])
+			if err != nil {
+				return "", fmt.Errorf("无法导出存储 %q：%w", name, err)
+			}
+			p["remote"] = target
+		}
+		if p["type"] == "union" {
+			ups, err := ParseUnionUpstreams(p["upstreams"])
+			if err != nil {
+				return "", err
+			}
+			for i := range ups {
+				ups[i].Target, err = c.exportLocalTarget(ups[i].Target)
+				if err != nil {
+					return "", fmt.Errorf("无法导出存储 %q：%w", name, err)
+				}
+			}
+			p["upstreams"] = FormatUnionUpstreams(ups)
+		}
+		if p["type"] == "combine" {
+			ups, err := ParseCombineUpstreams(p["upstreams"])
+			if err != nil {
+				return "", err
+			}
+			for i := range ups {
+				ups[i].Target, err = c.exportLocalTarget(ups[i].Target)
+				if err != nil {
+					return "", fmt.Errorf("无法导出存储 %q：%w", name, err)
+				}
+			}
+			p["upstreams"] = FormatCombineUpstreams(ups)
+		}
 		fmt.Fprintf(&b, "[%s]\n", name)
 		fmt.Fprintf(&b, "type = %s\n", p["type"])
 		for _, k := range slices.Sorted(maps.Keys(p)) {
@@ -1235,6 +1278,21 @@ func (c Config) ExportINI(ctx context.Context, names []string, encryptPassword s
 		return "", err
 	}
 	return string(encrypted), nil
+}
+
+func (c Config) exportLocalTarget(target string) (string, error) {
+	ref, sub, ok := strings.Cut(target, ":")
+	if !ok || !c.isLocalName(ref) {
+		return target, nil
+	}
+	if !cleanRelative(sub) {
+		return "", errors.New("本地授权目录路径无效")
+	}
+	abs, err := resolveLocalEntry(sub, true)
+	if err != nil {
+		return "", err
+	}
+	return abs, nil
 }
 
 func (c Config) remoteDependencies(name string) []string {
@@ -1401,8 +1459,13 @@ func ValidateEntry(name string, p map[string]string, plainSecrets bool) error {
 
 	switch typ {
 	case "s3":
-		if p["access_key_id"] == "" || p["secret_access_key"] == "" || (p["env_auth"] != "" && p["env_auth"] != "false") {
-			return fmt.Errorf("%s 需要显式填写 S3 Access Key ID 和 Secret Access Key", name)
+		if err := validateBoolField(name, "env_auth", p["env_auth"]); err != nil {
+			return err
+		}
+		hasAccessKey := p["access_key_id"] != ""
+		hasSecretKey := p["secret_access_key"] != ""
+		if hasAccessKey != hasSecretKey {
+			return fmt.Errorf("%s 的 S3 Access Key ID 和 Secret Access Key 必须同时填写，或同时留空使用运行时/匿名访问", name)
 		}
 		if p["endpoint"] != "" && !validS3Endpoint(p["endpoint"]) {
 			return fmt.Errorf("%s 的 S3 端点无效（请填写如 oss-cn-hangzhou.aliyuncs.com 或 https://...）", name)
@@ -1544,9 +1607,19 @@ func ValidateEntry(name string, p map[string]string, plainSecrets bool) error {
 		if strings.TrimSpace(p["namespace"]) == "" || strings.TrimSpace(p["region"]) == "" {
 			return fmt.Errorf("%s 需要填写 Oracle Namespace 和 Region", name)
 		}
+		switch strings.TrimSpace(p["provider"]) {
+		case "", "env_auth", "user_principal_auth", "instance_principal_auth", "resource_principal_auth", "workload_identity_auth", "no_auth":
+		default:
+			return fmt.Errorf("%s 的 Oracle provider 不受支持", name)
+		}
 	case "qingstor":
-		if p["access_key_id"] == "" || p["secret_access_key"] == "" || (p["env_auth"] != "" && p["env_auth"] != "false") {
-			return fmt.Errorf("%s 需要显式填写 QingStor Access Key ID 和 Secret Access Key", name)
+		if err := validateBoolField(name, "env_auth", p["env_auth"]); err != nil {
+			return err
+		}
+		hasAccessKey := p["access_key_id"] != ""
+		hasSecretKey := p["secret_access_key"] != ""
+		if hasAccessKey != hasSecretKey {
+			return fmt.Errorf("%s 的 QingStor Access Key ID 和 Secret Access Key 必须同时填写，或同时留空使用运行时/匿名访问", name)
 		}
 	case "storj":
 		hasGrant := p["access_grant"] != ""

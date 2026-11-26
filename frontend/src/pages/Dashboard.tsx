@@ -15,6 +15,7 @@ import {
   IconClockStroked,
   IconCloudStroked,
   IconCopy,
+  IconDeleteStroked,
   IconEyeOpenedStroked,
   IconPause,
   IconPlay,
@@ -28,19 +29,25 @@ import {
   EmptyState,
   Header,
   IconButton,
+  InlineNotice,
   LoadState,
   LoadingPanel,
   SearchFilterInput,
   SectionCard,
   Status,
   confirmAction,
+  confirmDelete,
   errorToast,
 } from "../components/common";
 import { DryRunModal } from "../components/DryRunModal";
 import { FullSyncApprovalModal } from "../components/FullSyncApprovalModal";
 import { useAction, useResource } from "../lib/hooks";
 import { formatDisplayPathList } from "../lib/syncPathPreview";
-import { cloneJobToForm, findBatchMoveJobs } from "../lib/taskForm";
+import {
+  cloneJobToForm,
+  findBatchMoveJobs,
+  isLegacyOpenListJob,
+} from "../lib/taskForm";
 import {
   formatSize,
   methodLabel,
@@ -74,7 +81,8 @@ function methodTagColor(method: number): "blue" | "violet" | "cyan" | "grey" {
   return "grey";
 }
 
-function jobDotTone(job: DashboardJobItem): string {
+function jobDotTone(job: DashboardJobItem, legacy = false): string {
+  if (legacy) return "kpi-dot kpi-dot--danger";
   if (job.pendingApproval) return "kpi-dot kpi-dot--warning";
   if (job.running) return "kpi-dot kpi-dot--primary kpi-dot--pulse";
   if (job.queued) return "kpi-dot kpi-dot--primary";
@@ -110,7 +118,7 @@ export default function Dashboard() {
 
   const [searchInput, setSearchInput] = useState("");
   const [keyword, setKeyword] = useState("");
-  const [engineFilter, setEngineFilter] = useState<string>("all");
+  const [storageFilter, setStorageFilter] = useState<string>("all");
   const [methodFilter, setMethodFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
@@ -182,11 +190,40 @@ export default function Dashboard() {
     };
   }, [allJobs]);
 
+  const storageFilterOptions = useMemo(() => {
+    const names = new Set<string>(["本地"]);
+    for (const eng of engines.data || []) {
+      for (const name of Object.keys(eng.remotes || {})) {
+        if (name) names.add(name);
+      }
+    }
+    for (const job of allJobs) {
+      for (const p of [...parseJobPathList(job.srcPath), ...parseJobPathList(job.dstPath)]) {
+        const seg = p.replace(/^\/+/, "").split("/")[0];
+        if (seg) names.add(seg);
+      }
+    }
+    return [
+      { label: "全部存储", value: "all" },
+      ...[...names]
+        .sort((a, b) => (a === "本地" ? -1 : b === "本地" ? 1 : a.localeCompare(b)))
+        .map((name) => ({ label: name === "本地" ? "本地目录" : name, value: name })),
+    ];
+  }, [engines.data, allJobs]);
+
   const filteredJobs = useMemo(() => {
     const kw = keyword.trim().toLowerCase();
     return allJobs.filter((job) => {
-      if (engineFilter !== "all" && String(job.alistId) !== engineFilter)
-        return false;
+      if (storageFilter !== "all") {
+        const paths = [
+          ...parseJobPathList(job.srcPath),
+          ...parseJobPathList(job.dstPath),
+        ];
+        const usesStorage = paths.some(
+          (p) => p.replace(/^\/+/, "").split("/")[0]?.toLowerCase() === storageFilter.toLowerCase(),
+        );
+        if (!usesStorage) return false;
+      }
       if (methodFilter !== "all" && String(job.method) !== methodFilter)
         return false;
       if (statusFilter === "running" && !job.running) return false;
@@ -195,39 +232,50 @@ export default function Dashboard() {
       if (statusFilter === "failed" && !isJobFailed(job)) return false;
       if (statusFilter === "disabled" && job.enable === 1) return false;
       if (kw) {
-        const hay = `${job.remark || ""} #${job.id} ${job.alistName} ${job.srcPath} ${job.dstPath}`.toLowerCase();
+        const hay = `${job.remark || ""} #${job.id} ${job.srcPath} ${job.dstPath}`.toLowerCase();
         if (!hay.includes(kw)) return false;
       }
       return true;
     });
-  }, [allJobs, engineFilter, methodFilter, statusFilter, keyword]);
+  }, [allJobs, storageFilter, methodFilter, statusFilter, keyword]);
 
   const hasActiveFilters =
     Boolean(keyword.trim()) ||
-    engineFilter !== "all" ||
+    storageFilter !== "all" ||
     methodFilter !== "all" ||
     statusFilter !== "all";
 
   const resetFilters = () => {
     setSearchInput("");
     setKeyword("");
-    setEngineFilter("all");
+    setStorageFilter("all");
     setMethodFilter("all");
     setStatusFilter("all");
   };
 
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const legacyJobCount = useMemo(
+    () =>
+      allJobs.filter((j) => isLegacyOpenListJob(j, engines.data)).length,
+    [allJobs, engines.data],
+  );
+  const selectableVisibleJobs = useMemo(
+    () =>
+      filteredJobs.filter((j) => !isLegacyOpenListJob(j, engines.data)),
+    [filteredJobs, engines.data],
+  );
   const visibleAllSelected =
-    filteredJobs.length > 0 &&
-    filteredJobs.every((j) => selectedSet.has(j.id));
+    selectableVisibleJobs.length > 0 &&
+    selectableVisibleJobs.every((j) => selectedSet.has(j.id));
   const visibleSomeSelected =
-    filteredJobs.some((j) => selectedSet.has(j.id)) && !visibleAllSelected;
+    selectableVisibleJobs.some((j) => selectedSet.has(j.id)) &&
+    !visibleAllSelected;
 
   const toggleSelectAllVisible = (checked: boolean) => {
     if (checked) {
-      setSelectedIds(filteredJobs.map((j) => j.id));
+      setSelectedIds(selectableVisibleJobs.map((j) => j.id));
     } else {
-      const visible = new Set(filteredJobs.map((j) => j.id));
+      const visible = new Set(selectableVisibleJobs.map((j) => j.id));
       setSelectedIds((prev) => prev.filter((id) => !visible.has(id)));
     }
   };
@@ -330,6 +378,21 @@ export default function Dashboard() {
       return;
     }
     void execute();
+  };
+
+  const handleDeleteLegacy = (job: DashboardJobItem) => {
+    const jobName = job.remark || `同步任务 #${job.id}`;
+    confirmDelete(
+      `删除旧版 OpenList 任务「${jobName}」？`,
+      () =>
+        action.run(async () => {
+          await api.deleteJob(job.id);
+          setSelectedIds((prev) => prev.filter((id) => id !== job.id));
+          Toast.success("已删除旧版任务，请使用内置存储重新创建");
+          await refreshAll(true);
+        }),
+      "此任务关联已移除的旧版 OpenList 引擎且历史执行记录将一并删除。",
+    );
   };
 
   const handleClone = (jobId: number) => {
@@ -460,17 +523,36 @@ export default function Dashboard() {
           (kpi.queuedJobs / kpi.totalJobs) * 100,
         )
       : 0;
+  const primaryEngine = engines.data?.[0];
+  const storageHealthList = primaryEngine?.health?.storagesKnown
+    ? primaryEngine.health.storages || []
+    : [];
+  const totalStorages =
+    storageHealthList.length > 0
+      ? storageHealthList.length
+      : kpi?.totalEngines ?? 0;
+  const unhealthyStorages =
+    storageHealthList.length > 0
+      ? storageHealthList.filter((st) => {
+          if (st.disabled) return false;
+          const s = (st.status || "").trim().toLowerCase();
+          return s !== "" && s !== "work" && s !== "ok";
+        }).length
+      : kpi?.offlineEngines ?? 0;
+  const healthyStorages =
+    storageHealthList.length > 0
+      ? Math.max(0, totalStorages - unhealthyStorages)
+      : kpi?.onlineEngines ?? 0;
+  const unknownStoragesCount =
+    storageHealthList.length > 0
+      ? 0
+      : kpi
+        ? Math.max(0, kpi.totalEngines - kpi.onlineEngines - kpi.offlineEngines)
+        : 0;
   const onlinePct =
-    kpi && kpi.totalEngines > 0
-      ? (kpi.onlineEngines / kpi.totalEngines) * 100
-      : 0;
+    totalStorages > 0 ? (healthyStorages / totalStorages) * 100 : 0;
   const offlinePct =
-    kpi && kpi.totalEngines > 0
-      ? (kpi.offlineEngines / kpi.totalEngines) * 100
-      : 0;
-  const unknownEnginesCount = kpi
-    ? Math.max(0, kpi.totalEngines - kpi.onlineEngines - kpi.offlineEngines)
-    : 0;
+    totalStorages > 0 ? (unhealthyStorages / totalStorages) * 100 : 0;
   const recentSuccessPct =
     recent && recent.totalRuns > 0
       ? (recent.successRuns / recent.totalRuns) * 100
@@ -496,14 +578,14 @@ export default function Dashboard() {
     !engines.loading && !engines.error && (engines.data?.length ?? 0) === 0 ? (
       <div className="empty-guide">
         <span className="muted">
-          还没有配置存储引擎，先添加引擎即可创建同步任务
+          存储服务尚未就绪，请前往存储管理检查本地目录或添加远程存储
         </span>
         <Button
           type="primary"
           theme="solid"
           onClick={() => navigate("/engines")}
         >
-          前往添加存储引擎
+          前往存储管理
         </Button>
       </div>
     ) : !engines.loading ? (
@@ -574,6 +656,13 @@ export default function Dashboard() {
       >
         {data && kpi && recent && (
           <div className="dashboard-content">
+            {legacyJobCount > 0 && (
+              <InlineNotice
+                role="alert"
+                icon={<IconAlertTriangle aria-hidden="true" size="small" />}
+                message={`检测到 ${legacyJobCount} 个旧版 OpenList 同步任务已自动停用。当前版本已移除 OpenList 引擎，请删除旧任务后在「存储管理」接入对应存储并重新创建。`}
+              />
+            )}
             {data.pendingApprovals.length > 0 && (
               <div className="approval-alert-banner" role="alert">
                 <div className="approval-alert-head">
@@ -795,7 +884,7 @@ export default function Dashboard() {
                 type="button"
                 className={[
                   "dashboard-kpi-card",
-                  kpi.offlineEngines > 0 ? "is-danger" : "",
+                  unhealthyStorages > 0 ? "is-danger" : "",
                 ]
                   .filter(Boolean)
                   .join(" ")}
@@ -803,7 +892,7 @@ export default function Dashboard() {
               >
                 <div className="dashboard-kpi-head">
                   <span className="dashboard-kpi-label">
-                    存储引擎健康
+                    存储健康状态
                     <IconChevronRight
                       size="small"
                       className="dashboard-kpi-link-arrow"
@@ -812,10 +901,9 @@ export default function Dashboard() {
                   </span>
                   <span
                     className={`dashboard-kpi-icon ${
-                      kpi.offlineEngines > 0
+                      unhealthyStorages > 0
                         ? "dashboard-kpi-icon--danger"
-                        : kpi.totalEngines > 0 &&
-                            kpi.onlineEngines === kpi.totalEngines
+                        : totalStorages > 0 && healthyStorages === totalStorages
                           ? "dashboard-kpi-icon--success"
                           : ""
                     }`}
@@ -826,13 +914,13 @@ export default function Dashboard() {
                 </div>
                 <div className="dashboard-kpi-value-row">
                   <span className="dashboard-kpi-value">
-                    {kpi.onlineEngines}
+                    {healthyStorages}
                   </span>
                   <span className="dashboard-kpi-denom">
-                    / {kpi.totalEngines}
+                    / {totalStorages}
                   </span>
                 </div>
-                {kpi.totalEngines > 0 && (
+                {totalStorages > 0 && (
                   <div className="dashboard-kpi-bar" aria-hidden="true">
                     {onlinePct > 0 && (
                       <span
@@ -849,23 +937,23 @@ export default function Dashboard() {
                   </div>
                 )}
                 <div className="dashboard-kpi-foot">
-                  {kpi.totalEngines === 0 ? (
+                  {totalStorages === 0 ? (
                     <span className="dashboard-kpi-stat">
                       <span className="kpi-dot" aria-hidden="true" />
-                      尚未配置存储引擎
+                      前往配置本地与远程存储
                     </span>
-                  ) : kpi.offlineEngines > 0 ? (
+                  ) : unhealthyStorages > 0 ? (
                     <span className="dashboard-kpi-stat is-danger">
                       <span
                         className="kpi-dot kpi-dot--danger"
                         aria-hidden="true"
                       />
-                      {kpi.offlineEngines} 个引擎连接异常
+                      {unhealthyStorages} 个存储状态异常
                     </span>
-                  ) : unknownEnginesCount > 0 ? (
+                  ) : unknownStoragesCount > 0 ? (
                     <span className="dashboard-kpi-stat">
                       <span className="kpi-dot" aria-hidden="true" />
-                      {unknownEnginesCount} 个引擎待检测
+                      存储待检测
                     </span>
                   ) : (
                     <span className="dashboard-kpi-stat is-success">
@@ -873,7 +961,7 @@ export default function Dashboard() {
                         className="kpi-dot kpi-dot--success"
                         aria-hidden="true"
                       />
-                      全部引擎连接正常
+                      全部存储连接正常
                     </span>
                   )}
                 </div>
@@ -1014,7 +1102,7 @@ export default function Dashboard() {
                   aria-label="全选当前列表任务"
                   checked={visibleAllSelected}
                   indeterminate={visibleSomeSelected}
-                  disabled={!filteredJobs.length}
+                  disabled={!selectableVisibleJobs.length}
                   onChange={(e) =>
                     toggleSelectAllVisible(Boolean(e.target.checked))
                   }
@@ -1026,8 +1114,8 @@ export default function Dashboard() {
                   aria-hidden="true"
                 />
                 <SearchFilterInput
-                  ariaLabel="搜索任务名称、路径或引擎"
-                  placeholder="搜索任务名 / 路径 / 引擎"
+                  ariaLabel="搜索任务名称或路径"
+                  placeholder="搜索任务名 / 路径"
                   value={searchInput}
                   onChange={(next) => {
                     setSearchInput(next);
@@ -1036,16 +1124,10 @@ export default function Dashboard() {
                   onSearch={setKeyword}
                 />
                 <Select
-                  aria-label="按存储引擎筛选"
-                  value={engineFilter}
-                  onChange={(v) => setEngineFilter(String(v))}
-                  optionList={[
-                    { label: "全部引擎", value: "all" },
-                    ...(engines.data || []).map((e) => ({
-                      label: e.remark || e.userName || `引擎 #${e.id}`,
-                      value: String(e.id),
-                    })),
-                  ]}
+                  aria-label="按存储筛选"
+                  value={storageFilter}
+                  onChange={(v) => setStorageFilter(String(v))}
+                  optionList={storageFilterOptions}
                 />
                 <Select
                   aria-label="按同步方式筛选"
@@ -1056,6 +1138,7 @@ export default function Dashboard() {
                     { label: "增量同步", value: "0" },
                     { label: "全量同步", value: "1" },
                     { label: "移动", value: "2" },
+                    { label: "双向同步", value: "3" },
                   ]}
                 />
                 {hasActiveFilters && (
@@ -1156,6 +1239,7 @@ export default function Dashboard() {
                         : "");
                     const fullRouteTitle = `${displaySrcList.join(", ") || "—"} → ${displayDstList.join(", ") || "—"}`;
                     const isSelected = selectedSet.has(job.id);
+                    const legacy = isLegacyOpenListJob(job, engines.data);
                     const failed = isJobFailed(job);
                     const livePct = Math.min(
                       100,
@@ -1172,14 +1256,18 @@ export default function Dashboard() {
                     const rowClassName = [
                       "dashboard-job-row",
                       isSelected ? "is-selected" : "",
-                      job.pendingApproval
-                        ? "is-approval"
-                        : job.running
-                          ? "is-running"
-                          : failed
-                            ? "is-failed"
-                            : "",
-                      job.enable !== 1 && !job.running ? "is-disabled" : "",
+                      legacy
+                        ? "is-failed"
+                        : job.pendingApproval
+                          ? "is-approval"
+                          : job.running
+                            ? "is-running"
+                            : failed
+                              ? "is-failed"
+                              : "",
+                      (legacy || (job.enable !== 1 && !job.running))
+                        ? "is-disabled"
+                        : "",
                     ]
                       .filter(Boolean)
                       .join(" ");
@@ -1188,8 +1276,13 @@ export default function Dashboard() {
                       <div key={job.id} className={rowClassName}>
                         <div className="dashboard-job-check">
                           <Checkbox
-                            aria-label={`选择 ${jobName}`}
-                            checked={isSelected}
+                            aria-label={
+                              legacy
+                                ? `${jobName}（旧版已停用，请删除重建）`
+                                : `选择 ${jobName}`
+                            }
+                            checked={!legacy && isSelected}
+                            disabled={legacy}
                             onChange={(e) =>
                               toggleSelect(job.id, Boolean(e.target.checked))
                             }
@@ -1203,7 +1296,7 @@ export default function Dashboard() {
                           <div className="dashboard-job-title-line">
                             <span className="dashboard-job-name-wrap">
                               <span
-                                className={jobDotTone(job)}
+                                className={jobDotTone(job, legacy)}
                                 aria-hidden="true"
                               />
                               <button
@@ -1225,24 +1318,29 @@ export default function Dashboard() {
                             >
                               {methodLabel(job.method)}
                             </Tag>
-                            {job.pendingApproval && (
+                            {legacy && (
+                              <Tag size="small" type="solid" color="red">
+                                旧版已停用
+                              </Tag>
+                            )}
+                            {!legacy && job.pendingApproval && (
                               <Tag size="small" type="solid" color="orange">
                                 {job.pendingApproval.status === "executing"
                                   ? "正在删除"
                                   : "待确认删除"}
                               </Tag>
                             )}
-                            {job.queued && (
+                            {!legacy && job.queued && (
                               <Tag size="small" type="light" color="cyan">
                                 排队等待中
                               </Tag>
                             )}
-                            {job.enable !== 1 && (
+                            {!legacy && job.enable !== 1 && (
                               <Tag size="small" type="light" color="grey">
                                 已停用
                               </Tag>
                             )}
-                            {job.windowEnable === 1 && (
+                            {!legacy && job.windowEnable === 1 && (
                               <Tag size="small" type="light" color="violet">
                                 窗口 {job.windowStart}–{job.windowEnd}
                               </Tag>
@@ -1250,13 +1348,6 @@ export default function Dashboard() {
                           </div>
 
                           <div className="dashboard-job-meta">
-                            <span
-                              className="dashboard-meta-engine"
-                              title={job.alistName || `引擎 #${job.alistId}`}
-                            >
-                              <IconServerStroked size="small" aria-hidden="true" />
-                              <span>{job.alistName || `引擎 #${job.alistId}`}</span>
-                            </span>
                             <span
                               className="dashboard-path-route"
                               title={fullRouteTitle}
@@ -1279,7 +1370,7 @@ export default function Dashboard() {
                         <div
                           className="dashboard-job-status-col"
                           onClick={() =>
-                            !job.running && job.pendingApproval
+                            !legacy && !job.running && job.pendingApproval
                               ? openApprovalModal(
                                   job.id,
                                   jobName,
@@ -1288,7 +1379,20 @@ export default function Dashboard() {
                               : openJobDetail(job)
                           }
                         >
-                          {job.running ? (
+                          {legacy ? (
+                            <div className="dashboard-job-approval-note">
+                              <span className="dashboard-job-approval-title">
+                                <IconAlertTriangle
+                                  size="small"
+                                  aria-hidden="true"
+                                />
+                                旧版 OpenList 任务已停用
+                              </span>
+                              <span className="dashboard-job-approval-action">
+                                已不再支持，请删除后重新创建
+                              </span>
+                            </div>
+                          ) : job.running ? (
                             <div className="dashboard-job-progress">
                               <div className="dashboard-job-progress-head">
                                 <span className="dashboard-job-progress-label">
@@ -1407,42 +1511,54 @@ export default function Dashboard() {
                         </div>
 
                         <div className="row-actions dashboard-job-actions">
-                          <IconButton
-                            label="模拟运行预览"
-                            icon={<IconEyeOpenedStroked aria-hidden="true" />}
-                            disabled={action.busy}
-                            onClick={() =>
-                              setDryRunJob({ id: job.id, name: jobName })
-                            }
-                          />
-                          <IconButton
-                            label={
-                              job.running || job.queued ? "停止任务" : "启动任务"
-                            }
-                            icon={
-                              job.running || job.queued ? (
-                                <IconPause aria-hidden="true" />
-                              ) : (
-                                <IconPlay aria-hidden="true" />
-                              )
-                            }
-                            danger={job.running || job.queued}
-                            disabled={
-                              action.busy ||
-                              (!job.running && !job.queued && job.enable !== 1)
-                            }
-                            onClick={() =>
-                              job.running || job.queued
-                                ? handleStopOne(job)
-                                : handleRunOne(job)
-                            }
-                          />
-                          <IconButton
-                            label="复制任务"
-                            icon={<IconCopy aria-hidden="true" />}
-                            disabled={action.busy}
-                            onClick={() => handleClone(job.id)}
-                          />
+                          {legacy ? (
+                            <IconButton
+                              label="删除旧版任务"
+                              icon={<IconDeleteStroked aria-hidden="true" />}
+                              danger
+                              disabled={action.busy}
+                              onClick={() => handleDeleteLegacy(job)}
+                            />
+                          ) : (
+                            <>
+                              <IconButton
+                                label="模拟运行预览"
+                                icon={<IconEyeOpenedStroked aria-hidden="true" />}
+                                disabled={action.busy}
+                                onClick={() =>
+                                  setDryRunJob({ id: job.id, name: jobName })
+                                }
+                              />
+                              <IconButton
+                                label={
+                                  job.running || job.queued ? "停止任务" : "启动任务"
+                                }
+                                icon={
+                                  job.running || job.queued ? (
+                                    <IconPause aria-hidden="true" />
+                                  ) : (
+                                    <IconPlay aria-hidden="true" />
+                                  )
+                                }
+                                danger={job.running || job.queued}
+                                disabled={
+                                  action.busy ||
+                                  (!job.running && !job.queued && job.enable !== 1)
+                                }
+                                onClick={() =>
+                                  job.running || job.queued
+                                    ? handleStopOne(job)
+                                    : handleRunOne(job)
+                                }
+                              />
+                              <IconButton
+                                label="复制任务"
+                                icon={<IconCopy aria-hidden="true" />}
+                                disabled={action.busy}
+                                onClick={() => handleClone(job.id)}
+                              />
+                            </>
+                          )}
                           <IconButton
                             label="查看任务详情"
                             icon={<IconChevronRight aria-hidden="true" />}

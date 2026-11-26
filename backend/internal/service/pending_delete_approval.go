@@ -59,7 +59,6 @@ type pendingDeleteRecord struct {
 
 	// Runtime-only fields (never persisted to SQLite).
 	expiresAtTime time.Time          `json:"-"`
-	client        *AlistClient       `json:"-"`
 	expiryTimer   *time.Timer        `json:"-"`
 	execCancel    context.CancelFunc `json:"-"`
 }
@@ -296,11 +295,6 @@ func (m *pendingDeleteManager) Stage(jt *JobTask, targets []pendingDeleteTarget)
 		Approval:  approval,
 		Status:    pendingApprovalStatusPending,
 		CreatedAt: now.Unix(),
-	}
-	// Preserve direct client override for isolated unit tests that construct a
-	// JobTask against an httptest server without registering an engine in DB.
-	if util.ToInt64(jobSnap["alistId"]) <= 0 && jt.AlistClient != nil {
-		rec.client = jt.AlistClient
 	}
 
 	shouldNotify := true
@@ -673,103 +667,29 @@ func (m *pendingDeleteManager) executeRecord(ctx context.Context, rec *pendingDe
 	}()
 
 	jobCfg := m.liveJobConfig(rec)
-	if alistID := util.ToInt64(jobCfg["alistId"]); alistID > 0 && rec.client == nil {
-		nativeCfg, nativeErr := loadNative(alistID)
-		if nativeErr != nil {
-			if ctx.Err() != nil {
-				m.restorePendingAfterCancel(rec)
-				return
-			}
-			m.returnToPending(rec, rec.Targets, false, nativeErr.Error())
+	alistID := util.ToInt64(jobCfg["alistId"])
+	if alistID <= 0 {
+		id, err := EnsureNativeEngine()
+		if err != nil {
+			m.returnToPending(rec, rec.Targets, false, err.Error())
 			return
 		}
-		if nativeCfg != nil {
-			m.executeNativeRecord(ctx, rec, jobCfg, nativeCfg)
-			return
-		}
+		alistID = id
 	}
-
-	client, err := m.resolveClient(ctx, rec, jobCfg)
-	if err != nil {
+	nativeCfg, nativeErr := loadNative(alistID)
+	if nativeErr != nil {
 		if ctx.Err() != nil {
 			m.restorePendingAfterCancel(rec)
 			return
 		}
-		log.Printf("Job %d (task %d) pending delete verification failed to connect engine: %v", rec.JobID, rec.TaskID, err)
-		m.returnToPending(rec, rec.Targets, false, err.Error())
+		m.returnToPending(rec, rec.Targets, false, nativeErr.Error())
 		return
 	}
-
-	toDelete, refreshedTargets, changed, verifyErr := verifyPendingDeleteTargets(ctx, client, jobCfg, rec.Targets)
-	if ctx.Err() != nil {
-		m.restorePendingAfterCancel(rec)
+	if nativeCfg == nil {
+		m.returnToPending(rec, rec.Targets, false, legacyOpenListJobDisabledMsg)
 		return
 	}
-	if verifyErr != nil {
-		log.Printf("Job %d (task %d) pending delete verification aborted: %v", rec.JobID, rec.TaskID, verifyErr)
-		m.returnToPending(rec, rec.Targets, false, verifyErr.Error())
-		return
-	}
-	if changed {
-		if len(refreshedTargets) == 0 {
-			m.completeRecord(rec)
-			return
-		}
-		log.Printf("Job %d (task %d) pending delete target(s) changed since scan; re-prompting with %d updated path(s)", rec.JobID, rec.TaskID, len(refreshedTargets))
-		m.returnToPending(rec, refreshedTargets, true, "")
-		return
-	}
-	if len(toDelete) == 0 {
-		log.Printf("Job %d (task %d) pending delete targets already resolved; nothing to delete", rec.JobID, rec.TaskID)
-		m.completeRecord(rec)
-		return
-	}
-
-	// Execute verified deletions with a lightweight JobTask runner so trash
-	// handling, path safety checks, consecutive failure caps, and task-item
-	// persistence share the exact same tested implementation as full sync.
-	delCtx, delCancel := context.WithCancel(ctx)
-	delRunner := &JobTask{
-		TaskID:      rec.TaskID,
-		Job:         jobCfg,
-		AlistClient: client,
-		ctx:         delCtx,
-		cancel:      delCancel,
-	}
-	delRunner.initRuntime()
-	defer delRunner.cancelTaskRuntime()
-
-	// Group by DstRoot so each root uses its own fullSyncDeleteRun while
-	// keeping deterministic target order.
-	runsByRoot := make(map[string]*fullSyncDeleteRun)
-	for _, target := range toDelete {
-		if delCtx.Err() != nil {
-			break
-		}
-		run := runsByRoot[target.DstRoot]
-		if run == nil {
-			run = &fullSyncDeleteRun{jt: delRunner, root: target.DstRoot}
-			runsByRoot[target.DstRoot] = run
-		}
-		if run.aborted {
-			continue
-		}
-		run.run(fullSyncDelete{
-			dir:      target.DstDir,
-			name:     target.Name,
-			metadata: FileMetadata{Size: target.Size, Modified: target.Modified},
-		})
-	}
-
-	if delCtx.Err() != nil {
-		// Process shutdown or job deletion interrupted execution.
-		_ = delRunner.persistRemainingTaskItems()
-		m.restorePendingAfterCancel(rec)
-		return
-	}
-
-	m.persistDeleteOutcome(rec, delRunner)
-	m.completeRecord(rec)
+	m.executeNativeRecord(ctx, rec, jobCfg, nativeCfg)
 }
 
 func (m *pendingDeleteManager) liveJobConfig(rec *pendingDeleteRecord) map[string]interface{} {
@@ -868,17 +788,6 @@ func (m *pendingDeleteManager) executeNativeRecord(ctx context.Context, rec *pen
 
 	m.persistDeleteOutcome(rec, delRunner)
 	m.completeRecord(rec)
-}
-
-func (m *pendingDeleteManager) resolveClient(ctx context.Context, rec *pendingDeleteRecord, jobCfg map[string]interface{}) (*AlistClient, error) {
-	if rec.client != nil {
-		return rec.client, nil
-	}
-	alistID := util.ToInt64(jobCfg["alistId"])
-	if alistID <= 0 {
-		return nil, errors.New("missing storage engine id for pending deletion")
-	}
-	return GetClientByIDContext(ctx, alistID)
 }
 
 func (m *pendingDeleteManager) persistDeleteOutcome(rec *pendingDeleteRecord, delRunner *JobTask) {
@@ -1006,47 +915,8 @@ func (m *pendingDeleteManager) completeRecord(rec *pendingDeleteRecord) {
 	}
 }
 
-// verifyPendingDeleteTargets performs targeted live verification of every
-// approved target against source and destination before any deletion happens.
-//
-// Returns:
-//   - toDelete: targets verified safe & unchanged, ready for deletion
-//   - refreshed: updated targets list when changed == true
-//   - changed: true if any still-extra target changed on destination since scan
-//   - err: non-nil if source/destination could not be verified safely (network
-//     error, empty source root guard, etc.); callers must delete nothing.
+// pendingDeleteDirLister lists a directory during targeted pending-delete verification.
 type pendingDeleteDirLister func(dir string) (FileListResult, bool, error)
-
-func verifyPendingDeleteTargets(
-	ctx context.Context,
-	client *AlistClient,
-	jobCfg map[string]interface{},
-	targets []pendingDeleteTarget,
-) (toDelete []pendingDeleteTarget, refreshed []pendingDeleteTarget, changed bool, err error) {
-	scanIntervalS := util.ToInt(jobCfg["scanIntervalS"])
-	scanIntervalT := util.ToInt(jobCfg["scanIntervalT"])
-	listSrcRaw := func(dir string) (FileListResult, bool, error) {
-		items, listErr := client.FileListApiContext(ctx, dir, 0, scanIntervalS)
-		if listErr != nil {
-			if isAlistObjectNotFound(listErr) {
-				return nil, true, nil
-			}
-			return nil, false, listErr
-		}
-		return items, false, nil
-	}
-	listDstRaw := func(dir string) (FileListResult, bool, error) {
-		items, listErr := client.FileListApiContext(ctx, dir, 0, scanIntervalT)
-		if listErr != nil {
-			if isAlistObjectNotFound(listErr) {
-				return nil, true, nil
-			}
-			return nil, false, listErr
-		}
-		return items, false, nil
-	}
-	return verifyPendingDeleteTargetsWithLister(ctx, listSrcRaw, listDstRaw, jobCfg, targets)
-}
 
 func verifyPendingDeleteTargetsWithLister(
 	ctx context.Context,

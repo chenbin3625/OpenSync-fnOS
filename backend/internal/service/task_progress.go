@@ -121,17 +121,6 @@ type jobCurrentPayload struct {
 	RemainTime int                `json:"remainTime,omitempty"`
 }
 
-type transferMeter struct {
-	duration int
-	doneSize int64
-	// speed is the last rate measured across a whole-second boundary. Readers
-	// that land in the same second (GET ?current=1, an SSE snapshot, the
-	// debounced publisher) reuse it instead of reporting 0, and only a sample
-	// with a newer duration advances the window — so concurrent observers can
-	// neither zero the rate nor shrink its window to one caller's interval.
-	speed float64
-}
-
 func (item streamDoingItem) countableSize() int64 {
 	if taskItemTypeFromValue(item.Type) == taskItemTypeDelete {
 		return 0
@@ -177,17 +166,18 @@ func (jt *JobTask) getCurrentPayload() jobCurrentPayload {
 			waitCount = max(0, int(stats.TotalTransfers-stats.Transfers))
 		}
 		runningRemain := int64(0)
-		if len(stats.Transferring) > 0 {
-			doing = make([]streamDoingItem, 0, len(stats.Transferring))
+		activeItems := snap.activeTransferring()
+		if len(activeItems) > 0 {
+			doing = make([]streamDoingItem, 0, len(activeItems))
 			runningSize = 0
-			for _, item := range stats.Transferring {
+			for _, item := range activeItems {
 				rel := path.Clean(item.Name)
 				runningSize += item.Size
 				if rem := item.Size - item.Bytes; rem > 0 {
 					runningRemain += rem
 				}
-				srcBase := snap.src
-				dstBase := snap.dst
+				srcBase := item.srcBase
+				dstBase := item.dstBase
 				doing = append(doing, streamDoingItem{
 					FileName:   path.Base(rel),
 					SrcPath:    path.Join(srcBase, path.Dir(rel)),
@@ -242,11 +232,7 @@ func (jt *JobTask) getCurrentPayload() jobCurrentPayload {
 		}
 	}
 
-	if jt.nativeConfig != nil {
-		payload.Speed = nativeSpeed
-	} else {
-		payload.Speed = jt.sampleSpeed(duration, doneSize)
-	}
+	payload.Speed = nativeSpeed
 
 	rateForETA := payload.SpeedAvg
 	if rateForETA <= 0 && payload.Speed > 0 {
@@ -256,28 +242,6 @@ func (jt *JobTask) getCurrentPayload() jobCurrentPayload {
 		payload.RemainTime = int(math.Ceil(float64(remainSize) / rateForETA))
 	}
 	return payload
-}
-
-// sampleSpeed returns the instantaneous transfer rate. The window only moves
-// forward: a sample from the same (or an earlier) second returns the cached
-// rate unchanged, so many observers interleaving within one second behave
-// exactly like a single periodic sampler.
-func (jt *JobTask) sampleSpeed(duration int, doneSize int64) float64 {
-	jt.CurrentMu.Lock()
-	defer jt.CurrentMu.Unlock()
-	prev := jt.lastMeter
-	if prev.duration > 0 && duration <= prev.duration {
-		return prev.speed
-	}
-	speed := 0.0
-	if prev.duration > 0 {
-		speed = float64(doneSize-prev.doneSize) / float64(duration-prev.duration)
-		if speed < 0 {
-			speed = 0
-		}
-	}
-	jt.lastMeter = transferMeter{duration: duration, doneSize: doneSize, speed: speed}
-	return speed
 }
 
 // GetCurrent keeps the legacy in-process map contract for callers outside the
@@ -473,24 +437,26 @@ func (jt *JobTask) doingStreamItems() []streamDoingItem {
 }
 
 func (jt *JobTask) doingTaskMaps() []map[string]interface{} {
-	if snap := jt.nativeStats.Load(); snap != nil && snap.stats != nil && len(snap.stats.Transferring) > 0 {
-		now := time.Now().Unix()
-		dos := make([]map[string]interface{}, 0, len(snap.stats.Transferring))
-		for _, item := range snap.stats.Transferring {
-			rel := path.Clean(item.Name)
-			dos = append(dos, map[string]interface{}{
-				"taskId":     jt.TaskID,
-				"srcPath":    path.Join(snap.src, path.Dir(rel)),
-				"dstPath":    path.Join(snap.dst, path.Dir(rel)),
-				"fileName":   path.Base(rel),
-				"fileSize":   item.Size,
-				"type":       taskItemTypeCopy.Int(),
-				"status":     taskStatusRunning.Int(),
-				"progress":   item.Percentage,
-				"createTime": now,
-			})
+	if snap := jt.nativeStats.Load(); snap != nil {
+		if activeItems := snap.activeTransferring(); len(activeItems) > 0 {
+			now := time.Now().Unix()
+			dos := make([]map[string]interface{}, 0, len(activeItems))
+			for _, item := range activeItems {
+				rel := path.Clean(item.Name)
+				dos = append(dos, map[string]interface{}{
+					"taskId":     jt.TaskID,
+					"srcPath":    path.Join(item.srcBase, path.Dir(rel)),
+					"dstPath":    path.Join(item.dstBase, path.Dir(rel)),
+					"fileName":   path.Base(rel),
+					"fileSize":   item.Size,
+					"type":       taskItemTypeCopy.Int(),
+					"status":     taskStatusRunning.Int(),
+					"progress":   item.Percentage,
+					"createTime": now,
+				})
+			}
+			return dos
 		}
-		return dos
 	}
 	jt.DoingMu.RLock()
 	defer jt.DoingMu.RUnlock()

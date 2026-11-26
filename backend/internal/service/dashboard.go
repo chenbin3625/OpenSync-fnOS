@@ -69,6 +69,7 @@ func GetDashboardOverview() (map[string]interface{}, error) {
 	}
 
 	queuedSet := engineQueue.AllQueuedJobIDs()
+	legacyEngineIDs := legacyOpenListAlistIDs()
 	jobClientListMu.RLock()
 	clientsCopy := make(map[int64]*JobClient, len(jobClientList))
 	for id, c := range jobClientList {
@@ -85,7 +86,8 @@ func GetDashboardOverview() (map[string]interface{}, error) {
 	for _, job := range jobs {
 		jobID := util.ToInt64(job["id"])
 		alistID := util.ToInt64(job["alistId"])
-		enabled := util.ToInt(job["enable"]) == 1
+		legacyOpenList := legacyEngineIDs[alistID]
+		enabled := !legacyOpenList && util.ToInt(job["enable"]) == 1
 		if enabled {
 			enabledJobs++
 		}
@@ -155,15 +157,24 @@ func GetDashboardOverview() (map[string]interface{}, error) {
 			}
 		}
 
+		alistName := engineNameByID[alistID]
+		if legacyOpenList {
+			alistName = "旧版 OpenList（已失效）"
+		}
+		effectiveEnable := util.ToInt(job["enable"])
+		if legacyOpenList {
+			effectiveEnable = 0
+		}
 		jobSummaries = append(jobSummaries, map[string]interface{}{
 			"id":              jobID,
 			"remark":          job["remark"],
 			"srcPath":         job["srcPath"],
 			"dstPath":         job["dstPath"],
 			"alistId":         alistID,
-			"alistName":       engineNameByID[alistID],
+			"alistName":       alistName,
+			"legacyOpenList":  legacyOpenList,
 			"method":          util.ToInt(job["method"]),
-			"enable":          util.ToInt(job["enable"]),
+			"enable":          effectiveEnable,
 			"isCron":          util.ToInt(job["isCron"]),
 			"interval":        job["interval"],
 			"windowEnable":    util.ToInt(job["windowEnable"]),

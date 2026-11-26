@@ -48,6 +48,10 @@ type CopyOptions struct {
 	// Targeted file list (when non-empty, skips source prescan)
 	OnlyFiles []PendingFile
 
+	// ForceOverwrite skips deep check-download and passes --ignore-times directly
+	// when the caller already decided which files must be transferred.
+	ForceOverwrite bool
+
 	// ReportSkipped emits dry-run skip/mkdir events with reasons (used by service dry-run)
 	ReportSkipped bool
 
@@ -139,7 +143,7 @@ func (c Config) Pair(src, dst string) (Endpoint, Endpoint, error) {
 		return a, b, e
 	}
 	if b.ReadOnly {
-		return a, b, errors.New("HTTP 存储为只读源，不能作为同步目标")
+		return a, b, errors.New("只读存储（如 HTTP / Archive）不能作为同步目标")
 	}
 	if EndpointsConflict(a, b) {
 		return a, b, errors.New("同步源与目标实际目录重叠")
@@ -324,8 +328,8 @@ func (c Config) Copy(ctx context.Context, src, dst string, opt CopyOptions, emit
 	// MD5 hashes, avoiding full downloads. Fall back to `rclone check --download`
 	// when content comparison is requested on a hashless backend or default mode
 	// on standard WebDAV without reliable modtimes.
-	useChecksum := !skipExisting && opt.Compare == 2 && endpointSupportsNativeMD5(srcEp) && endpointSupportsNativeMD5(destEp)
-	deep := !skipExisting && ((opt.Compare == 2 && !useChecksum) || (opt.Compare == 0 && (!endpointHasReliableModTime(srcEp) || !endpointHasReliableModTime(destEp))))
+	useChecksum := !skipExisting && !opt.ForceOverwrite && opt.Compare == 2 && endpointSupportsNativeMD5(srcEp) && endpointSupportsNativeMD5(destEp)
+	deep := !skipExisting && !opt.ForceOverwrite && ((opt.Compare == 2 && !useChecksum) || (opt.Compare == 0 && (!endpointHasReliableModTime(srcEp) || !endpointHasReliableModTime(destEp))))
 
 	srcName, srcSub := parts(src)
 	dstName, dstSub := parts(dst)
@@ -536,7 +540,7 @@ func (c Config) Copy(ctx context.Context, src, dst string, opt CopyOptions, emit
 	if opt.DryRun {
 		args = append(args, "--dry-run", "--combined", previewFile)
 	}
-	if deep {
+	if deep || opt.ForceOverwrite {
 		args = append(args, "--ignore-times")
 	} else if useChecksum {
 		args = append(args, "--checksum")
@@ -865,102 +869,183 @@ func prescanRemoteSource(
 	if e != nil {
 		return 0, 0, nil, nil, e
 	}
-	out, stderr, e := limitedOutputWithStderr(cmd, 64<<20)
+	stdout, e := cmd.StdoutPipe()
 	if e != nil {
-		return 0, 0, nil, nil, classifyRcloneError(backend, stderr)
+		return 0, 0, nil, nil, e
 	}
-	var rows []struct {
-		Path    string `json:"Path"`
-		Name    string `json:"Name"`
-		Size    int64  `json:"Size"`
-		ModTime string `json:"ModTime"`
-		IsDir   bool   `json:"IsDir"`
+	errBuf := &tailBuffer{limit: maxStderrCapture}
+	cmd.Stderr = errBuf
+	if e = cmd.Start(); e != nil {
+		return 0, 0, nil, nil, e
 	}
-	if json.Unmarshal(out, &rows) != nil {
-		return 0, 0, nil, nil, errors.New("无法解析远端源目录文件清单")
-	}
-	slices.SortFunc(rows, func(a, b struct {
-		Path    string `json:"Path"`
-		Name    string `json:"Name"`
-		Size    int64  `json:"Size"`
-		ModTime string `json:"ModTime"`
-		IsDir   bool   `json:"IsDir"`
-	}) int {
-		return strings.Compare(a.Path, b.Path)
-	})
 
 	f, e := os.OpenFile(listPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0600)
 	if e != nil {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
 		return 0, 0, nil, nil, e
 	}
 	buf := bufio.NewWriter(f)
 
 	scannedDirs = 1
-	excludedDirs := make([]string, 0)
-	isUnderExcluded := func(p string) bool {
-		for _, ex := range excludedDirs {
-			if p == ex || strings.HasPrefix(p, ex+"/") {
-				return true
+	dirAllowed := make(map[string]bool)
+	checkDirAllowed := func(dirRel string) bool {
+		if dirRel == "" || dirRel == "." || opt.Include == nil {
+			return true
+		}
+		if ok, seen := dirAllowed[dirRel]; seen {
+			return ok
+		}
+		segs := strings.Split(dirRel, "/")
+		cur := ""
+		for _, seg := range segs {
+			if cur == "" {
+				cur = seg
+			} else {
+				cur += "/" + seg
+			}
+			if ok, seen := dirAllowed[cur]; seen {
+				if !ok {
+					dirAllowed[dirRel] = false
+					return false
+				}
+				continue
+			}
+			allowed := opt.Include(cur, syntheticFileInfo{name: seg, isDir: true})
+			dirAllowed[cur] = allowed
+			if !allowed {
+				dirAllowed[dirRel] = false
+				return false
 			}
 		}
-		return false
+		return true
 	}
+
 	dirHasChild := map[string]bool{}
 	var allDirs []string
+	var streamErr error
+	killed := false
 
-	for _, r := range rows {
-		if ctx.Err() != nil {
-			_ = f.Close()
-			return 0, 0, nil, nil, ctx.Err()
-		}
-		rel := strings.TrimPrefix(path.Clean("/"+r.Path), "/")
-		if rel == "" || rel == "." || strings.HasPrefix(rel, "../") {
-			continue
-		}
-		if isUnderExcluded(rel) {
-			continue
-		}
-		modTime := parseRcloneTime(r.ModTime)
-		fi := syntheticFileInfo{
-			name:    path.Base(rel),
-			size:    r.Size,
-			modTime: modTime,
-			isDir:   r.IsDir,
-		}
-		if opt.Include != nil && !opt.Include(rel, fi) {
-			if r.IsDir {
-				excludedDirs = append(excludedDirs, rel)
+	dec := json.NewDecoder(bufio.NewReaderSize(stdout, 64<<10))
+	if tok, tokErr := dec.Token(); tokErr != nil {
+		streamErr = tokErr
+	} else if delim, ok := tok.(json.Delim); !ok || delim != '[' {
+		streamErr = errors.New("无法解析远端源目录文件清单")
+	} else {
+		for dec.More() {
+			if ctx.Err() != nil {
+				streamErr = ctx.Err()
+				break
 			}
-			continue
+			var r struct {
+				Path    string `json:"Path"`
+				Name    string `json:"Name"`
+				Size    int64  `json:"Size"`
+				ModTime string `json:"ModTime"`
+				IsDir   bool   `json:"IsDir"`
+			}
+			if decErr := dec.Decode(&r); decErr != nil {
+				streamErr = errors.New("无法解析远端源目录文件清单")
+				break
+			}
+			rel := strings.TrimPrefix(path.Clean("/"+r.Path), "/")
+			if rel == "" || rel == "." || strings.HasPrefix(rel, "../") {
+				continue
+			}
+			parentDir := path.Dir(rel)
+			if !checkDirAllowed(parentDir) {
+				if r.IsDir {
+					dirAllowed[rel] = false
+				}
+				continue
+			}
+			modTime := parseRcloneTime(r.ModTime)
+			fi := syntheticFileInfo{
+				name:    path.Base(rel),
+				size:    r.Size,
+				modTime: modTime,
+				isDir:   r.IsDir,
+			}
+			if r.IsDir {
+				if allowed, seen := dirAllowed[rel]; seen {
+					if !allowed {
+						continue
+					}
+				} else if opt.Include != nil {
+					allowed = opt.Include(rel, fi)
+					dirAllowed[rel] = allowed
+					if !allowed {
+						continue
+					}
+				}
+				if opt.CreateEmptySrcDirs {
+					if parentDir != "." {
+						dirHasChild[parentDir] = true
+					}
+					allDirs = append(allDirs, rel)
+				}
+				scannedDirs++
+				continue
+			}
+			if opt.Include != nil && !opt.Include(rel, fi) {
+				continue
+			}
+			if opt.CreateEmptySrcDirs && parentDir != "." {
+				dirHasChild[parentDir] = true
+			}
+			if strings.ContainsAny(rel, "\r\n") {
+				streamErr = errors.New("远端源目录含有换行符文件名，无法生成 rclone 文件清单")
+				break
+			}
+			if _, wErr := fmt.Fprintln(buf, rel); wErr != nil {
+				streamErr = wErr
+				break
+			}
+			fileSizes[rel] = r.Size
+			if len(pending) < maxPendingEventFiles {
+				pending = append(pending, PendingFile{Path: rel, Size: r.Size})
+			}
+			count++
+			if count%500 == 0 {
+				emit(Event{ScanDirs: scannedDirs, ScanFiles: int64(count)})
+			}
 		}
-		parentDir := path.Dir(rel)
-		if parentDir != "." {
-			dirHasChild[parentDir] = true
-		}
-		if r.IsDir {
-			scannedDirs++
-			allDirs = append(allDirs, rel)
-			continue
-		}
-		if strings.ContainsAny(rel, "\r\n") {
-			_ = f.Close()
-			return 0, 0, nil, nil, errors.New("远端源目录含有换行符文件名，无法生成 rclone 文件清单")
-		}
-		if _, wErr := fmt.Fprintln(buf, rel); wErr != nil {
-			_ = f.Close()
-			return 0, 0, nil, nil, wErr
-		}
-		fileSizes[rel] = r.Size
-		if len(pending) < maxPendingEventFiles {
-			pending = append(pending, PendingFile{Path: rel, Size: r.Size})
-		}
-		count++
-		if count%500 == 0 {
-			emit(Event{ScanDirs: scannedDirs, ScanFiles: int64(count)})
+		if streamErr == nil {
+			if tok, tokErr := dec.Token(); tokErr != nil {
+				streamErr = errors.New("无法解析远端源目录文件清单")
+			} else if delim, ok := tok.(json.Delim); !ok || delim != ']' {
+				streamErr = errors.New("无法解析远端源目录文件清单")
+			}
 		}
 	}
-	if err := errors.Join(buf.Flush(), f.Close()); err != nil {
-		return 0, 0, nil, nil, err
+
+	if streamErr != nil && !errors.Is(streamErr, io.EOF) {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			killed = true
+		}
+		_ = stdout.Close()
+	}
+	waitErr := cmd.Wait()
+	stderr := errBuf.String()
+	flushCloseErr := errors.Join(buf.Flush(), f.Close())
+
+	if ctx.Err() != nil {
+		return 0, 0, nil, nil, ctx.Err()
+	}
+	if waitErr != nil && !killed {
+		return 0, 0, nil, nil, classifyRcloneError(backend, stderr)
+	}
+	if streamErr != nil {
+		if errors.Is(streamErr, io.EOF) && strings.TrimSpace(stderr) != "" {
+			return 0, 0, nil, nil, classifyRcloneError(backend, stderr)
+		}
+		return 0, 0, nil, nil, streamErr
+	}
+	if flushCloseErr != nil {
+		return 0, 0, nil, nil, flushCloseErr
 	}
 	if opt.CreateEmptySrcDirs {
 		for _, d := range allDirs {

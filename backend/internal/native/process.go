@@ -31,6 +31,25 @@ var passthroughEnvKeys = []string{
 	"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
 	"http_proxy", "https_proxy", "no_proxy",
 	"SSL_CERT_FILE", "SSL_CERT_DIR", "TZ",
+	// Runtime credential/configuration sources used by rclone backends. These
+	// are intentionally allowlisted because command() otherwise starts with a
+	// clean environment and HOME=/nonexistent.
+	"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+	"AWS_PROFILE", "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE",
+	"AWS_ROLE_ARN", "AWS_ROLE_SESSION_NAME", "AWS_WEB_IDENTITY_TOKEN_FILE",
+	"AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+	"AWS_CONTAINER_AUTHORIZATION_TOKEN", "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+	"AWS_EC2_METADATA_DISABLED", "AWS_EC2_METADATA_SERVICE_ENDPOINT",
+	"RCLONE_S3_ACCESS_KEY_ID", "RCLONE_S3_SECRET_ACCESS_KEY", "RCLONE_S3_SESSION_TOKEN",
+	"RCLONE_S3_ENV_AUTH", "RCLONE_S3_SHARED_CREDENTIALS_FILE", "RCLONE_S3_PROFILE",
+	"QINGSTOR_ACCESS_KEY_ID", "QINGSTOR_SECRET_ACCESS_KEY", "QINGSTOR_ZONE",
+	"RCLONE_QINGSTOR_ENV_AUTH", "RCLONE_QINGSTOR_ACCESS_KEY_ID", "RCLONE_QINGSTOR_SECRET_ACCESS_KEY",
+	"RCLONE_QINGSTOR_ZONE",
+	"RCLONE_OOS_NAMESPACE", "RCLONE_OOS_COMPARTMENT", "RCLONE_OOS_REGION",
+	"RCLONE_OOS_ENDPOINT", "RCLONE_OOS_CONFIG_FILE", "RCLONE_OOS_CONFIG_PROFILE",
+	"OCI_CONFIG_FILE", "OCI_CLI_PROFILE", "OCI_RESOURCE_PRINCIPAL_VERSION", "OCI_RESOURCE_PRINCIPAL_RPST",
+	"OCI_RESOURCE_PRINCIPAL_REGION", "OCI_RESOURCE_PRINCIPAL_PRIVATE_PEM", "OCI_RESOURCE_PRINCIPAL_PRIVATE_PEM_PASSPHRASE",
+	"TF_VAR_tenancy_ocid", "TF_VAR_user_ocid", "TF_VAR_fingerprint", "TF_VAR_region", "TF_VAR_private_key_path",
 }
 
 // Production packages place both executables together. A development override
@@ -374,6 +393,8 @@ func (c Config) SessionFor(specs []SessionSpec, opts SessionOptions) (*Session, 
 
 	var conf strings.Builder
 	knownHostsIdx := 0
+	var proxyOwner, proxyVal string
+	var insecureOwners, leafNetRemotes []string
 	for _, n := range queue {
 		p := maps.Clone(c[n])
 		if p == nil || p["type"] == "local" {
@@ -381,16 +402,61 @@ func (c Config) SessionFor(specs []SessionSpec, opts SessionOptions) (*Session, 
 		}
 		curMode := modeByRemote[n]
 		curChecksum := checksumByRemote[n]
+		isComposite := IsWrapperType(p["type"]) || p["type"] == "union" || p["type"] == "combine"
+		if !isComposite {
+			leafNetRemotes = append(leafNetRemotes, n)
+		}
 
 		if p["insecure_skip_verify"] == "true" {
 			s.insecureSkipVerify = true
+			if !isComposite {
+				insecureOwners = append(insecureOwners, n)
+			}
 		}
-		if p["proxy_url"] != "" {
-			s.proxyURL = p["proxy_url"]
+		if pu := strings.TrimSpace(p["proxy_url"]); pu != "" {
+			if proxyVal != "" && proxyVal != pu {
+				return nil, fmt.Errorf("同一次同步涉及的存储（%s 与 %s）配置了不同的专属代理，rclone 单进程暂不支持同时使用多个代理", proxyOwner, n)
+			}
+			proxyVal = pu
+			proxyOwner = n
+			s.proxyURL = pu
 		}
 		allowHashCheck := p["allow_hashcheck"] == "true"
 		for metaKey := range openSyncMetaFields {
 			delete(p, metaKey)
+		}
+		if p["type"] == "oracleobjectstorage" {
+			// File paths from HTTP configuration remain forbidden. Only a path
+			// configured by the application environment can provide OCI keys.
+			file := strings.TrimSpace(os.Getenv("RCLONE_OOS_CONFIG_FILE"))
+			if file == "" {
+				file = strings.TrimSpace(os.Getenv("OCI_CONFIG_FILE"))
+			}
+			provider := p["provider"]
+			if provider == "" {
+				provider = strings.TrimSpace(os.Getenv("RCLONE_OOS_PROVIDER"))
+				if provider != "" {
+					p["provider"] = provider
+				}
+			}
+			if provider == "user_principal_auth" || ((provider == "" || provider == "env_auth") && file != "") {
+				if !filepath.IsAbs(file) {
+					return nil, errors.New("OCI 用户主体认证需要在应用环境中设置 RCLONE_OOS_CONFIG_FILE 的绝对路径，私钥也需使用绝对路径")
+				}
+				st, err := os.Stat(file)
+				if err != nil || !st.Mode().IsRegular() {
+					return nil, errors.New("无法读取应用环境指定的 OCI 配置文件，请检查路径与权限")
+				}
+				p["config_file"] = file
+				if profile := strings.TrimSpace(os.Getenv("RCLONE_OOS_CONFIG_PROFILE")); profile != "" {
+					p["config_profile"] = profile
+				}
+				if provider == "" || provider == "env_auth" {
+					// rclone's env_auth uses OCI's default provider, which ignores
+					// the rclone config_file option. Select the file provider here.
+					p["provider"] = "user_principal_auth"
+				}
+			}
 		}
 
 		if IsWrapperType(p["type"]) {
@@ -465,6 +531,16 @@ func (c Config) SessionFor(specs []SessionSpec, opts SessionOptions) (*Session, 
 			fmt.Fprintf(&conf, "%s = %s\n", k, p[k])
 		}
 		conf.WriteByte('\n')
+	}
+	if proxyOwner != "" && len(leafNetRemotes) > 1 {
+		for _, leaf := range leafNetRemotes {
+			if leaf != proxyOwner && strings.TrimSpace(c[leaf]["proxy_url"]) == "" {
+				log.Printf("native session warning: remote %q sets proxy_url which applies to the whole rclone process (including %q)", proxyOwner, leaf)
+			}
+		}
+	}
+	if len(insecureOwners) > 0 && len(leafNetRemotes) > len(insecureOwners) {
+		log.Printf("native session warning: insecure_skip_verify from %v applies process-wide across remotes %v", insecureOwners, leafNetRemotes)
 	}
 	if _, e = s.configFile.WriteString(conf.String()); e != nil {
 		return nil, e

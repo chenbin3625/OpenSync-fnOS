@@ -121,7 +121,7 @@ function parseNativeExtraFlags(value: unknown): Required<NativeExtraFlags> {
     ioTimeout: str("ioTimeout"),
     conTimeout: str("conTimeout"),
     bisyncResyncMode: str("bisyncResyncMode"),
-    bisyncMaxDelete: num("bisyncMaxDelete"),
+    bisyncMaxDelete: Math.min(100, num("bisyncMaxDelete")),
     bisyncForce: Boolean(obj.bisyncForce),
   };
 }
@@ -153,7 +153,7 @@ function serializeNativeExtraFlags(flags: NativeExtraFlags | undefined): string 
   if (flags.bisyncResyncMode?.trim())
     out.bisyncResyncMode = flags.bisyncResyncMode.trim();
   if (Number(flags.bisyncMaxDelete || 0) > 0)
-    out.bisyncMaxDelete = Math.trunc(Number(flags.bisyncMaxDelete));
+    out.bisyncMaxDelete = Math.min(100, Math.trunc(Number(flags.bisyncMaxDelete)));
   if (flags.bisyncForce) out.bisyncForce = true;
   return Object.keys(out).length > 0 ? JSON.stringify(out) : "";
 }
@@ -360,16 +360,30 @@ export function cloneJobToForm(job: JobItem): JobForm {
   };
 }
 
+export function isLegacyOpenListJob(
+  job?: { legacyOpenList?: boolean; alistId?: number } | null,
+  engines?: readonly { id: number }[] | null,
+): boolean {
+  if (!job) return false;
+  if (job.legacyOpenList) return true;
+  if (engines && engines.length > 0 && Number(job.alistId || 0) > 0) {
+    return !engines.some((e) => e.id === job.alistId);
+  }
+  return false;
+}
+
 export function buildJobPayload(form: JobForm) {
   const { minFileSizeUnit, maxFileSizeUnit, ...data } = form;
   // Strip any read-only runtime decoration fields if spread from a stored JobItem
   const runtimeStripped = { ...data } as typeof data & {
+    legacyOpenList?: unknown;
     running?: unknown;
     queued?: unknown;
     pendingApproval?: unknown;
     lastStatus?: unknown;
     nextRunTime?: unknown;
   };
+  delete runtimeStripped.legacyOpenList;
   delete runtimeStripped.running;
   delete runtimeStripped.queued;
   delete runtimeStripped.pendingApproval;
@@ -407,8 +421,8 @@ export function buildJobPayload(form: JobForm) {
     notifyMode: Number(form.notifyMode) || 0,
     notifyIds: form.notifyMode === 1 ? form.notifyIds : [],
     bwLimit: form.bwLimit.trim(),
-    tpsLimit: Math.max(0, Math.min(10000, Number(form.tpsLimit) || 0)),
-    tpsLimitBurst: Math.max(0, Math.min(10000, Math.trunc(Number(form.tpsLimitBurst) || 0))),
+    tpsLimit: Math.max(0, Math.min(1000, Number(form.tpsLimit) || 0)),
+    tpsLimitBurst: Math.max(0, Math.min(1000, Math.trunc(Number(form.tpsLimitBurst) || 0))),
     modifyWindow: form.modifyWindow.trim(),
     fastList: Number(Boolean(form.fastList)),
     multiThreadStreams: Math.max(0, Math.min(64, Math.trunc(Number(form.multiThreadStreams) || 0))),
@@ -491,7 +505,7 @@ export function validateJobFormFields(
     step0Errors.push(fields.remark);
   }
   if (!form.alistId) {
-    fields.alistId = "请选择存储引擎";
+    fields.alistId = "内置存储引擎尚未就绪，请稍后重试";
     step0Errors.push(fields.alistId);
   }
   if (!form.srcPath.length) {
@@ -525,7 +539,7 @@ export function validateJobFormFields(
       step0Errors.push(pathError);
     }
   }
-  if (form.trashEnable) {
+  if (form.trashEnable && form.method !== 2) {
     const trimmedTrash = form.trashDir.trim().replace(/^\/+|\/+$/g, "");
     if (!trimmedTrash || trimmedTrash.includes("..") || trimmedTrash.includes("\\")) {
       fields.trashDir = "回收站目录名不能包含 .. 或反斜杠";
@@ -627,11 +641,11 @@ export function validateJobFormFields(
   if (
     form.olderThanDays > 0 &&
     form.newerThanDays > 0 &&
-    form.olderThanDays > form.newerThanDays
+    form.olderThanDays >= form.newerThanDays
   ) {
     fields.fileSizeRange =
       fields.fileSizeRange ||
-      "「仅同步早于 N 天」不能大于「仅同步最近 N 天」";
+      "「仅同步早于 N 天」必须小于「仅同步最近 N 天」";
     step2Errors.push(fields.fileSizeRange);
   }
   if (form.filterMode === 1 && !form.include.trim()) {

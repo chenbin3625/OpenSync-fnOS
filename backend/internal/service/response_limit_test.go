@@ -1,75 +1,36 @@
 package service
 
 import (
-	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
 
-func TestAlistClientRejectsOversizedResponse(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(strings.Repeat("x", int(alistDeps.MaxResponseBytes+1))))
-	}))
-	defer server.Close()
-
-	client := &AlistClient{
-		URL:    server.URL,
-		client: server.Client(),
+func TestReadAllWithLimit(t *testing.T) {
+	data, err := readAllWithLimit(strings.NewReader("hello"), 5)
+	if err != nil || string(data) != "hello" {
+		t.Fatalf("exact limit: got (%q, %v), want (\"hello\", nil)", string(data), err)
 	}
-
-	_, err := client.GetContext(context.Background(), "/api/fs/list", nil)
-	if err == nil {
-		t.Fatalf("GetContext() error = nil, want response size error")
+	if _, err := readAllWithLimit(strings.NewReader("hello!"), 5); err == nil || !strings.Contains(err.Error(), "response body exceeds") {
+		t.Fatalf("exceeded limit: err = %v, want response body exceeds error", err)
 	}
-	if !strings.Contains(err.Error(), "response body exceeds") {
-		t.Fatalf("GetContext() error = %q, want response size error", err.Error())
+	unlimited, err := readAllWithLimit(strings.NewReader("unlimited"), 0)
+	if err != nil || string(unlimited) != "unlimited" {
+		t.Fatalf("zero limit: got (%q, %v), want (\"unlimited\", nil)", string(unlimited), err)
 	}
 }
 
-func TestCopyOrMoveFileContextIncludesOperationInRequestError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "failure", http.StatusInternalServerError)
-	}))
-	defer server.Close()
-
-	client := &AlistClient{
-		URL:    server.URL,
-		client: server.Client(),
+func TestCapReader(t *testing.T) {
+	cr := &capReader{r: strings.NewReader("12345"), limit: 5}
+	got, err := io.ReadAll(cr)
+	if err != nil || string(got) != "12345" {
+		t.Fatalf("exact cap: got (%q, %v), want (\"12345\", nil)", string(got), err)
 	}
-
-	tests := []struct {
-		name    string
-		apiPath string
-		call    func() (string, error)
-	}{
-		{
-			name:    "copy",
-			apiPath: "/api/fs/copy",
-			call: func() (string, error) {
-				return client.CopyFileContext(context.Background(), "/src", "/dst", "file.txt")
-			},
-		},
-		{
-			name:    "move",
-			apiPath: "/api/fs/move",
-			call: func() (string, error) {
-				return client.MoveFileContext(context.Background(), "/src", "/dst", "file.txt")
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := tt.call()
-			if err == nil {
-				t.Fatalf("%s error = nil, want request error", tt.name)
-			}
-			if !strings.Contains(err.Error(), tt.apiPath) {
-				t.Fatalf("%s error = %q, want api path context %q", tt.name, err.Error(), tt.apiPath)
-			}
-		})
+	over := &capReader{r: strings.NewReader("123456"), limit: 5}
+	if _, err := io.ReadAll(over); err == nil || !strings.Contains(err.Error(), "response body exceeds") {
+		t.Fatalf("over cap: err = %v, want response body exceeds error", err)
 	}
 }
 

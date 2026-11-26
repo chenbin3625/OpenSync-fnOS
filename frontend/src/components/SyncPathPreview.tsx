@@ -116,7 +116,7 @@ export function SyncPathPreview({
   const singleDirectRoot =
     preview.rule === "single-src" && preview.items.length > 0;
   const showKeepFirstDstAction =
-    method === 2 && dstPaths.length > 1 && Boolean(onKeepFirstDst);
+    (method === 2 || method === 3) && dstPaths.length > 1 && Boolean(onKeepFirstDst);
 
   return (
     <Field

@@ -232,11 +232,13 @@ export const History = memo(function History({
   jobId,
   currentTaskId,
   refreshKey = 0,
+  disableRetry = false,
   onOpenRealtime,
 }: {
   jobId: number;
   currentTaskId?: number;
   refreshKey?: number;
+  disableRetry?: boolean;
   onOpenRealtime: () => void;
 }) {
   const [page, setPage] = useState(1);
@@ -370,12 +372,14 @@ export const History = memo(function History({
           icon={<IconEyeOpenedStroked aria-hidden="true" />}
           onClick={() => setDetail(record.id)}
         />
-        <IconButton
-          label="重试未完成项"
-          icon={<IconRefresh aria-hidden="true" />}
-          disabled={action.busy}
-          onClick={() => retry(record)}
-        />
+        {!disableRetry && (
+          <IconButton
+            label="重试未完成项"
+            icon={<IconRefresh aria-hidden="true" />}
+            disabled={action.busy}
+            onClick={() => retry(record)}
+          />
+        )}
         <IconButton
           label="删除执行记录"
           icon={<IconDeleteStroked aria-hidden="true" />}
@@ -607,6 +611,7 @@ export const History = memo(function History({
       {detail !== null && (
         <FileDetails
           taskId={detail}
+          disableRetry={disableRetry}
           onClose={() => setDetail(null)}
           onRetried={() => void resource.refresh(true)}
         />
@@ -920,10 +925,12 @@ const MobileFileRecord = memo(function MobileFileRecord({
 
 function FileDetails({
   taskId,
+  disableRetry = false,
   onClose,
   onRetried,
 }: {
   taskId: number;
+  disableRetry?: boolean;
   onClose: () => void;
   onRetried?: () => void;
 }) {
@@ -1067,7 +1074,7 @@ function FileDetails({
             重置
           </Button>
           <div className="history-toolbar-actions">
-            {selectedItemIds.length > 0 && (
+            {!disableRetry && selectedItemIds.length > 0 && (
               <Button
                 size="small"
                 theme="solid"
@@ -1106,24 +1113,30 @@ function FileDetails({
           <FileTable
             rows={rows}
             loading={resource.loading}
-            selectedIds={selectedSet}
-            onToggleSelect={(id, checked) =>
-              setSelectedItemIds((prev) =>
-                checked
-                  ? prev.includes(id)
-                    ? prev
-                    : [...prev, id]
-                  : prev.filter((item) => item !== id),
-              )
+            selectedIds={disableRetry ? undefined : selectedSet}
+            onToggleSelect={
+              disableRetry
+                ? undefined
+                : (id, checked) =>
+                    setSelectedItemIds((prev) =>
+                      checked
+                        ? prev.includes(id)
+                          ? prev
+                          : [...prev, id]
+                        : prev.filter((item) => item !== id),
+                    )
             }
-            onToggleSelectAll={(checked) =>
-              setSelectedItemIds(
-                checked
-                  ? rows.filter(isRetryableItem).map((r) => Number(r.id))
-                  : [],
-              )
+            onToggleSelectAll={
+              disableRetry
+                ? undefined
+                : (checked) =>
+                    setSelectedItemIds(
+                      checked
+                        ? rows.filter(isRetryableItem).map((r) => Number(r.id))
+                        : [],
+                    )
             }
-            onRetrySingle={(id) => retryItems([id])}
+            onRetrySingle={disableRetry ? undefined : (id) => retryItems([id])}
             busy={action.busy}
           />
         )}

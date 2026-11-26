@@ -10,7 +10,6 @@ import (
 	"opensync/internal/mapper"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,16 +32,6 @@ func TestCopyQueueStatsTracksWaitTotals(t *testing.T) {
 	count, size = queue.stats()
 	if count != 1 || size != 20 {
 		t.Fatalf("stats after pop = count %d size %d, want 1/20", count, size)
-	}
-}
-
-func TestJobTaskRuntimeInitializesScanBranchSemaphoreLimit(t *testing.T) {
-	jt := &JobTask{}
-
-	jt.initRuntime()
-
-	if got, want := cap(jt.scanBranchSem), scanBranchLimit(); got != want {
-		t.Fatalf("scanBranchSem cap = %d, want %d", got, want)
 	}
 }
 
@@ -132,30 +121,6 @@ func TestDefaultCopyQueueIsUnboundedForRealtimeTaskList(t *testing.T) {
 	}
 }
 
-func TestCopyItemUsesRuntimeAndClientInterfaces(t *testing.T) {
-	var _ copyItemRuntime = (*JobTask)(nil)
-	var _ copyItemClient = (*AlistClient)(nil)
-
-	jt := &JobTask{
-		TaskID:      42,
-		Job:         map[string]interface{}{},
-		AlistClient: &AlistClient{},
-	}
-	jt.initRuntime()
-
-	item := newCopyItem(jt, jt.AlistClient, "/src/", "/dst/", "file.txt", int64(10), taskItemTypeMove)
-
-	if item.runtime != jt {
-		t.Fatalf("item runtime = %#v, want JobTask runtime", item.runtime)
-	}
-	if item.client != jt.AlistClient {
-		t.Fatalf("item client = %#v, want JobTask AlistClient", item.client)
-	}
-	if item.Status != taskStatusWaiting || item.Progress != 0 {
-		t.Fatalf("new item status/progress = %d/%f, want 0/0", item.Status, item.Progress)
-	}
-}
-
 func TestJobTaskRuntimeInitializationIsConcurrentSafe(t *testing.T) {
 	jt := &JobTask{TaskID: 1}
 
@@ -220,93 +185,6 @@ func TestRuntimeTaskLimitsClampInvalidConfiguredValues(t *testing.T) {
 	}
 	if limits.MaxRetries != config.MaxRetryAttempts {
 		t.Fatalf("MaxRetries = %d, want max %d", limits.MaxRetries, config.MaxRetryAttempts)
-	}
-}
-
-func TestCopyItemRetriesFailedCopyBeforeSuccess(t *testing.T) {
-	oldConfig := config.GetConfig()
-	d := *jobDeps
-	d.CopyRetryDelay = func(int) time.Duration { return 0 }
-	restore := SetJobDepsForTest(&d)
-	defer func() {
-		config.SetConfigForTest(oldConfig)
-		restore()
-	}()
-	config.SetConfigForTest(&config.Config{
-		Server: config.ServerConfig{
-			Timeout:         0,
-			CopyConcurrency: 1,
-			ScanConcurrency: 1,
-			MaxRetries:      2,
-		},
-	})
-	var persisted []map[string]interface{}
-	restorePersist := stubPersistJobTaskItems(t, &persisted, nil)
-	defer restorePersist()
-
-	var attempts atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		// DoIt verifies the destination when the copy response carries no task
-		// id; report the file as present so that path treats it as success.
-		if r.URL.Path == "/api/fs/get" {
-			_, _ = w.Write([]byte(`{"code":200,"message":"ok","data":{}}`))
-			return
-		}
-		if r.URL.Path != "/api/fs/copy" {
-			http.NotFound(w, r)
-			return
-		}
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-
-		if attempts.Add(1) <= 2 {
-			_, _ = w.Write([]byte(`{"code":500,"message":"boom","data":{}}`))
-			return
-		}
-		_, _ = w.Write([]byte(`{"code":200,"message":"ok","data":{"tasks":[]}}`))
-	}))
-	defer server.Close()
-
-	jt := &JobTask{
-		TaskID:  42,
-		Job:     map[string]interface{}{},
-		Waiting: newCopyQueue(),
-		AlistClient: &AlistClient{
-			URL:    server.URL,
-			client: server.Client(),
-		},
-	}
-	jt.initRuntime()
-
-	item := newCopyItem(jt, jt.AlistClient, "/src", "/dst", "file.txt", int64(11), taskItemTypeCopy)
-	item.CreateTime = 100
-
-	item.DoIt()
-	if err := jt.flushPersistBuffer(); err != nil {
-		t.Fatalf("flushPersistBuffer() error: %v", err)
-	}
-
-	if got := attempts.Load(); got != 3 {
-		t.Fatalf("copy attempts = %d, want 3", got)
-	}
-	if status := item.status(); status != taskStatusSuccess {
-		t.Fatalf("item status = %d, want success status 2", status)
-	}
-	if item.ErrMsg != nil {
-		t.Fatalf("item ErrMsg = %q, want nil after successful retry", *item.ErrMsg)
-	}
-
-	if len(persisted) != 1 {
-		t.Fatalf("persisted len = %d, want 1", len(persisted))
-	}
-	if persisted[0]["status"] != taskStatusSuccess.Int() {
-		t.Fatalf("persisted status = %v, want 2", persisted[0]["status"])
-	}
-	if errMsg, ok := persisted[0]["errMsg"].(*string); !ok || errMsg != nil {
-		t.Fatalf("persisted errMsg = %q, want nil", persisted[0]["errMsg"])
 	}
 }
 
@@ -389,75 +267,6 @@ func TestCopyItemMapUsesTaskItemContractAndKeepsRealtimeProgress(t *testing.T) {
 	}
 }
 
-func TestWaitForBreakReturnsWhenBreakRequested(t *testing.T) {
-	jt := &JobTask{}
-	jt.initRuntime()
-
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		jt.requestBreak()
-	}()
-
-	start := time.Now()
-	if completed := jt.waitForBreak(5 * time.Second); completed {
-		t.Fatalf("waitForBreak returned completed=true after break")
-	}
-	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
-		t.Fatalf("waitForBreak took %s after break, want under 500ms", elapsed)
-	}
-}
-
-func TestMarkWaitingAsAbortedMovesQueuedItemsToFinish(t *testing.T) {
-	var persisted []map[string]interface{}
-	restorePersist := stubPersistJobTaskItems(t, &persisted, nil)
-	defer restorePersist()
-
-	jt := &JobTask{
-		TaskID:  42,
-		Waiting: newCopyQueue(),
-	}
-	jt.initRuntime()
-
-	jt.Waiting.pushWait(context.Background(), &CopyItem{
-		SrcPath:    "/src/",
-		DstPath:    "/dst/",
-		FileName:   "one.txt",
-		FileSize:   int64(10),
-		CopyType:   0,
-		Status:     0,
-		CreateTime: 100,
-	})
-	jt.Waiting.pushWait(context.Background(), &CopyItem{
-		SrcPath:    "/src/",
-		DstPath:    "/dst/",
-		FileName:   "two.txt",
-		FileSize:   int64(20),
-		CopyType:   2,
-		Status:     0,
-		CreateTime: 101,
-	})
-
-	jt.markWaitingAsAborted()
-	if err := jt.flushPersistBuffer(); err != nil {
-		t.Fatalf("flushPersistBuffer() error: %v", err)
-	}
-
-	if jt.Waiting.len() != 0 {
-		t.Fatalf("waiting queue len = %d, want 0", jt.Waiting.len())
-	}
-	if len(persisted) != 2 {
-		t.Fatalf("persisted len = %d, want 2", len(persisted))
-	}
-	for i, item := range persisted {
-		if item["status"] != taskStatusStopped.Int() {
-			t.Fatalf("persisted[%d].status = %v, want 4", i, item["status"])
-		}
-		if item["taskId"] != int64(42) {
-			t.Fatalf("persisted[%d].taskId = %v, want 42", i, item["taskId"])
-		}
-	}
-}
-
 func TestCopyHookPersistsFinishedItemsImmediately(t *testing.T) {
 	var persisted []map[string]interface{}
 	var batchSizes []int
@@ -523,111 +332,16 @@ func TestCopyHookRecordsPersistenceError(t *testing.T) {
 	}
 }
 
-func TestEnsureCopyMonitorIsConcurrentSafe(t *testing.T) {
-	jt := &JobTask{TaskID: 1}
-	const workers = 32
-	monitors := make([]*copyTaskMonitor, workers)
-	var wg sync.WaitGroup
-	wg.Add(workers)
-	for i := 0; i < workers; i++ {
-		go func(idx int) {
-			defer wg.Done()
-			monitors[idx] = jt.ensureCopyMonitor()
-		}(i)
-	}
-	wg.Wait()
-
-	first := monitors[0]
-	if first == nil {
-		t.Fatal("ensureCopyMonitor returned nil")
-	}
-	for i, monitor := range monitors {
-		if monitor != first {
-			t.Fatalf("monitor[%d] = %p, want %p", i, monitor, first)
-		}
-	}
-}
-
-func TestCopyTaskWatchCloseDoneIsIdempotent(t *testing.T) {
-	watch := &copyTaskWatch{done: make(chan struct{})}
-	watch.closeDone()
-	watch.closeDone()
-	select {
-	case <-watch.done:
-	default:
-		t.Fatal("done channel was not closed")
-	}
-}
-
-type panicCopyItemClient struct{}
-
-func (panicCopyItemClient) CopyFileContext(context.Context, string, string, string) (string, error) {
-	panic("copy exploded")
-}
-
-func (panicCopyItemClient) MoveFileContext(context.Context, string, string, string) (string, error) {
-	panic("move exploded")
-}
-
-func (panicCopyItemClient) TaskCancelContext(context.Context, string, taskItemType) error {
-	return nil
-}
-
-func (panicCopyItemClient) TaskDeleteContext(context.Context, string, taskItemType) error {
-	return nil
-}
-
-func (panicCopyItemClient) TaskInfoContext(context.Context, string, taskItemType) (map[string]interface{}, error) {
-	return nil, nil
-}
-
-func (panicCopyItemClient) TaskUndoneListContext(context.Context, taskItemType) ([]map[string]interface{}, error) {
-	return nil, nil
-}
-
-func (panicCopyItemClient) DeleteFileContext(context.Context, string, []string, int) error {
-	return nil
-}
-
-func (panicCopyItemClient) FileExistsContext(context.Context, string, string) (bool, error) {
-	return false, nil
-}
-
-func TestCopyWorkerPanicPersistsFailedItemAndClearsDoing(t *testing.T) {
-	var persisted []map[string]interface{}
-	restorePersist := stubPersistJobTaskItems(t, &persisted, nil)
-	defer restorePersist()
-
-	jt := &JobTask{TaskID: 42}
-	jt.initRuntime()
-	item := newCopyItem(jt, panicCopyItemClient{}, "/src", "/dst", "file.txt", int64(1), taskItemTypeCopy)
-
-	jt.startCopyItem(item)
-	jt.copyWG.Wait()
-	if err := jt.flushPersistBuffer(); err != nil {
-		t.Fatalf("flushPersistBuffer() error: %v", err)
-	}
-
-	if len(persisted) != 1 {
-		t.Fatalf("persisted len = %d, want 1", len(persisted))
-	}
-	if persisted[0]["status"] != taskStatusFailed.Int() {
-		t.Fatalf("persisted status = %v, want failed", persisted[0]["status"])
-	}
-	if jt.doingLen() != 0 {
-		t.Fatalf("doing len = %d, want 0", jt.doingLen())
-	}
-	if !jt.isBreak() {
-		t.Fatalf("copy worker panic did not request task break")
-	}
-}
-
-func TestTaskSubmitMarksTaskFailedWhenFinishedItemPersistenceFails(t *testing.T) {
+func TestFinishSubmittedTaskMarksTaskFailedWhenPersistenceFails(t *testing.T) {
 	writeErr := errors.New("write failed")
 
 	testDB := newServiceTaskStatusTestDB(t)
 	oldDB := mapperDBForServiceTest(testDB)
 	defer oldDB()
+
+	oldQueue := queueTaskNotification
+	queueTaskNotification = func(int64, int, map[string]interface{}, int, float64) {}
+	defer func() { queueTaskNotification = oldQueue }()
 
 	client := &JobClient{}
 	client.tryMarkDoing()
@@ -641,7 +355,8 @@ func TestTaskSubmitMarksTaskFailedWhenFinishedItemPersistenceFails(t *testing.T)
 	jt.ScanFinish.Store(true)
 	client.setCurrentTask(jt)
 
-	jt.taskSubmit()
+	persistErr := jt.persistRemainingTaskItems()
+	jt.finishSubmittedTask(persistErr)
 
 	status, errMsg := readServiceTaskStatus(t, testDB, 10)
 	if status != taskStatusSystemFailed.Int() {
@@ -674,63 +389,12 @@ func TestUpdateTaskStatusReturnsPersistenceErrors(t *testing.T) {
 	}
 }
 
-func TestJobTaskStartRecoversPanickingSyncWorker(t *testing.T) {
-	testDB := newServiceTaskStatusTestDB(t)
-	oldDB := mapperDBForServiceTest(testDB)
-	defer oldDB()
-	notified := make(chan int, 4)
-	oldQueue := queueTaskNotification
-	queueTaskNotification = func(_ int64, status int, _ map[string]interface{}, _ int, _ float64) {
-		notified <- status
-	}
-	defer func() { queueTaskNotification = oldQueue }()
-
-	client := &JobClient{
-		Job: map[string]interface{}{"enable": 1, "isCron": 2},
-	}
-	if !client.tryMarkDoing() {
-		t.Fatalf("tryMarkDoing() = false, want true")
-	}
-	jt := &JobTask{
-		TaskID:     10,
-		JobClient:  client,
-		Job:        map[string]interface{}{"srcPath": "/src", "dstPath": "/dst"},
-		CreateTime: float64(time.Now().Unix()),
-		Waiting:    newCopyQueue(),
-	}
-	jt.initRuntime()
-	client.setCurrentTask(jt)
-
-	jt.Start()
-
-	if !client.waitUntilIdle(time.Second) {
-		t.Fatalf("job client stayed busy after worker panic")
-	}
-	status, errMsg := readServiceTaskStatus(t, testDB, 10)
-	if status != taskStatusSystemFailed.Int() {
-		t.Fatalf("task status = %d, want 6 after worker panic", status)
-	}
-	if !strings.Contains(errMsg, "panic") {
-		t.Fatalf("errMsg = %q, want panic details", errMsg)
-	}
-	select {
-	case got := <-notified:
-		if got != taskStatusSystemFailed.Int() {
-			t.Fatalf("notification status = %d, want SystemFailed", got)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("no failure notification queued")
-	}
-}
-
 func newServiceTaskStatusTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	testDB, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatalf("sql.Open() error: %v", err)
 	}
-	// Each connection to ":memory:" is its own empty database; background
-	// readers (failure notification) must share the one holding the tables.
 	testDB.SetMaxOpenConns(1)
 	t.Cleanup(func() {
 		_ = testDB.Close()
@@ -930,29 +594,6 @@ func TestFinalTaskStatusUsesPartialWhenSomeItemsSucceeded(t *testing.T) {
 	}
 }
 
-func TestScanProgressTracksDiscoveredAndFinishedDirectories(t *testing.T) {
-	jt := &JobTask{}
-
-	jt.beginScanWork(scanWork{})
-	progress := jt.scanProgress()
-	if progress["totalDirs"] != 1 || progress["scannedDirs"] != 0 || progress["remainingDirs"] != 1 {
-		t.Fatalf("scanProgress after root start = %#v, want total=1 scanned=0 remaining=1", progress)
-	}
-
-	children := make([]scanWork, 0)
-	jt.addChildScanWork(&children, scanWork{Mode: scanWorkCompare})
-	progress = jt.scanProgress()
-	if progress["totalDirs"] != 2 || progress["scannedDirs"] != 0 || progress["remainingDirs"] != 2 {
-		t.Fatalf("scanProgress after child discovery = %#v, want total=2 scanned=0 remaining=2", progress)
-	}
-
-	jt.finishScanWork()
-	progress = jt.scanProgress()
-	if progress["totalDirs"] != 2 || progress["scannedDirs"] != 1 || progress["remainingDirs"] != 1 {
-		t.Fatalf("scanProgress after root finish = %#v, want total=2 scanned=1 remaining=1", progress)
-	}
-}
-
 func TestGetCurrentIncludesTaskIDForTaskActions(t *testing.T) {
 	jt := &JobTask{
 		TaskID:     123,
@@ -1024,83 +665,6 @@ func TestGetCurrentByStatusPagePaginatesRecentFinishedItems(t *testing.T) {
 	}
 	if items[0]["createTime"] != int64(102) || items[1]["createTime"] != int64(101) {
 		t.Fatalf("page createTimes = %v, %v; want 102, 101", items[0]["createTime"], items[1]["createTime"])
-	}
-}
-
-func TestSyncRetryItemsReadsRetrySourceInBatches(t *testing.T) {
-	d := *jobDeps
-	var batchSizes []int
-	d.ForEachJobTaskItemsByStatuses = func(taskID int64, statuses []int, batchSize int, fn func([]map[string]interface{}) error) error {
-		if taskID != 55 {
-			t.Fatalf("taskID = %d, want 55", taskID)
-		}
-		if len(statuses) != 1 || statuses[0] != taskStatusFailed.Int() {
-			t.Fatalf("statuses = %v, want [7]", statuses)
-		}
-		if batchSize <= 0 {
-			t.Fatalf("batchSize = %d, want positive", batchSize)
-		}
-		batches := [][]map[string]interface{}{
-			{
-				{"type": 0, "srcPath": "/src/", "dstPath": "/dst/", "fileName": "one.txt", "fileSize": int64(1)},
-				{"type": 0, "srcPath": "/src/", "dstPath": "/dst/", "fileName": "two.txt", "fileSize": int64(2)},
-			},
-			{
-				{"type": 0, "srcPath": "/src/", "dstPath": "/dst/", "fileName": "three.txt", "fileSize": int64(3)},
-			},
-		}
-		for _, batch := range batches {
-			batchSizes = append(batchSizes, len(batch))
-			if err := fn(batch); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	restore := SetJobDepsForTest(&d)
-	defer restore()
-
-	jt := &JobTask{
-		TaskID:            123,
-		Job:               map[string]interface{}{"srcPath": "/src/", "dstPath": "/dst/"},
-		RetrySourceTaskID: 55,
-		RetryStatuses:     []taskStatus{taskStatusFailed},
-		Waiting:           newCopyQueue(),
-	}
-	jt.initRuntime()
-
-	jt.syncRetryItems()
-
-	items := jt.Waiting.snapshot()
-	if len(items) != 3 {
-		t.Fatalf("queued retry items = %d, want 3", len(items))
-	}
-	if items[0].FileName != "one.txt" || items[1].FileName != "two.txt" || items[2].FileName != "three.txt" {
-		t.Fatalf("queued file names = %q, %q, %q; want one/two/three", items[0].FileName, items[1].FileName, items[2].FileName)
-	}
-	// The retry source is read twice: once to find directory records that need a
-	// rescan, then to replay the items. Both passes must use the same batching.
-	if got := batchSizes; len(got) != 4 || got[0] != 2 || got[1] != 1 || got[2] != 2 || got[3] != 1 {
-		t.Fatalf("batch sizes = %v, want [2 1 2 1]", got)
-	}
-	if !jt.ScanFinish.Load() {
-		t.Fatalf("ScanFinish = false, want true after retry source is exhausted")
-	}
-}
-
-func TestRunChildScanWorksFinishesCountedChildrenAfterBreak(t *testing.T) {
-	jt := &JobTask{}
-	jt.initRuntime()
-
-	children := make([]scanWork, 0)
-	jt.addChildScanWork(&children, scanWork{Mode: scanWorkCompare})
-	jt.requestBreak()
-
-	jt.runChildScanWorks(children, nil)
-
-	progress := jt.scanProgress()
-	if progress["totalDirs"] != 1 || progress["scannedDirs"] != 1 || progress["remainingDirs"] != 0 {
-		t.Fatalf("scanProgress after break child finish = %#v, want total=1 scanned=1 remaining=0", progress)
 	}
 }
 

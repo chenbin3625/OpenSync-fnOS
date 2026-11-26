@@ -12,11 +12,15 @@ func GetAlist(c *gin.Context) {
 	// Check if it's a path select request
 	alistIDStr := c.Query("alistId")
 	path := c.Query("path")
-	if alistIDStr != "" && path != "" {
-		alistID, err := parseRequiredID(alistIDStr)
-		if err != nil {
-			respondError(c, err.Error())
-			return
+	if path != "" {
+		var alistID int64
+		if alistIDStr != "" {
+			var err error
+			alistID, err = parseRequiredID(alistIDStr)
+			if err != nil {
+				respondError(c, err.Error())
+				return
+			}
 		}
 		handleService(c, func() (interface{}, error) {
 			return service.GetChildPath(c.Request.Context(), alistID, path)

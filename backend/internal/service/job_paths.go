@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"fmt"
+	"opensync/pkg/util"
 	"path"
 	"strings"
 	"unicode"
@@ -364,6 +365,19 @@ func resolvedDstPathsForJob(job map[string]interface{}) []string {
 		}
 	}
 	return resolved
+}
+
+// writablePathsForJob returns all directory roots that a job may write to or
+// delete from. For one-way modes this is resolvedDstPathsForJob; for bisync
+// (method == 3) both srcPath and dstPath are written/deleted bidirectionally.
+func writablePathsForJob(job map[string]interface{}) []string {
+	paths := resolvedDstPathsForJob(job)
+	if util.ToInt(job["method"]) == 3 {
+		for _, srcItem := range parsePathList(job["srcPath"]) {
+			paths = append(paths, normalizeDirPath(srcItem))
+		}
+	}
+	return paths
 }
 
 // resolvedDstPathsNestedForJob reports whether one resolved destination root of

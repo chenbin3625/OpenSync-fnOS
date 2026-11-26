@@ -5,6 +5,7 @@ import (
 	"opensync/internal/config"
 	"opensync/internal/mapper"
 	"opensync/internal/msg"
+	"opensync/internal/native"
 	"opensync/pkg/util"
 	"path/filepath"
 	"testing"
@@ -32,9 +33,10 @@ func TestEditEnabledJobClientUpdatesNextRunWithoutBreakingCurrentTask(t *testing
 	resetJobClientsForTest()
 
 	// AddJobClient validates that the engine exists before inserting the job.
+	const testNativeToken = `{"old-src":{"type":"webdav","url":"https://old-src.test"},"old-dst":{"type":"webdav","url":"https://old-dst.test"},"new-src":{"type":"webdav","url":"https://new-src.test"},"new-dst":{"type":"webdav","url":"https://new-dst.test"},"src":{"type":"webdav","url":"https://src.test"},"dst":{"type":"webdav","url":"https://dst.test"}}`
 	d := *alistDeps
 	d.GetAlistByID = func(alistID int64) (map[string]interface{}, error) {
-		return map[string]interface{}{"id": alistID, "url": "https://alist.test", "token": "t"}, nil
+		return map[string]interface{}{"id": alistID, "url": native.EngineURL, "token": testNativeToken}, nil
 	}
 	restoreAlistDeps := SetAlistDepsForTest(&d)
 	defer restoreAlistDeps()
@@ -153,7 +155,7 @@ func TestEditJobClientRejectsUnknownEngine(t *testing.T) {
 		if alistID == 2 {
 			return nil, errors.New(msg.T(msg.AlistNotFound))
 		}
-		return map[string]interface{}{"id": alistID, "url": "https://alist.test", "token": "t"}, nil
+		return map[string]interface{}{"id": alistID, "url": native.EngineURL, "token": `{"src":{"type":"webdav","url":"https://src.test"},"dst":{"type":"webdav","url":"https://dst.test"}}`}, nil
 	}
 	restoreAlistDeps := SetAlistDepsForTest(&d)
 	defer restoreAlistDeps()

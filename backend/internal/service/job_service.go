@@ -41,6 +41,9 @@ var scheduleTaskNumUpdateFn = scheduleTaskNumUpdate
 // InitJobs loads and starts all enabled jobs on startup
 func InitJobs() {
 	logger := log.Default()
+	if _, err := EnsureNativeEngine(); err != nil {
+		logger.Printf("Failed to ensure built-in rclone engine: %v", err)
+	}
 	if err := mapper.UpdateJobTaskStatusByStatus(); err != nil {
 		logger.Printf("Failed to mark unfinished task history as aborted: %v", err)
 	}
@@ -55,13 +58,31 @@ func InitJobs() {
 		logger.Printf("Failed to get job list: %v", err)
 		return
 	}
+	legacyEngineIDs := legacyOpenListAlistIDs()
+	var legacyJobIDs []int64
 	for _, item := range jobList {
+		jobID := util.ToInt64(item["id"])
+		alistID := util.ToInt64(item["alistId"])
+		if legacyEngineIDs[alistID] {
+			if util.ToInt(item["enable"]) != 0 {
+				if err := mapper.UpdateJobEnable(jobID, 0); err != nil {
+					logger.Printf("Failed to disable legacy OpenList job %d: %v", jobID, err)
+				} else {
+					logger.Printf("Disabled legacy OpenList job %d (alistId=%d); user must delete and recreate it", jobID, alistID)
+				}
+			}
+			legacyJobIDs = append(legacyJobIDs, jobID)
+			continue
+		}
 		logger.Printf("Adding jobId %v", item["id"])
 		if err := AddJobClient(item, true); err != nil {
 			logger.Printf("Error adding job: %v", err)
 		}
 	}
 	pendingDeleteApprovals.LoadFromDB()
+	for _, jobID := range legacyJobIDs {
+		pendingDeleteApprovals.ClearForJob(jobID)
+	}
 }
 
 func ShutdownJobs(ctx context.Context) {
@@ -261,6 +282,12 @@ func getJobClientByIDLocked(jobID int64) (*JobClient, error) {
 		if err := publicErrorIf(err, msg.T(msg.JobNotFound)); err != nil {
 			return nil, err
 		}
+	}
+	if isLegacyOpenListAlistID(util.ToInt64(job["alistId"])) {
+		if util.ToInt(job["enable"]) != 0 {
+			_ = mapper.UpdateJobEnable(jobID, 0)
+		}
+		return nil, publicError(legacyOpenListJobDisabledMsg)
 	}
 	// NewJobClient runs validateJobInput. A stored row is loaded under the same
 	// rules as InitJobs (isInit): overlapping or nested sources are refused, a
@@ -763,7 +790,7 @@ func validateJobDestinationConflicts(job map[string]interface{}) error {
 		return nil
 	}
 	jobID := util.ToInt64(job["id"])
-	mine := resolvedDstPathsForJob(job)
+	mine := writablePathsForJob(job)
 	if len(mine) == 0 {
 		return nil
 	}
@@ -779,7 +806,7 @@ func validateJobDestinationConflicts(job map[string]interface{}) error {
 		if util.ToInt64(other["id"]) == jobID || util.ToInt64(other["alistId"]) != alistID {
 			continue
 		}
-		for _, otherDst := range resolvedDstPathsForJob(other) {
+		for _, otherDst := range writablePathsForJob(other) {
 			for _, dst := range mine {
 				if syncPathContains(dst, otherDst) || syncPathContains(otherDst, dst) {
 					return publicError(msg.JobDstConflict(otherDst))
@@ -914,6 +941,15 @@ func CreateJobClient(job map[string]interface{}) (int64, error) {
 }
 
 func addJobClient(job map[string]interface{}, isInit bool) (int64, error) {
+	if !isInit {
+		if id, ok := strictJobInt64(job["alistId"]); !ok || id <= 0 {
+			nativeID, err := EnsureNativeEngine()
+			if err != nil {
+				return 0, err
+			}
+			job["alistId"] = nativeID
+		}
+	}
 	// A row loaded from a pre-migration database has no stored mapping yet.
 	// Freeze the layout it has been using before this run's computed mapping
 	// could change on the first edit.
@@ -940,18 +976,16 @@ func addJobClient(job map[string]interface{}, isInit bool) (int64, error) {
 			return 0, err
 		}
 		row, err := alistDeps.GetAlistByID(util.ToInt64(job["alistId"]))
-		if err == nil {
-			if util.ToInt(job["method"]) == 3 && util.StringValue(row["url"]) != native.EngineURL {
-				return 0, publicError("双向同步仅支持原生 rclone 引擎")
-			}
-			if err := validateNativeJob(job, row); err != nil {
-				return 0, err
-			}
-		}
 		if err != nil {
 			if err := publicErrorIf(err, msg.T(msg.AlistNotFound)); err != nil {
 				return 0, err
 			}
+		}
+		if util.StringValue(row["url"]) != native.EngineURL {
+			return 0, publicError("当前版本仅支持内置 rclone 存储引擎")
+		}
+		if err := validateNativeJob(job, row); err != nil {
+			return 0, err
 		}
 	}
 	client, err := NewJobClient(job, isInit)
@@ -967,11 +1001,26 @@ func addJobClient(job map[string]interface{}, isInit bool) (int64, error) {
 // EditJobClient updates an existing job client
 func EditJobClient(job map[string]interface{}) error {
 	jobID := util.ToInt64(job["id"])
-	if job["dstMap"] == nil && jobID > 0 {
-		// The edit form does not send the mapping. It must survive the edit, or
-		// every remaining source would be re-mapped by the new source set.
+	if id, ok := strictJobInt64(job["alistId"]); !ok || id <= 0 {
+		nativeID, err := EnsureNativeEngine()
+		if err != nil {
+			return err
+		}
+		job["alistId"] = nativeID
+	}
+	if jobID > 0 {
 		if previous, err := mapper.GetJobByID(jobID); err == nil {
-			job["dstMap"] = previous["dstMap"]
+			if isLegacyOpenListAlistID(util.ToInt64(previous["alistId"])) {
+				if util.ToInt(previous["enable"]) != 0 {
+					_ = mapper.UpdateJobEnable(jobID, 0)
+				}
+				return publicError(legacyOpenListJobDisabledMsg)
+			}
+			// The edit form does not send the mapping. It must survive the edit, or
+			// every remaining source would be re-mapped by the new source set.
+			if job["dstMap"] == nil {
+				job["dstMap"] = previous["dstMap"]
+			}
 		}
 	}
 	if err := CleanJobInput(job); err != nil {
@@ -1013,8 +1062,8 @@ func EditJobClient(job map[string]interface{}) error {
 		var row map[string]interface{}
 		row, alistErr = alistDeps.GetAlistByID(util.ToInt64(job["alistId"]))
 		if alistErr == nil {
-			if util.ToInt(job["method"]) == 3 && util.StringValue(row["url"]) != native.EngineURL {
-				conflictErr = publicError("双向同步仅支持原生 rclone 引擎")
+			if util.StringValue(row["url"]) != native.EngineURL {
+				conflictErr = publicError("当前版本仅支持内置 rclone 存储引擎")
 			} else {
 				conflictErr = validateNativeJob(job, row)
 			}
@@ -1045,14 +1094,34 @@ func EditJobClient(job map[string]interface{}) error {
 	if jobConfigInvalidatesPendingDeletes(prevConfig, job) {
 		pendingDeleteApprovals.ClearForJob(jobID)
 	}
-	if prevConfig != nil &&
-		(fmt.Sprint(prevConfig["method"]) != fmt.Sprint(job["method"]) ||
-			fmt.Sprint(prevConfig["srcPath"]) != fmt.Sprint(job["srcPath"]) ||
-			fmt.Sprint(prevConfig["dstPath"]) != fmt.Sprint(job["dstPath"]) ||
-			fmt.Sprint(prevConfig["alistId"]) != fmt.Sprint(job["alistId"])) {
+	if jobConfigInvalidatesBisyncState(prevConfig, job) {
 		cleanupBisyncWorkDir(jobID)
 	}
 	return nil
+}
+
+func jobConfigInvalidatesBisyncState(prev, next map[string]interface{}) bool {
+	if prev == nil {
+		return false
+	}
+	for _, key := range []string{"method", "srcPath", "dstPath", "alistId"} {
+		if fmt.Sprint(prev[key]) != fmt.Sprint(next[key]) {
+			return true
+		}
+	}
+	if util.ToInt(next["method"]) != 3 {
+		return false
+	}
+	for _, key := range []string{
+		"exclude", "include", "filterMode",
+		"minFileSize", "maxFileSize", "minFileAgeMinutes", "olderThanDays", "newerThanDays",
+		"trashEnable", "trashDir", "followSymlinks", "compareMode",
+	} {
+		if fmt.Sprint(prev[key]) != fmt.Sprint(next[key]) {
+			return true
+		}
+	}
+	return false
 }
 
 func jobConfigInvalidatesPendingDeletes(prev, next map[string]interface{}) bool {
@@ -1224,6 +1293,17 @@ func ContinueJob(jobID int64) error {
 
 // PauseJob disables a job
 func PauseJob(jobID int64) error {
+	jobClientListMu.RLock()
+	cached := jobClientList[jobID]
+	jobClientListMu.RUnlock()
+	if cached == nil {
+		if row, err := mapper.GetJobByID(jobID); err == nil && isLegacyOpenListAlistID(util.ToInt64(row["alistId"])) {
+			if util.ToInt(row["enable"]) != 0 {
+				_ = mapper.UpdateJobEnable(jobID, 0)
+			}
+			return nil
+		}
+	}
 	client, err := GetJobClientByID(jobID)
 	if err != nil {
 		return err
@@ -1236,6 +1316,14 @@ func PauseJob(jobID int64) error {
 
 // AbortJob aborts a running job
 func AbortJob(jobID int64) error {
+	jobClientListMu.RLock()
+	cached := jobClientList[jobID]
+	jobClientListMu.RUnlock()
+	if cached == nil {
+		if row, err := mapper.GetJobByID(jobID); err == nil && isLegacyOpenListAlistID(util.ToInt64(row["alistId"])) {
+			return nil
+		}
+	}
 	client, err := GetJobClientByID(jobID)
 	if err != nil {
 		return err
@@ -1294,6 +1382,12 @@ func RetryFailedTaskItems(taskID int64, itemIDs []int64) error {
 			return err
 		}
 	}
+	if isLegacyOpenListAlistID(util.ToInt64(job["alistId"])) {
+		return publicError(legacyOpenListJobDisabledMsg)
+	}
+	if util.ToInt(job["method"]) == 3 {
+		return publicError("双向同步不支持按失败项局部重试，请直接重新执行任务")
+	}
 	client, err := GetJobClientByID(util.ToInt64(job["id"]))
 	if err != nil {
 		return err
@@ -1338,22 +1432,29 @@ func addJobNextRunTimes(result map[string]interface{}) {
 	jobClientListMu.RUnlock()
 	queuedSet := engineQueue.AllQueuedJobIDs()
 	latestTasks, _ := mapper.GetLatestTaskPerJob()
+	legacyEngineIDs := legacyOpenListAlistIDs()
 	for _, row := range rows {
 		jobID := util.ToInt64(row["id"])
+		legacyOpenList := legacyEngineIDs[util.ToInt64(row["alistId"])]
 		next := int64(0)
 		running := false
-		if client := clients[jobID]; client != nil {
-			if nextTime, scheduled := client.nextRunTime(); scheduled {
-				next = nextTime.Unix()
+		if !legacyOpenList {
+			if client := clients[jobID]; client != nil {
+				if nextTime, scheduled := client.nextRunTime(); scheduled {
+					next = nextTime.Unix()
+				}
+				if task := client.currentTask(); task != nil {
+					running = true
+				}
 			}
-			if task := client.currentTask(); task != nil {
-				running = true
-			}
+		} else {
+			row["enable"] = 0
 		}
+		row["legacyOpenList"] = legacyOpenList
 		row["nextRunTime"] = next
 		row["running"] = running
-		row["queued"] = queuedSet[jobID]
-		row["pendingApproval"] = pendingDeleteApprovals.Has(jobID)
+		row["queued"] = !legacyOpenList && queuedSet[jobID]
+		row["pendingApproval"] = !legacyOpenList && pendingDeleteApprovals.Has(jobID)
 		if latest, ok := latestTasks[jobID]; ok {
 			row["lastStatus"] = util.ToInt(latest["status"])
 		}
@@ -1382,6 +1483,9 @@ func GetJobCurrent(jobID int64, params map[string]interface{}) (interface{}, err
 	client := jobClientList[jobID]
 	jobClientListMu.RUnlock()
 	if client == nil {
+		if row, rowErr := mapper.GetJobByID(jobID); rowErr == nil && isLegacyOpenListAlistID(util.ToInt64(row["alistId"])) {
+			return nil, nil
+		}
 		var err error
 		client, err = GetJobClientByID(jobID)
 		if err != nil {

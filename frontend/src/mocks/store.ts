@@ -569,9 +569,11 @@ export class MockStore {
     const seededEngines = seed.engines ?? [
       {
         id: 1,
-        remark: "本地测试引擎",
-        url: "https://mock-engine.test",
-        userName: "mock-user",
+        kind: "rclone",
+        remark: "内置存储",
+        url: "rclone://native",
+        userName: "rclone",
+        maxConcurrentJobs: 0,
       },
     ];
     this.engines = seededEngines.map((item, index) =>
@@ -758,7 +760,7 @@ export class MockStore {
       engine = {
         id: this.nextEngineId++,
         kind: "rclone",
-        remark: remark?.trim() || "原生备份",
+        remark: remark?.trim() || "内置存储",
         url: "rclone://native",
         userName: "rclone",
         maxConcurrentJobs: maxConcurrentJobs ?? 1,
@@ -770,7 +772,7 @@ export class MockStore {
       };
       this.engines.push(engine);
     } else {
-      if (remark !== undefined) engine.remark = remark.trim() || "原生备份";
+      if (remark !== undefined) engine.remark = remark.trim() || "内置存储";
       if (maxConcurrentJobs !== undefined) {
         engine.maxConcurrentJobs = maxConcurrentJobs;
       }
@@ -934,13 +936,17 @@ export class MockStore {
           configuredSecrets,
           usedByJobs,
           usedByCrypts,
+          activeJobs: 0,
+          queuedJobs: 0,
         };
       });
     return {
       engineId: engine?.id ?? 0,
       enabled: Boolean(engine),
-      remark: engine?.remark || "原生备份",
-      maxConcurrentJobs: engine?.maxConcurrentJobs ?? 1,
+      remark: engine?.remark || "内置存储",
+      maxConcurrentJobs: engine?.maxConcurrentJobs ?? 0,
+      localActiveJobs: this.currentTasks.size,
+      localQueuedJobs: 0,
       rcloneAvailable: true,
       rcloneVersion: "v1.76.0",
       supportedTypes,

@@ -127,6 +127,7 @@ export function InlineNotice({
   className,
   onRetry,
   retrying = false,
+  action,
 }: {
   message: ReactNode;
   icon?: ReactNode;
@@ -134,6 +135,7 @@ export function InlineNotice({
   className?: string;
   onRetry?: () => void;
   retrying?: boolean;
+  action?: ReactNode;
 }) {
   return (
     <div
@@ -142,6 +144,7 @@ export function InlineNotice({
     >
       {icon}
       <span className="inline-error">{message}</span>
+      {action}
       {onRetry && (
         <Button
           size="small"

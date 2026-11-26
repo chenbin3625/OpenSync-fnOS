@@ -1,86 +1,126 @@
-import { useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Input from "@douyinfe/semi-ui/lib/es/input";
+import Modal from "@douyinfe/semi-ui/lib/es/modal";
 import Tag from "@douyinfe/semi-ui/lib/es/tag";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import {
+  IconAlertTriangle,
+  IconBarChartVStroked,
   IconChainStroked,
-  IconChevronDown,
-  IconChevronRight,
   IconDeleteStroked,
+  IconDownload,
   IconEditStroked,
+  IconFolderStroked,
+  IconInfoCircle,
   IconPlusStroked,
   IconRefresh,
+  IconSettingStroked,
+  IconUpload,
 } from "@douyinfe/semi-icons";
 import { api } from "../api/client";
-import { NativeStorageEditor } from "../components/NativeStorageEditor";
 import {
-  Editor,
+  NativeStorageEditor,
+  remoteTypeLabels,
+  type NativeEditorMode,
+} from "../components/NativeStorageEditor";
+import {
   Field,
   Header,
   IconButton,
+  InlineNotice,
   LoadState,
   ResourceCard,
+  confirmAction,
   confirmDelete,
   errorToast,
 } from "../components/common";
-import { useAction, useEditorForm, useResource } from "../lib/hooks";
+import { useResource } from "../lib/hooks";
+import { formatSize } from "./Home/homeUtils";
 import { formatTimestamp } from "../utils/date";
-import type { AlistItem, EngineStorageStatus } from "../types";
+import type {
+  EngineStorageStatus,
+  NativeAboutInfo,
+  NativeRemoteItem,
+  NativeStorageTestResult,
+} from "../types";
 
-function isStorageHealthy(st: EngineStorageStatus): boolean {
+function isStorageHealthy(st?: EngineStorageStatus): boolean {
+  if (!st) return true;
   if (st.disabled) return true;
   const s = (st.status || "").trim().toLowerCase();
   return s === "" || s === "work" || s === "ok";
 }
 
-export default function Engines() {
-  const engines = useResource((signal) => api.engines(signal));
-  const action = useAction();
-  const [editing, setEditing] = useState<AlistItem | null | undefined>();
-  const [testingId, setTestingId] = useState<number | null>(null);
-  const [nativeOpen, setNativeOpen] = useState(false);
-  const nativeEngine = engines.data?.find((engine) => engine.kind === "rclone");
-  const [checkingAll, setCheckingAll] = useState(false);
-  const [expandedStorages, setExpandedStorages] = useState<
-    Record<number, boolean>
-  >({});
+interface StorageModalState {
+  mode: NativeEditorMode;
+  editRemote?: NativeRemoteItem | null;
+  initialBrowsePath?: string;
+}
 
-  const testEngine = (id: number) => {
-    setTestingId(id);
-    api
-      .testEngine(id)
-      .then((health) => {
-        const latency = health?.latencyMs ? `（${health.latencyMs}ms）` : "";
-        const storageList = health?.storagesKnown ? health.storages || [] : [];
-        const unhealthy = storageList.filter((st) => !isStorageHealthy(st)).length;
-        if (unhealthy > 0) {
-          Toast.warning(
-            `引擎在线${latency}，但有 ${unhealthy} 个存储挂载异常`,
-          );
-          setExpandedStorages((prev) => ({ ...prev, [id]: true }));
-        } else {
-          const storages =
-            health?.storagesKnown && storageList.length > 0
-              ? `，已读取 ${storageList.length} 个挂载点`
-              : "";
-          Toast.success(`引擎连接正常${latency}${storages}`);
-        }
-        void engines.refresh(true);
-      })
-      .catch((err) => {
-        errorToast(err);
-        void engines.refresh(true);
-      })
-      .finally(() => setTestingId(null));
-  };
+export default function Engines() {
+  const nativeState = useResource((signal) => api.nativeStorageState(signal));
+  const engines = useResource((signal) => api.engines(signal));
+
+  const [modal, setModal] = useState<StorageModalState | null>(null);
+  const [checkingAll, setCheckingAll] = useState(false);
+  const [testingName, setTestingName] = useState<string | null>(null);
+  const [testResults, setTestResults] = useState<
+    Record<string, NativeStorageTestResult>
+  >({});
+  const [aboutLoadingName, setAboutLoadingName] = useState<string | null>(null);
+  const [aboutResults, setAboutResults] = useState<
+    Record<string, NativeAboutInfo>
+  >({});
+  const [cleaningName, setCleaningName] = useState<string | null>(null);
+  const [deletingName, setDeletingName] = useState<string | null>(null);
+  const [renameTarget, setRenameTarget] = useState<string | null>(null);
+  const [renameNewName, setRenameNewName] = useState("");
+  const [renaming, setRenaming] = useState(false);
+
+  const state = nativeState.data;
+  const nativeEngine = engines.data?.find(
+    (engine) => engine.kind === "rclone" || engine.url === "rclone://native",
+  ) ?? engines.data?.[0];
+  const health = nativeEngine?.health;
+
+  const storageStatusMap = useMemo(() => {
+    const map = new Map<string, EngineStorageStatus>();
+    for (const st of health?.storages || []) {
+      map.set(st.mountPath, st);
+    }
+    return map;
+  }, [health?.storages]);
+
+  const exportableRemotes = useMemo(
+    () => (state?.remotes || []).filter((r) => r.type !== "local"),
+    [state?.remotes],
+  );
+
+  const anyBusy =
+    checkingAll ||
+    testingName !== null ||
+    aboutLoadingName !== null ||
+    cleaningName !== null ||
+    deletingName !== null ||
+    renaming;
+
+  const refreshAll = useCallback(
+    async (silent = true) => {
+      await Promise.all([
+        nativeState.refresh(silent),
+        engines.refresh(silent),
+      ]);
+    },
+    [nativeState.refresh, engines.refresh],
+  );
 
   const refreshAllHealth = async () => {
     setCheckingAll(true);
     try {
       await api.engineHealth({ refresh: 1 });
-      await engines.refresh(true);
-      Toast.success("已完成全部存储引擎健康检查");
+      await refreshAll(true);
+      Toast.success("已完成全部存储连通性检查");
     } catch (err) {
       errorToast(err);
     } finally {
@@ -88,357 +128,585 @@ export default function Engines() {
     }
   };
 
+  const handleTestRemote = async (name: string) => {
+    setTestingName(name);
+    try {
+      const res = await api.testNativeStorage({ name });
+      setTestResults((prev) => ({ ...prev, [name]: res }));
+      if (res.ok && res.warning) {
+        Toast.warning(`${name}：${res.message}`);
+      } else if (res.ok) {
+        Toast.success(`${name}：${res.message}（${res.latencyMs}ms）`);
+      } else {
+        Toast.error(`${name}：${res.message}`);
+      }
+      await refreshAll(true);
+    } catch (err) {
+      errorToast(err);
+    } finally {
+      setTestingName(null);
+    }
+  };
+
+  const handleAboutStorage = async (name: string) => {
+    setAboutLoadingName(name);
+    try {
+      const info = await api.aboutNativeStorage(name);
+      setAboutResults((prev) => ({ ...prev, [name]: info }));
+      if (!info.supported) {
+        Toast.info(info.message || `${name} 不支持空间用量查询`);
+      }
+    } catch (err) {
+      errorToast(err);
+    } finally {
+      setAboutLoadingName(null);
+    }
+  };
+
+  const handleCleanupRemote = (name: string) => {
+    confirmAction({
+      title: `清理远程存储「${name}」回收站与碎片？`,
+      content:
+        "将调用 rclone cleanup 清空远端回收站或残留的分片上传碎片（具体行为取决于远端存储）。此操作不可撤销。",
+      okText: "确认清理",
+      onOk: async () => {
+        setCleaningName(name);
+        try {
+          await api.cleanupNativeStorage(name);
+          Toast.success(`已完成「${name}」清理`);
+        } catch (err) {
+          errorToast(err);
+        } finally {
+          setCleaningName(null);
+        }
+      },
+    });
+  };
+
+  const handleDeleteRemote = (item: NativeRemoteItem) => {
+    if (item.usedByCrypts.length > 0) {
+      Toast.warning(
+        `存储「${item.name}」正被复合存储（${item.usedByCrypts.join("、")}）引用，请先删除或修改对应存储`,
+      );
+      return;
+    }
+    if (item.usedByJobs.length > 0) {
+      Toast.warning(
+        `存储「${item.name}」正被同步任务（${item.usedByJobs.join("、")}）使用，请先修改或删除关联任务`,
+      );
+      return;
+    }
+    confirmDelete(
+      `删除远程存储「${item.name}」？`,
+      async () => {
+        setDeletingName(item.name);
+        try {
+          await api.deleteNativeStorage(item.name);
+          setTestResults((prev) => {
+            const copy = { ...prev };
+            delete copy[item.name];
+            return copy;
+          });
+          setAboutResults((prev) => {
+            const copy = { ...prev };
+            delete copy[item.name];
+            return copy;
+          });
+          Toast.success(`已删除存储「${item.name}」`);
+          await refreshAll(true);
+        } catch (err) {
+          errorToast(err);
+        } finally {
+          setDeletingName(null);
+        }
+      },
+      "仅删除 OpenSync 中保存的连接配置，不会删除远端文件。",
+    );
+  };
+
+  const handleExecuteRename = async () => {
+    if (!renameTarget) return;
+    const trimmed = renameNewName.trim();
+    if (!trimmed) {
+      Toast.warning("请输入新的存储名称");
+      return;
+    }
+    setRenaming(true);
+    try {
+      const res = await api.renameNativeStorage({
+        oldName: renameTarget,
+        newName: trimmed,
+      });
+      Toast.success(
+        res.updatedJobs > 0
+          ? `已重命名为「${res.newName}」，并自动更新了 ${res.updatedJobs} 个关联任务`
+          : `已重命名为「${res.newName}」`,
+      );
+      setRenameTarget(null);
+      setRenameNewName("");
+      setTestResults({});
+      setAboutResults({});
+      await refreshAll(true);
+      window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
+    } catch (err) {
+      errorToast(err);
+    } finally {
+      setRenaming(false);
+    }
+  };
+
+  const renderAboutSummary = (info?: NativeAboutInfo) => {
+    if (!info) return null;
+    if (!info.supported) {
+      return (
+        <div className="native-about-line muted">
+          {info.message || "该存储不支持空间用量统计"}
+        </div>
+      );
+    }
+    const parts: string[] = [];
+    if (info.used !== undefined) parts.push(`已用 ${formatSize(info.used)}`);
+    if (info.free !== undefined) parts.push(`可用 ${formatSize(info.free)}`);
+    if (info.total !== undefined) parts.push(`总计 ${formatSize(info.total)}`);
+    if (info.trashed !== undefined && info.trashed > 0) {
+      parts.push(`回收站 ${formatSize(info.trashed)}`);
+    }
+    return (
+      <div className="native-about-line muted">
+        空间配额：{parts.join(" · ") || "无数据"}
+      </div>
+    );
+  };
+
+  const localStatus = storageStatusMap.get("/本地");
+  const localActiveJobs = Number(state?.localActiveJobs || 0);
+  const localQueuedJobs = Number(state?.localQueuedJobs || 0);
+  const maxConcurrent = Number(state?.maxConcurrentJobs || 0);
+
   return (
     <div className="page">
       <Header
-        title="引擎管理"
+        title="存储管理"
         actions={
           <div className="dashboard-header-actions">
-            {Boolean(engines.data?.length) && (
+            <Button
+              type="tertiary"
+              icon={<IconRefresh aria-hidden="true" />}
+              loading={checkingAll}
+              disabled={!state || anyBusy}
+              onClick={() => void refreshAllHealth()}
+            >
+              刷新状态
+            </Button>
+            <Button
+              type="tertiary"
+              icon={<IconUpload aria-hidden="true" />}
+              disabled={!state || anyBusy}
+              onClick={() => setModal({ mode: "import" })}
+            >
+              导入配置
+            </Button>
+            {exportableRemotes.length > 0 && (
               <Button
                 type="tertiary"
-                icon={<IconRefresh aria-hidden="true" />}
-                loading={checkingAll}
-                onClick={() => void refreshAllHealth()}
+                icon={<IconDownload aria-hidden="true" />}
+                disabled={!state || anyBusy}
+                onClick={() => setModal({ mode: "export" })}
               >
-                刷新健康状态
+                导出配置
               </Button>
             )}
             <Button
-              disabled={engines.loading && !engines.data}
-              onClick={() => setNativeOpen(true)}
+              icon={<IconFolderStroked aria-hidden="true" />}
+              disabled={nativeState.loading && !state}
+              onClick={() => setModal({ mode: "local" })}
             >
-              {nativeEngine ? "配置原生存储" : "添加原生存储"}
+              配置本地目录
             </Button>
             <Button
               theme="solid"
               icon={<IconPlusStroked aria-hidden="true" />}
-              onClick={() => setEditing(null)}
+              disabled={nativeState.loading && !state}
+              onClick={() => setModal({ mode: "form", editRemote: null })}
             >
-              添加引擎
+              添加远程存储
             </Button>
           </div>
         }
       />
-      <LoadState
-        loading={engines.loading}
-        error={engines.error}
-        retry={engines.refresh}
-        empty={!engines.data?.length}
-      >
-        <div className="item-list">
-          {engines.data?.map((engine) => {
-            const health = engine.health;
-            const storages = health?.storages || [];
-            const unhealthyCount = storages.filter(
-              (st) => !isStorageHealthy(st),
-            ).length;
-            const expanded = Boolean(expandedStorages[engine.id]);
-            const maxConcurrent = Number(engine.maxConcurrentJobs || 0);
-            const activeJobs = Number(engine.activeJobs || 0);
-            const queuedJobs = Number(engine.queuedJobs || 0);
 
-            return (
-              <ResourceCard
-                key={engine.id}
-                className="engine-item"
-                title={
-                  <span className="engine-title-row">
-                    <span>
-                      {engine.remark || engine.userName || `引擎 #${engine.id}`}
-                    </span>
-                    {health?.status === "online" ? (
-                      <Tag size="small" type="light" color="green">
-                        在线 · {health.latencyMs}ms
-                      </Tag>
-                    ) : health?.status === "offline" ? (
-                      <Tag size="small" type="light" color="red">
-                        连接异常
-                      </Tag>
-                    ) : (
-                      <Tag size="small" type="light" color="grey">
-                        未检测
-                      </Tag>
-                    )}
-                    {maxConcurrent > 0 && (
+      <LoadState
+        loading={nativeState.loading && !state}
+        error={nativeState.error}
+        retry={() => void refreshAll(false)}
+      >
+        {state && (
+          <div className="item-list">
+            {!state.rcloneAvailable && (
+              <InlineNotice
+                role="alert"
+                icon={<IconAlertTriangle aria-hidden="true" size="small" />}
+                message={`内置 rclone 不可用：${state.rcloneError || "未找到可执行文件"}`}
+              />
+            )}
+
+            {/* Card 1 (always shown): Local authorized directories */}
+            <ResourceCard
+              className="engine-item storage-card storage-card--local"
+              title={
+                <span className="engine-title-row">
+                  <span>本地目录</span>
+                  <Tag size="small" type="light" color="blue">
+                    本地授权目录
+                  </Tag>
+                  {!state.rcloneAvailable ? (
+                    <Tag size="small" type="light" color="red">
+                      引擎不可用
+                    </Tag>
+                  ) : state.localRoots.length > 0 ? (
+                    <Tag size="small" type="light" color="green">
+                      已授权 {state.localRoots.length} 个
+                    </Tag>
+                  ) : (
+                    <Tag size="small" type="light" color="orange">
+                      未授权目录
+                    </Tag>
+                  )}
+                  {state.rcloneVersion && (
+                    <Tag size="small" type="light" color="cyan">
+                      rclone {state.rcloneVersion}
+                    </Tag>
+                  )}
+                  {maxConcurrent > 0 && (
+                    <Tag size="small" type="light" color="blue">
+                      {maxConcurrent === 1
+                        ? "全局串行排队"
+                        : `全局最多 ${maxConcurrent} 并发`}
+                    </Tag>
+                  )}
+                  {(localActiveJobs > 0 || localQueuedJobs > 0) && (
+                    <Tag size="small" type="light" color="cyan">
+                      运行 {localActiveJobs}
+                      {localQueuedJobs > 0 ? ` · 排队 ${localQueuedJobs}` : ""}
+                    </Tag>
+                  )}
+                </span>
+              }
+              subtitle={
+                state.localRoots.length > 0 ? (
+                  <div className="native-local-roots storage-card-roots">
+                    {state.localRoots.map((root) => (
+                      <span
+                        key={root.id}
+                        className="native-local-chip mono"
+                        title={root.path}
+                      >
+                        {root.path}
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  "请在飞牛「应用设置 → 文件夹访问权限」中为 OpenSync 授权文件夹"
+                )
+              }
+              meta={
+                <div className="engine-meta-stack">
+                  <div className="item-meta">
+                    内置 rclone 引擎
+                    {state.remark && state.remark !== "内置存储"
+                      ? `（${state.remark}）`
+                      : ""}
+                    {health?.lastCheckedAt
+                      ? ` · 最近检测 ${formatTimestamp(health.lastCheckedAt, true)}`
+                      : ""}
+                  </div>
+                  {localStatus && !isStorageHealthy(localStatus) && state.localRoots.length > 0 && (
+                    <div className="inline-error">{localStatus.status}</div>
+                  )}
+                  {renderAboutSummary(aboutResults["本地"])}
+                </div>
+              }
+              actions={
+                <>
+                  <IconButton
+                    label="浏览本地目录"
+                    icon={<IconFolderStroked aria-hidden="true" />}
+                    disabled={state.localRoots.length === 0 || anyBusy}
+                    onClick={() =>
+                      setModal({ mode: "browse", initialBrowsePath: "/本地" })
+                    }
+                  />
+                  <IconButton
+                    label={
+                      aboutLoadingName === "本地"
+                        ? "查询空间中…"
+                        : "查看本地空间配额"
+                    }
+                    icon={<IconBarChartVStroked aria-hidden="true" />}
+                    disabled={state.localRoots.length === 0 || anyBusy}
+                    ariaBusy={aboutLoadingName === "本地"}
+                    onClick={() => void handleAboutStorage("本地")}
+                  />
+                  <IconButton
+                    label="配置本地目录"
+                    icon={<IconSettingStroked aria-hidden="true" />}
+                    disabled={anyBusy}
+                    onClick={() => setModal({ mode: "local" })}
+                  />
+                </>
+              }
+            />
+
+            {/* Cards 2..N: One card per configured remote storage */}
+            {state.remotes.map((item) => {
+              const st = storageStatusMap.get(`/${item.name}`);
+              const healthy = st ? isStorageHealthy(st) : undefined;
+              const testRes = testResults[item.name];
+              const aboutRes = aboutResults[item.name];
+              const activeJobs = Number(item.activeJobs || 0);
+              const queuedJobs = Number(item.queuedJobs || 0);
+              const isLocked =
+                item.usedByJobs.length > 0 || item.usedByCrypts.length > 0;
+              const lockHint =
+                item.usedByCrypts.length > 0
+                  ? `正被复合存储 ${item.usedByCrypts.join("、")} 引用`
+                  : item.usedByJobs.length > 0
+                    ? `正被任务 ${item.usedByJobs.join("、")} 使用`
+                    : "";
+
+              return (
+                <ResourceCard
+                  key={item.name}
+                  className="engine-item storage-card"
+                  title={
+                    <span className="engine-title-row">
+                      <span>{item.name}</span>
                       <Tag size="small" type="light" color="blue">
-                        {maxConcurrent === 1
-                          ? "串行排队"
-                          : `最多 ${maxConcurrent} 并发`}
+                        {remoteTypeLabels[item.type] || item.type}
                       </Tag>
-                    )}
-                    {(activeJobs > 0 || queuedJobs > 0) && (
-                      <Tag size="small" type="light" color="cyan">
-                        运行 {activeJobs}
-                        {queuedJobs > 0 ? ` · 排队 ${queuedJobs}` : ""}
-                      </Tag>
-                    )}
-                    {unhealthyCount > 0 && (
-                      <Tag size="small" type="solid" color="red">
-                        {unhealthyCount} 个挂载异常
-                      </Tag>
-                    )}
-                  </span>
-                }
-                subtitle={
-                  engine.kind === "rclone"
-                    ? (() => {
-                        const names = Object.keys(engine.remotes || {}).sort((a, b) =>
-                          a.localeCompare(b),
-                        );
-                        return names.length > 0
-                          ? ["本地授权目录", ...names].join(" · ")
-                          : "本地授权目录（未配置远端存储）";
-                      })()
-                    : engine.url
-                }
-                meta={
-                  <div className="engine-meta-stack">
-                    <div className="item-meta">
-                      {engine.kind === "rclone"
-                        ? "内置 rclone 引擎"
-                        : `账号 ${engine.userName || "—"}`}
-                      {health?.lastCheckedAt
-                        ? ` · 最近检测 ${formatTimestamp(health.lastCheckedAt, true)}`
-                        : ""}
-                    </div>
-                    {health?.status === "offline" && health.error && (
-                      <div className="inline-error">{health.error}</div>
-                    )}
-                    {health?.storagesKnown && storages.length > 0 && (
-                      <div className="engine-storages">
-                        <button
-                          type="button"
-                          className="engine-storages-toggle"
-                          aria-expanded={expanded}
-                          onClick={() =>
-                            setExpandedStorages((prev) => ({
-                              ...prev,
-                              [engine.id]: !prev[engine.id],
-                            }))
+                      {testRes ? (
+                        <Tag
+                          size="small"
+                          type="light"
+                          color={
+                            testRes.ok
+                              ? testRes.warning
+                                ? "orange"
+                                : "green"
+                              : "red"
                           }
                         >
-                          {expanded ? (
-                            <IconChevronDown size="small" aria-hidden="true" />
-                          ) : (
-                            <IconChevronRight size="small" aria-hidden="true" />
-                          )}
+                          {testRes.ok
+                            ? `正常 · ${testRes.latencyMs}ms`
+                            : "连接异常"}
+                        </Tag>
+                      ) : healthy === true ? (
+                        <Tag size="small" type="light" color="green">
+                          正常
+                        </Tag>
+                      ) : healthy === false ? (
+                        <Tag size="small" type="light" color="red">
+                          连接异常
+                        </Tag>
+                      ) : (
+                        <Tag size="small" type="light" color="grey">
+                          未检测
+                        </Tag>
+                      )}
+                      {item.usedByJobs.length > 0 && (
+                        <Tag size="small" type="light" color="cyan">
+                          {item.usedByJobs.length} 个任务
+                        </Tag>
+                      )}
+                      {item.usedByCrypts.length > 0 && (
+                        <Tag size="small" type="light" color="violet">
+                          被复合存储引用
+                        </Tag>
+                      )}
+                      {(activeJobs > 0 || queuedJobs > 0) && (
+                        <Tag size="small" type="light" color="cyan">
+                          运行 {activeJobs}
+                          {queuedJobs > 0 ? ` · 排队 ${queuedJobs}` : ""}
+                        </Tag>
+                      )}
+                    </span>
+                  }
+                  subtitle={item.summary || (remoteTypeLabels[item.type] || item.type)}
+                  meta={
+                    <div className="engine-meta-stack">
+                      {health?.lastCheckedAt && (
+                        <div className="item-meta">
+                          挂载路径 /{item.name} · 最近检测{" "}
+                          {formatTimestamp(health.lastCheckedAt, true)}
+                        </div>
+                      )}
+                      {healthy === false && st?.status && !testRes && (
+                        <div className="inline-error">{st.status}</div>
+                      )}
+                      {renderAboutSummary(aboutRes)}
+                      {testRes && (
+                        <div
+                          className={`native-inline-test ${
+                            testRes.ok
+                              ? testRes.warning
+                                ? "is-warn"
+                                : "is-ok"
+                              : "is-error"
+                          }`}
+                        >
                           <span>
-                            挂载存储（{storages.length} 个
-                            {unhealthyCount > 0
-                              ? `，${unhealthyCount} 项异常`
-                              : "，全部正常"}
-                            ）
+                            {testRes.message}（{testRes.latencyMs}ms）
                           </span>
-                        </button>
-                        {expanded && (
-                          <div className="engine-storage-list">
-                            {storages.map((st) => {
-                              const ok = isStorageHealthy(st);
-                              return (
-                                <div
-                                  key={`${st.mountPath}-${st.driver}`}
-                                  className={`engine-storage-chip${ok ? "" : " is-error"}`}
-                                >
-                                  <strong>{st.mountPath}</strong>
-                                  <span className="muted">{st.driver}</span>
-                                  <Tag
-                                    size="small"
-                                    type="light"
-                                    color={
-                                      st.disabled
-                                        ? "grey"
-                                        : ok
-                                          ? "green"
-                                          : "red"
-                                    }
-                                  >
-                                    {st.disabled
-                                      ? "已禁用"
-                                      : ok
-                                        ? "正常"
-                                        : st.status}
-                                  </Tag>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                }
-                actions={
-                  <>
-                    <IconButton
-                      label={testingId === engine.id ? "测试中…" : "测试引擎"}
-                      icon={<IconChainStroked aria-hidden="true" />}
-                      disabled={testingId !== null}
-                      onClick={() => testEngine(engine.id)}
-                    />
-                    <IconButton
-                      label="编辑引擎"
-                      icon={<IconEditStroked aria-hidden="true" />}
-                      onClick={() => engine.kind==="rclone"?setNativeOpen(true):setEditing(engine)}
-                    />
-                    <IconButton
-                      label="删除引擎"
-                      icon={<IconDeleteStroked aria-hidden="true" />}
-                      danger
-                      onClick={() =>
-                        confirmDelete(
-                          "删除此存储引擎？",
-                          () =>
-                            action.run(async () => {
-                              await api.deleteEngine(engine.id);
-                              // Silent: the card list must not flash to a spinner
-                              // after the confirm dialog has already closed.
-                              await engines.refresh(true);
-                            }),
-                          "关联同步任务需先删除；引擎中的文件不会被删除。",
-                        )
-                      }
-                    />
-                  </>
-                }
-              />
-            );
-          })}
-        </div>
+                          {testRes.warning && (
+                            <span className="native-inline-test-sub">
+                              {testRes.warning}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  }
+                  actions={
+                    <>
+                      <IconButton
+                        label={
+                          testingName === item.name
+                            ? "测试中…"
+                            : `测试连接 ${item.name}`
+                        }
+                        icon={<IconChainStroked aria-hidden="true" />}
+                        disabled={anyBusy}
+                        ariaBusy={testingName === item.name}
+                        onClick={() => void handleTestRemote(item.name)}
+                      />
+                      <IconButton
+                        label={`浏览与恢复 ${item.name}`}
+                        icon={<IconFolderStroked aria-hidden="true" />}
+                        disabled={anyBusy}
+                        onClick={() =>
+                          setModal({
+                            mode: "browse",
+                            initialBrowsePath: `/${item.name}`,
+                          })
+                        }
+                      />
+                      <IconButton
+                        label={
+                          aboutLoadingName === item.name
+                            ? "查询空间中…"
+                            : `查看空间 ${item.name}`
+                        }
+                        icon={<IconBarChartVStroked aria-hidden="true" />}
+                        disabled={anyBusy}
+                        ariaBusy={aboutLoadingName === item.name}
+                        onClick={() => void handleAboutStorage(item.name)}
+                      />
+                      {item.type !== "local" && (
+                        <IconButton
+                          label={
+                            cleaningName === item.name
+                              ? "清理中…"
+                              : `清理回收站与碎片 ${item.name}`
+                          }
+                          icon={<IconRefresh aria-hidden="true" />}
+                          disabled={anyBusy}
+                          ariaBusy={cleaningName === item.name}
+                          onClick={() => handleCleanupRemote(item.name)}
+                        />
+                      )}
+                      <IconButton
+                        label={`重命名 ${item.name}`}
+                        icon={<IconSettingStroked aria-hidden="true" />}
+                        disabled={anyBusy}
+                        onClick={() => {
+                          setRenameTarget(item.name);
+                          setRenameNewName(item.name);
+                        }}
+                      />
+                      {item.type !== "local" && (
+                        <IconButton
+                          label={`编辑 ${item.name}`}
+                          icon={<IconEditStroked aria-hidden="true" />}
+                          disabled={anyBusy}
+                          onClick={() =>
+                            setModal({ mode: "form", editRemote: item })
+                          }
+                        />
+                      )}
+                      <IconButton
+                        label={
+                          isLocked
+                            ? `无法删除：${lockHint}`
+                            : `删除 ${item.name}`
+                        }
+                        icon={<IconDeleteStroked aria-hidden="true" />}
+                        danger
+                        disabled={anyBusy}
+                        ariaBusy={deletingName === item.name}
+                        onClick={() => handleDeleteRemote(item)}
+                      />
+                    </>
+                  }
+                />
+              );
+            })}
+
+            {state.remotes.length === 0 && (
+              <div className="sync-method-banner">
+                <IconInfoCircle aria-hidden="true" size="small" />
+                <span>
+                  尚未添加远程存储。可直接在不同本地授权目录之间同步，或点击右上角「添加远程存储」/「导入配置」接入 S3、WebDAV（含 OpenList / AList）、SFTP、SMB、OneDrive、Google Drive、Crypt 加密存储等。
+                </span>
+              </div>
+            )}
+          </div>
+        )}
       </LoadState>
-      {nativeOpen && (
+
+      {modal && (
         <NativeStorageEditor
           engine={nativeEngine}
-          onClose={() => setNativeOpen(false)}
-          onChanged={() => void engines.refresh(true)}
+          mode={modal.mode}
+          editRemote={modal.editRemote}
+          initialBrowsePath={modal.initialBrowsePath}
+          onClose={() => setModal(null)}
+          onChanged={() => void refreshAll(true)}
           onSaved={() => {
-            setNativeOpen(false);
-            void engines.refresh(true);
+            setModal(null);
+            void refreshAll(true);
           }}
         />
       )}
-      {editing !== undefined && (
-        <EngineEditor
-          engine={editing}
-          onClose={() => setEditing(undefined)}
-          onSaved={() => {
-            setEditing(undefined);
-            void engines.refresh(true);
+
+      {renameTarget && (
+        <Modal
+          visible
+          centered
+          width={440}
+          title={`重命名存储 · ${renameTarget}`}
+          onCancel={() => {
+            if (!renaming) setRenameTarget(null);
           }}
-        />
+          okText="确认重命名"
+          confirmLoading={renaming}
+          onOk={() => void handleExecuteRename()}
+        >
+          <div className="editor-form">
+            <Field
+              label="新存储名称"
+              required
+              hint="重命名将自动级联更新所有复合存储（Crypt / Chunker / Union 等）及关联同步任务的源/目标路径"
+            >
+              <Input
+                value={renameNewName}
+                maxLength={64}
+                onChange={setRenameNewName}
+                placeholder="输入新的存储名称"
+              />
+            </Field>
+          </div>
+        </Modal>
       )}
     </div>
-  );
-}
-
-function EngineEditor({
-  engine,
-  onClose,
-  onSaved,
-}: {
-  engine: AlistItem | null;
-  onClose: () => void;
-  onSaved: () => void;
-}) {
-  const { form, dirty, change, setDirty } = useEditorForm({
-    url: engine?.url || "",
-    remark: engine?.remark || "",
-    token: "",
-    maxConcurrentJobs: String(engine?.maxConcurrentJobs ?? 0),
-  });
-  const action = useAction();
-  const save = () => {
-    if (!form.remark.trim()) {
-      Toast.warning("请输入引擎名称");
-      return;
-    }
-    try {
-      const url = new URL(form.url);
-      if (!["http:", "https:"].includes(url.protocol)) throw new Error();
-    } catch {
-      Toast.warning("请输入有效的 HTTP / HTTPS 引擎地址");
-      return;
-    }
-    if (!engine && !form.token.trim()) {
-      Toast.warning("请输入引擎 API Token");
-      return;
-    }
-    const maxJobsRaw = form.maxConcurrentJobs.trim() || "0";
-    const maxConcurrentJobs = Number(maxJobsRaw);
-    if (
-      !/^\d+$/.test(maxJobsRaw) ||
-      !Number.isInteger(maxConcurrentJobs) ||
-      maxConcurrentJobs < 0 ||
-      maxConcurrentJobs > 50
-    ) {
-      Toast.warning("最大并发任务数请输入 0–50 的整数");
-      return;
-    }
-    void action.run(async () => {
-      try {
-        await api.saveEngine(
-          {
-            url: form.url.trim(),
-            remark: form.remark.trim(),
-            token: form.token,
-            maxConcurrentJobs,
-            ...(engine ? { id: engine.id } : {}),
-          },
-          Boolean(engine),
-        );
-        Toast.success("引擎连接已保存");
-        setDirty(false);
-        onSaved();
-      } catch (err) {
-        errorToast(err);
-      }
-    });
-  };
-  return (
-    <Editor
-      title={engine ? "编辑引擎" : "添加引擎"}
-      visible
-      busy={action.busy}
-      dirty={dirty}
-      onClose={onClose}
-      onSave={save}
-    >
-      <div className="editor-form">
-        <Field label="引擎名称" required>
-          <Input
-            value={form.remark}
-            onChange={(v) => change("remark", v)}
-            maxLength={200}
-            placeholder="我的 NAS 引擎"
-          />
-        </Field>
-        <Field label="引擎地址" required>
-          <Input
-            value={form.url}
-            onChange={(v) => change("url", v)}
-            placeholder="http://192.168.1.10:5244"
-          />
-        </Field>
-        <Field label="API Token" required={!engine}>
-          <Input
-            mode="password"
-            value={form.token}
-            onChange={(v) => change("token", v)}
-            placeholder={engine ? "留空保留原 Token" : "OpenList / AList Token"}
-          />
-        </Field>
-        <Field
-          label="最大并发任务数"
-          hint="0 表示不限制；设为 1 表示同引擎下的多任务按先入先出（FIFO）串行排队，避免并发打满网盘或触发限流"
-        >
-          <Input
-            inputMode="numeric"
-            value={form.maxConcurrentJobs}
-            onChange={(v) => change("maxConcurrentJobs", v)}
-            placeholder="0"
-          />
-        </Field>
-      </div>
-    </Editor>
   );
 }

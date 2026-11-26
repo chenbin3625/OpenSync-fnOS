@@ -128,7 +128,7 @@ func RenameNativeStorage(ctx context.Context, in NativeRenameInput) (*NativeRena
 		return nil, err
 	}
 	if id == 0 {
-		return nil, publicError("未找到原生备份引擎")
+		return nil, publicError("未找到内置存储引擎")
 	}
 	actualOld, ok := c.FindKey(oldName)
 	if !ok {
@@ -199,22 +199,31 @@ func RenameNativeStorage(ctx context.Context, in NativeRenameInput) (*NativeRena
 			enc, _ := json.Marshal(newDst)
 			cloned["dstPath"] = string(enc)
 		}
-		// Update dstMap keys if srcPath changed so derived destination subdirs stay stable!
-		if srcChanged {
-			if rawMap := jobDstMapRaw(cloned["dstMap"]); rawMap != "" {
-				var parsed map[string]string
-				if json.Unmarshal([]byte(rawMap), &parsed) == nil && len(parsed) > 0 {
-					nextMap := make(map[string]string, len(parsed))
-					for k, v := range parsed {
-						if nk, ok := rewriteVirtualPath(k); ok {
-							nextMap[nk] = v
-						} else {
-							nextMap[k] = v
-						}
-					}
-					enc, _ := json.Marshal(nextMap)
-					cloned["dstMap"] = string(enc)
+		// Update persisted dstMap (base, keys, and resolved values) whenever srcPath or dstPath
+		// changed so derived destination subdirs stay stable across storage renames.
+		rewriteDirPath := func(p string) string {
+			trimmed := strings.TrimRight(p, "/")
+			if nextP, ok := rewriteVirtualPath(trimmed); ok {
+				return normalizeDirPath(nextP)
+			}
+			return p
+		}
+		if stored := parseStoredJobDstMap(cloned["dstMap"]); stored != nil {
+			nextBase := make([]string, len(stored.Base))
+			for i, b := range stored.Base {
+				nextBase[i] = rewriteDirPath(b)
+			}
+			nextMap := make(map[string]string, len(stored.Map))
+			for k, v := range stored.Map {
+				srcPart, dstPart, hasSep := strings.Cut(k, "\x00")
+				nextKey := k
+				if hasSep {
+					nextKey = jobDstMapKey(rewriteDirPath(srcPart), rewriteDirPath(dstPart))
 				}
+				nextMap[nextKey] = rewriteDirPath(v)
+			}
+			if enc, encErr := json.Marshal(jobDstMap{Version: stored.Version, Base: nextBase, Map: nextMap}); encErr == nil {
+				cloned["dstMap"] = string(enc)
 			}
 		}
 		updatedJobs = append(updatedJobs, jobUpdate{id: jobID, job: cloned})
@@ -242,6 +251,9 @@ func RenameNativeStorage(ctx context.Context, in NativeRenameInput) (*NativeRena
 			jc.mu.Unlock()
 		}
 		pendingDeleteApprovals.ClearForJob(u.id)
+		if util.ToInt(u.job["method"]) == 3 {
+			cleanupBisyncWorkDir(u.id)
+		}
 	}
 	RemoveEngineHealth(id)
 	return &NativeRenameResult{
@@ -566,7 +578,7 @@ func ResetBisyncJob(jobID int64, runNow bool) error {
 		return err
 	}
 	if cfg == nil {
-		return publicError("双向同步仅支持原生 rclone 引擎")
+		return publicError(legacyOpenListJobDisabledMsg)
 	}
 	jobClientListMu.RLock()
 	jc := jobClientList[jobID]
@@ -660,7 +672,7 @@ func StartJobCheck(jobID int64, download, cryptCheck bool) (*JobCheckResult, err
 		return nil, err
 	}
 	if cfg == nil {
-		return nil, publicError("一致性校验仅支持原生 rclone 引擎任务")
+		return nil, publicError(legacyOpenListJobDisabledMsg)
 	}
 	if download && cryptCheck {
 		cryptCheck = false
@@ -773,9 +785,10 @@ func StartJobCheck(jobID int64, download, cryptCheck bool) (*JobCheckResult, err
 					BwLimit:       effectiveJobBwLimit(job),
 					TPSLimit:      jobFloat64(job["tpsLimit"]),
 					TPSLimitBurst: util.ToInt(job["tpsLimitBurst"]),
-					ModifyWindow:  strings.TrimSpace(util.StringValue(job["modifyWindow"])),
-					FastList:      util.ToInt(job["fastList"]) == 1,
-					UserAgent:     extra.UserAgent,
+					ModifyWindow:   strings.TrimSpace(util.StringValue(job["modifyWindow"])),
+					FastList:       util.ToInt(job["fastList"]) == 1,
+					FollowSymlinks: util.ToInt(job["followSymlinks"]) == 1,
+					UserAgent:      extra.UserAgent,
 					IOTimeout:     extra.IOTimeout,
 					ConTimeout:    extra.ConTimeout,
 					ProxyURL:      globalNativeProxyURL(),

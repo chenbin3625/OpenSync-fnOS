@@ -73,6 +73,8 @@ type NativeRemoteItem struct {
 	ConfiguredSecrets []string          `json:"configuredSecrets"`
 	UsedByJobs        []string          `json:"usedByJobs"`
 	UsedByCrypts      []string          `json:"usedByCrypts"`
+	ActiveJobs        int               `json:"activeJobs"`
+	QueuedJobs        int               `json:"queuedJobs"`
 }
 
 type NativeStorageState struct {
@@ -80,6 +82,8 @@ type NativeStorageState struct {
 	Enabled           bool                   `json:"enabled"`
 	Remark            string                 `json:"remark"`
 	MaxConcurrentJobs int                    `json:"maxConcurrentJobs"`
+	LocalActiveJobs   int                    `json:"localActiveJobs"`
+	LocalQueuedJobs   int                    `json:"localQueuedJobs"`
 	RcloneAvailable   bool                   `json:"rcloneAvailable"`
 	RcloneVersion     string                 `json:"rcloneVersion,omitempty"`
 	RcloneError       string                 `json:"rcloneError,omitempty"`
@@ -88,16 +92,44 @@ type NativeStorageState struct {
 	Remotes           []NativeRemoteItem     `json:"remotes"`
 }
 
+type nativeTransferringItem struct {
+	native.TransferItem
+	srcBase string
+	dstBase string
+}
+
 type nativeProgressSnapshot struct {
-	src   string
-	dst   string
-	stats *native.Stats
+	src          string
+	dst          string
+	stats        *native.Stats
+	transferring []nativeTransferringItem
+}
+
+func (snap *nativeProgressSnapshot) activeTransferring() []nativeTransferringItem {
+	if snap == nil {
+		return nil
+	}
+	if len(snap.transferring) > 0 {
+		return snap.transferring
+	}
+	if snap.stats == nil || len(snap.stats.Transferring) == 0 {
+		return nil
+	}
+	items := make([]nativeTransferringItem, len(snap.stats.Transferring))
+	for i, ti := range snap.stats.Transferring {
+		items[i] = nativeTransferringItem{
+			TransferItem: ti,
+			srcBase:      snap.src,
+			dstBase:      snap.dst,
+		}
+	}
+	return items
 }
 
 func defaultNativeRemark(remark string) string {
 	remark = strings.TrimSpace(remark)
 	if remark == "" {
-		return "原生备份"
+		return "内置存储"
 	}
 	return remark
 }
@@ -105,25 +137,25 @@ func defaultNativeRemark(remark string) string {
 func loadExistingNativeRowFull() (int64, string, int, native.Config, error) {
 	rows, err := mapper.GetAlistList()
 	if err != nil {
-		return 0, "原生备份", 1, nil, err
+		return 0, "内置存储", 1, nil, err
 	}
 	for _, row := range rows {
 		if row["url"] == native.EngineURL {
 			id := util.ToInt64(row["id"])
 			stored, err := mapper.GetAlistByID(id)
 			if err != nil {
-				return 0, "原生备份", 1, nil, err
+				return 0, "内置存储", 1, nil, err
 			}
 			c, err := native.Decode(util.StringValue(stored["token"]))
 			if err != nil {
-				return 0, "原生备份", 1, nil, publicError(err.Error())
+				return 0, "内置存储", 1, nil, publicError(err.Error())
 			}
 			remark := defaultNativeRemark(util.StringValue(stored["remark"]))
 			mc := util.ToInt(stored["maxConcurrentJobs"])
 			return id, remark, mc, c, nil
 		}
 	}
-	return 0, "原生备份", 1, native.Config{}, nil
+	return 0, "内置存储", 1, native.Config{}, nil
 }
 
 func loadExistingNativeRow() (int64, native.Config, error) {
@@ -206,6 +238,9 @@ func GetNativeStorageState(ctx context.Context) (*NativeStorageState, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if _, err := EnsureNativeEngine(); err != nil {
+		return nil, err
+	}
 	id, remark, mc, c, err := loadExistingNativeRowFull()
 	if err != nil {
 		return nil, err
@@ -213,11 +248,14 @@ func GetNativeStorageState(ctx context.Context) (*NativeStorageState, error) {
 	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	rcloneVer, rcloneErr := native.Version(checkCtx)
+	localActive, localQueued := engineQueue.StorageStats(native.Local)
 	state := &NativeStorageState{
 		EngineID:          id,
 		Enabled:           id > 0,
 		Remark:            remark,
 		MaxConcurrentJobs: mc,
+		LocalActiveJobs:   localActive,
+		LocalQueuedJobs:   localQueued,
 		RcloneAvailable:   rcloneErr == nil,
 		RcloneVersion:     rcloneVer,
 		SupportedTypes:    native.SupportedRemoteTypes(),
@@ -239,6 +277,7 @@ func GetNativeStorageState(ctx context.Context) (*NativeStorageState, error) {
 		if usedCrypts == nil {
 			usedCrypts = []string{}
 		}
+		activeJobs, queuedJobs := engineQueue.StorageStats(name)
 		state.Remotes = append(state.Remotes, NativeRemoteItem{
 			Name:              name,
 			Type:              params["type"],
@@ -247,6 +286,8 @@ func GetNativeStorageState(ctx context.Context) (*NativeStorageState, error) {
 			ConfiguredSecrets: secrets,
 			UsedByJobs:        usedJobs,
 			UsedByCrypts:      usedCrypts,
+			ActiveJobs:        activeJobs,
+			QueuedJobs:        queuedJobs,
 		})
 	}
 	return state, nil
@@ -343,7 +384,7 @@ func mergeEditRemoteParams(oldParams, incoming map[string]string, clearSecrets [
 	for _, key := range native.SecretFields {
 		if merged[key] == "" && !clearSet[key] && oldParams[key] != "" {
 			merged[key] = oldParams[key]
-			if native.IsObscuredField(key) {
+			if native.IsObscuredFieldForType(oldType, key) {
 				skipObscure[key] = true
 			}
 		}
@@ -522,7 +563,7 @@ func UpdateNativeStorage(ctx context.Context, in NativeRemoteEditInput) error {
 		return err
 	}
 	if id == 0 {
-		return publicError("未找到原生备份引擎")
+		return publicError("未找到内置存储引擎")
 	}
 	liveName, exists := c.FindKey(canonicalName)
 	if !exists {
@@ -801,14 +842,14 @@ func validateExistingNativeJobs(alistID int64, c native.Config) error {
 				}
 			}
 		}
-		for _, v := range resolvedDstPathsForJob(job) {
+		for _, v := range writablePathsForJob(job) {
 			ep, err := c.Resolve(v)
 			if err != nil {
-				return publicError(fmt.Sprintf("替换配置后任务「%s」目标失效：%s", jobDisplayName(job), err.Error()))
+				return publicError(fmt.Sprintf("替换配置后任务「%s」写入路径失效：%s", jobDisplayName(job), err.Error()))
 			}
 			for _, used := range allTargets {
 				if native.EndpointsConflict(used.ep, ep) {
-					return publicError(fmt.Sprintf("替换配置后任务「%s」与已有目标目录重叠：%s", jobDisplayName(job), used.virtual))
+					return publicError(fmt.Sprintf("替换配置后任务「%s」与已有写入目录重叠：%s", jobDisplayName(job), used.virtual))
 				}
 			}
 			allTargets = append(allTargets, target{v, ep})
@@ -842,7 +883,7 @@ func DeleteNativeStorage(name string) error {
 		return err
 	}
 	if id == 0 {
-		return publicError("未找到原生备份引擎")
+		return publicError("未找到内置存储引擎")
 	}
 
 	target, ok := c.FindKey(name)
@@ -926,12 +967,6 @@ func nativeConfig(row map[string]interface{}) (native.Config, error) {
 	return c, nil
 }
 func loadNative(id int64) (native.Config, error) {
-	alistClientListMu.RLock()
-	cached := alistClientList[id] != nil
-	alistClientListMu.RUnlock()
-	if cached {
-		return nil, nil
-	}
 	row, e := alistDeps.GetAlistByID(id)
 	if e != nil {
 		return nil, e
@@ -960,10 +995,10 @@ func validateNativeJob(job, row map[string]interface{}) error {
 				return publicError(err.Error())
 			}
 			if method == 3 && (epSrc.ReadOnly || epDst.ReadOnly) {
-				return publicError("双向同步的两端均需支持读写，不能使用只读 HTTP 存储")
+				return publicError("双向同步的两端均需支持读写，不能使用只读存储（如 HTTP / Archive）")
 			}
 			if method == 2 && epSrc.ReadOnly {
-				return publicError("移动模式需要删除源文件，不能使用只读 HTTP 存储作为源")
+				return publicError("移动模式需要删除源文件，不能使用只读存储（如 HTTP / Archive）作为源")
 			}
 		}
 	}
@@ -985,20 +1020,20 @@ func validateNativeDestinations(c native.Config, job map[string]interface{}) err
 		if util.ToInt64(other["id"]) == util.ToInt64(job["id"]) || util.ToInt64(other["alistId"]) != util.ToInt64(job["alistId"]) {
 			continue
 		}
-		for _, v := range resolvedDstPathsForJob(other) {
+		for _, v := range writablePathsForJob(other) {
 			if ep, e := c.Resolve(v); e == nil {
 				targets = append(targets, target{v, ep})
 			}
 		}
 	}
-	for _, v := range resolvedDstPathsForJob(job) {
+	for _, v := range writablePathsForJob(job) {
 		ep, e := c.Resolve(v)
 		if e != nil {
 			return publicError(e.Error())
 		}
 		for _, used := range targets {
 			if native.EndpointsConflict(used.ep, ep) {
-				return publicError(fmt.Sprintf("备份目标与已配置的目标目录重叠：%s", used.virtual))
+				return publicError(fmt.Sprintf("同步写入目录与已配置任务的写入目录重叠：%s", used.virtual))
 			}
 		}
 		targets = append(targets, target{v, ep})
@@ -1008,17 +1043,150 @@ func validateNativeDestinations(c native.Config, job map[string]interface{}) err
 
 type nativeItemKey struct{ src, dst string }
 
+// nativeRetryFilter matches both individual file retry rows (isPath=0) and
+// directory-level retry rows (isPath=1 or empty fileName) against candidate
+// source/destination file paths.
+type nativeRetryFilter struct {
+	mu          sync.Mutex
+	files       map[nativeItemKey]bool
+	dirs        []nativeItemKey
+	matchedDirs map[int]bool
+}
+
+func newNativeRetryFilter() *nativeRetryFilter {
+	return &nativeRetryFilter{
+		files:       make(map[nativeItemKey]bool),
+		matchedDirs: make(map[int]bool),
+	}
+}
+
+func cleanNativeRetryPath(base, name string) string {
+	base = strings.TrimSpace(base)
+	name = strings.TrimSpace(name)
+	if base == "" && name == "" {
+		return ""
+	}
+	joined := path.Clean(path.Join(base, name))
+	if joined == "." || joined == "/" {
+		return ""
+	}
+	return joined
+}
+
+func (f *nativeRetryFilter) addRow(r map[string]interface{}) {
+	if f == nil || r == nil {
+		return
+	}
+	isDir := taskItemObjectFromValue(r["isPath"]) == taskItemPath
+	srcRaw := strings.TrimSpace(util.StringValue(r["srcPath"]))
+	dstRaw := strings.TrimSpace(util.StringValue(r["dstPath"]))
+	name := strings.TrimSpace(util.StringValue(r["fileName"]))
+	if isDir || name == "" {
+		srcDir := cleanNativeRetryPath(srcRaw, name)
+		dstDir := cleanNativeRetryPath(dstRaw, name)
+		if srcDir == "" && dstDir == "" {
+			return
+		}
+		f.mu.Lock()
+		f.dirs = append(f.dirs, nativeItemKey{src: srcDir, dst: dstDir})
+		f.mu.Unlock()
+		return
+	}
+	srcFile := cleanNativeRetryPath(srcRaw, name)
+	dstFile := cleanNativeRetryPath(dstRaw, name)
+	if srcFile == "" && dstFile == "" {
+		return
+	}
+	f.mu.Lock()
+	f.files[nativeItemKey{src: srcFile, dst: dstFile}] = true
+	f.mu.Unlock()
+}
+
+func (f *nativeRetryFilter) empty() bool {
+	if f == nil {
+		return true
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.files) == 0 && len(f.dirs) == 0
+}
+
+func pathOverlapsDir(target, dir string) bool {
+	if dir == "" || target == "" {
+		return true
+	}
+	return target == dir || strings.HasPrefix(target, dir+"/") || strings.HasPrefix(dir, target+"/")
+}
+
+func pathWithinDir(filePath, dir string) bool {
+	if dir == "" {
+		return true
+	}
+	return filePath == dir || strings.HasPrefix(filePath, dir+"/")
+}
+
+// markPairMatch records any directory retry entry that overlaps a configured
+// sync pair so legitimately empty retried directories do not cause false errors.
+func (f *nativeRetryFilter) markPairMatch(pairSrc, pairDst string) {
+	if f == nil {
+		return
+	}
+	pairSrc = path.Clean(strings.TrimSpace(pairSrc))
+	pairDst = path.Clean(strings.TrimSpace(pairDst))
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, d := range f.dirs {
+		if pathOverlapsDir(pairSrc, d.src) && pathOverlapsDir(pairDst, d.dst) {
+			f.matchedDirs[i] = true
+		}
+	}
+}
+
+func (f *nativeRetryFilter) matchesAndConsume(srcFile, dstFile string) bool {
+	if f == nil {
+		return true
+	}
+	srcFile = path.Clean(strings.TrimSpace(srcFile))
+	dstFile = path.Clean(strings.TrimSpace(dstFile))
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := nativeItemKey{src: srcFile, dst: dstFile}
+	if f.files[key] {
+		delete(f.files, key)
+		return true
+	}
+	for i, d := range f.dirs {
+		if pathWithinDir(srcFile, d.src) && pathWithinDir(dstFile, d.dst) {
+			f.matchedDirs[i] = true
+			return true
+		}
+	}
+	return false
+}
+
+func (f *nativeRetryFilter) hasUnmatched() bool {
+	if f == nil {
+		return false
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.files) > 0 {
+		return true
+	}
+	return len(f.dirs) > 0 && len(f.matchedDirs) < len(f.dirs)
+}
+
 type nativePairsOutcome struct {
 	err                  error
 	hadFileFailure       bool
 	untrackedPairFailure bool
 }
 
-func runNativePairs(ctx context.Context, c native.Config, job map[string]interface{}, dry bool, selected map[nativeItemKey]bool, onEvent func(string, string, native.Event)) nativePairsOutcome {
+func runNativePairs(ctx context.Context, c native.Config, job map[string]interface{}, dry bool, selected *nativeRetryFilter, onEvent func(string, string, native.Event)) nativePairsOutcome {
 	return runNativePairsWithTask(ctx, nil, c, job, dry, selected, onEvent)
 }
 
-func runNativePairsWithTask(ctx context.Context, jt *JobTask, c native.Config, job map[string]interface{}, dry bool, selected map[nativeItemKey]bool, onEvent func(string, string, native.Event)) nativePairsOutcome {
+func runNativePairsWithTask(ctx context.Context, jt *JobTask, c native.Config, job map[string]interface{}, dry bool, selected *nativeRetryFilter, onEvent func(string, string, native.Event)) nativePairsOutcome {
 	backupDir := ""
 	if !dry {
 		backupDir = nativeTrashBackupSubdir(jt, job)
@@ -1034,10 +1202,10 @@ func runNativePairsWithTask(ctx context.Context, jt *JobTask, c native.Config, j
 	}
 
 	var (
-		out      nativePairsOutcome
-		mu       sync.Mutex
-		errs     []error
-		eventMu  sync.Mutex
+		out     nativePairsOutcome
+		mu      sync.Mutex
+		errs    []error
+		eventMu sync.Mutex
 	)
 
 	runOne := func(pt pairTarget) error {
@@ -1046,20 +1214,15 @@ func runNativePairsWithTask(ctx context.Context, jt *JobTask, c native.Config, j
 		}
 		pairOptions := baseOpts
 		if selected != nil {
+			selected.markPairMatch(pt.src, pt.dst)
 			pairOptions.Include = func(p string, st os.FileInfo) bool {
 				if st.IsDir() {
 					return baseOpts.Include(p, st)
 				}
-				key := nativeItemKey{path.Join(pt.src, p), path.Join(pt.dst, p)}
-				mu.Lock()
-				allowed := selected[key]
-				if allowed && baseOpts.Include(p, st) {
-					delete(selected, key)
-					mu.Unlock()
-					return true
+				if !baseOpts.Include(p, st) {
+					return false
 				}
-				mu.Unlock()
-				return false
+				return selected.matchesAndConsume(path.Join(pt.src, p), path.Join(pt.dst, p))
 			}
 		}
 		pairFileFailed := false
@@ -1129,7 +1292,7 @@ func runNativePairsWithTask(ctx context.Context, jt *JobTask, c native.Config, j
 		}
 	}
 
-	if len(selected) > 0 && len(errs) == 0 {
+	if selected != nil && selected.hasUnmatched() && len(errs) == 0 {
 		out.err = errors.New("部分重试文件已移动、被过滤或不属于当前任务")
 		out.untrackedPairFailure = true
 		return out
@@ -1152,13 +1315,12 @@ func (jt *JobTask) runNative() {
 		jt.finishFailedTask(err.Error())
 		return
 	}
-	var selected map[nativeItemKey]bool
+	var selected *nativeRetryFilter
 	if jt.hasRetrySource() {
-		selected = map[nativeItemKey]bool{}
+		selected = newNativeRetryFilter()
 		collect := func(rows []map[string]interface{}) error {
 			for _, r := range rows {
-				name := util.StringValue(r["fileName"])
-				selected[nativeItemKey{path.Join(util.StringValue(r["srcPath"]), name), path.Join(util.StringValue(r["dstPath"]), name)}] = true
+				selected.addRow(r)
 			}
 			return jt.context().Err()
 		}
@@ -1168,7 +1330,7 @@ func (jt *JobTask) runNative() {
 		} else {
 			err = mapper.ForEachJobTaskItemsByStatuses(jt.RetrySourceTaskID, retryableStatusValues(), retryTaskItemBatchSize, collect)
 		}
-		if err != nil || len(selected) == 0 {
+		if err != nil || selected.empty() {
 			jt.finishFailedTask("无法读取原生备份重试清单")
 			return
 		}
@@ -1251,6 +1413,7 @@ func (jt *JobTask) runNative() {
 	publishAggregateStats := func(lastSrc, lastDst string) {
 		var agg native.Stats
 		var totalDirs, totalFiles, totalChecked int64
+		var transferring []nativeTransferringItem
 		for _, ps := range pairState {
 			totalDirs += ps.scannedDirs
 			totalFiles += ps.scannedFiles
@@ -1260,16 +1423,24 @@ func (jt *JobTask) runNative() {
 			agg.Transfers += ps.transfers
 			agg.TotalTransfers += ps.totalTrans
 			agg.Speed += ps.speed
-			agg.Transferring = append(agg.Transferring, ps.transferring...)
+			for _, ti := range ps.transferring {
+				agg.Transferring = append(agg.Transferring, ti)
+				transferring = append(transferring, nativeTransferringItem{
+					TransferItem: ti,
+					srcBase:      ps.src,
+					dstBase:      ps.dst,
+				})
+			}
 		}
 		jt.ScanTotalDirs.Store(totalDirs)
 		jt.ScanDoneDirs.Store(totalDirs)
 		jt.ScanTotalFiles.Store(totalFiles)
 		jt.ScanCheckedFiles.Store(totalChecked)
 		jt.nativeStats.Store(&nativeProgressSnapshot{
-			src:   lastSrc,
-			dst:   lastDst,
-			stats: &agg,
+			src:          lastSrc,
+			dst:          lastDst,
+			stats:        &agg,
+			transferring: transferring,
 		})
 		jt.notifyProgressChange()
 	}
@@ -1384,7 +1555,7 @@ func collectS3ProbeBuckets(alistID int64, c native.Config) map[string]string {
 		if util.ToInt64(job["alistId"]) != alistID {
 			continue
 		}
-		for _, raw := range parsePathList(job["dstPath"]) {
+		for _, raw := range append(parsePathList(job["dstPath"]), parsePathList(job["srcPath"])...) {
 			name, sub, _ := strings.Cut(strings.TrimPrefix(raw, "/"), "/")
 			if c[name]["type"] != "s3" || sub == "" {
 				continue
@@ -1479,10 +1650,10 @@ func nativeHealth(ctx context.Context, row map[string]interface{}, sendAlert boo
 
 func nativeBackupKey(url, user, secret string) error {
 	if url != native.EngineURL {
-		return validateAlistURL(url)
+		return fmt.Errorf("不支持的旧版引擎地址")
 	}
 	if user != "rclone" {
-		return fmt.Errorf("无效的原生备份引擎")
+		return fmt.Errorf("无效的内置存储引擎")
 	}
 	if strings.TrimSpace(secret) != "" && !isMaskedSecretValue(secret) && !native.ConfigContainsRedactedSecrets(secret) {
 		_, e := native.Decode(secret)

@@ -8,6 +8,8 @@ import (
 	"opensync/internal/mapper"
 	"opensync/internal/msg"
 	"opensync/pkg/util"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -491,7 +493,7 @@ func (jc *JobClient) runMarkedJobConfig(sourceTaskID int64, statuses []taskStatu
 	}
 	queueCtx, queueCancel := context.WithCancel(context.Background())
 	jc.setQueueCancel(queueCancel)
-	slotRelease, acquireErr := engineQueue.Acquire(queueCtx, alistID, jc.idSnapshot(), maxConcurrent)
+	slotRelease, acquireErr := engineQueue.AcquireWithStorages(queueCtx, alistID, jc.idSnapshot(), maxConcurrent, extractJobStorageNames(jobSnap), 0)
 	jc.setQueueCancel(nil)
 	queueCancel()
 	if acquireErr != nil {
@@ -560,6 +562,22 @@ func (jc *JobClient) runMarkedJobConfig(sourceTaskID int64, statuses []taskStatu
 		go watchTaskTimeWindow(task)
 	}
 	task.Start()
+}
+
+func extractJobStorageNames(job map[string]interface{}) []string {
+	seen := make(map[string]struct{})
+	for _, raw := range append(parsePathList(job["srcPath"]), parsePathList(job["dstPath"])...) {
+		seg, _, _ := strings.Cut(strings.TrimPrefix(strings.TrimSpace(raw), "/"), "/")
+		if seg != "" {
+			seen[seg] = struct{}{}
+		}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func watchTaskTimeWindow(task *JobTask) {

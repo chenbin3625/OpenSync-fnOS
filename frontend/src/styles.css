@@ -4178,6 +4178,20 @@ body[theme-mode="dark"] .kpi-dot--pulse {
   background: var(--semi-color-danger-light-default);
 }
 
+.storage-card-roots {
+  margin-top: 4px;
+}
+
+.webdav-compare-tip {
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.webdav-compare-tip > span {
+  flex: 1 1 auto;
+}
+
 .dry-run-body {
   display: grid;
   gap: 12px;

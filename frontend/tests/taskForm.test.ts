@@ -652,4 +652,44 @@ describe("existing synchronization contracts", () => {
       s3NoHead: true,
     });
   });
+
+  it("clamps tpsLimit/tpsLimitBurst to 1000, bisyncMaxDelete to 100, rejects equal day bounds, and detects legacy OpenList jobs", () => {
+    const clampedPayload = buildJobPayload({
+      ...defaultJobForm(7),
+      remark: "限流上限",
+      srcPath: ["/A"],
+      dstPath: ["/B"],
+      tpsLimit: 5000,
+      tpsLimitBurst: 9999,
+      extraFlags: {
+        ...defaultJobForm(7).extraFlags,
+        bisyncMaxDelete: 250,
+      },
+    });
+    expect(clampedPayload.tpsLimit).toBe(1000);
+    expect(clampedPayload.tpsLimitBurst).toBe(1000);
+    expect(JSON.parse(clampedPayload.extraFlags)).toEqual({
+      bisyncMaxDelete: 100,
+    });
+
+    const equalDayBounds = validateJobForm({
+      ...defaultJobForm(7),
+      remark: "时间区间",
+      srcPath: ["/A"],
+      dstPath: ["/B"],
+      olderThanDays: 7,
+      newerThanDays: 7,
+    });
+    expect(equalDayBounds).toContain("必须小于");
+
+    expect(
+      taskFormModule.isLegacyOpenListJob({ legacyOpenList: true, alistId: 1 }),
+    ).toBe(true);
+    expect(
+      taskFormModule.isLegacyOpenListJob({ alistId: 2 }, [{ id: 1 }]),
+    ).toBe(true);
+    expect(
+      taskFormModule.isLegacyOpenListJob({ alistId: 1 }, [{ id: 1 }]),
+    ).toBe(false);
+  });
 });

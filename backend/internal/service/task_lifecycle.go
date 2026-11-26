@@ -33,6 +33,29 @@ func (jt *JobTask) releaseSlotNow() {
 	}
 }
 
+// cancelTaskRuntime releases the task-scoped resources that are not tied to a
+// finished work item: the debounced persist flush, the engine concurrency slot,
+// and the task context.
+func (jt *JobTask) cancelTaskRuntime() {
+	jt.cancelPersistFlush()
+	jt.runtimeMu.Lock()
+	cancel := jt.cancel
+	releaseSlot := jt.releaseEngineSlot
+	jt.releaseEngineSlot = nil
+	jt.runtimeMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if releaseSlot != nil {
+		releaseSlot()
+	}
+}
+
+// isDrained reports that the task exited because all work completed before cancellation/deadline.
+func (jt *JobTask) isDrained() bool {
+	return jt.drained.Load()
+}
+
 func (jt *JobTask) finishSuccessfulTask() {
 	status, taskNum, duration, err := jt.updateTaskStatus()
 	if err != nil {

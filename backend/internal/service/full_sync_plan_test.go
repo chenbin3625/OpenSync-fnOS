@@ -1,84 +1,10 @@
 package service
 
 import (
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
-	"opensync/internal/config"
 	"reflect"
 	"sort"
-	"sync"
 	"testing"
-	"time"
 )
-
-func TestFullSyncCreatesMissingDestinationRoot(t *testing.T) {
-	var mu sync.Mutex
-	created := false
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body map[string]interface{}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Errorf("decode request: %v", err)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/api/fs/list":
-			if body["path"] == "/dst/" {
-				mu.Lock()
-				exists := created
-				mu.Unlock()
-				if !exists {
-					_, _ = w.Write([]byte(`{"code":500,"message":"failed get dir: object not found","data":null}`))
-					return
-				}
-			}
-			_, _ = w.Write([]byte(`{"code":200,"message":"ok","data":{"content":[]}}`))
-		case "/api/fs/mkdir":
-			mu.Lock()
-			created = true
-			mu.Unlock()
-			_, _ = w.Write([]byte(`{"code":200,"message":"ok","data":{}}`))
-		default:
-			t.Errorf("unexpected request %s", r.URL.Path)
-		}
-	}))
-	defer server.Close()
-	d := *jobDeps
-	d.ScanListRetryDelay = func(int) time.Duration { return 0 }
-	restore := SetJobDepsForTest(&d)
-	defer restore()
-	var persisted []map[string]interface{}
-	restorePersist := stubPersistJobTaskItems(t, &persisted, nil)
-	defer restorePersist()
-	jt := scanTestTask(t, server.URL, server.Client(), map[string]interface{}{
-		"method": 1, "srcPath": "/src/", "dstPath": "/dst/",
-	})
-	jt.sync()
-	mu.Lock()
-	defer mu.Unlock()
-	if !created || jt.isBreak() {
-		t.Fatalf("created=%v stopped=%v, want created and running", created, jt.isBreak())
-	}
-}
-
-func TestFullSyncScanFailureDoesNotMarkTaskStopped(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"code":401,"message":"unauthorized","data":null}`))
-	}))
-	defer server.Close()
-	var persisted []map[string]interface{}
-	restorePersist := stubPersistJobTaskItems(t, &persisted, nil)
-	defer restorePersist()
-	jt := scanTestTask(t, server.URL, server.Client(), map[string]interface{}{
-		"method": 1, "srcPath": "/src/", "dstPath": "/dst/",
-	})
-	jt.sync()
-	if jt.isBreak() {
-		t.Fatal("scan failure marked task as user-stopped")
-	}
-}
 
 func TestFullSyncPlanMatchesMovedFileByStrongFingerprint(t *testing.T) {
 	plan := movedFileFullSyncPlan(FileMetadata{
@@ -107,192 +33,6 @@ func TestFullSyncPlanDoesNotInferMoveWithoutMD5(t *testing.T) {
 	}
 }
 
-func TestFullSyncPlanExecutesDestinationMoveBeforeDeletingOldTree(t *testing.T) {
-	var mu sync.Mutex
-	var calls []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		var body map[string]interface{}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Errorf("decode %s request: %v", r.URL.Path, err)
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		mu.Lock()
-		switch r.URL.Path {
-		case "/api/fs/list":
-			mu.Unlock()
-			writeMovedFileListResponse(t, w, body["path"].(string))
-			return
-		case "/api/fs/mkdir":
-			calls = append(calls, "mkdir:"+body["path"].(string))
-		case "/api/fs/move":
-			names := body["names"].([]interface{})
-			calls = append(calls, "move:"+body["src_dir"].(string)+"->"+body["dst_dir"].(string)+names[0].(string))
-		case "/api/fs/get":
-			calls = append(calls, "get:"+body["path"].(string))
-		case "/api/fs/remove":
-			names := body["names"].([]interface{})
-			calls = append(calls, "remove:"+body["dir"].(string)+names[0].(string))
-		default:
-			mu.Unlock()
-			t.Errorf("unexpected path %s", r.URL.Path)
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		mu.Unlock()
-
-		if r.URL.Path == "/api/fs/move" {
-			_, _ = w.Write([]byte(`{"code":200,"message":"ok","data":{"tasks":[]}}`))
-			return
-		}
-		_, _ = w.Write([]byte(`{"code":200,"message":"ok","data":{}}`))
-	}))
-	defer server.Close()
-
-	var persisted []map[string]interface{}
-	restorePersist := stubPersistJobTaskItems(t, &persisted, nil)
-	defer restorePersist()
-
-	jt := scanTestTask(t, server.URL, server.Client(), map[string]interface{}{
-		"method":        1,
-		"srcPath":       "/src/",
-		"dstPath":       "/dst/",
-		"useCacheS":     0,
-		"useCacheT":     0,
-		"scanIntervalS": 0,
-		"scanIntervalT": 0,
-	})
-
-	jt.sync()
-	jt.runFullSyncDeletes()
-	if err := jt.flushPersistBuffer(); err != nil {
-		t.Fatalf("flushPersistBuffer() error: %v", err)
-	}
-	if !jt.ScanFinish.Load() {
-		t.Fatal("sync did not mark scanning complete")
-	}
-
-	if waiting := jt.Waiting.snapshot(); len(waiting) != 0 {
-		t.Fatalf("waiting items = %d, want 0", len(waiting))
-	}
-	wantCalls := []string{
-		"mkdir:/dst/new/",
-		"mkdir:/dst/new/archive/",
-		"move:/dst/old/archive/->/dst/new/archive/movie.mkv",
-		"get:/dst/new/archive/movie.mkv",
-		"remove:/dst/old",
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(calls) != len(wantCalls) {
-		t.Fatalf("calls = %#v, want %#v", calls, wantCalls)
-	}
-	for i := range wantCalls {
-		if calls[i] != wantCalls[i] {
-			t.Fatalf("calls[%d] = %q, want %q (all calls: %#v)", i, calls[i], wantCalls[i], calls)
-		}
-	}
-
-	moveRecords := 0
-	for _, item := range persisted {
-		if item["type"] == taskItemTypeMove.Int() {
-			moveRecords++
-			if item["srcPath"] != "/dst/old/archive/" || item["dstPath"] != "/dst/new/archive/" {
-				t.Fatalf("persisted move = %#v", item)
-			}
-		}
-	}
-	if moveRecords != 1 {
-		t.Fatalf("move records = %d, want 1 (all records: %#v)", moveRecords, persisted)
-	}
-}
-
-func TestFullSyncPlanPreservesOldTreeWhenDestinationMoveFails(t *testing.T) {
-	oldConfig := config.GetConfig()
-	defer config.SetConfigForTest(oldConfig)
-	config.SetConfigForTest(&config.Config{Server: config.ServerConfig{
-		CopyConcurrency: 1,
-		ScanConcurrency: 1,
-		MaxRetries:      0,
-	}})
-
-	removeCalled := false
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/api/fs/mkdir":
-			_, _ = w.Write([]byte(`{"code":200,"message":"ok","data":{}}`))
-		case "/api/fs/move":
-			_, _ = w.Write([]byte(`{"code":500,"message":"move failed","data":null}`))
-		case "/api/fs/remove":
-			removeCalled = true
-			_, _ = w.Write([]byte(`{"code":200,"message":"ok","data":{}}`))
-		default:
-			t.Errorf("unexpected path %s", r.URL.Path)
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-	}))
-	defer server.Close()
-
-	var persisted []map[string]interface{}
-	restorePersist := stubPersistJobTaskItems(t, &persisted, nil)
-	defer restorePersist()
-
-	jt := scanTestTask(t, server.URL, server.Client(), map[string]interface{}{
-		"method":        1,
-		"scanIntervalT": 0,
-	})
-	plan := movedFileFullSyncPlan(FileMetadata{
-		Size: 8 << 30,
-		MD5:  "0123456789abcdef0123456789abcdef",
-	})
-
-	jt.executeFullSyncPlan(plan)
-	if len(jt.fullSyncDeletes) != 0 {
-		t.Fatalf("staged %d delete batches despite the failed relocation", len(jt.fullSyncDeletes))
-	}
-	if err := jt.flushPersistBuffer(); err != nil {
-		t.Fatalf("flushPersistBuffer() error: %v", err)
-	}
-	if removeCalled {
-		t.Fatal("old destination tree was deleted after its relocation failed")
-	}
-	waiting := jt.Waiting.snapshot()
-	if len(waiting) != 1 || waiting[0].SrcPath != "/src/new/archive/" || waiting[0].DstPath != "/dst/new/archive/" {
-		t.Fatalf("fallback copy queue = %#v, want source new/archive -> destination new/archive", waiting)
-	}
-	moveFailures := 0
-	for _, item := range persisted {
-		if item["type"] == taskItemTypeMove.Int() && item["status"] == taskStatusFailed.Int() {
-			moveFailures++
-		}
-	}
-	if moveFailures != 1 {
-		t.Fatalf("failed move records = %d, want 1 (all records: %#v)", moveFailures, persisted)
-	}
-}
-
-func writeMovedFileListResponse(t *testing.T, w http.ResponseWriter, dir string) {
-	t.Helper()
-	responses := map[string]string{
-		"/src/":             `{"code":200,"message":"ok","data":{"content":[{"name":"new","is_dir":true}]}}`,
-		"/src/new/":         `{"code":200,"message":"ok","data":{"content":[{"name":"archive","is_dir":true}]}}`,
-		"/src/new/archive/": `{"code":200,"message":"ok","data":{"content":[{"name":"movie.mkv","size":8589934592,"hash_info":{"md5":"0123456789abcdef0123456789abcdef"}}]}}`,
-		"/dst/":             `{"code":200,"message":"ok","data":{"content":[{"name":"old","is_dir":true}]}}`,
-		"/dst/old/":         `{"code":200,"message":"ok","data":{"content":[{"name":"archive","is_dir":true}]}}`,
-		"/dst/old/archive/": `{"code":200,"message":"ok","data":{"content":[{"name":"movie.mkv","size":8589934592,"hash_info":{"md5":"0123456789abcdef0123456789abcdef"}}]}}`,
-	}
-	response, ok := responses[dir]
-	if !ok {
-		t.Errorf("unexpected list path %q", dir)
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
-	_, _ = w.Write([]byte(response))
-}
-
 func movedFileFullSyncPlan(metadata FileMetadata) *fullSyncPlan {
 	src := &fullSyncSnapshot{
 		root: "/src/",
@@ -315,8 +55,6 @@ func movedFileFullSyncPlan(metadata FileMetadata) *fullSyncPlan {
 	return plan
 }
 
-// A source file excluded by the size filter must not be deleted from the
-// destination: the filter decides what gets copied, never what gets deleted.
 func TestFullSyncPlanKeepsSizeFilteredDestinationFile(t *testing.T) {
 	small := FileMetadata{Size: 500 * 1024}
 	src := &fullSyncSnapshot{
@@ -344,8 +82,6 @@ func TestFullSyncPlanKeepsSizeFilteredDestinationFile(t *testing.T) {
 	}
 }
 
-// A destination file with no source counterpart is still deleted when a size
-// filter is configured, so the filter fix does not disable mirror deletes.
 func TestFullSyncPlanStillDeletesUnmatchedDestinationFileWithSizeFilter(t *testing.T) {
 	src := &fullSyncSnapshot{
 		root: "/src/",
@@ -366,9 +102,6 @@ func TestFullSyncPlanStillDeletesUnmatchedDestinationFileWithSizeFilter(t *testi
 	}
 }
 
-// A destination directory whose name collides with a source file that the size
-// filter excludes must be kept: the filter only decides what is copied, and the
-// type-conflict delete exists solely to make room for the replacement file.
 func TestFullSyncPlanKeepsSizeFilteredDestinationDirectoryOfSameName(t *testing.T) {
 	small := FileMetadata{Size: 500 * 1024}
 	src := &fullSyncSnapshot{root: "/src/", dirs: map[string]FileListResult{
@@ -393,8 +126,6 @@ func TestFullSyncPlanKeepsSizeFilteredDestinationDirectoryOfSameName(t *testing.
 	}
 }
 
-// planShape renders a plan as sorted descriptive lines so the concurrent build
-// (non-nil branch gate) can be compared with the sequential one.
 func planShape(plan *fullSyncPlan) []string {
 	shape := make([]string, 0,
 		len(plan.newDirs)+len(plan.newFiles)+len(plan.changed)+
@@ -443,9 +174,6 @@ func branchyPlanSnapshots() (*fullSyncSnapshot, *fullSyncSnapshot) {
 	return src, dst
 }
 
-// The concurrent plan walk must produce exactly the sequential plan: it is the
-// production path (branchGate is the task's scan semaphore) and was previously
-// untested.
 func TestFullSyncPlanConcurrentBuildMatchesSequential(t *testing.T) {
 	job := map[string]interface{}{"method": 1}
 	src, dst := branchyPlanSnapshots()
@@ -469,8 +197,6 @@ func TestFullSyncPlanConcurrentBuildMatchesSequential(t *testing.T) {
 	}
 }
 
-// A panic in a concurrent compareDir branch must be recovered and recorded; the
-// caller then refuses to execute the partially built plan.
 func TestFullSyncPlanBranchPanicIsContainedAndRecorded(t *testing.T) {
 	src, dst := branchyPlanSnapshots()
 	gate := make(chan struct{}, 8)
@@ -487,45 +213,5 @@ func TestFullSyncPlanBranchPanicIsContainedAndRecorded(t *testing.T) {
 	}
 	if len(gate) != 0 {
 		t.Fatalf("%d branch slots leaked after panic", len(gate))
-	}
-}
-
-type panicListRoundTripper struct{}
-
-func (panicListRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
-	panic("simulated transport panic")
-}
-
-// buildFullSyncPlans runs each root pair in a goroutine; an unexpected panic
-// inside a worker must be recovered and turned into a fatal task break instead
-// of crashing the process.
-func TestBuildFullSyncPlansRecoversWorkerPanic(t *testing.T) {
-	jt := &JobTask{
-		TaskID: 42,
-		Job:    map[string]interface{}{"method": 1},
-		AlistClient: &AlistClient{
-			URL:    "http://127.0.0.1:1",
-			client: &http.Client{Transport: panicListRoundTripper{}},
-		},
-	}
-	jt.initRuntime()
-	t.Cleanup(jt.cancelTaskRuntime)
-
-	plans := jt.buildFullSyncPlans([]scanWork{{
-		SrcPath:     "/src/",
-		DstPath:     "/dst/",
-		SrcRootPath: "/src/",
-		DstRootPath: "/dst/",
-		FirstDst:    true,
-	}}, nil)
-
-	if len(plans) != 0 {
-		t.Fatalf("plans len = %d, want 0 after worker panic", len(plans))
-	}
-	if !jt.isBreak() {
-		t.Fatal("task was not broken after buildFullSyncPlans worker panic")
-	}
-	if fatal := jt.fatalError(); fatal == nil {
-		t.Fatal("fatalError() = nil, want recorded worker panic")
 	}
 }

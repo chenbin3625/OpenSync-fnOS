@@ -97,9 +97,17 @@ type RemoteFormType =
   | "union"
   | "combine";
 
-type PanelView = "overview" | "form" | "import" | "export" | "browse";
+export type NativeEditorMode =
+  | "overview"
+  | "local"
+  | "form"
+  | "import"
+  | "export"
+  | "browse";
 
-const remoteTypeLabels: Record<string, string> = {
+type PanelView = NativeEditorMode;
+
+export const remoteTypeLabels: Record<string, string> = {
   s3: "S3 兼容存储",
   webdav: "WebDAV",
   sftp: "SFTP",
@@ -344,7 +352,7 @@ const s3EndpointPlaceholders: Record<string, string> = {
 };
 
 const webdavVendors: Record<string, string> = {
-  other: "标准 WebDAV（自动读回比对）",
+  other: "标准 WebDAV（含 OpenList / AList）",
   nextcloud: "Nextcloud",
   owncloud: "ownCloud",
   rclone: "rclone / 支持修改时间的 WebDAV",
@@ -360,12 +368,13 @@ interface RemoteFormDraft {
   vendor: string;
   forcePathStyle: boolean;
   noCheckBucket: boolean;
+  authMode: "keys" | "runtime" | "anonymous";
   options: Record<string, string>;
   configuredSecrets: string[];
   clearSecrets: string[];
 }
 
-function emptyDraft(type: RemoteFormType = "s3"): RemoteFormDraft {
+export function emptyDraft(type: RemoteFormType = "s3"): RemoteFormDraft {
   return {
     editing: false,
     type,
@@ -374,13 +383,14 @@ function emptyDraft(type: RemoteFormType = "s3"): RemoteFormDraft {
     vendor: "other",
     forcePathStyle: false,
     noCheckBucket: false,
+    authMode: "keys",
     options: {},
     configuredSecrets: [],
     clearSecrets: [],
   };
 }
 
-function draftFromRemote(item: NativeRemoteItem): RemoteFormDraft {
+export function draftFromRemote(item: NativeRemoteItem): RemoteFormDraft {
   const type = (
     formTypes.includes(item.type as RemoteFormType) ? item.type : "s3"
   ) as RemoteFormType;
@@ -389,9 +399,8 @@ function draftFromRemote(item: NativeRemoteItem): RemoteFormDraft {
   const vendor = opts.vendor || "other";
   const forcePathStyle = opts.force_path_style === "true";
   const noCheckBucket = opts.no_check_bucket === "true";
-  delete opts.provider;
+  if (type === "s3") delete opts.provider;
   delete opts.vendor;
-  delete opts.env_auth;
   delete opts.force_path_style;
   delete opts.no_check_bucket;
   return {
@@ -402,6 +411,9 @@ function draftFromRemote(item: NativeRemoteItem): RemoteFormDraft {
     vendor,
     forcePathStyle,
     noCheckBucket,
+    authMode: opts.access_key_id || item.configuredSecrets?.includes("secret_access_key")
+      ? "keys"
+      : opts.env_auth === "true" ? "runtime" : "anonymous",
     options: opts,
     configuredSecrets: [...(item.configuredSecrets || [])],
     clearSecrets: [],
@@ -421,14 +433,35 @@ function snapshotDraft(d: RemoteFormDraft): string {
     vendor: d.vendor,
     forcePathStyle: d.forcePathStyle,
     noCheckBucket: d.noCheckBucket,
+    authMode: d.authMode,
     options: sortedOpts,
     clearSecrets: [...d.clearSecrets].sort(),
   });
 }
 
-function buildRemoteOptions(draft: RemoteFormDraft): Record<string, string> {
+export function changeStorageAuthMode(draft: RemoteFormDraft, mode: string): RemoteFormDraft {
+  const authMode = mode === "runtime" || mode === "anonymous" ? mode : "keys";
+  const options: Record<string, string> = { ...draft.options, env_auth: authMode === "runtime" ? "true" : "false" };
+  const clearSecrets = new Set(draft.clearSecrets);
+  if (authMode !== "keys") {
+    options.access_key_id = "";
+    for (const key of ["secret_access_key", "session_token"]) {
+      options[key] = "";
+      if (draft.configuredSecrets.includes(key)) clearSecrets.add(key);
+    }
+  } else {
+    for (const key of ["secret_access_key", "session_token"]) {
+      clearSecrets.delete(key);
+    }
+  }
+  return { ...draft, authMode, options, clearSecrets: [...clearSecrets] };
+}
+
+export function buildRemoteOptions(draft: RemoteFormDraft): Record<string, string> {
   const settings: Record<string, string> = { type: draft.type };
   for (const [k, rawVal] of Object.entries(draft.options)) {
+    if ((draft.type === "s3" || draft.type === "qingstor") && draft.authMode !== "keys" &&
+        ["access_key_id", "secret_access_key", "session_token"].includes(k)) continue;
     if (rawVal === undefined || rawVal === null) continue;
     if (k === "key_pem") {
       const normalized = rawVal.trim().replace(/\r?\n/g, "\\n");
@@ -443,12 +476,12 @@ function buildRemoteOptions(draft: RemoteFormDraft): Record<string, string> {
   }
   if (draft.type === "s3") {
     settings.provider = draft.provider || "Other";
-    settings.env_auth = "false";
+    settings.env_auth = draft.authMode === "runtime" ? "true" : "false";
     if (draft.forcePathStyle) settings.force_path_style = "true";
     if (draft.noCheckBucket) settings.no_check_bucket = "true";
   }
   if (draft.type === "qingstor") {
-    settings.env_auth = "false";
+    settings.env_auth = draft.authMode === "runtime" ? "true" : "false";
   }
   if (draft.type === "webdav" && draft.vendor) {
     settings.vendor = draft.vendor;
@@ -460,7 +493,7 @@ function isBoolTrue(opts: Record<string, string>, key: string): boolean {
   return (opts[key] || "").toLowerCase() === "true";
 }
 
-function validateRemoteDraft(
+export function validateRemoteDraft(
   draft: RemoteFormDraft,
   requireName: boolean,
 ): Record<string, string> {
@@ -509,12 +542,14 @@ function validateRemoteDraft(
     }
   };
 
-  if (draft.type === "s3") {
-    if (!(draft.options.access_key_id || "").trim()) {
-      errs.access_key_id = "请输入 Access Key ID";
-    }
-    if (!hasSecret("secret_access_key")) {
-      errs.secret_access_key = "请输入 Secret Access Key";
+  if (draft.type === "s3" || draft.type === "qingstor") {
+    if (draft.authMode === "keys") {
+      if (!(draft.options.access_key_id || "").trim()) {
+        errs.access_key_id = "请输入 Access Key ID";
+      }
+      if (!hasSecret("secret_access_key")) {
+        errs.secret_access_key = "请输入 Secret Access Key";
+      }
     }
   } else if (draft.type === "webdav") {
     checkHttpUrl(draft.options.url, "url", " WebDAV 地址");
@@ -605,19 +640,15 @@ function validateRemoteDraft(
     if (!hasAppCred && !hasUserKey && !hasStorageToken) {
       errs.user = "请填写用户名与密钥、应用凭据或 Storage URL + Auth Token";
     }
+    if (!hasStorageToken) {
+      checkHttpUrl(draft.options.auth, "auth", "认证地址（auth）");
+    }
   } else if (draft.type === "oracleobjectstorage") {
     if (!(draft.options.namespace || "").trim()) {
       errs.namespace = "请输入 Oracle Namespace";
     }
     if (!(draft.options.region || "").trim()) {
       errs.region = "请输入区域 (region)";
-    }
-  } else if (draft.type === "qingstor") {
-    if (!(draft.options.access_key_id || "").trim()) {
-      errs.access_key_id = "请输入 QingStor Access Key ID";
-    }
-    if (!hasSecret("secret_access_key")) {
-      errs.secret_access_key = "请输入 QingStor Secret Access Key";
     }
   } else if (draft.type === "storj") {
     const hasGrant = hasSecret("access_grant");
@@ -733,23 +764,31 @@ function validateRemoteDraft(
 
 export function NativeStorageEditor({
   engine,
+  mode = "overview",
+  editRemote = null,
+  initialBrowsePath = "/",
   onClose,
+  onSaved,
   onChanged,
 }: {
   engine?: AlistItem;
+  mode?: NativeEditorMode;
+  editRemote?: NativeRemoteItem | null;
+  initialBrowsePath?: string;
   onClose: () => void;
   onSaved?: () => void;
   onChanged?: () => void;
 }) {
-  const [view, setView] = useState<PanelView>("overview");
+  const focusedMode = mode !== "overview";
+  const [view, setView] = useState<PanelView>(mode);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [state, setState] = useState<NativeStorageState | null>(null);
 
-  // Overview engine settings
-  const [remark, setRemark] = useState(engine?.remark || "原生备份");
+  // Overview / Local engine settings
+  const [remark, setRemark] = useState(engine?.remark || "内置存储");
   const [maxConcurrentJobs, setMaxConcurrentJobs] = useState(
-    String(engine?.maxConcurrentJobs ?? 1),
+    String(engine?.maxConcurrentJobs ?? 0),
   );
   const [savingEngine, setSavingEngine] = useState(false);
   const [deletingName, setDeletingName] = useState<string | null>(null);
@@ -768,16 +807,31 @@ export function NativeStorageEditor({
   const [renaming, setRenaming] = useState(false);
 
   // Single remote add/edit form
-  const [draft, setDraft] = useState<RemoteFormDraft>(() => emptyDraft("s3"));
+  const initialDraftValue = useMemo(
+    () => (mode === "form" && editRemote ? draftFromRemote(editRemote) : emptyDraft("s3")),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+  const [draft, setDraft] = useState<RemoteFormDraft>(() => initialDraftValue);
   const [initialDraftSnap, setInitialDraftSnap] = useState(() =>
-    snapshotDraft(emptyDraft("s3")),
+    snapshotDraft(initialDraftValue),
   );
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [savingForm, setSavingForm] = useState(false);
   const [testingForm, setTestingForm] = useState(false);
   const [formTestResult, setFormTestResult] =
     useState<NativeStorageTestResult | null>(null);
-  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(() =>
+    Boolean(
+      initialDraftValue.options.proxy_url ||
+        initialDraftValue.options.insecure_skip_verify ||
+        initialDraftValue.options.storage_class ||
+        initialDraftValue.options.chunk_size ||
+        initialDraftValue.options.allow_hashcheck ||
+        initialDraftValue.options.filename_encryption ||
+        initialDraftValue.options.description,
+    ),
+  );
 
   // Import rclone.conf view
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -850,15 +904,25 @@ export function NativeStorageEditor({
       const next = await api.nativeStorageState(signal);
       if (signal?.aborted) return;
       setState(next);
-      setRemark(next.remark || "原生备份");
-      setMaxConcurrentJobs(String(next.maxConcurrentJobs ?? 1));
+      setRemark(next.remark || "内置存储");
+      setMaxConcurrentJobs(String(next.maxConcurrentJobs ?? 0));
+      if (mode === "export") {
+        setSelectedExports(
+          (next.remotes || [])
+            .filter((r) => r.type !== "local")
+            .map((r) => r.name),
+        );
+      }
+      if (mode === "browse" && next.localRoots.length > 0) {
+        setRestoreLocalRoot((prev) => prev || next.localRoots[0].path);
+      }
     } catch (err) {
       if (signal?.aborted) return;
-      setLoadError(err instanceof Error ? err.message : "加载原生存储配置失败");
+      setLoadError(err instanceof Error ? err.message : "加载存储配置失败");
     } finally {
       if (!signal?.aborted) setLoading(false);
     }
-  }, []);
+  }, [mode]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -869,8 +933,8 @@ export function NativeStorageEditor({
   const engineSettingsDirty = useMemo(() => {
     if (!state) return false;
     return (
-      remark.trim() !== (state.remark || "原生备份") ||
-      (maxConcurrentJobs.trim() || "0") !== String(state.maxConcurrentJobs ?? 1)
+      remark.trim() !== (state.remark || "内置存储") ||
+      (maxConcurrentJobs.trim() || "0") !== String(state.maxConcurrentJobs ?? 0)
     );
   }, [state, remark, maxConcurrentJobs]);
 
@@ -908,7 +972,7 @@ export function NativeStorageEditor({
     testingRemoteName !== null;
 
   const modalDirty =
-    view === "overview"
+    view === "overview" || view === "local"
       ? engineSettingsDirty
       : view === "form"
         ? formDirty
@@ -920,7 +984,7 @@ export function NativeStorageEditor({
   const saveEngineSettings = async () => {
     const trimmedRemark = remark.trim();
     if (!trimmedRemark) {
-      Toast.warning("请输入引擎名称");
+      Toast.warning("请输入名称");
       return;
     }
     const rawMc = maxConcurrentJobs.trim() || "0";
@@ -936,16 +1000,18 @@ export function NativeStorageEditor({
     }
     setSavingEngine(true);
     try {
-      const wasEnabled = Boolean(state?.enabled);
       const updated = await api.saveNativeEngine({
         remark: trimmedRemark,
         maxConcurrentJobs: parsedMc,
       });
       setState(updated);
-      setRemark(updated.remark || "原生备份");
-      setMaxConcurrentJobs(String(updated.maxConcurrentJobs ?? 1));
-      Toast.success(wasEnabled ? "引擎设置已保存" : "原生备份引擎已启用");
+      setRemark(updated.remark || "内置存储");
+      setMaxConcurrentJobs(String(updated.maxConcurrentJobs ?? 0));
+      Toast.success("本地目录与引擎设置已保存");
       notifyParent();
+      if (focusedMode) {
+        onSaved ? onSaved() : onClose();
+      }
     } catch (err) {
       errorToast(err);
     } finally {
@@ -1032,6 +1098,12 @@ export function NativeStorageEditor({
     setView("browse");
     void loadBrowse(initialPath);
   };
+
+  useEffect(() => {
+    if (mode === "browse") {
+      void loadBrowse(initialBrowsePath || "/");
+    }
+  }, [mode, initialBrowsePath, loadBrowse]);
 
   const backToOverview = () => {
     const leave = () => {
@@ -1464,6 +1536,12 @@ export function NativeStorageEditor({
     setFormTestResult(null);
   };
 
+  const handleStorageAuthModeChange = (mode: string) => {
+    setDraft((prev) => changeStorageAuthMode(prev, mode));
+    setFieldErrors({});
+    setFormTestResult(null);
+  };
+
   const handleTestForm = async () => {
     const errs = validateRemoteDraft(draft, draft.editing);
     if (Object.keys(errs).length > 0) {
@@ -1521,7 +1599,11 @@ export function NativeStorageEditor({
       });
       await loadState();
       notifyParent();
-      setView("overview");
+      if (focusedMode) {
+        onSaved ? onSaved() : onClose();
+      } else {
+        setView("overview");
+      }
     } catch (err) {
       errorToast(err);
     } finally {
@@ -1620,7 +1702,11 @@ export function NativeStorageEditor({
       setRemoteTestResults({});
       await loadState();
       notifyParent();
-      setView("overview");
+      if (focusedMode) {
+        onSaved ? onSaved() : onClose();
+      } else {
+        setView("overview");
+      }
     } catch (err) {
       errorToast(err);
     } finally {
@@ -1681,17 +1767,19 @@ export function NativeStorageEditor({
   }, [browsePath]);
 
   const modalTitle =
-    view === "overview"
-      ? "原生备份存储"
-      : view === "import"
-        ? "导入 rclone.conf"
-        : view === "export"
-          ? "导出 rclone.conf"
-          : view === "browse"
-            ? `浏览与恢复 · ${browsePath}`
-            : draft.editing
-              ? `编辑存储 · ${draft.name}`
-              : "添加远端存储";
+    view === "local"
+      ? "配置本地目录"
+      : view === "overview"
+        ? "存储配置管理"
+        : view === "import"
+          ? "导入 rclone.conf"
+          : view === "export"
+            ? "导出 rclone.conf"
+            : view === "browse"
+              ? `浏览与恢复 · ${browsePath}`
+              : draft.editing
+                ? `编辑远程存储 · ${draft.name}`
+                : "添加远程存储";
 
   const secretPlaceholder = (key: string, emptyHint: string) =>
     draft.editing &&
@@ -1705,28 +1793,53 @@ export function NativeStorageEditor({
       <Editor
         title={modalTitle}
         visible
-        width={view === "browse" ? 740 : 660}
+        width={view === "browse" ? 740 : view === "local" ? 580 : 660}
         busy={anyBusy}
         dirty={modalDirty}
         onClose={onClose}
         onSave={() => {
-          if (view === "form") void handleSaveForm();
+          if (view === "local") void saveEngineSettings();
+          else if (view === "form") void handleSaveForm();
           else if (view === "import") void handleExecuteImport();
           else if (view === "export") void handleExecuteExport();
           else onClose();
         }}
         footer={({ close }) => {
+          if (view === "local") {
+            return (
+              <div className="editor-actions">
+                <Button type="tertiary" onClick={close} disabled={anyBusy}>
+                  取消
+                </Button>
+                <Button
+                  type="primary"
+                  theme="solid"
+                  loading={savingEngine}
+                  disabled={!state}
+                  onClick={() => void saveEngineSettings()}
+                >
+                  保存配置
+                </Button>
+              </div>
+            );
+          }
           if (view === "form") {
             return (
               <div className="editor-actions">
-                <Button
-                  type="tertiary"
-                  className="editor-actions-start"
-                  onClick={backToOverview}
-                  disabled={anyBusy}
-                >
-                  返回列表
-                </Button>
+                {focusedMode ? (
+                  <Button type="tertiary" onClick={close} disabled={anyBusy}>
+                    取消
+                  </Button>
+                ) : (
+                  <Button
+                    type="tertiary"
+                    className="editor-actions-start"
+                    onClick={backToOverview}
+                    disabled={anyBusy}
+                  >
+                    返回列表
+                  </Button>
+                )}
                 <Button
                   type="tertiary"
                   icon={<IconChainStroked aria-hidden="true" />}
@@ -1751,14 +1864,20 @@ export function NativeStorageEditor({
           if (view === "import") {
             return (
               <div className="editor-actions">
-                <Button
-                  type="tertiary"
-                  className="editor-actions-start"
-                  onClick={backToOverview}
-                  disabled={anyBusy}
-                >
-                  返回列表
-                </Button>
+                {focusedMode ? (
+                  <Button type="tertiary" onClick={close} disabled={anyBusy}>
+                    取消
+                  </Button>
+                ) : (
+                  <Button
+                    type="tertiary"
+                    className="editor-actions-start"
+                    onClick={backToOverview}
+                    disabled={anyBusy}
+                  >
+                    返回列表
+                  </Button>
+                )}
                 <Button
                   type="primary"
                   theme="solid"
@@ -1776,14 +1895,20 @@ export function NativeStorageEditor({
           if (view === "export") {
             return (
               <div className="editor-actions">
-                <Button
-                  type="tertiary"
-                  className="editor-actions-start"
-                  onClick={backToOverview}
-                  disabled={anyBusy}
-                >
-                  返回列表
-                </Button>
+                {focusedMode ? (
+                  <Button type="tertiary" onClick={close} disabled={anyBusy}>
+                    取消
+                  </Button>
+                ) : (
+                  <Button
+                    type="tertiary"
+                    className="editor-actions-start"
+                    onClick={backToOverview}
+                    disabled={anyBusy}
+                  >
+                    返回列表
+                  </Button>
+                )}
                 <Button
                   type="primary"
                   theme="solid"
@@ -1800,14 +1925,16 @@ export function NativeStorageEditor({
           if (view === "browse") {
             return (
               <div className="editor-actions">
-                <Button
-                  type="tertiary"
-                  className="editor-actions-start"
-                  onClick={backToOverview}
-                  disabled={restoring}
-                >
-                  返回列表
-                </Button>
+                {!focusedMode && (
+                  <Button
+                    type="tertiary"
+                    className="editor-actions-start"
+                    onClick={backToOverview}
+                    disabled={restoring}
+                  >
+                    返回列表
+                  </Button>
+                )}
                 <Button type="tertiary" onClick={close} disabled={restoring}>
                   关闭
                 </Button>
@@ -1833,6 +1960,103 @@ export function NativeStorageEditor({
             message={loadError}
             onRetry={() => void loadState()}
           />
+        ) : view === "local" && state ? (
+          <div className="editor-form native-panel">
+            {!state.rcloneAvailable && (
+              <InlineNotice
+                role="alert"
+                icon={<IconAlertTriangle aria-hidden="true" size="small" />}
+                message={`内置 rclone 不可用：${state.rcloneError || "未找到可执行文件"}`}
+              />
+            )}
+
+            <section className="native-panel-section">
+              <div className="native-section-head">
+                <div className="native-section-title">
+                  <IconFolderStroked aria-hidden="true" size="small" />
+                  <h3>飞牛本地授权目录</h3>
+                  <Tag
+                    size="small"
+                    type="light"
+                    color={state.localRoots.length > 0 ? "green" : "orange"}
+                  >
+                    {state.localRoots.length > 0
+                      ? `已授权 ${state.localRoots.length} 个`
+                      : "未授权"}
+                  </Tag>
+                  {state.rcloneVersion && (
+                    <Tag size="small" type="light" color="cyan">
+                      rclone {state.rcloneVersion}
+                    </Tag>
+                  )}
+                </div>
+                <Button
+                  size="small"
+                  type="tertiary"
+                  theme="borderless"
+                  icon={<IconRefresh aria-hidden="true" />}
+                  loading={loading}
+                  onClick={() => void loadState()}
+                >
+                  刷新目录
+                </Button>
+              </div>
+
+              {state.localRoots.length > 0 ? (
+                <div className="native-local-roots">
+                  {state.localRoots.map((root) => (
+                    <span
+                      key={root.id}
+                      className="native-local-chip mono"
+                      title={root.path}
+                    >
+                      {root.path}
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <div className="sync-method-banner is-warning">
+                  <IconAlertTriangle aria-hidden="true" size="small" />
+                  <span>
+                    未检测到本地授权目录。如需同步或恢复到本地磁盘，请在飞牛「应用设置 → 文件夹访问权限」中为 OpenSync 授权文件夹后点击「刷新目录」。
+                  </span>
+                </div>
+              )}
+
+              <div className="field-hint">
+                本地目录由飞牛系统统一授权管理；添加或调整权限后，点击上方「刷新目录」即可立即生效。
+              </div>
+            </section>
+
+            <section className="native-panel-section">
+              <div className="native-section-head">
+                <div className="native-section-title">
+                  <h3>内置引擎设置</h3>
+                </div>
+              </div>
+              <div className="form-grid form-grid--two">
+                <Field label="显示名称" required>
+                  <Input
+                    value={remark}
+                    onChange={setRemark}
+                    maxLength={200}
+                    placeholder="内置存储"
+                  />
+                </Field>
+                <Field
+                  label="最大并发任务数"
+                  hint="0 表示不限制；1 表示全局串行排队（0–50）"
+                >
+                  <Input
+                    inputMode="numeric"
+                    value={maxConcurrentJobs}
+                    onChange={setMaxConcurrentJobs}
+                    placeholder="0"
+                  />
+                </Field>
+              </div>
+            </section>
+          </div>
         ) : view === "overview" && state ? (
           <div className="editor-form native-panel">
             {!state.rcloneAvailable && (
@@ -1847,7 +2071,7 @@ export function NativeStorageEditor({
             <section className="native-panel-section">
               <div className="native-section-head">
                 <div className="native-section-title">
-                  <h3>原生备份引擎</h3>
+                  <h3>内置存储引擎</h3>
                   <Tag
                     size="small"
                     type="light"
@@ -1869,7 +2093,7 @@ export function NativeStorageEditor({
                   disabled={state.enabled && !engineSettingsDirty}
                   onClick={() => void saveEngineSettings()}
                 >
-                  {state.enabled ? "保存引擎设置" : "启用原生引擎"}
+                  {state.enabled ? "保存引擎设置" : "启用内置存储"}
                 </Button>
               </div>
 
@@ -1879,7 +2103,7 @@ export function NativeStorageEditor({
                     value={remark}
                     onChange={setRemark}
                     maxLength={200}
-                    placeholder="原生备份"
+                    placeholder="内置存储"
                   />
                 </Field>
                 <Field
@@ -2170,6 +2394,72 @@ export function NativeStorageEditor({
           </div>
         ) : view === "form" ? (
           <div className="editor-form">
+            {!draft.editing && (
+              <div className="native-quick-picks" role="group" aria-label="常用远程存储模板">
+                <span className="muted">快捷模板：</span>
+                {(
+                  [
+                    {
+                      label: "OpenList / AList (WebDAV)",
+                      apply: () => {
+                        setDraft((prev) => ({
+                          ...emptyDraft("webdav"),
+                          name: prev.name || "openlist",
+                          vendor: "other",
+                          options: {
+                            url: "http://127.0.0.1:5244/dav",
+                          },
+                        }));
+                        setFieldErrors({});
+                        setFormTestResult(null);
+                      },
+                    },
+                    {
+                      label: "阿里云 OSS (S3)",
+                      apply: () => {
+                        setDraft((prev) => ({
+                          ...emptyDraft("s3"),
+                          name: prev.name,
+                          provider: "Alibaba",
+                        }));
+                        setFieldErrors({});
+                        setFormTestResult(null);
+                      },
+                    },
+                    {
+                      label: "MinIO / 自建 S3",
+                      apply: () => {
+                        setDraft((prev) => ({
+                          ...emptyDraft("s3"),
+                          name: prev.name,
+                          provider: "Minio",
+                          forcePathStyle: true,
+                        }));
+                        setFieldErrors({});
+                        setFormTestResult(null);
+                      },
+                    },
+                    {
+                      label: "SMB 局域网共享",
+                      apply: () => handleFormTypeChange("smb"),
+                    },
+                    {
+                      label: "SFTP",
+                      apply: () => handleFormTypeChange("sftp"),
+                    },
+                  ] as const
+                ).map((preset) => (
+                  <button
+                    key={preset.label}
+                    type="button"
+                    className="native-quick-chip"
+                    onClick={preset.apply}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+            )}
             <div className="form-grid form-grid--two">
               <Field
                 label="存储类型"
@@ -2229,6 +2519,21 @@ export function NativeStorageEditor({
                     }))}
                   />
                 </Field>
+                <Field
+                  label="认证方式"
+                  error={fieldErrors.env_auth}
+                  hint="运行时凭据从应用进程环境变量读取；留空密钥可用于匿名公共桶"
+                >
+                  <Select
+                    value={draft.authMode}
+                    optionList={[
+                      { value: "keys", label: "Access Key + Secret" },
+                      { value: "runtime", label: "运行时凭据（env_auth）" },
+                      { value: "anonymous", label: "匿名访问（公共桶）" },
+                    ]}
+                    onChange={(v) => handleStorageAuthModeChange(String(v))}
+                  />
+                </Field>
                 <div className="form-grid form-grid--two">
                   <Field
                     label="S3 端点"
@@ -2264,23 +2569,25 @@ export function NativeStorageEditor({
                 <div className="form-grid form-grid--two">
                   <Field
                     label="Access Key ID"
-                    required
+                    required={draft.authMode === "keys"}
                     error={fieldErrors.access_key_id}
                   >
                     <Input
                       value={draft.options.access_key_id || ""}
+                      disabled={draft.authMode !== "keys"}
                       onChange={(v) => updateDraftOption("access_key_id", v)}
                       placeholder="填写访问密钥 ID"
                     />
                   </Field>
                   <Field
                     label="Secret Access Key"
-                    required={!draft.editing}
+                    required={draft.authMode === "keys" && !draft.editing}
                     error={fieldErrors.secret_access_key}
                   >
                     <Input
                       mode="password"
                       value={draft.options.secret_access_key || ""}
+                      disabled={draft.authMode !== "keys"}
                       onChange={(v) => updateDraftOption("secret_access_key", v)}
                       placeholder={secretPlaceholder(
                         "secret_access_key",
@@ -2320,11 +2627,16 @@ export function NativeStorageEditor({
 
             {draft.type === "webdav" && (
               <>
-                <Field label="WebDAV 地址" required error={fieldErrors.url}>
+                <Field
+                  label="WebDAV 地址"
+                  required
+                  error={fieldErrors.url}
+                  hint="自建 OpenList / AList 默认地址通常为 http://127.0.0.1:5244/dav（或 NAS 局域网 IP）"
+                >
                   <Input
                     value={draft.options.url || ""}
                     onChange={(v) => updateDraftOption("url", v)}
-                    placeholder="例如 https://dav.example.com/dav"
+                    placeholder="例如 http://127.0.0.1:5244/dav 或 https://dav.example.com/dav"
                   />
                 </Field>
                 <Field label="WebDAV 类型">
@@ -2340,6 +2652,14 @@ export function NativeStorageEditor({
                     )}
                   />
                 </Field>
+                {draft.vendor === "other" && (
+                  <div className="sync-method-banner">
+                    <IconInfoCircle aria-hidden="true" size="small" />
+                    <span>
+                      接入 OpenList / AList（夸克、阿里云盘、百度网盘、115 等）或其他标准 WebDAV 时，创建同步任务建议将「文件比对方式」设为 <strong>仅大小</strong>，可避免每次增量同步触发读回校验并节省流量。
+                    </span>
+                  </div>
+                )}
                 <div className="form-grid form-grid--two">
                   <Field label="用户名">
                     <Input
@@ -3177,7 +3497,11 @@ export function NativeStorageEditor({
 
             {draft.type === "swift" && (
               <>
-                <Field label="认证地址（auth）">
+                <Field
+                  label="认证地址（auth）"
+                  required={!(draft.options.storage_url || "").trim()}
+                  error={fieldErrors.auth}
+                >
                   <Input
                     value={draft.options.auth || ""}
                     onChange={(v) => updateDraftOption("auth", v)}
@@ -3310,11 +3634,14 @@ export function NativeStorageEditor({
                       placeholder="如 us-ashburn-1 / ap-tokyo-1"
                     />
                   </Field>
-                  <Field label="认证方式（provider）">
+                  <Field
+                    label="认证方式（provider）"
+                    hint="OCI 配置文件需在应用环境设置 RCLONE_OOS_CONFIG_FILE 的绝对路径，配置中的私钥也需使用绝对路径。实例主体仅适用于 OCI 实例。"
+                  >
                     <Select
-                      value={draft.options.provider || "user_principal_auth"}
+                      value={draft.options.provider || "env_auth"}
                       optionList={[
-                        { value: "user_principal_auth", label: "OCI Config (~/.oci)" },
+                        { value: "user_principal_auth", label: "OCI 配置文件（应用环境）" },
                         { value: "env_auth", label: "环境变量 (env_auth)" },
                         { value: "instance_principal_auth", label: "实例主体" },
                         { value: "no_auth", label: "无认证（公共读）" },
@@ -3356,22 +3683,43 @@ export function NativeStorageEditor({
 
             {draft.type === "qingstor" && (
               <>
+                <Field
+                  label="认证方式"
+                  error={fieldErrors.env_auth}
+                  hint="运行时凭据从应用进程环境变量读取；留空密钥可用于匿名访问"
+                >
+                  <Select
+                    value={draft.authMode}
+                    optionList={[
+                      { value: "keys", label: "Access Key + Secret" },
+                      { value: "runtime", label: "运行时凭据（env_auth）" },
+                      { value: "anonymous", label: "匿名访问" },
+                    ]}
+                    onChange={(v) => handleStorageAuthModeChange(String(v))}
+                  />
+                </Field>
                 <div className="form-grid form-grid--two">
-                  <Field label="Access Key ID" required error={fieldErrors.access_key_id}>
+                  <Field
+                    label="Access Key ID"
+                    required={draft.authMode === "keys"}
+                    error={fieldErrors.access_key_id}
+                  >
                     <Input
                       value={draft.options.access_key_id || ""}
+                      disabled={draft.authMode !== "keys"}
                       onChange={(v) => updateDraftOption("access_key_id", v)}
                       placeholder="QingStor Access Key ID"
                     />
                   </Field>
                   <Field
                     label="Secret Access Key"
-                    required={!draft.editing}
+                    required={draft.authMode === "keys" && !draft.editing}
                     error={fieldErrors.secret_access_key}
                   >
                     <Input
                       mode="password"
                       value={draft.options.secret_access_key || ""}
+                      disabled={draft.authMode !== "keys"}
                       onChange={(v) => updateDraftOption("secret_access_key", v)}
                       placeholder={secretPlaceholder("secret_access_key", "Secret Access Key")}
                     />
@@ -4186,6 +4534,7 @@ export function NativeStorageEditor({
                           <Input
                             mode="password"
                             value={draft.options.session_token || ""}
+                            disabled={draft.authMode !== "keys"}
                             onChange={(v) => updateDraftOption("session_token", v)}
                             placeholder={secretPlaceholder("session_token", "可选")}
                           />
@@ -5076,7 +5425,7 @@ export function NativeStorageEditor({
             <div className="sync-method-banner">
               <IconInfoCircle aria-hidden="true" size="small" />
               <span>
-                导出标准 rclone.conf 文件，可直接用于桌面端 rclone 灾难恢复或迁移到其他设备；建议设置加密密码保护凭据。
+                导出标准 rclone.conf 文件；本地底层目录会导出为当前绝对路径，迁移到其他设备后需调整路径。运行时认证仍需配置环境凭据。建议设置加密密码保护凭据。
               </span>
             </div>
 

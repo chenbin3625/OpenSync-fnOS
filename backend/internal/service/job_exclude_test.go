@@ -85,15 +85,6 @@ func TestExcludeMatcherSeparatesNamesExtensionsAndDirectories(t *testing.T) {
 	}
 }
 
-func TestExcludeMatchPathOmitsLeadingSlashForRootFiles(t *testing.T) {
-	if got := excludeMatchPath("/src", "/src", "file.tmp"); got != "file.tmp" {
-		t.Fatalf("excludeMatchPath(root file) = %q, want file.tmp", got)
-	}
-	if got := excludeMatchPath("/src", "/src/dir", "file.tmp"); got != "dir/file.tmp" {
-		t.Fatalf("excludeMatchPath(nested file) = %q, want dir/file.tmp", got)
-	}
-}
-
 // A rule the user typed but we cannot honour must not be dropped in silence:
 // the job would keep syncing files the user believes are excluded.
 func TestInvalidExcludeRulesNamesUnsupportedLines(t *testing.T) {

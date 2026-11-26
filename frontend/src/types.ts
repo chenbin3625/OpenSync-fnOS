@@ -66,6 +66,8 @@ export interface NativeRemoteItem {
   configuredSecrets: string[];
   usedByJobs: string[];
   usedByCrypts: string[];
+  activeJobs?: number;
+  queuedJobs?: number;
 }
 
 export interface NativeStorageState {
@@ -73,6 +75,8 @@ export interface NativeStorageState {
   enabled: boolean;
   remark: string;
   maxConcurrentJobs: number;
+  localActiveJobs?: number;
+  localQueuedJobs?: number;
   rcloneAvailable: boolean;
   rcloneVersion?: string;
   rcloneError?: string;
@@ -288,6 +292,7 @@ export interface JobItem {
   followSymlinks?: number | boolean;
   extraFlags?: string | NativeExtraFlags | null;
   // Runtime decorations returned by GET /svr/job
+  legacyOpenList?: boolean;
   running?: boolean;
   queued?: boolean;
   pendingApproval?: boolean;
@@ -446,6 +451,7 @@ export interface DashboardJobItem {
   enable: number;
   alistId: number;
   alistName: string;
+  legacyOpenList?: boolean;
   method: number;
   isCron: number;
   interval: number;

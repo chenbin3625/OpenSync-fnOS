@@ -318,7 +318,7 @@ func TestExportImportEncryptedAboutBrowseRestoreCheckAndBisync(t *testing.T) {
 		t.Fatalf("Prepare crypt failed: %v", err)
 	}
 
-	// 1. ExportINI plain + encrypted round-trip
+	// 1. ExportINI plain + encrypted round-trip.
 	plainINI, err := cfg.ExportINI(ctx, nil, "")
 	if err != nil || !strings.Contains(plainINI, "[vault]") {
 		t.Fatalf("plain ExportINI failed: %v", err)
@@ -344,6 +344,23 @@ func TestExportImportEncryptedAboutBrowseRestoreCheckAndBisync(t *testing.T) {
 	}
 	if err := cfg.Copy(ctx, vSrc, "/vault", CopyOptions{Transfers: 2, Checkers: 2}, nil); err != nil {
 		t.Fatalf("copy to crypt failed: %v", err)
+	}
+	// A local-backed Crypt export must also work with standalone rclone.
+	for _, password := range []string{"", "encrypted-local-export"} {
+		content, err := cfg.ExportINI(ctx, []string{"vault"}, password)
+		if err != nil {
+			t.Fatal(err)
+		}
+		file := filepath.Join(t.TempDir(), "export.conf")
+		if err := os.WriteFile(file, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.CommandContext(ctx, os.Getenv("OPENSYNC_RCLONE_BIN"), "lsjson", "vault:", "--config", file, "--ask-password=false")
+		cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + t.TempDir(), "RCLONE_CONFIG_PASS=" + password}
+		out, err := cmd.CombinedOutput()
+		if err != nil || !strings.Contains(string(out), "alpha.txt") {
+			t.Fatalf("standalone local Crypt export failed: %v, %s", err, out)
+		}
 	}
 	entries, exists, err := cfg.ListDirEntries(ctx, "/vault", SessionOptions{})
 	if err != nil || !exists || len(entries) != 1 || entries[0].Name != "alpha.txt" {

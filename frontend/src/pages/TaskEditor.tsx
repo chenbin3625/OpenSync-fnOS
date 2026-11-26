@@ -32,7 +32,6 @@ import {
   HelpTip,
   InlineNotice,
   SettingRow,
-  confirmAction,
   errorToast,
 } from "../components/common";
 import { ExcludeTree } from "../components/ExcludeTree";
@@ -180,19 +179,27 @@ export default function TaskEditor({
   onClose: () => void;
   onSaved: (result: TaskEditorSavedResult) => void;
 }) {
+  const defaultEngineId = engines[0]?.id;
   const seedForm = useMemo(
     () =>
       initialDraft
-        ? initialDraft
+        ? { ...initialDraft, alistId: initialDraft.alistId || defaultEngineId }
         : job
-          ? jobToForm(job)
-          : defaultJobForm(engines[0]?.id),
+          ? { ...jobToForm(job), alistId: job.alistId || defaultEngineId }
+          : defaultJobForm(defaultEngineId),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
   );
   const { form, dirty, change, patch, setForm, setDirty } =
     useEditorForm<JobForm>(() => seedForm);
-  const nativeEngine = engines.find((engine) => engine.id === form.alistId)?.kind === "rclone";
+  useEffect(() => {
+    if (!form.alistId && defaultEngineId) {
+      setForm((current) =>
+        current.alistId ? current : { ...current, alistId: defaultEngineId },
+      );
+    }
+  }, [defaultEngineId, form.alistId, setForm]);
+  const nativeStorage = useResource((signal) => api.nativeStorageState(signal));
   const [nativeTarget, setNativeTarget] = useState("");
   const notifications = useResource((signal) => api.notifications(signal));
   const [fileSizeDrafts, setFileSizeDrafts] = useState<FileSizeDrafts>({});
@@ -229,11 +236,7 @@ export default function TaskEditor({
   );
   const [advancedOpen, setAdvancedOpen] = useState<boolean>(() =>
     Boolean(
-      seedForm.useCacheS ||
-        seedForm.useCacheT ||
-        seedForm.scanIntervalS ||
-        seedForm.scanIntervalT ||
-        seedForm.copyConcurrency ||
+      seedForm.copyConcurrency ||
         seedForm.scanConcurrency ||
         seedForm.maxRetries >= 0 ||
         seedForm.bwLimit ||
@@ -422,49 +425,6 @@ export default function TaskEditor({
     });
   };
 
-  const handleEngineChange = (nextValue: unknown) => {
-    const nextEngineId = Number(nextValue);
-    if (nextEngineId === form.alistId) return;
-    const applySwitch = () => {
-      const nextIsNative =
-        engines.find((engine) => engine.id === nextEngineId)?.kind === "rclone";
-      setDirty(true);
-      setForm((current) => ({
-        ...current,
-        alistId: nextEngineId,
-        ...(nextIsNative
-          ? {
-              useCacheS: false,
-              useCacheT: false,
-              scanIntervalS: 0,
-              scanIntervalT: 0,
-            }
-          : {
-              method: current.method === 3 ? 0 : current.method,
-            }),
-        srcPath: [],
-        dstPath: [],
-        // 文件夹过滤记录的是旧引擎源目录下的相对路径，换引擎后不再对应
-        exclude: updateExcludeFolders(current.exclude, []),
-      }));
-    };
-    const hasDependentSelection =
-      form.srcPath.length > 0 ||
-      form.dstPath.length > 0 ||
-      parseExcludeFolders(form.exclude).length > 0;
-    if (hasDependentSelection) {
-      confirmAction({
-        title: "切换存储引擎？",
-        content:
-          "切换引擎后，当前已选的源路径、目标路径和文件夹过滤规则会被清空。",
-        okText: "切换",
-        onOk: applySwitch,
-      });
-      return;
-    }
-    applySwitch();
-  };
-
   const handleSrcPathChange = (nextPaths: string[]) => {
     if (shouldClearExcludeFoldersOnSrcChange(form.srcPath, nextPaths, form.exclude)) {
       patch({
@@ -476,6 +436,30 @@ export default function TaskEditor({
     }
     change("srcPath", nextPaths);
   };
+
+  // Detect standard WebDAV (vendor=other / OpenList / AList) in selected paths
+  // so we can recommend "size-only" compare mode to avoid full read-back checks.
+  const matchedStandardWebDAVNames = useMemo(() => {
+    const remotes = nativeStorage.data?.remotes;
+    if (!remotes?.length) return [] as string[];
+    const standardDavMap = new Map<string, string>();
+    for (const remote of remotes) {
+      if (remote.type !== "webdav") continue;
+      const vendor = (remote.options?.vendor || "").trim().toLowerCase();
+      if (!vendor || vendor === "other") {
+        standardDavMap.set(remote.name.toLowerCase(), remote.name);
+      }
+    }
+    if (standardDavMap.size === 0) return [] as string[];
+    const hits = new Set<string>();
+    for (const p of [...form.srcPath, ...form.dstPath]) {
+      const seg = p.replace(/^\/+/, "").split("/")[0]?.toLowerCase();
+      if (seg && standardDavMap.has(seg)) {
+        hits.add(standardDavMap.get(seg)!);
+      }
+    }
+    return Array.from(hits);
+  }, [nativeStorage.data?.remotes, form.srcPath, form.dstPath]);
 
   const srcMultiple = form.method !== 3 || form.srcPath.length > 1;
   const dstMultiple =
@@ -514,47 +498,42 @@ export default function TaskEditor({
   }, [intervalDraft, intervalUnit, form.interval]);
 
   const activeAdvancedCount =
-    (nativeEngine
-      ? (form.bwLimit.trim() ? 1 : 0) +
-        (Number(form.tpsLimit || 0) > 0 ? 1 : 0) +
-        (Number(form.tpsLimitBurst || 0) > 0 ? 1 : 0) +
-        (form.modifyWindow.trim() ? 1 : 0) +
-        (form.fastList ? 1 : 0) +
-        (Number(form.multiThreadStreams || 0) > 0 ? 1 : 0) +
-        (form.createEmptySrcDirs ? 1 : 0) +
-        (form.followSymlinks ? 1 : 0) +
-        (form.extraFlags?.noUpdateModtime ? 1 : 0) +
-        (form.extraFlags?.inplace ? 1 : 0) +
-        (form.extraFlags?.checkFirst ? 1 : 0) +
-        (form.extraFlags?.s3NoHead ? 1 : 0) +
-        (form.extraFlags?.ignoreSize ? 1 : 0) +
-        (form.extraFlags?.trackRenames ? 1 : 0) +
-        (form.extraFlags?.useMmap ? 1 : 0) +
-        (form.extraFlags?.maxTransfer?.trim() ? 1 : 0) +
-        (form.extraFlags?.cutoffMode?.trim() ? 1 : 0) +
-        (form.extraFlags?.maxDuration?.trim() ? 1 : 0) +
-        (form.extraFlags?.orderBy?.trim() ? 1 : 0) +
-        (Number(form.extraFlags?.maxBacklog || 0) > 0 ? 1 : 0) +
-        (form.extraFlags?.bufferSize?.trim() ? 1 : 0) +
-        (form.extraFlags?.multiThreadCutoff?.trim() ? 1 : 0) +
-        (form.extraFlags?.multiThreadChunkSize?.trim() ? 1 : 0) +
-        (form.extraFlags?.userAgent?.trim() ? 1 : 0) +
-        (form.extraFlags?.ioTimeout?.trim() ? 1 : 0) +
-        (form.extraFlags?.conTimeout?.trim() ? 1 : 0) +
-        (form.extraFlags?.bisyncResyncMode?.trim() ? 1 : 0) +
-        (Number(form.extraFlags?.bisyncMaxDelete || 0) > 0 ? 1 : 0) +
-        (form.extraFlags?.bisyncForce ? 1 : 0)
-      : (form.useCacheS ? 1 : 0) +
-        (form.useCacheT ? 1 : 0) +
-        (Number(form.scanIntervalS || 0) > 0 ? 1 : 0) +
-        (Number(form.scanIntervalT || 0) > 0 ? 1 : 0)) +
+    (form.bwLimit.trim() ? 1 : 0) +
+    (Number(form.tpsLimit || 0) > 0 ? 1 : 0) +
+    (Number(form.tpsLimitBurst || 0) > 0 ? 1 : 0) +
+    (form.modifyWindow.trim() ? 1 : 0) +
+    (form.fastList ? 1 : 0) +
+    (Number(form.multiThreadStreams || 0) > 0 ? 1 : 0) +
+    (form.createEmptySrcDirs ? 1 : 0) +
+    (form.followSymlinks ? 1 : 0) +
+    (form.extraFlags?.noUpdateModtime ? 1 : 0) +
+    (form.extraFlags?.inplace ? 1 : 0) +
+    (form.extraFlags?.checkFirst ? 1 : 0) +
+    (form.extraFlags?.s3NoHead ? 1 : 0) +
+    (form.extraFlags?.ignoreSize ? 1 : 0) +
+    (form.extraFlags?.trackRenames ? 1 : 0) +
+    (form.extraFlags?.useMmap ? 1 : 0) +
+    (form.extraFlags?.maxTransfer?.trim() ? 1 : 0) +
+    (form.extraFlags?.cutoffMode?.trim() ? 1 : 0) +
+    (form.extraFlags?.maxDuration?.trim() ? 1 : 0) +
+    (form.extraFlags?.orderBy?.trim() ? 1 : 0) +
+    (Number(form.extraFlags?.maxBacklog || 0) > 0 ? 1 : 0) +
+    (form.extraFlags?.bufferSize?.trim() ? 1 : 0) +
+    (form.extraFlags?.multiThreadCutoff?.trim() ? 1 : 0) +
+    (form.extraFlags?.multiThreadChunkSize?.trim() ? 1 : 0) +
+    (form.extraFlags?.userAgent?.trim() ? 1 : 0) +
+    (form.extraFlags?.ioTimeout?.trim() ? 1 : 0) +
+    (form.extraFlags?.conTimeout?.trim() ? 1 : 0) +
+    (form.extraFlags?.bisyncResyncMode?.trim() ? 1 : 0) +
+    (Number(form.extraFlags?.bisyncMaxDelete || 0) > 0 ? 1 : 0) +
+    (form.extraFlags?.bisyncForce ? 1 : 0) +
     (Number(form.copyConcurrency || 0) > 0 ? 1 : 0) +
     (Number(form.scanConcurrency || 0) > 0 ? 1 : 0) +
     (Number(form.maxRetries) >= 0 ? 1 : 0);
   const activePolicyCount =
     (form.compareMode !== 0 ? 1 : 0) +
-    (form.conflictPolicy !== 0 ? 1 : 0) +
-    (form.trashEnable ? 1 : 0) +
+    (form.method !== 2 && form.conflictPolicy !== 0 ? 1 : 0) +
+    (form.method !== 2 && form.trashEnable ? 1 : 0) +
     (form.method === 2 && form.deleteEmptySrcDirs ? 1 : 0);
 
   const runFilterTest = async () => {
@@ -724,44 +703,23 @@ export default function TaskEditor({
             <div className="task-editor-step" ref={scrollRef}>
               {panelMounted("basic") && (
                 <div className="form-section" style={panelStyle("basic")}>
-                  <div className="form-grid form-grid--two">
-                    <Field
-                      label="任务名称"
-                      required
-                      error={showStepError(0, "remark")}
-                      fieldId="remark"
-                    >
-                      <Input
-                        value={form.remark}
-                        onChange={(value) => change("remark", value)}
-                        placeholder="相册每日备份"
-                      />
-                    </Field>
-                    <Field
-                      label="存储引擎"
-                      required
-                      error={showStepError(0, "alistId")}
-                      fieldId="alistId"
-                    >
-                      <Select
-                        value={form.alistId}
-                        placeholder={
-                          engines.length ? "请选择引擎" : "暂无可用存储引擎"
-                        }
-                        disabled={!engines.length}
-                        optionList={engines.map((engine) => ({
-                          label: engine.kind==="rclone" ? `${engine.remark || "原生备份"} · rclone` : `${engine.remark || engine.userName} · ${engine.url}`,
-                          value: engine.id,
-                        }))}
-                        onChange={handleEngineChange}
-                      />
-                    </Field>
-                  </div>
+                  <Field
+                    label="任务名称"
+                    required
+                    error={showStepError(0, "remark")}
+                    fieldId="remark"
+                  >
+                    <Input
+                      value={form.remark}
+                      onChange={(value) => change("remark", value)}
+                      placeholder="相册每日备份"
+                    />
+                  </Field>
 
                   {enginesError && (
                     <InlineNotice
                       role="alert"
-                      message={`存储引擎加载失败：${enginesError}`}
+                      message={`存储配置加载失败：${enginesError}`}
                       onRetry={onRetryEngines}
                     />
                   )}
@@ -770,7 +728,7 @@ export default function TaskEditor({
                     <div className="engine-empty-guide" role="status">
                       <IconInfoCircle aria-hidden="true" size="small" />
                       <span>
-                        还未添加存储引擎，请先添加引擎后再配置同步路径。
+                        内置存储尚未就绪，请先前往存储管理检查本地目录或远程存储配置。
                       </span>
                       {onNavigateEngines && (
                         <Button
@@ -779,7 +737,7 @@ export default function TaskEditor({
                           theme="light"
                           onClick={onNavigateEngines}
                         >
-                          前往引擎管理
+                          前往存储管理
                         </Button>
                       )}
                     </div>
@@ -798,7 +756,7 @@ export default function TaskEditor({
                       <Select
                         aria-labelledby={methodLabelId}
                         value={form.method}
-                        optionList={(nativeEngine ? methodOptions : methodOptions.slice(0, 3)).map((method, value) => ({
+                        optionList={methodOptions.map((method, value) => ({
                           value,
                           label: method.name,
                         }))}
@@ -857,67 +815,85 @@ export default function TaskEditor({
                     </Field>
                   </div>
 
-                  {nativeEngine && (
-                    <Field
-                      label="手动输入路径"
-                      hint="原生引擎支持本地↔本地、本地↔远端、远端↔远端双向任意组合；仅有单桶权限或目录尚未创建时可直接输入路径。"
-                    >
-                      <div className="field-group">
-                        <Input
-                          value={nativeTarget}
-                          onChange={setNativeTarget}
-                          placeholder="/存储名称/存储桶/子目录"
-                        />
-                        <div className="native-section-actions">
-                          <Button
-                            type="tertiary"
-                            disabled={(() => {
-                              const t = nativeTarget.trim();
-                              return (
-                                !t.startsWith("/") ||
-                                t === "/" ||
-                                t.split("/").filter(Boolean).length === 0
-                              );
-                            })()}
-                            onClick={() => {
-                              const cleaned = nativeTarget.trim().replace(/\/+$/, "");
-                              if (!cleaned || cleaned === "/") return;
-                              handleSrcPathChange(
-                                form.method === 3
-                                  ? [cleaned]
-                                  : Array.from(new Set([...form.srcPath, cleaned])),
-                              );
-                              setNativeTarget("");
-                            }}
-                          >
-                            添加到源路径
-                          </Button>
-                          <Button
-                            disabled={(() => {
-                              const t = nativeTarget.trim();
-                              return (
-                                !t.startsWith("/") ||
-                                t === "/" ||
-                                t.split("/").filter(Boolean).length === 0
-                              );
-                            })()}
-                            onClick={() => {
-                              const cleaned = nativeTarget.trim().replace(/\/+$/, "");
-                              if (!cleaned || cleaned === "/") return;
-                              change(
-                                "dstPath",
-                                form.method === 2 || form.method === 3
-                                  ? [cleaned]
-                                  : Array.from(new Set([...form.dstPath, cleaned])),
-                              );
-                              setNativeTarget("");
-                            }}
-                          >
-                            添加到目标路径
-                          </Button>
-                        </div>
+                  <Field
+                    label="手动输入路径"
+                    hint="支持本地↔本地、本地↔远端、远端↔远端任意组合；仅有单桶权限或目录尚未创建时可直接输入路径。"
+                  >
+                    <div className="field-group">
+                      <Input
+                        value={nativeTarget}
+                        onChange={setNativeTarget}
+                        placeholder="/存储名称/存储桶/子目录"
+                      />
+                      <div className="native-section-actions">
+                        <Button
+                          type="tertiary"
+                          disabled={(() => {
+                            const t = nativeTarget.trim();
+                            return (
+                              !t.startsWith("/") ||
+                              t === "/" ||
+                              t.split("/").filter(Boolean).length === 0
+                            );
+                          })()}
+                          onClick={() => {
+                            const cleaned = nativeTarget.trim().replace(/\/+$/, "");
+                            if (!cleaned || cleaned === "/") return;
+                            handleSrcPathChange(
+                              form.method === 3
+                                ? [cleaned]
+                                : Array.from(new Set([...form.srcPath, cleaned])),
+                            );
+                            setNativeTarget("");
+                          }}
+                        >
+                          添加到源路径
+                        </Button>
+                        <Button
+                          disabled={(() => {
+                            const t = nativeTarget.trim();
+                            return (
+                              !t.startsWith("/") ||
+                              t === "/" ||
+                              t.split("/").filter(Boolean).length === 0
+                            );
+                          })()}
+                          onClick={() => {
+                            const cleaned = nativeTarget.trim().replace(/\/+$/, "");
+                            if (!cleaned || cleaned === "/") return;
+                            change(
+                              "dstPath",
+                              form.method === 2 || form.method === 3
+                                ? [cleaned]
+                                : Array.from(new Set([...form.dstPath, cleaned])),
+                            );
+                            setNativeTarget("");
+                          }}
+                        >
+                          添加到目标路径
+                        </Button>
                       </div>
-                    </Field>
+                    </div>
+                  </Field>
+                  {matchedStandardWebDAVNames.length > 0 && form.compareMode !== 1 && (
+                    <div className="sync-method-banner is-warning webdav-compare-tip" role="status">
+                      <IconAlertTriangle aria-hidden="true" size="small" />
+                      <span>
+                        已选择标准 WebDAV 存储（{matchedStandardWebDAVNames.join("、")}，如 OpenList / AList）。标准 WebDAV 默认比对会触发文件读回校验并消耗流量，建议将「文件比对方式」切换为 <strong>仅大小</strong>。
+                      </span>
+                      <Button
+                        size="small"
+                        type="primary"
+                        theme="light"
+                        onClick={() => {
+                          change("compareMode", 1);
+                          setPolicyOpen(true);
+                          Toast.success("已将文件比对方式设为「仅大小」");
+                        }}
+                      >
+                        设为仅大小
+                      </Button>
+                    </div>
                   )}
                   <SyncPathPreview
                     srcPaths={form.srcPath}
@@ -965,59 +941,78 @@ export default function TaskEditor({
                             onChange={(v) => change("compareMode", Number(v))}
                           />
                         </Field>
-                        <Field label="同名冲突处理">
-                          <Select
-                            value={form.conflictPolicy}
-                            optionList={conflictPolicyOptions.map((o) => ({
-                              label: o.label,
-                              value: o.value,
-                            }))}
-                            onChange={(v) =>
-                              change("conflictPolicy", Number(v))
-                            }
-                          />
-                        </Field>
-                        <SettingRow
-                          label="启用目标端回收站（软删除）"
-                          variant="bordered"
-                          tip="开启后，全量删除或覆盖旧文件时先移至目标目录下的回收站子目录，避免误删不可恢复"
-                        >
-                          <Switch
-                            aria-label="启用目标端回收站"
-                            checked={form.trashEnable}
-                            onChange={(v) => change("trashEnable", v)}
-                          />
-                        </SettingRow>
-                        {form.trashEnable && (
-                          <div className="form-grid form-grid--two">
-                            <Field
-                              label="回收站目录名"
-                              error={showStepError(0, "trashDir")}
-                              hint="自动从同步扫描中排除"
-                            >
-                              <Input
-                                value={form.trashDir}
-                                placeholder=".opensync-trash"
-                                onChange={(v) => change("trashDir", v)}
-                              />
-                            </Field>
-                            <Field
-                              label="回收站保留天数"
-                              hint="0 表示永久保留，不自动清理"
-                            >
-                              <Input
-                                inputMode="numeric"
-                                value={String(form.trashRetentionDays)}
-                                placeholder="30"
+                        {form.method === 2 ? (
+                          <div className="sync-method-banner">
+                            <IconAlertTriangle aria-hidden="true" size="small" />
+                            <span>
+                              移动模式为保护源数据安全，目标端若已存在不同内容的文件将自动跳过并保留源文件，不执行覆盖、冲突副本或目标回收站操作。
+                            </span>
+                          </div>
+                        ) : (
+                          <>
+                            <Field label="同名冲突处理">
+                              <Select
+                                value={form.conflictPolicy}
+                                optionList={conflictPolicyOptions.map((o) => ({
+                                  label: o.label,
+                                  value: o.value,
+                                }))}
                                 onChange={(v) =>
-                                  change(
-                                    "trashRetentionDays",
-                                    Math.max(0, Math.trunc(Number(v) || 0)),
-                                  )
+                                  change("conflictPolicy", Number(v))
                                 }
                               />
                             </Field>
-                          </div>
+                            <SettingRow
+                              label={
+                                form.method === 3
+                                  ? "启用双端回收站（软删除）"
+                                  : "启用目标端回收站（软删除）"
+                              }
+                              variant="bordered"
+                              tip={
+                                form.method === 3
+                                  ? "开启后，双向同步删除或覆盖旧文件时先移至对应端的回收站子目录，避免误删不可恢复（选择「保留双方副本」时不触发覆盖备份）"
+                                  : "开启后，全量删除或覆盖旧文件时先移至目标目录下的回收站子目录，避免误删不可恢复"
+                              }
+                            >
+                              <Switch
+                                aria-label="启用目标端回收站"
+                                checked={form.trashEnable}
+                                onChange={(v) => change("trashEnable", v)}
+                              />
+                            </SettingRow>
+                            {form.trashEnable && (
+                              <div className="form-grid form-grid--two">
+                                <Field
+                                  label="回收站目录名"
+                                  error={showStepError(0, "trashDir")}
+                                  hint="自动从同步扫描中排除"
+                                >
+                                  <Input
+                                    value={form.trashDir}
+                                    placeholder=".opensync-trash"
+                                    onChange={(v) => change("trashDir", v)}
+                                  />
+                                </Field>
+                                <Field
+                                  label="回收站保留天数"
+                                  hint="0 表示永久保留，不自动清理"
+                                >
+                                  <Input
+                                    inputMode="numeric"
+                                    value={String(form.trashRetentionDays)}
+                                    placeholder="30"
+                                    onChange={(v) =>
+                                      change(
+                                        "trashRetentionDays",
+                                        Math.max(0, Math.trunc(Number(v) || 0)),
+                                      )
+                                    }
+                                  />
+                                </Field>
+                              </div>
+                            )}
+                          </>
                         )}
                         {form.method === 2 && (
                           <SettingRow
@@ -1564,11 +1559,7 @@ export default function TaskEditor({
                         className="advanced-options-chevron"
                         aria-hidden="true"
                       />
-                      <span>
-                        {nativeEngine
-                          ? "高级选项（限速、流控、并发与 rclone 调优）"
-                          : "高级选项（目录缓存、防风控限流与并发覆盖）"}
-                      </span>
+                      <span>高级选项（并发、限速、流控与 rclone 调优）</span>
                       {activeAdvancedCount > 0 && (
                         <Tag size="small" color="blue" type="light">
                           已配置 {activeAdvancedCount} 项
@@ -1577,64 +1568,6 @@ export default function TaskEditor({
                     </button>
                     {advancedOpen && (
                       <div className="advanced-options-body">
-                        {!nativeEngine && (
-                          <>
-                            <SettingRow
-                              label="源端缓存"
-                              variant="bordered"
-                              tip="开启后优先使用引擎缓存目录列表，减少远程请求次数，提升同步速度"
-                            >
-                              <Switch
-                                aria-label="源端缓存"
-                                checked={form.useCacheS}
-                                onChange={(value) => change("useCacheS", value)}
-                              />
-                            </SettingRow>
-                            <SettingRow
-                              label="目标缓存"
-                              variant="bordered"
-                              tip="开启后优先使用引擎缓存目录列表，减少远程请求次数，提升同步速度"
-                            >
-                              <Switch
-                                aria-label="目标缓存"
-                                checked={form.useCacheT}
-                                onChange={(value) => change("useCacheT", value)}
-                              />
-                            </SettingRow>
-                            <div className="form-grid form-grid--two">
-                              <Field
-                                label="源端扫描间隔（秒）"
-                                hint="0–300，每次列目录后延迟，防网盘触发 QPS 风控"
-                              >
-                                <Input
-                                  inputMode="numeric"
-                                  value={String(form.scanIntervalS)}
-                                  onChange={(v) =>
-                                    change(
-                                      "scanIntervalS",
-                                      Math.max(0, Math.min(300, Math.trunc(Number(v) || 0))),
-                                    )
-                                  }
-                                />
-                              </Field>
-                              <Field
-                                label="目标端扫描间隔（秒）"
-                                hint="0–300，每次列目录后延迟"
-                              >
-                                <Input
-                                  inputMode="numeric"
-                                  value={String(form.scanIntervalT)}
-                                  onChange={(v) =>
-                                    change(
-                                      "scanIntervalT",
-                                      Math.max(0, Math.min(300, Math.trunc(Number(v) || 0))),
-                                    )
-                                  }
-                                />
-                              </Field>
-                            </div>
-                          </>
-                        )}
                         <div className="form-grid form-grid--three">
                           <Field label="操作并发覆盖" hint="0 = 跟随全局设置 (1–100)">
                             <Input
@@ -1678,10 +1611,8 @@ export default function TaskEditor({
                             />
                           </Field>
                         </div>
-                        {nativeEngine && (
-                          <>
-                            <Field
-                              label="带宽限制（--bwlimit）"
+                        <Field
+                          label="带宽限制（--bwlimit）"
                               hint="留空跟随系统设置；支持单速（如 10M）或分时段（如 08:00,5M 23:00,off）"
                             >
                               <div className="field-group">
@@ -1714,7 +1645,7 @@ export default function TaskEditor({
                             <div className="form-grid form-grid--two">
                               <Field
                                 label="API 限流（--tpslimit）"
-                                hint="每秒请求上限，0 表示不限（防云盘 429）"
+                                hint="每秒请求上限（0–1000），0 表示不限（防云盘 429）"
                               >
                                 <Input
                                   inputMode="decimal"
@@ -1723,14 +1654,14 @@ export default function TaskEditor({
                                     const n = Number(v);
                                     change(
                                       "tpsLimit",
-                                      Number.isFinite(n) && n >= 0 ? Math.min(10000, n) : 0,
+                                      Number.isFinite(n) && n >= 0 ? Math.min(1000, n) : 0,
                                     );
                                   }}
                                 />
                               </Field>
                               <Field
                                 label="API 突发上限（--tpslimit-burst）"
-                                hint="0 表示使用 rclone 默认值"
+                                hint="0–1000，0 表示使用 rclone 默认值"
                               >
                                 <Input
                                   inputMode="numeric"
@@ -1738,7 +1669,7 @@ export default function TaskEditor({
                                   onChange={(v) =>
                                     change(
                                       "tpsLimitBurst",
-                                      Math.max(0, Math.min(10000, Math.trunc(Number(v) || 0))),
+                                      Math.max(0, Math.min(1000, Math.trunc(Number(v) || 0))),
                                     )
                                   }
                                 />
@@ -2073,7 +2004,7 @@ export default function TaskEditor({
                                     <Select
                                       value={form.extraFlags?.bisyncResyncMode || ""}
                                       optionList={[
-                                        { label: "默认 (path1)", value: "" },
+                                        { label: "默认 (newer，保留最新修改)", value: "" },
                                         { label: "path1（以左侧为准）", value: "path1" },
                                         { label: "path2（以右侧为准）", value: "path2" },
                                         { label: "newer（保留最新修改）", value: "newer" },
@@ -2090,8 +2021,8 @@ export default function TaskEditor({
                                     />
                                   </Field>
                                   <Field
-                                    label="单次删除数安全上限（--max-delete）"
-                                    hint="0 表示禁用检查（非百分比，按对象数计）"
+                                    label="单次删除比例上限（--max-delete，%）"
+                                    hint="0 表示使用 rclone 默认值（50%），1–100 按删除占比触发安全保护"
                                   >
                                     <Input
                                       inputMode="numeric"
@@ -2101,7 +2032,7 @@ export default function TaskEditor({
                                           ...form.extraFlags,
                                           bisyncMaxDelete: Math.max(
                                             0,
-                                            Math.trunc(Number(v) || 0),
+                                            Math.min(100, Math.trunc(Number(v) || 0)),
                                           ),
                                         })
                                       }
@@ -2123,8 +2054,6 @@ export default function TaskEditor({
                                 </div>
                               </>
                             )}
-                          </>
-                        )}
                       </div>
                     )}
                   </div>

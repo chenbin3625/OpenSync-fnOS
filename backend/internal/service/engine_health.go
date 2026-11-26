@@ -2,19 +2,18 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"log"
 	"opensync/internal/config"
 	"opensync/internal/mapper"
 	"opensync/internal/msg"
+	"opensync/internal/native"
 	"opensync/pkg/util"
 	"strings"
 	"sync"
 	"time"
 )
 
-// EngineStorageStatus describes one mounted storage reported by OpenList/AList.
+// EngineStorageStatus describes one local or remote storage reported by the built-in engine.
 type EngineStorageStatus struct {
 	MountPath string `json:"mountPath"`
 	Driver    string `json:"driver"`
@@ -23,7 +22,7 @@ type EngineStorageStatus struct {
 	Remark    string `json:"remark"`
 }
 
-// EngineHealth holds the latest health probe outcome for one storage engine.
+// EngineHealth holds the latest health probe outcome for the storage engine.
 type EngineHealth struct {
 	AlistID       int64                 `json:"alistId"`
 	Status        string                `json:"status"` // "unknown" | "online" | "offline"
@@ -158,84 +157,54 @@ func buildEngineAlertContent(name, engineURL, detail, kind string) string {
 	if msg.Locale() == "en" {
 		switch kind {
 		case "online":
-			return fmt.Sprintf("Engine: %s\nAddress: %s\nStatus: Recovered Online (Latency: %s)", name, engineURL, detail)
+			return fmt.Sprintf("Storage Engine: %s\nAddress: %s\nStatus: Recovered Online (Latency: %s)", name, engineURL, detail)
 		case "storage_error":
-			return fmt.Sprintf("Engine: %s\nAddress: %s\nUnhealthy Mounts: %s", name, engineURL, detail)
+			return fmt.Sprintf("Storage Engine: %s\nAddress: %s\nUnhealthy Storages: %s", name, engineURL, detail)
 		default:
-			return fmt.Sprintf("Engine: %s\nAddress: %s\nStatus: Offline\nReason: %s", name, engineURL, detail)
+			return fmt.Sprintf("Storage Engine: %s\nAddress: %s\nStatus: Offline\nReason: %s", name, engineURL, detail)
 		}
 	}
 	switch kind {
 	case "online":
 		return fmt.Sprintf("存储引擎：%s\n服务地址：%s\n当前状态：已恢复在线（响应延迟 %s）", name, engineURL, detail)
 	case "storage_error":
-		return fmt.Sprintf("存储引擎：%s\n服务地址：%s\n异常挂载：%s", name, engineURL, detail)
+		return fmt.Sprintf("存储引擎：%s\n服务地址：%s\n异常存储：%s", name, engineURL, detail)
 	default:
 		return fmt.Sprintf("存储引擎：%s\n服务地址：%s\n当前状态：连接异常\n原因：%s", name, engineURL, detail)
 	}
 }
 
 func probeEngineRow(ctx context.Context, alist map[string]interface{}, sendAlert bool) *EngineHealth {
-	if alist["url"] == "rclone://native" {
-		probe, cancel := context.WithTimeout(ctx, 30*time.Second)
-		defer cancel()
-		return nativeHealth(probe, alist, sendAlert)
-	}
 	alistID := util.ToInt64(alist["id"])
-	remark := util.StringValue(alist["remark"])
 	urlStr := util.StringValue(alist["url"])
-	token := util.StringValue(alist["token"])
-
-	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-
-	start := time.Now()
-	client, err := alistDeps.NewAlistClientCtx(probeCtx, urlStr, token, alistID)
-	latency := time.Since(start).Milliseconds()
-	now := time.Now().Unix()
-
-	if err != nil {
-		errText := msg.T(msg.AlistConnectFail)
-		if strings.TrimSpace(err.Error()) == msg.T(msg.AlistUnAuth) {
-			errText = msg.T(msg.AlistUnAuth)
-		}
+	if urlStr != native.EngineURL {
 		h := EngineHealth{
 			AlistID:       alistID,
 			Status:        "offline",
-			LatencyMs:     latency,
-			LastCheckedAt: now,
-			Error:         errText,
+			LastCheckedAt: time.Now().Unix(),
+			Error:         "旧版 OpenList 引擎已不再支持",
 			Storages:      []EngineStorageStatus{},
 			StoragesKnown: false,
 		}
-		updateEngineHealthCache(alistID, remark, urlStr, h, sendAlert)
+		updateEngineHealthCache(alistID, util.StringValue(alist["remark"]), urlStr, h, false)
 		return &h
 	}
-	defer client.Close()
-
-	storages, known, storageErr := client.ListStoragesContext(probeCtx)
-	if storageErr != nil {
-		log.Printf("engine health storage list failed: alistID=%d: %v", alistID, storageErr)
-	}
-	if storages == nil {
-		storages = []EngineStorageStatus{}
-	}
-	h := EngineHealth{
-		AlistID:       alistID,
-		Status:        "online",
-		LatencyMs:     latency,
-		LastCheckedAt: now,
-		Storages:      storages,
-		StoragesKnown: known,
-	}
-	updateEngineHealthCache(alistID, remark, urlStr, h, sendAlert)
-	return &h
+	probe, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	return nativeHealth(probe, alist, sendAlert)
 }
 
 // CheckEngineHealth probes one engine immediately and updates the cache.
 func CheckEngineHealth(ctx context.Context, alistID int64) (*EngineHealth, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if alistID <= 0 {
+		id, err := EnsureNativeEngine()
+		if err != nil {
+			return nil, err
+		}
+		alistID = id
 	}
 	alist, err := alistDeps.GetAlistByID(alistID)
 	if err != nil {
@@ -244,7 +213,7 @@ func CheckEngineHealth(ctx context.Context, alistID int64) (*EngineHealth, error
 	return probeEngineRow(ctx, alist, false), nil
 }
 
-// CheckAllEnginesHealth probes all configured engines concurrently (bounded).
+// CheckAllEnginesHealth probes the built-in rclone engine and all configured storages.
 func CheckAllEnginesHealth(ctx context.Context) ([]*EngineHealth, error) {
 	return checkAllEnginesHealthInternal(ctx, false)
 }
@@ -253,31 +222,26 @@ func checkAllEnginesHealthInternal(ctx context.Context, sendAlert bool) ([]*Engi
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if _, err := EnsureNativeEngine(); err != nil {
+		return nil, fmt.Errorf("ensure native engine for health check: %w", err)
+	}
 	list, err := mapper.GetAlistList()
 	if err != nil {
 		return nil, fmt.Errorf("get alist list for health check: %w", err)
 	}
-	results := make([]*EngineHealth, len(list))
-	if len(list) == 0 {
-		return results, nil
+	nativeRows := make([]map[string]interface{}, 0, 1)
+	for _, row := range list {
+		if util.StringValue(row["url"]) == native.EngineURL {
+			nativeRows = append(nativeRows, row)
+		}
 	}
-	sem := make(chan struct{}, 4)
-	var wg sync.WaitGroup
-	for i, row := range list {
-		i, row := i, row
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
-			case <-ctx.Done():
-				return
-			}
-			results[i] = probeEngineRow(ctx, row, sendAlert)
-		}()
+	results := make([]*EngineHealth, len(nativeRows))
+	for i, row := range nativeRows {
+		if ctx.Err() != nil {
+			break
+		}
+		results[i] = probeEngineRow(ctx, row, sendAlert)
 	}
-	wg.Wait()
 	return results, nil
 }
 
@@ -367,65 +331,4 @@ func runEngineHealthCheckerLoop(stopCh <-chan struct{}, doneCh chan<- struct{}) 
 			engineHealthMu.Unlock()
 		}
 	}
-}
-
-// ListStoragesContext fetches mounted storages via /api/admin/storage/list.
-// Non-admin tokens (HTTP 401/403 or business code 401/403) are handled
-// gracefully with known=false and err=nil so regular users still see online status.
-func (c *AlistClient) ListStoragesContext(ctx context.Context) ([]EngineStorageStatus, bool, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	data, err := c.GetContext(ctx, "/api/admin/storage/list", map[string]string{
-		"page":     "1",
-		"per_page": "200",
-	})
-	if err != nil {
-		// Non-admin or unsupported endpoint: degrade gracefully without error.
-		var statusErr *alistStatusError
-		if err.Error() == msg.T(msg.AlistUnAuth) {
-			return nil, false, nil
-		}
-		if asErr := err; asErr != nil {
-			if ok := extractAlistStatusError(asErr, &statusErr); ok {
-				if statusErr.httpStatus == 401 || statusErr.httpStatus == 403 || statusErr.httpStatus == 404 ||
-					statusErr.alistCode == 401 || statusErr.alistCode == 403 || statusErr.alistCode == 404 {
-					return nil, false, nil
-				}
-			}
-		}
-		return nil, false, err
-	}
-
-	var raw struct {
-		Content []struct {
-			MountPath string `json:"mount_path"`
-			Driver    string `json:"driver"`
-			Status    string `json:"status"`
-			Disabled  bool   `json:"disabled"`
-			Remark    string `json:"remark"`
-		} `json:"content"`
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, false, nil
-	}
-	out := make([]EngineStorageStatus, 0, len(raw.Content))
-	for _, item := range raw.Content {
-		out = append(out, EngineStorageStatus{
-			MountPath: item.MountPath,
-			Driver:    item.Driver,
-			Status:    item.Status,
-			Disabled:  item.Disabled,
-			Remark:    item.Remark,
-		})
-	}
-	return out, true, nil
-}
-
-func extractAlistStatusError(err error, target **alistStatusError) bool {
-	if se, ok := err.(*alistStatusError); ok {
-		*target = se
-		return true
-	}
-	return false
 }

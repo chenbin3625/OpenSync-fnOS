@@ -85,11 +85,11 @@ const fields = [
   },
   {
     key: "engineHealthCheckInterval",
-    label: "引擎健康检查周期",
+    label: "存储健康检查周期",
     min: 0,
     max: 1440,
     unit: "分钟",
-    tip: "后台自动探测存储引擎连通性与挂载点状态的间隔，异常或恢复时自动发送告警；0 表示关闭定期检测",
+    tip: "后台自动探测内置 rclone 与远程存储连通性的间隔，异常或恢复时自动发送告警；0 表示关闭定期检测",
   },
   {
     key: "taskSave",
@@ -104,14 +104,14 @@ const fields = [
     label: "默认带宽限制",
     kind: "text",
     placeholder: "如 10M 或 08:00,5M 23:00,off（留空不限速）",
-    tip: "原生 rclone 引擎默认带宽上限，任务未单独设置限速时生效；支持分时段格式如 08:00,5M 23:00,off",
+    tip: "内置 rclone 引擎默认带宽上限，任务未单独设置限速时生效；支持分时段格式如 08:00,5M 23:00,off",
   },
   {
     key: "proxyUrl",
     label: "全局代理地址",
     kind: "text",
     placeholder: "如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080",
-    tip: "原生 rclone 引擎访问远端存储时使用的全局 HTTP / HTTPS / SOCKS5 代理（本地授权目录自动直连）",
+    tip: "内置 rclone 引擎访问远程存储时使用的全局 HTTP / HTTPS / SOCKS5 代理（本地授权目录自动直连）",
   },
 ] as const;
 type SettingsForm = Record<(typeof fields)[number]["key"], string>;
@@ -129,7 +129,7 @@ const cardGroups = [
     ] as const,
   },
   {
-    title: "原生引擎与网络",
+    title: "传输限速与网络代理",
     keys: ["defaultBwLimit", "proxyUrl"] as const,
   },
   {
@@ -478,13 +478,13 @@ export default function Settings() {
               <div className="settings-backup-desc">
                 <strong>导出配置</strong>
                 <span className="muted">
-                  导出系统设置、存储引擎、通知渠道与同步任务为 JSON 文件，便于迁移或留存副本。
+                  导出系统设置、存储配置、通知渠道与同步任务为 JSON 文件，便于迁移或留存副本。
                 </span>
                 <Checkbox
                   checked={includeSecrets}
                   onChange={(e) => setIncludeSecrets(Boolean(e.target.checked))}
                 >
-                  同时导出敏感凭据（引擎 Token、通知密钥与密码）
+                  同时导出敏感凭据（远程存储密钥、通知密钥与密码）
                 </Checkbox>
               </div>
               <Button
@@ -498,7 +498,7 @@ export default function Settings() {
               <div className="settings-backup-desc">
                 <strong>导入配置</strong>
                 <span className="muted">
-                  从备份 JSON 恢复配置，系统会自动重新映射引擎与通知渠道 ID。
+                  从备份 JSON 恢复配置，系统会自动重新映射存储配置与通知渠道 ID。
                 </span>
               </div>
               <div className="settings-backup-controls">
@@ -635,7 +635,7 @@ export default function Settings() {
               系统设置：{importSummary.settingsUpdated ? "已更新" : "未变更"}
             </div>
             <div>
-              存储引擎：新增 {importSummary.enginesCreated} · 更新{" "}
+              存储配置：新增 {importSummary.enginesCreated} · 更新{" "}
               {importSummary.enginesUpdated} · 跳过 {importSummary.enginesSkipped}
             </div>
             <div>

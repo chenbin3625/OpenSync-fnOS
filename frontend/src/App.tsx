@@ -64,7 +64,7 @@ const sections = [
   },
   {
     path: "/engines",
-    label: "引擎管理",
+    label: "存储管理",
     icon: <IconServerStroked aria-hidden="true" />,
   },
   {
@@ -83,6 +83,7 @@ export const SessionContext = createContext<{ development: boolean }>({
 });
 
 function jobStatusDotClass(job: JobItem): string {
+  if (job.legacyOpenList) return "job-dot job-dot--error";
   if (job.pendingApproval) return "job-dot job-dot--approval";
   if (job.running) return "job-dot job-dot--running";
   if (job.queued) return "job-dot job-dot--queued";
@@ -352,7 +353,7 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
                 key={section.path}
                 to={section.path}
                 className={({ isActive }) =>
-                  `nav-link${isActive ? " selected" : ""}`
+                  `nav-link${isActive || (section.path === "/engines" && pathname.startsWith("/storages")) ? " selected" : ""}`
                 }
               >
                 {section.icon}
@@ -464,6 +465,7 @@ function Workspace() {
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/tasks" element={<Tasks />} />
           <Route path="/engines" element={<Engines />} />
+          <Route path="/storages" element={<Engines />} />
           <Route path="/notifications" element={<Notifications />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="*" element={<Navigate to="/tasks" replace />} />

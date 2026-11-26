@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
-	"net"
-	"net/url"
+	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -88,45 +88,96 @@ func (c Config) ListTree(ctx context.Context, virtualPath string, opt TreeOption
 	if err != nil {
 		return nil, false, err
 	}
-	out, stderr, err := limitedOutputWithStderr(cmd, 64<<20)
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		return nil, false, err
+	}
+	errBuf := &tailBuffer{limit: maxStderrCapture}
+	cmd.Stderr = errBuf
+	if err := cmd.Start(); err != nil {
+		return nil, false, err
+	}
+
+	dec := json.NewDecoder(bufio.NewReaderSize(stdout, 64<<10))
+	var entries []TreeEntry
+	var parseErr error
+	killed := false
+	if tok, tokErr := dec.Token(); tokErr != nil {
+		parseErr = tokErr
+	} else if delim, ok := tok.(json.Delim); !ok || delim != '[' {
+		parseErr = errors.New("无法解析远端目录树")
+	} else {
+		for dec.More() {
+			if ctx.Err() != nil {
+				parseErr = ctx.Err()
+				break
+			}
+			var r struct {
+				Path    string            `json:"Path"`
+				Name    string            `json:"Name"`
+				Size    int64             `json:"Size"`
+				ModTime string            `json:"ModTime"`
+				IsDir   bool              `json:"IsDir"`
+				Hashes  map[string]string `json:"Hashes"`
+			}
+			if decErr := dec.Decode(&r); decErr != nil {
+				parseErr = errors.New("无法解析远端目录树")
+				break
+			}
+			rel := strings.TrimPrefix(path.Clean("/"+r.Path), "/")
+			if rel == "" || rel == "." || strings.HasPrefix(rel, "../") {
+				continue
+			}
+			md5Sum := ""
+			if r.Hashes != nil {
+				md5Sum = strings.ToLower(strings.TrimSpace(r.Hashes["md5"]))
+				if md5Sum == "" {
+					md5Sum = strings.ToLower(strings.TrimSpace(r.Hashes["MD5"]))
+				}
+			}
+			entries = append(entries, TreeEntry{
+				RelPath: rel,
+				Name:    path.Base(rel),
+				IsDir:   r.IsDir,
+				Size:    r.Size,
+				ModTime: parseRcloneTime(r.ModTime).Unix(),
+				MD5:     md5Sum,
+			})
+		}
+		if parseErr == nil {
+			if tok, tokErr := dec.Token(); tokErr != nil {
+				parseErr = errors.New("无法解析远端目录树")
+			} else if delim, ok := tok.(json.Delim); !ok || delim != ']' {
+				parseErr = errors.New("无法解析远端目录树")
+			}
+		}
+	}
+	if parseErr != nil && !errors.Is(parseErr, io.EOF) {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			killed = true
+		}
+		_ = stdout.Close()
+	}
+	waitErr := cmd.Wait()
+	stderr := errBuf.String()
+	if ctx.Err() != nil {
+		return nil, false, ctx.Err()
+	}
+	if waitErr != nil && !killed {
 		if isRcloneNotFound(stderr) {
 			return nil, false, nil
 		}
 		return nil, false, classifyRcloneError(ep.Backend, stderr)
 	}
-	var rows []struct {
-		Path    string            `json:"Path"`
-		Name    string            `json:"Name"`
-		Size    int64             `json:"Size"`
-		ModTime string            `json:"ModTime"`
-		IsDir   bool              `json:"IsDir"`
-		Hashes  map[string]string `json:"Hashes"`
-	}
-	if json.Unmarshal(out, &rows) != nil {
+	if parseErr != nil {
+		if isRcloneNotFound(stderr) {
+			return nil, false, nil
+		}
+		if strings.TrimSpace(stderr) != "" {
+			return nil, false, classifyRcloneError(ep.Backend, stderr)
+		}
 		return nil, false, errors.New("无法解析远端目录树")
-	}
-	entries := make([]TreeEntry, 0, len(rows))
-	for _, r := range rows {
-		rel := strings.TrimPrefix(path.Clean("/"+r.Path), "/")
-		if rel == "" || rel == "." || strings.HasPrefix(rel, "../") {
-			continue
-		}
-		md5Sum := ""
-		if r.Hashes != nil {
-			md5Sum = strings.ToLower(strings.TrimSpace(r.Hashes["md5"]))
-			if md5Sum == "" {
-				md5Sum = strings.ToLower(strings.TrimSpace(r.Hashes["MD5"]))
-			}
-		}
-		entries = append(entries, TreeEntry{
-			RelPath: rel,
-			Name:    path.Base(rel),
-			IsDir:   r.IsDir,
-			Size:    r.Size,
-			ModTime: parseRcloneTime(r.ModTime).Unix(),
-			MD5:     md5Sum,
-		})
 	}
 	return entries, true, nil
 }
@@ -386,6 +437,15 @@ func sortDirEntries(out []DirEntry) {
 	})
 }
 
+func isStorageRootPath(virtualPath string, ep Endpoint) bool {
+	_, sub := parts(virtualPath)
+	if !ep.IsLocal {
+		return strings.Trim(sub, "/") == ""
+	}
+	_, rel, _ := strings.Cut(sub, "/")
+	return strings.Trim(rel, "/") == ""
+}
+
 // DeletePath removes a single file or directory subtree at virtualPath.
 func (c Config) DeletePath(ctx context.Context, virtualPath string, isDir bool, opts SessionOptions) error {
 	var (
@@ -399,6 +459,9 @@ func (c Config) DeletePath(ctx context.Context, virtualPath string, isDir bool, 
 	}
 	if err != nil {
 		return err
+	}
+	if isStorageRootPath(virtualPath, ep) {
+		return errors.New("禁止删除存储根目录，请选择根目录下的具体文件或文件夹")
 	}
 	if ep.ReadOnly {
 		return errors.New("只读存储不支持删除")
@@ -442,6 +505,133 @@ func (c Config) DeletePath(ctx context.Context, virtualPath string, isDir bool, 
 		return classifyRcloneError(ep.Backend, stderr)
 	}
 	return nil
+}
+
+// DeleteFilesBatch deletes multiple relative file paths under rootVirtual using
+// a single local os.Root handle or a single `rclone delete --files-from-raw`
+// subprocess for remotes. If the remote batch command reports an error, it
+// falls back to per-file deletion so callers receive exact per-file errors.
+func (c Config) DeleteFilesBatch(ctx context.Context, rootVirtual string, relPaths []string, opts SessionOptions) (map[string]error, error) {
+	if len(relPaths) == 0 {
+		return nil, nil
+	}
+	ep, err := c.Resolve(rootVirtual)
+	if err != nil {
+		return nil, err
+	}
+	if ep.ReadOnly {
+		return nil, errors.New("只读存储不支持删除")
+	}
+
+	seen := make(map[string]struct{}, len(relPaths))
+	cleanRels := make([]string, 0, len(relPaths))
+	for _, raw := range relPaths {
+		rel := strings.TrimPrefix(path.Clean("/"+strings.TrimSpace(raw)), "/")
+		if rel == "" || rel == "." || strings.HasPrefix(rel, "../") {
+			continue
+		}
+		if _, dup := seen[rel]; dup {
+			continue
+		}
+		seen[rel] = struct{}{}
+		cleanRels = append(cleanRels, rel)
+	}
+	if len(cleanRels) == 0 {
+		return nil, nil
+	}
+
+	errs := make(map[string]error)
+	if ep.IsLocal {
+		_, sub := parts(rootVirtual)
+		root, baseRel, rootDev, hasRootDev, openErr := openDiskWithDev(sub)
+		if openErr != nil {
+			return nil, openErr
+		}
+		defer root.Close()
+		for _, rel := range cleanRels {
+			if ctx.Err() != nil {
+				return errs, ctx.Err()
+			}
+			target := rel
+			if baseRel != "" && baseRel != "." {
+				target = path.Join(baseRel, rel)
+			}
+			if target == "" || target == "." {
+				errs[rel] = errors.New("拒绝删除本地授权根目录")
+				continue
+			}
+			if delErr := removeInRootSafe(root, target, ".", rootDev, hasRootDev); delErr != nil && !errors.Is(delErr, os.ErrNotExist) {
+				errs[rel] = delErr
+			}
+		}
+		return errs, nil
+	}
+
+	var batchSafe []string
+	var individual []string
+	for _, rel := range cleanRels {
+		if strings.ContainsAny(rel, "\r\n") {
+			individual = append(individual, rel)
+		} else {
+			batchSafe = append(batchSafe, rel)
+		}
+	}
+
+	rootTrim := strings.TrimRight(strings.TrimSpace(rootVirtual), "/")
+	if len(batchSafe) == 1 {
+		individual = append(individual, batchSafe[0])
+		batchSafe = nil
+	}
+	if len(batchSafe) > 1 {
+		name, _ := parts(rootVirtual)
+		s, sessErr := c.SessionFor([]SessionSpec{{Name: name, Mode: diskFullWrite}}, opts)
+		if sessErr != nil {
+			return nil, sessErr
+		}
+		listFile := filepath.Join(s.dir, "delete-list")
+		f, createErr := os.OpenFile(listFile, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0600)
+		if createErr != nil {
+			s.Close()
+			return nil, createErr
+		}
+		bw := bufio.NewWriter(f)
+		for _, rel := range batchSafe {
+			if _, wErr := fmt.Fprintln(bw, rel); wErr != nil {
+				_ = f.Close()
+				s.Close()
+				return nil, wErr
+			}
+		}
+		if flushErr := errors.Join(bw.Flush(), f.Close()); flushErr != nil {
+			s.Close()
+			return nil, flushErr
+		}
+
+		cmd, cmdErr := s.Cmd(ctx, "delete", "--files-from-raw", listFile, "--no-traverse", "--", ep.Path)
+		if cmdErr != nil {
+			s.Close()
+			return nil, cmdErr
+		}
+		_, stderr, runErr := limitedOutputWithStderr(cmd, 64<<10)
+		s.Close()
+		if runErr != nil && !isRcloneNotFound(stderr) {
+			if ctx.Err() != nil {
+				return errs, ctx.Err()
+			}
+			// Batch command failed; fall back to individual deletes for exact per-file status.
+			individual = append(individual, batchSafe...)
+		}
+	}
+
+	for _, rel := range individual {
+		if ctx.Err() != nil {
+			return errs, ctx.Err()
+		}
+		if delErr := c.DeletePath(ctx, rootTrim+"/"+rel, false, opts); delErr != nil {
+			errs[rel] = delErr
+		}
+	}
+	return errs, nil
 }
 
 // RemoveEmptyDir removes a directory only if it is empty.
@@ -556,6 +746,9 @@ func (c Config) MovePath(ctx context.Context, srcVirtual, dstVirtual string, isD
 	}
 	if err != nil {
 		return err
+	}
+	if isStorageRootPath(srcVirtual, srcEp) || isStorageRootPath(dstVirtual, dstEp) {
+		return errors.New("禁止移动存储根目录，请选择根目录下的具体文件或文件夹")
 	}
 	if srcEp.ReadOnly || dstEp.ReadOnly {
 		return errors.New("只读存储不支持移动操作")
@@ -857,9 +1050,10 @@ type CheckOptions struct {
 	BwLimit       string
 	TPSLimit      float64
 	TPSLimitBurst int
-	ModifyWindow  string
-	FastList      bool
-	UserAgent     string
+	ModifyWindow   string
+	FastList       bool
+	FollowSymlinks bool
+	UserAgent      string
 	IOTimeout     string
 	ConTimeout    string
 	ProxyURL      string
@@ -941,7 +1135,7 @@ func (c Config) Check(ctx context.Context, src, dst string, opt CheckOptions, em
 
 	srcArg := srcEp.Path
 	if srcEp.IsLocal {
-		srcArg, err = s.diskWithMode(srcSub, diskReadOnly, useChecksum || useCryptCheck)
+		srcArg, err = s.diskWithOptions(srcSub, diskReadOnly, useChecksum || useCryptCheck, opt.FollowSymlinks)
 		if err != nil {
 			return nil, err
 		}
@@ -1130,10 +1324,11 @@ type BisyncOptions struct {
 	WorkDir              string
 	ForceResync          bool
 	ResyncMode           string // newer | older | path1 | path2 | larger | smaller
-	MaxDelete            int    // >0 limits max deletes (--max-delete)
+	MaxDelete            int    // 0: rclone default (50%); 1..100: safety abort percentage (--max-delete)
 	Force                bool
 	TrackRenames         bool
 	DryRun               bool
+	BackupDir            string // relative path under path1/path2 roots for --backup-dir1/--backup-dir2
 	Transfers            int
 	Checkers             int
 	Retries              int
@@ -1187,7 +1382,7 @@ func (c Config) Bisync(ctx context.Context, path1, path2 string, opt BisyncOptio
 		return nil, err
 	}
 	if ep1.ReadOnly || ep2.ReadOnly {
-		return nil, errors.New("双向同步的两端都必须支持读写，不能使用只读 HTTP 存储")
+		return nil, errors.New("双向同步的两端都必须支持读写，不能使用只读存储（如 HTTP / Archive）")
 	}
 	if strings.TrimSpace(opt.WorkDir) == "" {
 		return nil, errors.New("缺少双向同步状态目录")
@@ -1288,6 +1483,13 @@ func (c Config) Bisync(ctx context.Context, path1, path2 string, opt BisyncOptio
 	}
 	if opt.DryRun {
 		args = append(args, "--dry-run")
+	} else if opt.ConflictPolicy != 2 {
+		if bd := strings.TrimSpace(opt.BackupDir); bd != "" {
+			args = append(args,
+				"--backup-dir1", joinRcloneRemotePath(arg1, bd),
+				"--backup-dir2", joinRcloneRemotePath(arg2, bd),
+			)
+		}
 	}
 	if opt.CreateEmptySrcDirs {
 		args = append(args, "--create-empty-src-dirs")
@@ -1379,7 +1581,7 @@ func (c Config) Bisync(ctx context.Context, path1, path2 string, opt BisyncOptio
 					Updated: strings.Contains(m.Msg, "replaced"),
 					Reason:  "双向同步复制",
 				})
-			case strings.HasPrefix(m.Msg, "Deleted") || (opt.DryRun && strings.Contains(m.Msg, "Skipped delete")):
+			case strings.HasPrefix(m.Msg, "Deleted") || strings.HasPrefix(m.Msg, "Moved into backup dir") || (opt.DryRun && strings.Contains(m.Msg, "Skipped delete")):
 				delete(failed, obj)
 				emit(Event{
 					File:   obj,
@@ -1387,6 +1589,9 @@ func (c Config) Bisync(ctx context.Context, path1, path2 string, opt BisyncOptio
 					Reason: "delete",
 				})
 			case strings.HasPrefix(m.Msg, "Moved") || (opt.DryRun && strings.Contains(m.Msg, "Skipped move")):
+				if opt.BackupDir != "" && !opt.TrackRenames && m.Msg == "Moved (server-side)" {
+					continue
+				}
 				delete(failed, obj)
 				emit(Event{
 					File:   obj,
@@ -1725,29 +1930,12 @@ type CopyURLOptions struct {
 	NoClobber    bool
 }
 
-func validateCopyURLTarget(rawURL string) error {
-	rawURL = strings.TrimSpace(rawURL)
-	if rawURL == "" || len(rawURL) > 2048 {
-		return errors.New("请输入有效的 HTTP/HTTPS 下载链接")
-	}
-	u, err := url.Parse(rawURL)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
-		return errors.New("仅支持有效的 HTTP/HTTPS 下载链接")
-	}
-	host := strings.ToLower(u.Hostname())
-	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
-		return errors.New("出于安全限制，禁止拉取本机回环地址")
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
-			return errors.New("出于安全限制，禁止拉取回环或链路本地地址")
-		}
-	}
-	return nil
-}
-
 // CopyURL downloads an HTTP(S) URL directly into dstDirVirtual using `rclone copyurl`.
 func (c Config) CopyURL(ctx context.Context, rawURL, dstDirVirtual string, opt CopyURLOptions, opts SessionOptions) (string, error) {
+	return c.copyURL(ctx, rawURL, dstDirVirtual, opt, opts, nil)
+}
+
+func (c Config) copyURL(ctx context.Context, rawURL, dstDirVirtual string, opt CopyURLOptions, opts SessionOptions, transport http.RoundTripper) (string, error) {
 	if err := validateCopyURLTarget(rawURL); err != nil {
 		return "", err
 	}
@@ -1786,14 +1974,22 @@ func (c Config) CopyURL(ctx context.Context, rawURL, dstDirVirtual string, opt C
 		}
 	}
 
+	if transport == nil {
+		transport = &copyURLTransport{proxyURL: s.proxyURL}
+	}
+	source, err := newCopyURLSource(ctx, strings.TrimSpace(rawURL), transport)
+	if err != nil {
+		return "", err
+	}
+	defer source.Close()
 	args := []string{"copyurl"}
 	if opt.NoClobber {
 		args = append(args, "--no-clobber")
 	}
 	if fileName != "" {
-		args = append(args, "--", rawURL, joinRcloneRemotePath(dstArg, fileName))
+		args = append(args, "--", source.URL, joinRcloneRemotePath(dstArg, fileName))
 	} else {
-		args = append(args, "--auto-filename", "--header-filename", "--print-filename", "--", rawURL, dstArg)
+		args = append(args, "--auto-filename", "--header-filename", "--print-filename", "--", source.URL, dstArg)
 	}
 	cmd, err := s.Cmd(ctx, args...)
 	if err != nil {
@@ -1801,6 +1997,12 @@ func (c Config) CopyURL(ctx context.Context, rawURL, dstDirVirtual string, opt C
 	}
 	out, stderr, err := limitedOutputWithStderr(cmd, 64<<10)
 	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		if source.Error() != nil {
+			return "", source.Error()
+		}
 		return "", classifyRcloneError(dstEp.Backend, stderr)
 	}
 	if fileName != "" {

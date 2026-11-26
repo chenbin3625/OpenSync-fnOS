@@ -116,7 +116,7 @@ export function ExcludeTree({
         aria-label={ariaLabel}
         aria-labelledby={ariaLabelledBy}
       >
-        请先在「基础与路径」中选择引擎和源目录
+        请先在「基础与路径」中选择源目录
       </div>
     );
   }

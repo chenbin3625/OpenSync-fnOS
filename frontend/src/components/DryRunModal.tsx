@@ -257,7 +257,7 @@ export function DryRunModal({
                 <strong>{result.updateCount}</strong>
                 <span className="muted">{formatSize(result.updateSize)}</span>
               </div>
-              {result.method === 1 && (
+              {(result.method === 1 || result.method === 3) && (
                 <div className="dry-run-kpi is-danger">
                   <span className="dry-run-kpi-label">预计删除</span>
                   <strong>{result.deleteCount}</strong>

@@ -16,41 +16,104 @@ import (
 )
 
 var (
-	alistClientList   = make(map[int64]*AlistClient)
-	alistClientListMu sync.RWMutex
-	alistClientLoads  = make(map[int64]*alistClientLoad)
-	// alistClientRemovals counts RemoveClient calls per id. A load that read
-	// the DB row before the row was deleted would otherwise cache a client for
-	// an id that no longer exists; finishAlistClientLoad compares epochs and
-	// discards such a client instead.
-	alistClientRemovals = make(map[int64]uint64)
-	// alistClientUpdates counts UpdateClient cache commits per id so a load that
-	// started before UpdateClient cannot overwrite or outlive the new credentials
-	// even if the new client was concurrently evicted.
-	alistClientUpdates = make(map[int64]uint64)
-	// alistMutationMu serializes DB mutations (AddClient, UpdateClient,
-	// RemoveClient) with their corresponding in-memory cache updates and
-	// finishAlistClientLoad. Lock order: alistRefMu -> alistMutationMu -> alistClientListMu.
+	// alistRefMu serializes (validate storage exists -> insert/update job) against
+	// (check job references -> remove storage) and native engine initialization.
+	// Lock order: alistRefMu -> alistMutationMu.
+	alistRefMu      sync.Mutex
 	alistMutationMu sync.Mutex
 )
 
-type alistClientLoad struct {
-	client      *AlistClient
-	baseline    *AlistClient
-	epoch       uint64
-	updateEpoch uint64
-	err         error
-	done        chan struct{}
+const legacyOpenListJobDisabledMsg = "该任务关联旧版 OpenList 引擎，已不再支持并自动停用，请删除后重新创建"
+
+// legacyOpenListAlistIDs returns the set of stored alist row IDs that do not
+// belong to the built-in rclone engine (rclone://native).
+func legacyOpenListAlistIDs() map[int64]bool {
+	rows, err := mapper.GetAlistList()
+	if err != nil {
+		return nil
+	}
+	legacy := make(map[int64]bool)
+	for _, row := range rows {
+		if util.StringValue(row["url"]) != native.EngineURL {
+			legacy[util.ToInt64(row["id"])] = true
+		}
+	}
+	return legacy
 }
 
-// GetClientList returns all alist entries without token, enriched with live
-// health status and concurrency queue stats.
+// isLegacyOpenListAlistID reports whether alistID points to a stored legacy
+// OpenList/AList engine row (url != rclone://native).
+func isLegacyOpenListAlistID(alistID int64) bool {
+	if alistID <= 0 {
+		return false
+	}
+	row, err := alistDeps.GetAlistByID(alistID)
+	if err != nil || row == nil {
+		return false
+	}
+	return util.StringValue(row["url"]) != native.EngineURL
+}
+
+// EnsureNativeEngine guarantees the built-in rclone storage engine record exists
+// in SQLite and returns its row ID.
+func EnsureNativeEngine() (int64, error) {
+	rows, err := mapper.GetAlistList()
+	if err != nil {
+		return 0, fmt.Errorf("get alist list: %w", err)
+	}
+	for _, row := range rows {
+		if util.StringValue(row["url"]) == native.EngineURL {
+			return util.ToInt64(row["id"]), nil
+		}
+	}
+
+	alistRefMu.Lock()
+	defer alistRefMu.Unlock()
+	alistMutationMu.Lock()
+	defer alistMutationMu.Unlock()
+
+	rows, err = mapper.GetAlistList()
+	if err != nil {
+		return 0, fmt.Errorf("get alist list: %w", err)
+	}
+	for _, row := range rows {
+		if util.StringValue(row["url"]) == native.EngineURL {
+			return util.ToInt64(row["id"]), nil
+		}
+	}
+
+	newID, err := mapper.AddAlistWithConcurrency("内置存储", native.EngineURL, "rclone", "{}", 1)
+	if err != nil {
+		// Handle possible race if UNIQUE constraint was hit concurrently.
+		if retryRows, listErr := mapper.GetAlistList(); listErr == nil {
+			for _, row := range retryRows {
+				if util.StringValue(row["url"]) == native.EngineURL {
+					return util.ToInt64(row["id"]), nil
+				}
+			}
+		}
+		return 0, fmt.Errorf("create built-in rclone engine: %w", err)
+	}
+	RemoveEngineHealth(newID)
+	return newID, nil
+}
+
+// GetClientList returns the built-in rclone engine entry without credentials,
+// enriched with live health status, remote metadata, and concurrency stats.
+// Legacy external OpenList/AList rows are filtered out.
 func GetClientList() ([]map[string]interface{}, error) {
-	clientList, err := mapper.GetAlistList()
+	if _, err := EnsureNativeEngine(); err != nil {
+		return nil, err
+	}
+	rawList, err := mapper.GetAlistList()
 	if err != nil {
 		return nil, fmt.Errorf("get alist list: %w", err)
 	}
-	for _, client := range clientList {
+	clientList := make([]map[string]interface{}, 0, 1)
+	for _, client := range rawList {
+		if util.StringValue(client["url"]) != native.EngineURL {
+			continue
+		}
 		decorateNative(client)
 		delete(client, "token")
 		alistID := util.ToInt64(client["id"])
@@ -61,225 +124,9 @@ func GetClientList() ([]map[string]interface{}, error) {
 		client["activeJobs"] = active
 		client["queuedJobs"] = queued
 		client["health"] = GetEngineHealth(alistID)
+		clientList = append(clientList, client)
 	}
 	return clientList, nil
-}
-
-func GetClientByIDContext(ctx context.Context, alistID int64) (*AlistClient, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	alistClientListMu.RLock()
-	client, ok := alistClientList[alistID]
-	alistClientListMu.RUnlock()
-	if ok {
-		return client, nil
-	}
-
-	load, owner := beginAlistClientLoad(alistID)
-	if !owner {
-		return awaitAlistClientLoad(ctx, load)
-	}
-
-	alist, err := alistDeps.GetAlistByID(alistID)
-	if err != nil {
-		finishAlistClientLoad(alistID, load, nil, err)
-		return nil, alistClientLoadError(err)
-	}
-
-	// The load is shared by every concurrent caller for this id, so it must
-	// not inherit the owner's cancellation: one aborted request would fail all
-	// waiters with a connect error although their own contexts are fine. The
-	// load runs detached, bounded by alistValidationTimeout, and every caller
-	// (owner included) only waits on it with its own context.
-	//
-	// Resolve the dependency now instead of inside the goroutine: tests swap
-	// the package-level alistDeps when they return, and a detached goroutine
-	// reading it later is a data race.
-	newClient := alistDeps.NewAlistClientCtx
-	go runAlistClientLoad(context.WithoutCancel(ctx), alistID, alist, load, newClient)
-	return awaitAlistClientLoad(ctx, load)
-}
-
-func runAlistClientLoad(ctx context.Context, alistID int64, alist map[string]interface{}, load *alistClientLoad, newClient func(context.Context, string, string, int64) (*AlistClient, error)) {
-	ctx, cancel := context.WithTimeout(ctx, alistValidationTimeout)
-	defer cancel()
-	client, err := newClient(
-		ctx,
-		fmt.Sprintf("%v", alist["url"]),
-		fmt.Sprintf("%v", alist["token"]),
-		alistID,
-	)
-	if err != nil {
-		finishAlistClientLoad(alistID, load, nil, err)
-		return
-	}
-	finishAlistClientLoad(alistID, load, client, nil)
-}
-
-func awaitAlistClientLoad(ctx context.Context, load *alistClientLoad) (*AlistClient, error) {
-	select {
-	case <-load.done:
-	case <-ctx.Done():
-		return nil, alistClientLoadError(ctx.Err())
-	}
-	if load.err != nil {
-		return nil, alistClientLoadError(load.err)
-	}
-	return load.client, nil
-}
-
-func beginAlistClientLoad(alistID int64) (*alistClientLoad, bool) {
-	alistClientListMu.Lock()
-	defer alistClientListMu.Unlock()
-
-	if client, ok := alistClientList[alistID]; ok {
-		load := &alistClientLoad{client: client, done: make(chan struct{})}
-		close(load.done)
-		return load, false
-	}
-	if load, ok := alistClientLoads[alistID]; ok {
-		return load, false
-	}
-
-	load := &alistClientLoad{
-		baseline:    alistClientList[alistID],
-		epoch:       alistClientRemovals[alistID],
-		updateEpoch: alistClientUpdates[alistID],
-		done:        make(chan struct{}),
-	}
-	alistClientLoads[alistID] = load
-	return load, true
-}
-
-func finishAlistClientLoad(alistID int64, load *alistClientLoad, client *AlistClient, err error) {
-	var stale *AlistClient
-	alistMutationMu.Lock()
-	alistClientListMu.Lock()
-	load.err = err
-	if err == nil && client != nil && alistClientRemovals[alistID] != load.epoch {
-		// The engine was removed while we were loading it.
-		load.client = nil
-		load.err = publicError(msg.T(msg.AlistNotFound))
-		stale = client
-	} else if err == nil && client != nil {
-		current := alistClientList[alistID]
-		if alistClientUpdates[alistID] != load.updateEpoch {
-			// UpdateClient mutated this engine while we were loading.
-			if current != nil {
-				load.client = current
-			} else {
-				load.client = nil
-				load.err = publicError(msg.T(msg.AlistConnectFail))
-			}
-			stale = client
-		} else if current != nil && current != load.baseline {
-			// A newer client was stored (e.g. via UpdateClient) while we were
-			// loading; keep the fresh one and discard the stale client we built.
-			load.client = current
-			stale = client
-		} else {
-			alistClientList[alistID] = client
-			load.client = client
-		}
-	} else {
-		load.client = client
-	}
-	delete(alistClientLoads, alistID)
-	alistClientListMu.Unlock()
-	alistMutationMu.Unlock()
-	close(load.done)
-	if stale != nil {
-		stale.Close()
-	}
-}
-
-func swapCachedAlistClient(alistID int64, client *AlistClient) *AlistClient {
-	alistClientListMu.Lock()
-	previous := alistClientList[alistID]
-	alistClientList[alistID] = client
-	alistClientUpdates[alistID]++
-	alistClientListMu.Unlock()
-	if previous == client {
-		return nil
-	}
-	return previous
-}
-
-func storeAlistClient(alistID int64, client *AlistClient) {
-	if previous := swapCachedAlistClient(alistID, client); previous != nil {
-		previous.Close()
-	}
-}
-
-func removeCachedAlistClient(alistID int64) {
-	var previous *AlistClient
-	alistClientListMu.Lock()
-	previous = alistClientList[alistID]
-	delete(alistClientList, alistID)
-	alistClientListMu.Unlock()
-	if previous != nil {
-		previous.Close()
-	}
-}
-
-// removeCachedAlistClientIf evicts the cached client for alistID only when it
-// is still client. A task holding an old client whose token was just replaced
-// via UpdateClient gets a 401; evicting by id alone would drop (and close) the
-// new, valid client instead of the stale one.
-func removeCachedAlistClientIf(alistID int64, client *AlistClient) {
-	alistClientListMu.Lock()
-	current, ok := alistClientList[alistID]
-	evict := ok && current == client
-	if evict {
-		delete(alistClientList, alistID)
-	}
-	alistClientListMu.Unlock()
-	if evict {
-		client.Close()
-	}
-}
-
-func alistClientLoadError(err error) error {
-	if err == nil {
-		return nil
-	}
-	// "Not found" is already a sanitized, actionable public message — pass it
-	// through so a stale client ID gets a meaningful error. Everything else may
-	// include internal host/IP/port details: log it and return only a generic
-	// message so network topology is not leaked through the API response.
-	if err.Error() == msg.T(msg.AlistNotFound) {
-		return publicError(msg.T(msg.AlistNotFound))
-	}
-	log.Printf("alist client load failed: %v", err)
-	return publicError(msg.T(msg.AlistConnectFail))
-}
-
-func normalizeAlistInput(alist map[string]interface{}) (string, error) {
-	remark, _ := alist["remark"]
-	if remark != nil {
-		if s, ok := remark.(string); ok && strings.TrimSpace(s) == "" {
-			alist["remark"] = nil
-		}
-	}
-
-	urlStr := strings.TrimRight(fmt.Sprintf("%v", alist["url"]), "/")
-	if err := validateAlistURL(urlStr); err != nil {
-		return "", publicError(err.Error())
-	}
-	alist["url"] = urlStr
-	return urlStr, nil
-}
-
-func validateAlistURL(rawURL string) error {
-	if err := util.ValidateHTTPURL(rawURL, msg.T(msg.AlistURLInvalid)); err != nil {
-		return err
-	}
-	u, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil || !validateHTTPURLHostPort(u) {
-		return fmt.Errorf("%s", msg.T(msg.AlistURLInvalid))
-	}
-	return nil
 }
 
 func validateHTTPURLHostPort(u *url.URL) bool {
@@ -299,27 +146,6 @@ func validateHTTPURLHostPort(u *url.URL) bool {
 		}
 	}
 	return true
-}
-
-func normalizeAlistToken(alist map[string]interface{}, required bool) (string, bool, error) {
-	token, ok := alist["token"]
-	if !ok || token == nil {
-		if required {
-			return "", false, publicError(msg.T(msg.AlistTokenRequired))
-		}
-		delete(alist, "token")
-		return "", false, nil
-	}
-	tokenStr := strings.TrimSpace(fmt.Sprintf("%v", token))
-	if tokenStr == "" || tokenStr == "<nil>" {
-		if required {
-			return "", false, publicError(msg.T(msg.AlistTokenRequired))
-		}
-		delete(alist, "token")
-		return "", false, nil
-	}
-	alist["token"] = tokenStr
-	return tokenStr, true, nil
 }
 
 func normalizeAlistMaxConcurrentJobs(alist map[string]interface{}) (int, bool, error) {
@@ -360,19 +186,9 @@ func parseStrictNonNegativeInt(raw interface{}) (int, bool) {
 	}
 }
 
-// UpdateClient updates an AList client
+// UpdateClient updates the built-in rclone engine's remark and concurrency cap.
 func UpdateClient(alist map[string]interface{}) error {
 	alistID := util.ToInt64(alist["id"])
-	urlStr, err := normalizeAlistInput(alist)
-	if err != nil {
-		return err
-	}
-
-	token, hasToken, err := normalizeAlistToken(alist, false)
-	if err != nil {
-		return err
-	}
-
 	maxConcurrentJobs, hasMaxConcurrent, err := normalizeAlistMaxConcurrentJobs(alist)
 	if err != nil {
 		return err
@@ -384,69 +200,27 @@ func UpdateClient(alist map[string]interface{}) error {
 			return err
 		}
 	}
-
-	if alistOld["url"] == "rclone://native" {
-		return publicError("请通过原生存储设置修改引擎")
-	}
-	oldURL := fmt.Sprintf("%v", alistOld["url"])
-	var client *AlistClient
-	if oldURL != urlStr || hasToken {
-		if !hasToken {
-			return publicError(msg.T(msg.WithoutToken))
-		}
-		// Validate with alistID=0: a bad new token makes /api/me answer 401, and
-		// checkAlistCode would evict the cached client for alistID — the one
-		// that still works with the old, stored credentials. The id is only
-		// attached once validation succeeded.
-		client, err = alistDeps.NewAlistClient(urlStr, token, 0)
-		if err != nil {
-			log.Printf("alist client update failed: %v", err)
-			return publicError(msg.T(msg.AlistConnectFail))
-		}
-		client.AlistID = alistID
+	if util.StringValue(alistOld["url"]) != native.EngineURL {
+		return publicError("当前版本仅支持内置 rclone 存储引擎")
 	}
 
-	var tokenPtr *string
-	if hasToken {
-		tokenPtr = &token
+	remarkStr := defaultNativeRemark(util.StringValue(alistOld["remark"]))
+	if remark, ok := alist["remark"]; ok && remark != nil {
+		trimmed := strings.TrimSpace(fmt.Sprintf("%v", remark))
+		if trimmed != "" {
+			remarkStr = trimmed
+		}
 	}
 	var maxConcurrentPtr *int
 	if hasMaxConcurrent {
 		maxConcurrentPtr = &maxConcurrentJobs
 	}
-	remarkStr := ""
-	remark, _ := alist["remark"]
-	if remark != nil {
-		remarkStr = fmt.Sprintf("%v", remark)
-	}
+
 	alistMutationMu.Lock()
-	currentRow, err := mapper.GetAlistByID(alistID)
-	if err != nil {
-		alistMutationMu.Unlock()
-		if client != nil {
-			client.Close()
-		}
-		return publicErrorIf(err, msg.T(msg.AlistNotFound))
-	}
-	currentOldURL := fmt.Sprintf("%v", currentRow["url"])
-	if (currentOldURL != urlStr || hasToken) && client == nil {
-		alistMutationMu.Unlock()
-		return publicError(msg.T(msg.WithoutToken))
-	}
-	if err := mapper.UpdateAlistWithConcurrency(alistID, remarkStr, urlStr, tokenPtr, maxConcurrentPtr); err != nil {
-		alistMutationMu.Unlock()
-		if client != nil {
-			client.Close()
-		}
-		return fmt.Errorf("update alist: %w", err)
-	}
-	var previous *AlistClient
-	if client != nil {
-		previous = swapCachedAlistClient(alistID, client)
-	}
+	err = mapper.UpdateAlistWithConcurrency(alistID, remarkStr, native.EngineURL, nil, maxConcurrentPtr)
 	alistMutationMu.Unlock()
-	if previous != nil {
-		previous.Close()
+	if err != nil {
+		return fmt.Errorf("update built-in engine: %w", err)
 	}
 	if hasMaxConcurrent {
 		engineQueue.RefreshLimit(alistID, maxConcurrentJobs)
@@ -454,71 +228,23 @@ func UpdateClient(alist map[string]interface{}) error {
 	return nil
 }
 
-// AddClient adds a new AList client
-func AddClient(alist map[string]interface{}) error {
-	urlStr, err := normalizeAlistInput(alist)
-	if err != nil {
-		return err
-	}
-	token, _, err := normalizeAlistToken(alist, true)
-	if err != nil {
-		return err
-	}
-	maxConcurrentJobs, _, err := normalizeAlistMaxConcurrentJobs(alist)
-	if err != nil {
-		return err
-	}
-
-	client, err := alistDeps.NewAlistClient(urlStr, token, 0)
-	if err != nil {
-		log.Printf("Failed to add alist client: %v", err)
-		return publicError(msg.T(msg.AlistConnectFail))
-	}
-
-	remarkStr := ""
-	if alist["remark"] != nil {
-		remarkStr = fmt.Sprintf("%v", alist["remark"])
-	}
-
-	alistMutationMu.Lock()
-	newID, err := mapper.AddAlistWithConcurrency(remarkStr, urlStr, client.User, token, maxConcurrentJobs)
-	if err != nil {
-		alistMutationMu.Unlock()
-		// The validated client is never cached on this path; release its
-		// connection pool (and any HTTP/3 UDP socket) now instead of at GC.
-		client.Close()
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			return publicError(msg.T(msg.AlistExists))
-		}
-		return fmt.Errorf("add alist: %w", err)
-	}
-
-	client.AlistID = newID
-	previous := swapCachedAlistClient(newID, client)
-	alistMutationMu.Unlock()
-	if previous != nil {
-		previous.Close()
-	}
-	return nil
+// AddClient is disabled in pure-rclone mode; remote storages are managed via /svr/native/*.
+func AddClient(_ map[string]interface{}) error {
+	return publicError("当前版本仅支持内置 rclone 存储，请在存储管理中添加远程存储")
 }
 
-// alistRefMu serializes (validate alist exists → insert job) against
-// (check job references → remove alist), closing the TOCTOU window where a job
-// could be created for an alist that RemoveClient is deleting.
-var alistRefMu sync.Mutex
-
-// RemoveClient removes an AList client
+// RemoveClient refuses to delete the built-in rclone engine while still allowing
+// cleanup of unused legacy rows if requested.
 func RemoveClient(alistID int64) error {
 	alistRefMu.Lock()
 	defer alistRefMu.Unlock()
 	alistMutationMu.Lock()
-	var previous *AlistClient
-	defer func() {
-		alistMutationMu.Unlock()
-		if previous != nil {
-			previous.Close()
-		}
-	}()
+	defer alistMutationMu.Unlock()
+
+	if row, err := mapper.GetAlistByID(alistID); err == nil && util.StringValue(row["url"]) == native.EngineURL {
+		return publicError("内置存储引擎不可删除")
+	}
+
 	count, err := mapper.CountJobsByAlistID(alistID)
 	if err != nil {
 		return fmt.Errorf("count jobs by alist: %w", err)
@@ -526,48 +252,31 @@ func RemoveClient(alistID int64) error {
 	if count > 0 {
 		return publicError(msg.T(msg.AlistInUse))
 	}
-
-	// Delete the row before dropping the cache: in the other order a
-	// concurrent GetClientByIDContext could read the still-present row and
-	// re-cache a client for the id being removed. The removal epoch covers a
-	// load that read the row just before the delete.
 	if err := mapper.RemoveAlist(alistID); err != nil {
 		return fmt.Errorf("remove alist: %w", err)
 	}
-	previous = markAlistClientRemovedLocked(alistID)
 	RemoveEngineHealth(alistID)
 	return nil
 }
 
-// markAlistClientRemoved evicts the cached client for alistID and bumps its
-// removal epoch so an in-flight load discards the client it is building.
-func markAlistClientRemoved(alistID int64) {
-	if previous := markAlistClientRemovedLocked(alistID); previous != nil {
-		previous.Close()
-	}
-}
-
-func markAlistClientRemovedLocked(alistID int64) *AlistClient {
-	alistClientListMu.Lock()
-	alistClientRemovals[alistID]++
-	previous := alistClientList[alistID]
-	delete(alistClientList, alistID)
-	alistClientListMu.Unlock()
-	return previous
-}
-
-// TestClient tests connectivity to an existing AList engine by creating a fresh
-// connection (bypassing the cache) so we know the engine is reachable right now.
+// TestClient tests connectivity to the built-in rclone storage engine.
 func TestClient(ctx context.Context, alistID int64) error {
 	_, err := TestClientWithHealth(ctx, alistID)
 	return err
 }
 
-// TestClientWithHealth probes connectivity and mounted storages on an existing
-// AList engine, updates the health cache, and returns the EngineHealth snapshot.
+// TestClientWithHealth probes the built-in rclone engine and all configured
+// storages, updates the health cache, and returns the EngineHealth snapshot.
 func TestClientWithHealth(ctx context.Context, alistID int64) (*EngineHealth, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if alistID <= 0 {
+		id, err := EnsureNativeEngine()
+		if err != nil {
+			return nil, err
+		}
+		alistID = id
 	}
 	alist, err := alistDeps.GetAlistByID(alistID)
 	if err != nil {
@@ -575,12 +284,9 @@ func TestClientWithHealth(ctx context.Context, alistID int64) (*EngineHealth, er
 			return nil, err
 		}
 	}
-	// util.StringValue, not a bare type assertion: a DB row can carry a
-	// non-string (or NULL) here, and an assertion would silently degrade the
-	// token to "" and test the engine unauthenticated.
 	urlStr := util.StringValue(alist["url"])
-	if urlStr == "" {
-		return nil, publicError(msg.T(msg.AlistURLInvalid))
+	if urlStr != native.EngineURL {
+		return nil, publicError("旧版 OpenList 引擎已不再支持")
 	}
 	row := make(map[string]interface{}, len(alist)+1)
 	for k, v := range alist {
@@ -591,41 +297,39 @@ func TestClientWithHealth(ctx context.Context, alistID int64) (*EngineHealth, er
 	}
 	health := probeEngineRow(ctx, row, false)
 	if health.Status != "online" {
-		log.Printf("alist test failed: alistID=%d: %s", alistID, health.Error)
-		if urlStr == "rclone://native" && strings.TrimSpace(health.Error) != "" {
+		log.Printf("native storage engine test failed: alistID=%d: %s", alistID, health.Error)
+		if strings.TrimSpace(health.Error) != "" {
 			return health, publicError(health.Error)
-		}
-		if health.Error == msg.T(msg.AlistUnAuth) {
-			return health, publicError(msg.T(msg.AlistUnAuth))
 		}
 		return health, publicError(msg.T(msg.AlistConnectFail))
 	}
 	return health, nil
 }
 
-// GetChildPath gets child directory paths for path selector
+// GetChildPath gets child directory paths for the path selector via built-in rclone.
 func GetChildPath(ctx context.Context, alistID int64, path string) ([]map[string]string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if alistID <= 0 {
+		id, err := EnsureNativeEngine()
+		if err != nil {
+			return nil, err
+		}
+		alistID = id
+	}
 	cfg, err := loadNative(alistID)
 	if err != nil {
-		return nil, err
+		return nil, publicErrorIf(err, msg.T(msg.AlistNotFound))
 	}
-	if cfg != nil {
-		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-		defer cancel()
-		list, e := cfg.ListWithOptions(ctx, path, native.SessionOptions{ProxyURL: globalNativeProxyURL()})
-		if e != nil {
-			return nil, publicError(e.Error())
-		}
-		return list, nil
+	if cfg == nil {
+		return nil, publicError("旧版 OpenList 引擎已不再支持，请使用内置存储路径")
 	}
-	client, err := GetClientByIDContext(ctx, alistID)
-	if err != nil {
-		return nil, err
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	list, e := cfg.ListWithOptions(ctx, path, native.SessionOptions{ProxyURL: globalNativeProxyURL()})
+	if e != nil {
+		return nil, publicError(e.Error())
 	}
-	result, err := client.FilePathList(ctx, path)
-	if err != nil {
-		log.Printf("alist path list failed: alistID=%d path=%q: %v", alistID, path, err)
-		return nil, publicError(msg.T(msg.AlistConnectFail))
-	}
-	return result, nil
+	return list, nil
 }

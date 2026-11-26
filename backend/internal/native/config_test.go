@@ -278,3 +278,107 @@ func TestEncryptedImport(t *testing.T) {
 		t.Fatal("accepted incorrect password")
 	}
 }
+
+func TestRuntimeCredentialModes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+	}{
+		{"s3-env", Config{"s3": {"type": "s3", "provider": "AWS", "env_auth": "true"}}},
+		{"s3-anonymous", Config{"s3": {"type": "s3", "provider": "AWS", "env_auth": "false"}}},
+		{"qingstor-env", Config{"qs": {"type": "qingstor", "env_auth": "true"}}},
+		{"qingstor-anonymous", Config{"qs": {"type": "qingstor", "env_auth": "false"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.cfg.Validate(); err != nil {
+				t.Fatalf("runtime/anonymous credentials should validate: %v", err)
+			}
+		})
+	}
+	for _, tc := range []Config{
+		{"s3": {"type": "s3", "provider": "AWS", "access_key_id": "ak"}},
+		{"s3": {"type": "s3", "provider": "AWS", "secret_access_key": "sk"}},
+		{"s3": {"type": "s3", "env_auth": "invalid"}},
+		{"qs": {"type": "qingstor", "access_key_id": "ak", "secret_access_key": ""}},
+		{"qs": {"type": "qingstor", "env_auth": "invalid"}},
+	} {
+		if err := tc.Validate(); err == nil {
+			t.Fatal("partial access credentials must be rejected")
+		}
+	}
+}
+
+func TestOracleProviderValidation(t *testing.T) {
+	for _, provider := range []string{"env_auth", "instance_principal_auth", "resource_principal_auth", "workload_identity_auth", "no_auth", "user_principal_auth"} {
+		cfg := Config{"oci": {"type": "oracleobjectstorage", "provider": provider, "namespace": "ns", "region": "us-phoenix-1"}}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("provider %q should validate: %v", provider, err)
+		}
+	}
+	bad := Config{"oci": {"type": "oracleobjectstorage", "provider": "unknown", "namespace": "ns", "region": "us-phoenix-1"}}
+	if err := bad.Validate(); err == nil {
+		t.Fatal("unknown Oracle provider must be rejected")
+	}
+}
+
+func TestRcloneBackendAliasesImportAndExport(t *testing.T) {
+	cfg, err := ImportSelected(context.Background(), "[g]\ntype = gcs\nanonymous = true\n[o]\ntype = oos\nprovider = no_auth\nnamespace = ns\nregion = us-phoenix-1\n", "", nil)
+	if err != nil || cfg["g"]["type"] != "googlecloudstorage" || cfg["o"]["type"] != "oracleobjectstorage" {
+		t.Fatalf("rclone backend aliases failed to import: %+v, %v", cfg, err)
+	}
+	out, err := cfg.ExportINI(context.Background(), nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	imported, err := ImportSelected(context.Background(), out, "", nil)
+	if err != nil || imported["g"]["anonymous"] != "true" || imported["o"]["provider"] != "no_auth" {
+		t.Fatalf("backend alias round trip failed: %+v, %v", imported, err)
+	}
+}
+
+func TestExportINIConvertsLocalCompositeTargets(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "local disk")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TRIM_PKGTMP", "")
+	t.Setenv("TRIM_DATA_ACCESSIBLE_PATHS", root)
+	virtual, err := virtualLocal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := Local + ":" + strings.TrimPrefix(virtual, "/"+Local+"/")
+	cfg := Config{
+		"disk":    {"type": "local"},
+		"vault":   {"type": "crypt", "remote": target, "password": "AAAAAAAAAAAAAAAAAAAAAA"},
+		"wrapped": {"type": "alias", "remote": "vault:sub"},
+		"union":   {"type": "union", "upstreams": FormatUnionUpstreams([]UnionUpstream{{Target: target, Suffix: ":ro"}})},
+		"combine": {"type": "combine", "upstreams": FormatCombineUpstreams([]CombineUpstream{{Name: "data", Target: strings.Replace(target, Local+":", "disk:", 1)}})},
+	}
+	out, err := cfg.ExportINI(context.Background(), nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	exported, err := ParseINI(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exported["vault"]["remote"] != root || exported["wrapped"]["remote"] != "vault:sub" {
+		t.Fatalf("wrapper paths exported incorrectly: %s", out)
+	}
+	ups, err := ParseUnionUpstreams(exported["union"]["upstreams"])
+	if err != nil || len(ups) != 1 || ups[0].Target != root || ups[0].Suffix != ":ro" {
+		t.Fatalf("union paths exported incorrectly: %s, %v", out, err)
+	}
+	comb, err := ParseCombineUpstreams(exported["combine"]["upstreams"])
+	if err != nil || len(comb) != 1 || comb[0].Target != root {
+		t.Fatalf("combine paths exported incorrectly: %s, %v", out, err)
+	}
+	if cfg["vault"]["remote"] != target || strings.Contains(out, Local+":") {
+		t.Fatalf("export mutated stored config or retained an internal alias: %s", out)
+	}
+	t.Setenv("TRIM_DATA_ACCESSIBLE_PATHS", "")
+	if _, err := cfg.ExportINI(context.Background(), []string{"wrapped"}, ""); err == nil {
+		t.Fatal("revoked local directory was silently exported")
+	}
+}

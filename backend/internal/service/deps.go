@@ -1,20 +1,14 @@
 package service
 
 import (
-	"context"
 	"opensync/internal/mapper"
-	"time"
 )
 
-// AlistDeps groups the external dependencies used by the alist service layer.
+// AlistDeps groups the external dependencies used by the storage service layer.
 // Production code accesses them through the package-level alistDeps pointer;
 // tests replace the whole struct via SetAlistDepsForTest.
 type AlistDeps struct {
-	GetAlistByID      func(int64) (map[string]interface{}, error)
-	NewAlistClient    func(string, string, int64) (*AlistClient, error)
-	NewAlistClientCtx func(context.Context, string, string, int64) (*AlistClient, error)
-	FileListPageSize  int
-	MaxResponseBytes  int64
+	GetAlistByID func(int64) (map[string]interface{}, error)
 }
 
 // JobDeps groups the external dependencies used by the job / task layer.
@@ -25,15 +19,6 @@ type JobDeps struct {
 	PersistJobTaskItems           func([]map[string]interface{}) error
 	ForEachJobTaskItemsByStatuses func(int64, []int, int, func([]map[string]interface{}) error) error
 	CountJobTaskItemsByStatuses   func(int64, []int) (int64, error)
-	CopyRetryDelay                func(int) time.Duration
-	ScanListRetryDelay            func(int) time.Duration
-	// CopyPollErrorWindow is how long TaskInfo polling for one copy item may
-	// keep failing transiently before the item is declared failed.
-	CopyPollErrorWindow time.Duration
-	// CopyPollMaxBackoff caps the per-item delay between failing polls.
-	CopyPollMaxBackoff time.Duration
-	// Now is the clock used by the copy poller; tests inject a fake one.
-	Now func() time.Time
 }
 
 // NotifyDeps groups the external dependencies used by the notification layer.
@@ -53,11 +38,7 @@ func init() {
 
 func newDefaultAlistDeps() *AlistDeps {
 	return &AlistDeps{
-		GetAlistByID:      mapper.GetAlistByID,
-		NewAlistClient:    NewAlistClient,
-		NewAlistClientCtx: NewAlistClientContext,
-		FileListPageSize:  500,
-		MaxResponseBytes:  loadMaxListResponseBytes(),
+		GetAlistByID: mapper.GetAlistByID,
 	}
 }
 
@@ -69,11 +50,6 @@ func newDefaultJobDeps() *JobDeps {
 		PersistJobTaskItems:           mapper.AddJobTaskItemMany,
 		ForEachJobTaskItemsByStatuses: mapper.ForEachJobTaskItemsByStatuses,
 		CountJobTaskItemsByStatuses:   mapper.CountJobTaskItemsByStatuses,
-		CopyRetryDelay:                defaultCopyRetryDelay,
-		ScanListRetryDelay:            defaultScanListRetryDelay,
-		CopyPollErrorWindow:           defaultCopyPollErrorWindow,
-		CopyPollMaxBackoff:            defaultCopyPollMaxBackoff,
-		Now:                           time.Now,
 	}
 }
 

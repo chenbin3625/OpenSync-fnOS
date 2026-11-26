@@ -24,12 +24,12 @@ afterAll(() => server.close());
 
 describe("native storage mock API lifecycle", () => {
   it("supports enabling engine, CRUD remotes with secret preservation, testing, and selective import", async () => {
-    // 1. Initial state: disabled with authorized local roots
+    // 1. Initial state: built-in rclone engine is enabled by default with authorized local roots
     const initial = await json<NativeStorageState>(
       await fetch(`${apiUrl}/native/storage`),
     );
     expect(initial.code).toBe(200);
-    expect(initial.data.enabled).toBe(false);
+    expect(initial.data.enabled).toBe(true);
     expect(initial.data.localRoots.length).toBeGreaterThan(0);
 
     // 2. Enable engine with custom remark and concurrency

@@ -4,13 +4,16 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"opensync/internal/config"
 	"opensync/internal/mapper"
+	"opensync/internal/native"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -371,24 +374,46 @@ func TestHistoryExportFormulaEscapeAndBatchDelete(t *testing.T) {
 func TestConfigExportImportRoundTripAndRemapping(t *testing.T) {
 	_, cleanup := setupFullFeatureTestDB(t)
 	defer cleanup()
+	isolateJobClientRegistryForTest(t)
 
-	alistID, _ := mapper.AddAlistWithConcurrency("NAS", "http://10.0.0.2:5244", "u1", "secret-tok", 1)
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "a")
+	dstDir := filepath.Join(tmp, "b")
+	for _, d := range []string{srcDir, dstDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("TRIM_DATA_ACCESSIBLE_PATHS", srcDir+":"+dstDir)
+	t.Setenv("TRIM_PKGTMP", "")
+	roots := native.AuthorizedRoots()
+	var srcV, dstV string
+	for _, r := range roots {
+		if r.Path == srcDir {
+			srcV = "/" + native.Local + "/" + r.ID
+		} else if r.Path == dstDir {
+			dstV = "/" + native.Local + "/" + r.ID
+		}
+	}
+
+	rawCfg := `{"oss":{"type":"s3","provider":"Alibaba","endpoint":"oss-cn-hangzhou.aliyuncs.com","access_key_id":"ak1","secret_access_key":"super_secret_sk"}}`
+	alistID, _ := mapper.AddAlistWithConcurrency("内置存储", native.EngineURL, "rclone", rawCfg, 1)
 	notifyID, _ := mapper.AddNotify(map[string]interface{}{
 		"enable": 1, "method": 6, "params": `{"botToken":"123456:secret_token_9999","chatId":"42"}`,
 	})
 	_, _ = mapper.AddJob(map[string]interface{}{
-		"enable": 1, "remark": "备份任务", "srcPath": `["/a"]`, "dstPath": `["/b"]`,
+		"enable": 1, "remark": "备份任务", "srcPath": fmt.Sprintf("[%q]", srcV), "dstPath": fmt.Sprintf("[%q]", dstV),
 		"alistId": alistID, "method": 0, "isCron": 2,
 		"notifyMode": 1, "notifyIds": "[" + jsonNumberString(notifyID) + "]",
 	})
 
-	// Export without secrets should mask secrets
+	// Export without secrets should redact remote secrets
 	redacted, err := ExportSystemBackup(false)
 	if err != nil {
 		t.Fatalf("ExportSystemBackup(false): %v", err)
 	}
-	if redacted.HasSecrets || redacted.Engines[0]["token"] != "" {
-		t.Fatalf("expected stripped token when includeSecrets=false: %+v", redacted.Engines[0])
+	if redacted.HasSecrets || strings.Contains(fmt.Sprint(redacted.Engines[0]["token"]), "super_secret_sk") {
+		t.Fatalf("expected redacted native secret when includeSecrets=false: %+v", redacted.Engines[0])
 	}
 
 	// Export with secrets and import into a fresh DB
@@ -396,15 +421,15 @@ func TestConfigExportImportRoundTripAndRemapping(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ExportSystemBackup(true): %v", err)
 	}
-	if !full.HasSecrets || full.Engines[0]["token"] != "secret-tok" {
-		t.Fatalf("expected raw token when includeSecrets=true: %+v", full.Engines[0])
+	if !full.HasSecrets || full.Engines[0]["token"] != rawCfg {
+		t.Fatalf("expected raw native config when includeSecrets=true: %+v", full.Engines[0])
 	}
 
 	_, cleanup2 := setupFullFeatureTestDB(t)
 	defer cleanup2()
 
-	// Pre-insert a dummy engine so new imported engine gets ID=2 (testing remapping!)
-	_, _ = mapper.AddAlistWithConcurrency("Existing", "http://10.0.0.99:5244", "x", "y", 0)
+	// Pre-insert a legacy row so the imported native engine gets ID=2 (testing remapping!)
+	_, _ = mapper.AddAlistWithConcurrency("LegacyRow", "http://10.0.0.99:5244", "x", "y", 0)
 	_, _ = mapper.AddNotify(map[string]interface{}{"enable": 1, "method": 1, "params": `{"sendKey":"dummy"}`})
 
 	summary, err := ImportSystemBackup(*full, "skip")
@@ -441,69 +466,69 @@ func TestAppLogsRedactionAndFiltering(t *testing.T) {
 	}
 }
 
-func TestDryRunIncrementalAndFullSyncAreReadOnly(t *testing.T) {
-	var mutatingCalls atomic.Int32
-	listFn := func(dir string, isSrc bool) (FileListResult, bool, error) {
-		if isSrc {
-			return FileListResult{
-				"keep.txt": FileMetadata{Size: 100, Modified: 1000},
-				"new.txt":  FileMetadata{Size: 200, Modified: 2000},
-			}, true, nil
+func TestDryRunFullSyncIsReadOnly(t *testing.T) {
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "src")
+	dstDir := filepath.Join(tmp, "dst")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(srcDir, "keep.txt"), []byte("12345"), 0o644)
+	_ = os.WriteFile(filepath.Join(srcDir, "new.txt"), []byte("new-file"), 0o644)
+	_ = os.WriteFile(filepath.Join(dstDir, "keep.txt"), []byte("12345"), 0o644)
+	_ = os.WriteFile(filepath.Join(dstDir, "extra.txt"), []byte("extra-file"), 0o644)
+	sameTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	_ = os.Chtimes(filepath.Join(srcDir, "keep.txt"), sameTime, sameTime)
+	_ = os.Chtimes(filepath.Join(dstDir, "keep.txt"), sameTime, sameTime)
+
+	t.Setenv("TRIM_DATA_ACCESSIBLE_PATHS", srcDir+":"+dstDir)
+	t.Setenv("TRIM_PKGTMP", "")
+	roots := native.AuthorizedRoots()
+	var srcV, dstV string
+	for _, r := range roots {
+		if r.Path == srcDir {
+			srcV = "/" + native.Local + "/" + r.ID
+		} else if r.Path == dstDir {
+			dstV = "/" + native.Local + "/" + r.ID
 		}
-		return FileListResult{
-			"keep.txt":  FileMetadata{Size: 100, Modified: 1000},
-			"extra.txt": FileMetadata{Size: 300, Modified: 500},
-		}, true, nil
 	}
 
 	sess := &dryRunSession{
 		result: DryRunResult{JobID: 1, Status: "running", Method: 1, Items: []DryRunItem{}},
 	}
-	job := map[string]interface{}{"method": 1, "compareMode": 0, "conflictPolicy": 0}
-	work := scanWork{SrcPath: "/src", DstPath: "/dst"}
-	dryRunFullSyncWork(context.Background(), sess, job, work, nil, nil, listFn)
-
-	if mutatingCalls.Load() != 0 {
-		t.Fatal("dry run should never mutate")
+	job := map[string]interface{}{
+		"method":         1,
+		"compareMode":    0,
+		"conflictPolicy": 0,
+		"srcPath":        []string{srcV},
+		"dstPath":        []string{dstV},
+	}
+	if err := dryRunNativeFullSync(context.Background(), sess, native.Config{}, job); err != nil {
+		t.Fatalf("dryRunNativeFullSync error: %v", err)
 	}
 	snap := sess.snapshot()
 	if snap.CopyCount != 1 || snap.DeleteCount != 1 || snap.TotalItems != 2 {
 		t.Fatalf("unexpected dry run full sync counts: %+v", snap)
 	}
+	if _, err := os.Stat(filepath.Join(dstDir, "extra.txt")); err != nil {
+		t.Fatalf("dry-run modified destination file extra.txt: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dstDir, "new.txt")); !os.IsNotExist(err) {
+		t.Fatalf("dry-run created destination file new.txt: %v", err)
+	}
 }
 
-func TestDashboardOverviewAndEngineHealthListStorages(t *testing.T) {
+func TestDashboardOverviewWithBuiltInEngine(t *testing.T) {
 	_, cleanup := setupFullFeatureTestDB(t)
 	defer cleanup()
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/api/me":
-			_, _ = w.Write([]byte(`{"code":200,"data":{"username":"admin"}}`))
-		case "/api/admin/storage/list":
-			_, _ = w.Write([]byte(`{"code":200,"data":{"content":[{"mount_path":"/nas","driver":"Local","status":"work","disabled":false},{"mount_path":"/cloud","driver":"Aliyundrive","status":"token expired","disabled":false}]}}`))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer srv.Close()
-
-	client, err := NewAlistClientContext(context.Background(), srv.URL, "tok", 1)
+	alistID, err := EnsureNativeEngine()
 	if err != nil {
-		t.Fatalf("NewAlistClientContext: %v", err)
+		t.Fatalf("EnsureNativeEngine: %v", err)
 	}
-	defer client.Close()
-
-	storages, known, err := client.ListStoragesContext(context.Background())
-	if err != nil || !known || len(storages) != 2 {
-		t.Fatalf("ListStoragesContext = (%+v, %v, %v)", storages, known, err)
-	}
-	if storages[0].MountPath != "/nas" || storages[1].Status != "token expired" {
-		t.Fatalf("unexpected storage entries: %+v", storages)
-	}
-
-	alistID, _ := mapper.AddAlistWithConcurrency("E1", srv.URL, "admin", "tok", 1)
 	_, _ = mapper.AddJob(map[string]interface{}{
 		"enable": 1, "remark": "总览任务", "srcPath": `["/a"]`, "dstPath": `["/b"]`,
 		"alistId": alistID, "method": 0, "isCron": 2,
@@ -518,7 +543,6 @@ func TestDashboardOverviewAndEngineHealthListStorages(t *testing.T) {
 		t.Fatalf("expected totalJobs=1, got %+v", kpi)
 	}
 
-	// Verify new config settings validation & defaults
 	cfg := config.GetSystemSettings()
 	if cfg.FullSyncApprovalTimeout < 0 || cfg.EngineHealthCheckInterval < 0 {
 		t.Fatalf("invalid config defaults: %+v", cfg)

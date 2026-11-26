@@ -18,16 +18,7 @@ import (
 func setupNativeTestDB(t *testing.T) func() {
 	t.Helper()
 	_, cleanup := setupFullFeatureTestDB(t)
-	alistClientListMu.Lock()
-	prevClients := alistClientList
-	alistClientList = make(map[int64]*AlistClient)
-	alistClientListMu.Unlock()
-	return func() {
-		alistClientListMu.Lock()
-		alistClientList = prevClients
-		alistClientListMu.Unlock()
-		cleanup()
-	}
+	return cleanup
 }
 
 func TestNativeStorageCRUDAndProtection(t *testing.T) {
@@ -328,13 +319,13 @@ func TestNativeStorageStateEngineSettingsAndHealthInvalidation(t *testing.T) {
 	t.Setenv("TRIM_DATA_ACCESSIBLE_PATHS", rootB+":"+rootA)
 	t.Setenv("TRIM_PKGTMP", "")
 
-	// 1. Before enabling, state reports disabled + authorized roots
+	// 1. In pure-rclone mode, GetNativeStorageState auto-ensures the built-in engine + authorized roots
 	st, err := GetNativeStorageState(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Enabled || st.EngineID != 0 {
-		t.Fatalf("expected disabled native state initially, got %+v", st)
+	if !st.Enabled || st.EngineID <= 0 {
+		t.Fatalf("expected enabled built-in native state initially, got %+v", st)
 	}
 	if len(st.LocalRoots) != 2 || st.LocalRoots[0].Path != rootB || st.LocalRoots[1].Path != rootA {
 		t.Fatalf("expected sorted local roots [%s, %s], got %+v", rootB, rootA, st.LocalRoots)
@@ -531,6 +522,37 @@ func TestNativeStorageInPlaceEditPreservesSecretsAndKnownHosts(t *testing.T) {
 	}
 }
 
+func TestNativeStorageSwitchesFromStaticToRuntimeAndAnonymousCredentials(t *testing.T) {
+	defer setupNativeTestDB(t)()
+	ctx := context.Background()
+	for _, typ := range []string{"s3", "qingstor"} {
+		options := map[string]string{"type": typ, "access_key_id": "static-access", "secret_access_key": "static-secret"}
+		clearSecrets := []string{"secret_access_key"}
+		if typ == "s3" {
+			options["session_token"] = "static-session-token"
+			clearSecrets = append(clearSecrets, "session_token")
+		}
+		if err := SaveNativeStorage(ctx, NativeStorageInput{Name: typ, Options: options}); err != nil {
+			t.Fatal(err)
+		}
+		for _, envAuth := range []string{"true", "false"} {
+			if err := UpdateNativeStorage(ctx, NativeRemoteEditInput{
+				Name: typ, Options: map[string]string{"type": typ, "env_auth": envAuth}, ClearSecrets: clearSecrets,
+			}); err != nil {
+				t.Fatalf("switch %s env_auth=%s: %v", typ, envAuth, err)
+			}
+			_, cfg, err := loadExistingNativeRow()
+			if err != nil {
+				t.Fatal(err)
+			}
+			p := cfg[typ]
+			if p["env_auth"] != envAuth || p["access_key_id"] != "" || p["secret_access_key"] != "" || p["session_token"] != "" {
+				t.Fatalf("static credentials survived %s auth mode change: env_auth=%s", typ, p["env_auth"])
+			}
+		}
+	}
+}
+
 func TestNativeImportPreviewAndSelectiveImport(t *testing.T) {
 	defer setupNativeTestDB(t)()
 	ctx := context.Background()
@@ -676,11 +698,11 @@ func TestNativeStorageSingleTestAndDraftValidation(t *testing.T) {
 			t.Fatalf("expected 1 authorized local root, got %+v (%v)", localRes, err)
 		}
 
-		// Draft missing S3 keys fails validation cleanly before dialing
+		// Draft with partial S3 credentials (access key without secret) fails validation cleanly before dialing
 		if _, err := TestNativeStorage(ctx, NativeStorageTestInput{
-			Options: map[string]string{"type": "s3", "provider": "Alibaba"},
+			Options: map[string]string{"type": "s3", "provider": "Alibaba", "access_key_id": "ak-only"},
 		}); err == nil {
-			t.Fatal("expected missing S3 credentials validation error")
+			t.Fatal("expected partial S3 credentials validation error")
 		}
 	}
 }

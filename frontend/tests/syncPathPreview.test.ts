@@ -577,4 +577,47 @@ describe("syncPathPreview parity with backend path mapping", () => {
       "/本地/sec",
     ]);
   });
+
+  it("detects cross-job conflicts involving bisync (method=3) source paths", () => {
+    const existingJobs = [
+      {
+        id: 10,
+        remark: "双向同步任务",
+        alistId: 7,
+        method: 3,
+        srcPath: '["/本地/Work"]',
+        dstPath: '["/Cloud/Work"]',
+      },
+      {
+        id: 11,
+        remark: "常规备份任务",
+        alistId: 7,
+        method: 0,
+        srcPath: '["/本地/Docs"]',
+        dstPath: '["/Cloud/Archive"]',
+      },
+    ];
+
+    // New one-way job targeting an existing bisync job's srcPath must conflict
+    const hitBisyncSrc = buildSyncPathPreview({
+      srcPaths: ["/本地/Other"],
+      dstPaths: ["/本地/Work/Sub"],
+      method: 0,
+      existingJobs,
+      engineId: 7,
+    });
+    expect(hitBisyncSrc.conflicts[0]).toContain("双向同步任务");
+    expect(hitBisyncSrc.items[0].hasConflict).toBe(true);
+
+    // New bisync job whose srcPath overlaps an existing job's dstPath must conflict
+    const newBisyncHitsDst = buildSyncPathPreview({
+      srcPaths: ["/Cloud/Archive/Sub"],
+      dstPaths: ["/本地/Fresh"],
+      method: 3,
+      existingJobs,
+      engineId: 7,
+    });
+    expect(newBisyncHitsDst.conflicts[0]).toContain("常规备份任务");
+    expect(newBisyncHitsDst.items[0].hasConflict).toBe(true);
+  });
 });
