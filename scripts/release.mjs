@@ -92,54 +92,7 @@ if (!node.satisfiesMinimum)
 console.log(`Node ${node.text}（${node.dir}，已前置 PATH）`);
 requireNodeModules(node.dir);
 
-// ── 3. 测试 ──────────────────────────────────────────────────────────────
-step(3, TOTAL, runTests ? "运行前后端、脚本和生命周期测试" : "跳过测试（--skip-tests）");
-if (runTests) {
-  const nodeEnv = envWithNode(node.dir);
-  const frontend = join(root, "frontend");
-  const backend = join(root, "backend");
-  console.log("· 前端：tsc --noEmit");
-  run("npm", ["exec", "--", "tsc", "--noEmit"], {
-    cwd: frontend,
-    env: nodeEnv,
-  });
-  console.log("· 前端：vitest");
-  run("npm", ["test"], { cwd: frontend, env: nodeEnv });
-  console.log("· 脚本：test:scripts");
-  run("npm", ["run", "test:scripts"], { env: nodeEnv });
-  console.log("· Go：go vet ./...");
-  run("go", ["vet", "./..."], { cwd: backend });
-
-  const testDir = mkdtempSync(join(tmpdir(), "opensync-release-"));
-  try {
-    let rcloneBinary = process.env.OPENSYNC_RCLONE_BIN;
-    if (!rcloneBinary) {
-      const arch = { x64: "amd64", arm64: "arm64" }[process.arch];
-      if (process.platform !== "linux" || !arch)
-        throw new Error("请通过 OPENSYNC_RCLONE_BIN 指定当前平台的 rclone 绝对路径，用于 Go 集成测试");
-      bundleRclone(arch, testDir);
-      rcloneBinary = join(testDir, "rclone");
-    }
-    console.log("· Go：go test -race ./...");
-    run("go", ["test", "-race", "./..."], {
-      cwd: backend,
-      env: { OPENSYNC_RCLONE_BIN: rcloneBinary },
-    });
-    if (process.platform === "linux") {
-      const lifecycleBinary = join(testDir, "opensync");
-      console.log("· Linux 生命周期：test:lifecycle");
-      run("go", ["build", "-o", lifecycleBinary, "./cmd/server"], { cwd: backend });
-      run("npm", ["run", "test:lifecycle"], {
-        env: { ...nodeEnv, OPENSYNC_TEST_BINARY: lifecycleBinary },
-      });
-    } else {
-      console.log("· 生命周期测试需要 Linux，已跳过。");
-    }
-  } finally {
-    rmSync(testDir, { recursive: true, force: true });
-  }
-}
-
+// ── 3–6. 测试、前端构建（仅一次，供 Go 嵌入测试与双架构打包共用）与打包 ──
 const version = readVersion();
 if (!version) throw new Error("无法从 fnos/manifest 读取 version");
 
@@ -153,17 +106,68 @@ const { artifacts, checksumFile } = withBuildLock(() => {
   };
   cleanupArtifacts();
   try {
-    // ── 4. 前端构建 ──────────────────────────────────────────────────────────
-    step(4, TOTAL, "构建前端（仅一次，两个架构共用）");
+    const nodeEnv = envWithNode(node.dir);
+    const frontend = join(root, "frontend");
+    const backend = join(root, "backend");
+
+    // ── 3. 前端与脚本测试 ──────────────────────────────────────────────────
+    step(3, TOTAL, runTests ? "运行前端与脚本测试" : "跳过测试（--skip-tests）");
+    if (runTests) {
+      console.log("· 前端：tsc --noEmit");
+      run("npm", ["exec", "--", "tsc", "--noEmit"], {
+        cwd: frontend,
+        env: nodeEnv,
+      });
+      console.log("· 前端：vitest");
+      run("npm", ["test"], { cwd: frontend, env: nodeEnv });
+      console.log("· 脚本：test:scripts");
+      run("npm", ["run", "test:scripts"], { env: nodeEnv });
+    }
+
+    // ── 4. 前端构建（先于 Go 测试，确保 go:embed 静态资源存在）──────────────
+    step(4, TOTAL, "构建前端（仅一次，供 Go 测试与双架构打包共用）");
     buildFrontend(node.dir);
 
-    // ── 5. 双架构打包 ────────────────────────────────────────────────────────
-    step(5, TOTAL, `打包 ${ARCHES.join(" / ")}`);
+    // ── 5. Go 后端与 Linux 生命周期测试 ────────────────────────────────────
+    step(5, TOTAL, runTests ? "运行 Go 后端与生命周期测试" : "跳过后端测试（--skip-tests）");
+    if (runTests) {
+      console.log("· Go：go vet ./...");
+      run("go", ["vet", "./..."], { cwd: backend });
+
+      const testDir = mkdtempSync(join(tmpdir(), "opensync-release-"));
+      try {
+        let rcloneBinary = process.env.OPENSYNC_RCLONE_BIN;
+        if (!rcloneBinary) {
+          const arch = { x64: "amd64", arm64: "arm64" }[process.arch];
+          if (process.platform !== "linux" || !arch)
+            throw new Error("请通过 OPENSYNC_RCLONE_BIN 指定当前平台的 rclone 绝对路径，用于 Go 集成测试");
+          bundleRclone(arch, testDir);
+          rcloneBinary = join(testDir, "rclone");
+        }
+        console.log("· Go：go test -race ./...");
+        run("go", ["test", "-race", "./..."], {
+          cwd: backend,
+          env: { OPENSYNC_RCLONE_BIN: rcloneBinary },
+        });
+        if (process.platform === "linux") {
+          const lifecycleBinary = join(testDir, "opensync");
+          console.log("· Linux 生命周期：test:lifecycle");
+          run("go", ["build", "-o", lifecycleBinary, "./cmd/server"], { cwd: backend });
+          run("npm", ["run", "test:lifecycle"], {
+            env: { ...nodeEnv, OPENSYNC_TEST_BINARY: lifecycleBinary },
+          });
+        } else {
+          console.log("· 生命周期测试需要 Linux，已跳过。");
+        }
+      } finally {
+        rmSync(testDir, { recursive: true, force: true });
+      }
+    }
+
+    // ── 6. 双架构打包与校验和 ──────────────────────────────────────────────
+    step(6, TOTAL, `打包 ${ARCHES.join(" / ")} 并生成 SHA256SUMS`);
     for (const arch of ARCHES)
       produced.push({ arch, file: buildPackage(arch, { nodeDir: node.dir }) });
-
-    // ── 6. 校验和与产物清单 ──────────────────────────────────────────────────
-    step(6, TOTAL, "生成 SHA256SUMS 与产物清单");
     sumFile = writeChecksums(
       produced.map(({ file }) => file),
       version,
