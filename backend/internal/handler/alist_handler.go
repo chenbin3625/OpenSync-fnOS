@@ -74,6 +74,16 @@ func UpdateNativeStorage(c *gin.Context) {
 	handleServiceVoid(c, func() error { return service.UpdateNativeStorage(c.Request.Context(), in) })
 }
 
+func UpdateNativeStoragePolicy(c *gin.Context) {
+	var in service.NativeConnectionPolicyInput
+	if !bindJSONStrict(c, &in) {
+		return
+	}
+	handleServiceVoid(c, func() error {
+		return service.UpdateNativeStoragePolicy(c.Request.Context(), in)
+	})
+}
+
 func PreviewNativeImport(c *gin.Context) {
 	var in service.NativeImportInput
 	if !bindJSONStrict(c, &in) {

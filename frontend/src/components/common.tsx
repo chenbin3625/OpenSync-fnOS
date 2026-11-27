@@ -348,16 +348,19 @@ export function ActionMenu({
   disabled,
   label = "更多操作",
   size,
+  zIndex,
 }: {
   actions: MenuAction[];
   disabled?: boolean;
   label?: string;
   size?: "small" | "default";
+  zIndex?: number;
 }) {
   return (
     <Dropdown
       trigger="click"
       position="bottomRight"
+      zIndex={zIndex}
       menu={actions.map((action) => ({
         node: "item" as const,
         name: action.label,

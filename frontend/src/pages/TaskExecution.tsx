@@ -98,11 +98,13 @@ const fileTableWidths = {
 export const SyncRecords = memo(function SyncRecords({
   jobId,
   refreshKey = 0,
+  initialHasError,
   disableRetry = false,
   onTaskEnded,
 }: {
   jobId: number;
   refreshKey?: number;
+  initialHasError?: number;
   disableRetry?: boolean;
   onTaskEnded?: () => void;
 }) {
@@ -123,7 +125,7 @@ export const SyncRecords = memo(function SyncRecords({
   const [status, setStatus] = useState<number | undefined>();
   const [type, setType] = useState<number | undefined>();
   const [object, setObject] = useState<number | undefined>();
-  const [hasError, setHasError] = useState<number | undefined>();
+  const [hasError, setHasError] = useState<number | undefined>(initialHasError);
   const [input, setInput] = useState("");
   const [keyword, setKeyword] = useState("");
   const [range, setRange] = useState<Date[]>([]);
@@ -191,6 +193,11 @@ export const SyncRecords = memo(function SyncRecords({
   useEffect(() => {
     setSelectedItemIds([]);
   }, [jobId, page, size, status, type, object, hasError, keyword, range]);
+
+  useEffect(() => {
+    setHasError(initialHasError);
+    setPage(1);
+  }, [jobId, initialHasError]);
 
   const currentBw = (currentTask?.liveBwLimit || "").trim();
   const currentBwInfo = useMemo(() => describeBwLimit(currentBw), [currentBw]);

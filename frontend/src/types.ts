@@ -76,6 +76,10 @@ export interface NativeRemoteItem {
   maxConcurrentJobs?: number;
   activeJobs?: number;
   queuedJobs?: number;
+  pollIntervalSec?: number;
+  weeklySchedule?: WeeklyScheduleConfig;
+  bwLimit?: string;
+  paused?: boolean;
 }
 
 export interface NativeStorageState {
@@ -316,6 +320,9 @@ export interface SyncStatus {
   error: string;
   failures: number;
   retryAt?: number;
+  errorType?: SyncErrorType;
+  errorSide?: SyncErrorSide;
+  errorEndpoint?: string;
   direction?: string;
   directionMode?: string;
   watchDegraded?: boolean;
@@ -330,7 +337,20 @@ export interface SyncStatus {
   schedulePaused?: boolean;
   weeklyLimitRate?: string;
   effectiveBwLimit?: string;
+  connectionPaused?: boolean;
 }
+
+export type SyncErrorType =
+  | "auth"
+  | "local_permission"
+  | "rate_limited"
+  | "remote_permission"
+  | "connection"
+  | "transfer"
+  | "state"
+  | string;
+
+export type SyncErrorSide = "local" | "remote" | "system" | "unknown" | string;
 
 export interface JobCheckResult {
   jobId: number;

@@ -117,6 +117,7 @@ func newRouterWithVersionChecker(development bool, allowedOrigins []string, chec
 	api.PUT("/native/engine", handler.SaveNativeEngine)
 	api.POST("/native/storage", handler.SaveNativeStorage)
 	api.PUT("/native/storage", handler.UpdateNativeStorage)
+	api.PUT("/native/storage/policy", handler.UpdateNativeStoragePolicy)
 	api.DELETE("/native/storage", handler.DeleteNativeStorage)
 	api.POST("/native/storage/test", handler.TestNativeStorage)
 	api.POST("/native/storage/rename", handler.RenameNativeStorage)

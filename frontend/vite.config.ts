@@ -51,6 +51,10 @@ export default defineConfig(({ mode }) => {
           target: "http://127.0.0.1:8040",
           changeOrigin: false,
         },
+        "/app/opensync/oauth/callback": {
+          target: "http://127.0.0.1:8040",
+          changeOrigin: false,
+        },
       },
     },
     build: { outDir: "../backend/cmd/server/web", emptyOutDir: true },

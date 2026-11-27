@@ -426,6 +426,9 @@ func (jc *JobClient) schedulerSnapshot() *Scheduler {
 }
 
 func (jc *JobClient) replaceJobConfig(job map[string]interface{}, scheduler *Scheduler) *Scheduler {
+	if cfg, err := loadNative(util.ToInt64(job["alistId"])); err == nil {
+		job = applyConnectionDefaults(job, cfg)
+	}
 	jc.mu.Lock()
 	oldScheduler := jc.Scheduler
 	jc.JobID = util.ToInt64(job["id"])
@@ -632,7 +635,8 @@ func (jc *JobClient) runMarkedJobWithOptions(opts markedJobRunOptions) {
 	started := false
 	defer func() {
 		if opts.syncGeneration > 0 && !started {
-			_ = mapper.RecordSyncError(jc.idSnapshot(), "同步启动中断，待处理变更已保留，将自动重试")
+			job := jc.jobSnapshot()
+			_ = recordSyncErrorForJob(jc.idSnapshot(), job, "同步启动中断，待处理变更已保留，将自动重试")
 		}
 	}()
 	sourceTaskID := opts.sourceTaskID
@@ -672,6 +676,13 @@ func (jc *JobClient) runMarkedJobWithOptions(opts markedJobRunOptions) {
 
 	// Enforce per-engine and per-storage maxConcurrentJobs queues before creating the task row.
 	jobSnap := jc.jobSnapshot()
+	if cfg, cfgErr := loadNative(util.ToInt64(jobSnap["alistId"])); cfgErr == nil && connectionPolicyUsesPausedRemote(jobSnap, cfg) {
+		// A connection pause is independent from the job enable flag. Keep the
+		// job enabled and its pending mirror confirmation untouched, but do not
+		// create a new task while any referenced connection is paused.
+		jc.markDone()
+		return
+	}
 	alistID := util.ToInt64(jobSnap["alistId"])
 	maxConcurrent := 0
 	var storageLimits map[string]int
@@ -842,7 +853,7 @@ func watchTaskTimeWindow(task *JobTask, manual bool) {
 				if nextRate != lastBwLimit {
 					lastBwLimit = nextRate
 					if task.rcController != nil {
-						_ = task.rcController.SetBwLimit(ctx, nextRate)
+						_ = task.updateTaskBaseBwLimit(ctx, nextRate)
 						task.notifyProgressNow()
 					}
 				}

@@ -1,4 +1,4 @@
-import { useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Checkbox from "@douyinfe/semi-ui/lib/es/checkbox";
@@ -41,13 +41,15 @@ import {
   errorToast,
   type MenuAction,
 } from "../components/common";
-import { TaskDetailDrawer } from "../components/TaskDetailDrawer";
+import { WeeklyScheduleGrid } from "../components/WeeklyScheduleGrid";
 import {
   formatMinutesShort,
   formatRelativeSyncTime,
   formatSecondsShort,
+  formatSyncNextAction,
   getContinuousSyncMeta,
   isSyncStatusError,
+  resolveSyncError,
   resolveEffectiveSyncStatus,
   syncStatusTone,
   SyncStatusTag,
@@ -61,6 +63,7 @@ import {
   formatDisplayPathList,
 } from "../lib/syncPathPreview";
 import {
+  getJobConnectionScope,
   getJobMountNames,
   isLegacyOpenListJob,
   jobHasCryptRemote,
@@ -88,6 +91,7 @@ import type {
   NativeLocalRoot,
   NativeRemoteItem,
   NativeStorageTestResult,
+  WeeklyScheduleConfig,
 } from "../types";
 
 const statusOptions = [
@@ -108,7 +112,7 @@ const directionOptions = [
 ];
 
 type StatusKey = (typeof statusOptions)[number]["value"];
-type BatchAction = "run" | "stop" | "enable" | "disable" | "run_all" | "stop_all";
+type BatchAction = "run" | "stop" | "enable" | "disable";
 type WorkbenchTab = "tasks" | "history" | "settings";
 type HistoryFilter = "all" | "success" | "failed" | "delete";
 
@@ -122,6 +126,11 @@ interface SyncOverviewProps {
   engines: AlistItem[];
   busy?: boolean;
   onAdd: (remote?: string) => void;
+  taskHref: (
+    jobId: number,
+    tab: TaskTab,
+    intent?: "mirrorPreview" | "conflicts" | "failed",
+  ) => string;
   onEdit?: (job: JobItem) => void;
   onClone?: (job: JobItem) => void;
   onToggle?: (job: JobItem) => void;
@@ -159,6 +168,7 @@ function classifyJobStatus(job: JobItem): JobClassification {
   const synced =
     !job.running &&
     job.enable === 1 &&
+    !sync.connectionPaused &&
     !failed &&
     (sync.state === "synced" || sync.state === "monitoring");
   return {
@@ -167,7 +177,7 @@ function classifyJobStatus(job: JobItem): JobClassification {
     queued: Boolean(job.queued),
     conflict: (sync.conflictCount ?? 0) > 0,
     failed,
-    disabled: job.enable !== 1,
+    disabled: job.enable !== 1 || Boolean(sync.connectionPaused),
   };
 }
 
@@ -350,6 +360,7 @@ export function SyncOverview({
   engines,
   busy = false,
   onAdd,
+  taskHref,
   onEdit,
   onClone,
   onToggle,
@@ -364,19 +375,16 @@ export function SyncOverview({
   onLocalFolders,
   onNavigateEngines,
   onJobsChanged,
+  onStorageChanged,
 }: SyncOverviewProps) {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const filterId = useId();
   const [keyword, setKeyword] = useState("");
   const [selected, setSelected] = useState<number[]>([]);
-  const [workbenchTab, setWorkbenchTab] = useState<WorkbenchTab>("tasks");
   const [historyFilter, setHistoryFilter] = useState<HistoryFilter>("all");
   const [historyKeyword, setHistoryKeyword] = useState("");
   const [historyPage, setHistoryPage] = useState(1);
-  const [drawer, setDrawer] = useState<{ jobId: number; tab: TaskTab } | null>(
-    null,
-  );
   const [testingName, setTestingName] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<
     Record<string, NativeStorageTestResult>
@@ -385,9 +393,21 @@ export function SyncOverview({
   const [aboutResults, setAboutResults] = useState<
     Record<string, NativeAboutInfo>
   >({});
+  const [connectionPolicy, setConnectionPolicy] = useState<{
+    name: string;
+    pollIntervalSec: string;
+    weeklySchedule?: WeeklyScheduleConfig;
+    bwLimit: string;
+    paused: boolean;
+  } | null>(null);
+  const [savingConnectionPolicy, setSavingConnectionPolicy] = useState(false);
   const action = useAction();
 
   const storage = params.get("storage") || "all";
+  const rawView = params.get("view");
+  const workbenchTab: WorkbenchTab = rawView === "history" || rawView === "settings"
+    ? rawView
+    : "tasks";
   const status: StatusKey =
     statusOptions.find(({ value }) => value === params.get("status"))?.value ??
     "all";
@@ -406,15 +426,33 @@ export function SyncOverview({
     const next = new URLSearchParams(params);
     if (value === "all") next.delete(key);
     else next.set(key, value);
-    setParams(next, { replace: true });
-    if (key === "storage") setHistoryPage(1);
+    if (key === "storage") {
+      next.delete("status");
+      next.delete("direction");
+      next.delete("jobId");
+      next.delete("tab");
+      next.delete("mirrorPreview");
+      next.delete("conflicts");
+      setKeyword("");
+      setHistoryPage(1);
+    }
+    setParams(next, { replace: key !== "storage" });
   };
 
   const resetFilters = () => {
     setKeyword("");
     setSelected([]);
     setHistoryPage(1);
-    setParams({}, { replace: true });
+    const next = new URLSearchParams(params);
+    next.delete("status");
+    next.delete("direction");
+    setParams(next, { replace: true });
+  };
+  const selectView = (view: string) => {
+    const next = new URLSearchParams(params);
+    if (view === "tasks") next.delete("view");
+    else next.set("view", view);
+    setParams(next);
   };
 
   const liveJobMap = useMemo(() => {
@@ -436,9 +474,30 @@ export function SyncOverview({
     return map;
   }, [engines]);
 
-  const statusCounts = useMemo(() => {
+  const jobsWithMounts = useMemo(() => {
+    return jobs.map((job) => {
+      const mounts = getJobMountNames(job);
+      return {
+        job,
+        mounts: mounts.map((name) => name.toLowerCase()),
+        group: getJobConnectionScope(job, remotes, engines, mounts).toLowerCase(),
+      };
+    });
+  }, [jobs, remotes, engines]);
+
+  const storageMatches = (name: string) =>
+    name.toLowerCase() === storage.toLowerCase();
+  const localScope = storage === "__local__" || storage === "本地";
+  const scopedJobs = jobsWithMounts.filter(({ mounts, group }) => {
+    if (storage === "all") return true;
+    if (localScope) return group === "__local__";
+    if (storage === "__other__") return group === "__other__";
+    return mounts.some(storageMatches);
+  });
+
+  const statusCounts = (() => {
     const counts = {
-      all: jobs.length,
+      all: scopedJobs.length,
       running: 0,
       synced: 0,
       queued: 0,
@@ -446,7 +505,7 @@ export function SyncOverview({
       failed: 0,
       disabled: 0,
     };
-    for (const job of jobs) {
+    for (const { job } of scopedJobs) {
       const cls = classifyJobStatus(job);
       if (cls.running) counts.running += 1;
       if (cls.synced) counts.synced += 1;
@@ -456,23 +515,27 @@ export function SyncOverview({
       if (cls.disabled) counts.disabled += 1;
     }
     return counts;
-  }, [jobs]);
+  })();
 
   const storageHistoryParam =
     storage === "all" || storage === "__other__"
       ? undefined
-      : storage === "__local__" || storage === "本地"
+      : localScope
         ? "__local__"
         : storage;
+  const historyJobIds = storage === "__other__"
+    ? scopedJobs.map(({ job }) => job.id)
+    : undefined;
 
   const recentHistory = useResource(
     (signal) =>
-      workbenchTab === "history"
+      workbenchTab === "history" && historyJobIds?.length !== 0
         ? api.recentTaskItems(
             {
               pageNum: historyPage,
               pageSize: 20,
               storage: storageHistoryParam,
+              jobIds: historyJobIds,
               status: historyFilter === "success" ? 2 : undefined,
               type: historyFilter === "delete" ? 1 : undefined,
               hasError: historyFilter === "failed" ? 1 : undefined,
@@ -485,39 +548,11 @@ export function SyncOverview({
       workbenchTab,
       historyPage,
       storageHistoryParam,
+      historyJobIds,
       historyFilter,
       historyKeyword,
     ],
   );
-
-  const jobsWithMounts = useMemo(
-    () => jobs.map((job) => ({ job, mounts: getJobMountNames(job) })),
-    [jobs],
-  );
-
-  const storageNames = useMemo(() => {
-    const names = new Set(["本地", ...remotes.map((remote) => remote.name)]);
-    for (const { mounts } of jobsWithMounts) {
-      for (const mount of mounts) names.add(mount);
-    }
-    if (storage !== "all" && storage !== "__local__" && storage !== "__other__") {
-      const exists = [...names].some(
-        (name) => name.toLowerCase() === storage.toLowerCase(),
-      );
-      if (!exists) names.add(storage);
-    }
-    return names;
-  }, [remotes, jobsWithMounts, storage]);
-
-  const storageMatches = (name: string) =>
-    name.toLowerCase() === storage.toLowerCase();
-
-  const isLocalOnlyJob = (job: JobItem, mounts: string[]) => {
-    const legacy = isLegacyOpenListJob(job, engines);
-    if (legacy) return false;
-    const remoteMounts = mounts.filter((m) => m !== "本地");
-    return remoteMounts.length === 0;
-  };
 
   // Counts across all jobs for the left connection rail
   const connectionStats = useMemo(() => {
@@ -536,7 +571,7 @@ export function SyncOverview({
     const localStats = { total: 0, running: 0, errors: 0, conflicts: 0 };
     const otherStats = { total: 0, running: 0, errors: 0, conflicts: 0 };
 
-    for (const { job, mounts } of jobsWithMounts) {
+    for (const { job, mounts, group } of jobsWithMounts) {
       const legacy = isLegacyOpenListJob(job, engines);
       const sync = resolveEffectiveSyncStatus(job);
       const hasErr =
@@ -546,15 +581,7 @@ export function SyncOverview({
       const isRun = Boolean(job.running && !job.paused);
       const conflicts = sync.conflictCount ?? 0;
 
-      const remoteMounts = Array.from(
-        new Set(
-          mounts
-            .map((m) => m.toLowerCase())
-            .filter((m) => m !== "本地" && byRemote.has(m)),
-        ),
-      );
-
-      if (!legacy && mounts.every((m) => m === "本地") && mounts.length > 0) {
+      if (group === "__local__") {
         localStats.total += 1;
         if (isRun) localStats.running += 1;
         if (hasErr) localStats.errors += 1;
@@ -562,8 +589,8 @@ export function SyncOverview({
         continue;
       }
 
-      if (!legacy && remoteMounts.length >= 1) {
-        for (const r of remoteMounts) {
+      if (!legacy) {
+        for (const r of mounts) {
           const entry = byRemote.get(r);
           if (!entry) continue;
           entry.total += 1;
@@ -571,37 +598,20 @@ export function SyncOverview({
           if (hasErr) entry.errors += 1;
           entry.conflicts += conflicts;
         }
-        continue;
       }
 
-      otherStats.total += 1;
-      if (isRun) otherStats.running += 1;
-      if (hasErr) otherStats.errors += 1;
-      otherStats.conflicts += conflicts;
+      if (group === "__other__") {
+        otherStats.total += 1;
+        if (isRun) otherStats.running += 1;
+        if (hasErr) otherStats.errors += 1;
+        otherStats.conflicts += conflicts;
+      }
     }
 
     return { byRemote, localStats, otherStats };
   }, [jobsWithMounts, remotes, engines]);
 
-  const visible = jobsWithMounts.filter(({ job, mounts }) => {
-    if (storage === "__local__" || storage === "本地") {
-      if (!isLocalOnlyJob(job, mounts)) return false;
-    } else if (storage === "__other__") {
-      const legacy = isLegacyOpenListJob(job, engines);
-      const remoteSet = new Set(remotes.map((r) => r.name.toLowerCase()));
-      const remoteMounts = mounts.filter(
-        (m) => m !== "本地" && remoteSet.has(m.toLowerCase()),
-      );
-      if (
-        !legacy &&
-        (mounts.every((m) => m === "本地") || remoteMounts.length === 1)
-      ) {
-        return false;
-      }
-    } else if (storage !== "all" && !mounts.some(storageMatches)) {
-      return false;
-    }
-
+  const visible = scopedJobs.filter(({ job }) => {
     const searchable = `${getJobName(job)} #${job.id} ${job.srcPath} ${job.dstPath}`;
     if (search && !searchable.toLowerCase().includes(search)) return false;
 
@@ -623,33 +633,50 @@ export function SyncOverview({
   const selectedIds = selectedJobs.map((job) => job.id);
   const fullySelected =
     selectable.length > 0 && selectable.length === selectedIds.length;
-  const anyEnabled = jobs.some(
-    (job) => job.enable === 1 && !isLegacyOpenListJob(job, engines),
-  );
-  const anyActive = jobs.some((job) => job.running || job.queued);
+  const batchTargets: Record<BatchAction, number[]> = {
+    run: [],
+    stop: [],
+    enable: [],
+    disable: [],
+  };
+  for (const job of selectedIds.length ? selectedJobs : selectable) {
+    if (job.running || job.queued) batchTargets.stop.push(job.id);
+    else if (job.enable === 1 && !job.syncStatus?.connectionPaused) {
+      batchTargets.run.push(job.id);
+    }
+    if (job.enable === 1 && job.isCron !== 2) batchTargets.disable.push(job.id);
+    if (job.enable !== 1 && !requiresFirstMirrorPreview(job)) {
+      batchTargets.enable.push(job.id);
+    }
+  }
+  const allConnectionsBatch = !filtered && selectedIds.length === 0;
+  const batchLabel = allConnectionsBatch ? "全部" : "当前列表";
+  const connectionName = storageHistoryParam === "__local__"
+    ? "本地目录互备"
+    : storage === "__other__"
+      ? "其他 / 跨端"
+      : storage;
+  const batchScope = selectedIds.length
+    ? "已勾选任务"
+    : allConnectionsBatch
+      ? "全部连接"
+      : storage === "all"
+        ? "当前筛选结果"
+        : `「${connectionName}」的当前列表`;
 
   const runBatch = (operation: BatchAction, label: string) => {
-    if (
-      operation === "enable" &&
-      selectedJobs.some(requiresFirstMirrorPreview)
-    ) {
-      Toast.warning("所选任务包含待预览的镜像。请先逐个确认镜像影响。");
-      return;
-    }
+    const ids = batchTargets[operation];
+    if (allBusy || ids.length === 0) return;
     const execute = () =>
       action.run(async () => {
         try {
-          const ids =
-            operation === "run_all" || operation === "stop_all"
-              ? undefined
-              : selectedIds;
           const result = await api.batchJobAction(operation, ids);
           if (result.failed > 0) {
             Toast.warning(
-              `${label}完成：成功 ${result.succeeded} 个，失败 ${result.failed} 个`,
+              `${label}：已提交 ${result.succeeded} 个，失败 ${result.failed} 个`,
             );
           } else {
-            Toast.success(`${label}完成（共 ${result.succeeded} 个任务）`);
+            Toast.success(`已提交${label}（${result.succeeded} 个任务）`);
           }
           setSelected([]);
           await onJobsChanged();
@@ -657,17 +684,18 @@ export function SyncOverview({
           errorToast(err);
         }
       });
-    if (
-      operation === "stop" ||
-      operation === "stop_all" ||
-      operation === "disable"
-    ) {
+    const target = `${batchScope}中的 ${ids.length} 个任务`;
+    const confirmation = operation === "stop"
+      ? `将中止${target}正在运行或排队的批次。已完成的文件和任务启用状态会保留。`
+      : operation === "disable"
+        ? `将暂停${target}的自动同步，并中止它们正在运行或排队的批次。`
+        : operation === "run" && allConnectionsBatch
+          ? `将立即触发${target}。各任务按已配置的同步策略运行。`
+          : null;
+    if (confirmation) {
       confirmAction({
         title: `确认执行「${label}」？`,
-        content:
-          operation === "disable"
-            ? "暂停持续同步将停止监控并中止正在进行的传输，后续可随时恢复并自动补齐变更。"
-            : "将中止目标任务当前的传输批次，已完成的文件不会撤销，持续同步保持开启。",
+        content: confirmation,
         okText: "确认",
         onOk: execute,
       });
@@ -701,22 +729,11 @@ export function SyncOverview({
     ]),
   );
 
-  for (const { job, mounts: paths } of visible) {
-    const nonLocalMounts = new Set(
-      paths
-        .map((mount) => mount.toLowerCase())
-        .filter((mount) => mount !== "本地"),
-    );
-    const [mount] = nonLocalMounts;
-    const legacy = isLegacyOpenListJob(job, engines);
-    const targetRemoteGroup =
-      !legacy && nonLocalMounts.size === 1 && mount
-        ? remoteGroups.get(mount)
-        : undefined;
-    (
-      targetRemoteGroup ??
-      (!legacy && nonLocalMounts.size === 0 ? localGroup : customGroup)
-    ).jobs.push(job);
+  for (const { job, group } of visible) {
+    const targetGroup = group === "__local__"
+      ? localGroup
+      : remoteGroups.get(group) ?? customGroup;
+    targetGroup.jobs.push(job);
   }
 
   const visibleGroups = [
@@ -746,11 +763,19 @@ export function SyncOverview({
     [remotes, storage],
   );
 
-  const drawerJob = useMemo(
-    () =>
-      drawer ? jobs.find((j) => j.id === drawer.jobId) ?? null : null,
-    [drawer, jobs],
-  );
+  useEffect(() => {
+    if (!selectedRemote) {
+      setConnectionPolicy(null);
+      return;
+    }
+    setConnectionPolicy({
+      name: selectedRemote.name,
+      pollIntervalSec: String(selectedRemote.pollIntervalSec || 0),
+      weeklySchedule: selectedRemote.weeklySchedule,
+      bwLimit: selectedRemote.bwLimit || "",
+      paused: Boolean(selectedRemote.paused),
+    });
+  }, [selectedRemote]);
 
   const handleTestRemote = async (name: string) => {
     setTestingName(name);
@@ -783,12 +808,42 @@ export function SyncOverview({
     }
   };
 
-  const storageSelectValue =
-    storage === "__local__" || storage === "本地"
-      ? "__local__"
-      : storage === "__other__"
-        ? "__other__"
-        : [...storageNames].find(storageMatches) ?? "all";
+  const saveConnectionPolicy = async (pausedOverride?: boolean) => {
+    if (!selectedRemote || !connectionPolicy) return;
+    const poll = Number(connectionPolicy.pollIntervalSec || 0);
+    if (!Number.isInteger(poll) || poll < 0 || (poll !== 0 && (poll < 10 || poll > 86400))) {
+      Toast.warning("连接轮询周期请输入 0 或 10–86400 秒");
+      return;
+    }
+    const nextPaused =
+      pausedOverride !== undefined ? pausedOverride : connectionPolicy.paused;
+    setSavingConnectionPolicy(true);
+    try {
+      await api.updateNativeStoragePolicy({
+        name: selectedRemote.name,
+        pollIntervalSec: poll,
+        weeklySchedule: connectionPolicy.weeklySchedule,
+        bwLimit: connectionPolicy.bwLimit.trim(),
+        paused: nextPaused,
+      });
+      setConnectionPolicy((prev) =>
+        prev ? { ...prev, paused: nextPaused } : prev,
+      );
+      Toast.success(
+        pausedOverride !== undefined
+          ? nextPaused
+            ? `已暂停连接「${selectedRemote.name}」`
+            : `已恢复连接「${selectedRemote.name}」`
+          : "连接策略已保存",
+      );
+      onStorageChanged?.();
+      await onJobsChanged();
+    } catch (err) {
+      errorToast(err);
+    } finally {
+      setSavingConnectionPolicy(false);
+    }
+  };
 
   const statusPills: Array<{
     key: StatusKey;
@@ -861,6 +916,7 @@ export function SyncOverview({
             type="button"
             className={`sync-connection-item${storage === "all" ? " is-active" : ""}`}
             data-testid="connection-item-all"
+            aria-pressed={storage === "all"}
             onClick={() => setFilter("storage", "all")}
           >
             <div className="sync-connection-item__main">
@@ -884,6 +940,7 @@ export function SyncOverview({
                 type="button"
                 className={`sync-connection-item${active ? " is-active" : ""}`}
                 data-testid={`connection-item-${remote.name}`}
+                aria-pressed={active}
                 onClick={() => setFilter("storage", remote.name)}
               >
                 <div className="sync-connection-item__main">
@@ -902,6 +959,7 @@ export function SyncOverview({
                     <span className="sync-connection-item__sub muted">
                       {remoteTypeLabels[remote.type] || remote.type}
                       {remote.type === "crypt" ? " · 加密" : ""}
+                      {remote.paused ? " · 已暂停" : ""}
                     </span>
                   </div>
                 </div>
@@ -925,6 +983,7 @@ export function SyncOverview({
               storage === "__local__" || storage === "本地" ? " is-active" : ""
             }`}
             data-testid="connection-item-local"
+            aria-pressed={localScope}
             onClick={() => setFilter("storage", "__local__")}
           >
             <div className="sync-connection-item__main">
@@ -957,6 +1016,7 @@ export function SyncOverview({
                 storage === "__other__" ? " is-active" : ""
               }`}
               data-testid="connection-item-other"
+              aria-pressed={storage === "__other__"}
               onClick={() => setFilter("storage", "__other__")}
             >
               <div className="sync-connection-item__main">
@@ -1011,60 +1071,44 @@ export function SyncOverview({
                     </Tag>
                   );
                 })()}
-            </div>
-            <div className="sync-connection-banner__actions">
-              {selectedRemote ? (
-                <>
-                  <Button
-                    size="small"
-                    type="tertiary"
-                    loading={testingName === selectedRemote.name}
-                    onClick={() => void handleTestRemote(selectedRemote.name)}
-                  >
-                    测试连接
-                  </Button>
-                  {onBrowseRemote && (
-                    <Button
-                      size="small"
-                      type="tertiary"
-                      onClick={() => onBrowseRemote(selectedRemote)}
-                    >
-                      浏览与恢复
-                    </Button>
-                  )}
-                  <Button
-                    size="small"
-                    type="tertiary"
-                    onClick={() => onRepair(selectedRemote)}
-                  >
-                    编辑连接
-                  </Button>
-                  <Button
-                    size="small"
-                    type="primary"
-                    onClick={() => onAdd(selectedRemote.name)}
-                  >
-                    添加同步任务
-                  </Button>
-                </>
-              ) : (
-                <>
-                  <Button size="small" type="tertiary" onClick={onLocalFolders}>
-                    管理授权目录
-                  </Button>
-                  <Button size="small" type="primary" onClick={() => onAdd()}>
-                    添加同步任务
-                  </Button>
-                </>
+              {selectedRemote?.paused && (
+                <Tag size="small" type="light" color="amber">
+                  连接已暂停
+                </Tag>
+              )}
+              {selectedRemote?.bwLimit && (
+                <Tag size="small" type="light" color="grey">
+                  共享限速 {selectedRemote.bwLimit}
+                </Tag>
               )}
             </div>
+            {selectedRemote && connectionPolicy && (
+              <div className="sync-connection-banner__actions">
+                <Button
+                  size="small"
+                  type={selectedRemote.paused ? "primary" : "tertiary"}
+                  theme={selectedRemote.paused ? "solid" : "light"}
+                  icon={
+                    selectedRemote.paused ? (
+                      <IconPlay aria-hidden="true" />
+                    ) : (
+                      <IconPause aria-hidden="true" />
+                    )
+                  }
+                  loading={savingConnectionPolicy}
+                  onClick={() => void saveConnectionPolicy(!selectedRemote.paused)}
+                >
+                  {selectedRemote.paused ? "恢复连接" : "暂停连接"}
+                </Button>
+              </div>
+            )}
           </div>
         )}
 
         <Tabs
           className="sync-workbench-tabs"
           activeKey={workbenchTab}
-          onChange={(key) => setWorkbenchTab(key as WorkbenchTab)}
+          onChange={selectView}
           keepDOM={false}
         >
           <Tabs.TabPane tab="任务列表" itemKey="tasks" />
@@ -1122,20 +1166,20 @@ export function SyncOverview({
                         type="tertiary"
                         theme="light"
                         icon={<IconRefresh aria-hidden="true" />}
-                        disabled={allBusy || !anyEnabled}
-                        onClick={() => runBatch("run_all", "全部立即同步")}
+                        disabled={allBusy || !batchTargets.run.length}
+                        onClick={() => runBatch("run", `${batchLabel}立即同步`)}
                       >
-                        全部立即同步
+                        {batchLabel}立即同步（{batchTargets.run.length}）
                       </Button>
                       <Button
                         size="small"
                         type="danger"
                         theme="light"
                         icon={<IconStop aria-hidden="true" />}
-                        disabled={allBusy || !anyActive}
-                        onClick={() => runBatch("stop_all", "全部中止")}
+                        disabled={allBusy || !batchTargets.stop.length}
+                        onClick={() => runBatch("stop", `${batchLabel}中止`)}
                       >
-                        全部中止
+                        {batchLabel}中止（{batchTargets.stop.length}）
                       </Button>
                     </div>
                   )}
@@ -1169,21 +1213,6 @@ export function SyncOverview({
                     onSearch={setKeyword}
                   />
                   <Select
-                    aria-labelledby={`${filterId}-storage`}
-                    value={storageSelectValue}
-                    onChange={(value) => setFilter("storage", String(value))}
-                    optionList={[
-                      { label: "全部存储", value: "all" },
-                      { label: "本地目录互备", value: "__local__" },
-                      ...[...storageNames]
-                        .filter((name) => name !== "本地")
-                        .map((name) => ({ label: name, value: name })),
-                    ]}
-                  />
-                  <span className="sr-only" id={`${filterId}-storage`}>
-                    按存储筛选
-                  </span>
-                  <Select
                     aria-labelledby={`${filterId}-direction`}
                     value={direction}
                     onChange={(value) => setFilter("direction", String(value))}
@@ -1201,7 +1230,7 @@ export function SyncOverview({
                   <span className="sr-only" id={`${filterId}-status`}>
                     按运行状态筛选
                   </span>
-                  {filtered && (
+                  {otherFiltersActive && (
                     <Button
                       size="small"
                       theme="borderless"
@@ -1221,35 +1250,35 @@ export function SyncOverview({
                       <Button
                         size="small"
                         theme="solid"
-                        disabled={allBusy}
+                        disabled={allBusy || !batchTargets.run.length}
                         onClick={() => runBatch("run", "批量立即同步")}
                       >
-                        批量立即同步
+                        批量立即同步（{batchTargets.run.length}）
                       </Button>
                       <Button
                         size="small"
                         type="danger"
                         theme="light"
-                        disabled={allBusy}
+                        disabled={allBusy || !batchTargets.stop.length}
                         onClick={() => runBatch("stop", "批量中止传输")}
                       >
-                        批量中止传输
+                        批量中止传输（{batchTargets.stop.length}）
                       </Button>
                       <Button
                         size="small"
                         type="tertiary"
-                        disabled={allBusy}
+                        disabled={allBusy || !batchTargets.enable.length}
                         onClick={() => runBatch("enable", "批量恢复同步")}
                       >
-                        批量恢复同步
+                        批量恢复同步（{batchTargets.enable.length}）
                       </Button>
                       <Button
                         size="small"
                         type="tertiary"
-                        disabled={allBusy}
+                        disabled={allBusy || !batchTargets.disable.length}
                         onClick={() => runBatch("disable", "批量暂停同步")}
                       >
-                        批量暂停同步
+                        批量暂停同步（{batchTargets.disable.length}）
                       </Button>
                       <Button
                         size="small"
@@ -1288,13 +1317,9 @@ export function SyncOverview({
                           <Button
                             type="primary"
                             theme="solid"
-                            onClick={() =>
-                              onNavigateEngines
-                                ? onNavigateEngines()
-                                : navigate("/engines")
-                            }
+                            onClick={() => selectView("settings")}
                           >
-                            前往存储管理
+                            前往连接设置
                           </Button>
                         </div>
                       </div>
@@ -1388,7 +1413,7 @@ export function SyncOverview({
                   className="sync-connection-group"
                   bodyClassName="sync-connection-body"
                   extra={
-                    group.remote && (
+                    group.remote && storage === "all" && (
                       <Button
                         size="small"
                         type="tertiary"
@@ -1425,7 +1450,7 @@ export function SyncOverview({
                         )
                       }
                       onNavigate={(path) => navigate(path)}
-                      onOpenDrawer={(tab) => setDrawer({ jobId: job.id, tab })}
+                      taskHref={(tab, intent) => taskHref(job.id, tab, intent)}
                       onEdit={() => onEdit?.(job)}
                       onClone={() => onClone?.(job)}
                       onToggle={() => onToggle?.(job)}
@@ -1600,15 +1625,7 @@ export function SyncOverview({
                             {formatRelativeSyncTime(item.createTime)}
                           </span>
                           {matchJob ? (
-                            <Button
-                              size="small"
-                              theme="borderless"
-                              onClick={() =>
-                                setDrawer({ jobId: matchJob.id, tab: "records" })
-                              }
-                            >
-                              查看任务
-                            </Button>
+                            <Link to={taskHref(matchJob.id, "records")}>查看任务</Link>
                           ) : (
                             <Link to={`/tasks?jobId=${item.jobId}&tab=records`}>
                               查看任务
@@ -1676,7 +1693,7 @@ export function SyncOverview({
                       type="primary"
                       onClick={() => onRepair(selectedRemote)}
                     >
-                      编辑配置
+                      编辑连接
                     </Button>
                   </div>
                 }
@@ -1733,6 +1750,97 @@ export function SyncOverview({
                     );
                   })()}
                 </div>
+                {connectionPolicy && (
+                  <div className="sync-connection-policy" data-testid="connection-policy-editor">
+                    <div className="sync-connection-policy__head">
+                      <div>
+                        <h3>连接默认策略</h3>
+                        <p className="muted">
+                          任务填写的轮询周期和周历优先；留空或关闭时才继承这里的默认值。
+                        </p>
+                      </div>
+                      <Button
+                        size="small"
+                        type={connectionPolicy.paused ? "primary" : "tertiary"}
+                        loading={savingConnectionPolicy}
+                        onClick={() =>
+                          void saveConnectionPolicy(!connectionPolicy.paused)
+                        }
+                      >
+                        {connectionPolicy.paused ? "恢复连接" : "暂停连接"}
+                      </Button>
+                    </div>
+                    <div className="sync-connection-policy__fields">
+                      <label>
+                        <span>默认远端轮询周期（秒）</span>
+                        <input
+                          type="number"
+                          min={0}
+                          max={86400}
+                          value={connectionPolicy.pollIntervalSec}
+                          onChange={(event) =>
+                            setConnectionPolicy((prev) =>
+                              prev
+                                ? { ...prev, pollIntervalSec: event.target.value }
+                                : prev,
+                            )
+                          }
+                        />
+                        <small className="muted">0 表示沿用系统默认值</small>
+                      </label>
+                      <label>
+                        <span>连接并行传输总限速</span>
+                        <input
+                          type="text"
+                          value={connectionPolicy.bwLimit}
+                          placeholder="留空表示不限速"
+                          onChange={(event) =>
+                            setConnectionPolicy((prev) =>
+                              prev ? { ...prev, bwLimit: event.target.value } : prev,
+                            )
+                          }
+                        />
+                        <small className="muted">同一连接的多任务共享这一上限</small>
+                      </label>
+                    </div>
+                    <div className="sync-connection-policy__schedule-head">
+                      <strong>连接周历默认值</strong>
+                      {connectionPolicy.weeklySchedule && (
+                        <Button
+                          size="small"
+                          theme="borderless"
+                          onClick={() =>
+                            setConnectionPolicy((prev) =>
+                              prev ? { ...prev, weeklySchedule: undefined } : prev,
+                            )
+                          }
+                        >
+                          清除默认周历
+                        </Button>
+                      )}
+                    </div>
+                    <WeeklyScheduleGrid
+                      value={connectionPolicy.weeklySchedule}
+                      onChange={(weeklySchedule) =>
+                        setConnectionPolicy((prev) =>
+                          prev ? { ...prev, weeklySchedule } : prev,
+                        )
+                      }
+                    />
+                    <div className="sync-connection-policy__hint muted">
+                      本地互备不继承远端策略；云对云和多端任务按实际引用的连接分别共享限速，Crypt 会沿底层远端链继承。连接恢复只解除连接层暂停，不会唤醒手动暂停或待镜像确认的任务。
+                    </div>
+                    <div className="sync-settings-actions">
+                      <Button
+                        type="primary"
+                        loading={savingConnectionPolicy}
+                        onClick={() => void saveConnectionPolicy()}
+                      >
+                        保存连接策略
+                      </Button>
+                    </div>
+                  </div>
+                )}
               </SectionCard>
             ) : storage === "__local__" || storage === "本地" ? (
               <SectionCard
@@ -1766,20 +1874,13 @@ export function SyncOverview({
                 title="全部存储连接"
                 extra={
                   <div className="sync-settings-actions">
-                    <Button
-                      size="small"
-                      type="tertiary"
-                      onClick={onLocalFolders}
-                    >
-                      本地授权目录
-                    </Button>
-                    {onAddConnection && (
+                    {onNavigateEngines && (
                       <Button
                         size="small"
-                        type="primary"
-                        onClick={onAddConnection}
+                        type="tertiary"
+                        onClick={onNavigateEngines}
                       >
-                        添加远程连接
+                        高级存储管理
                       </Button>
                     )}
                   </div>
@@ -1818,26 +1919,10 @@ export function SyncOverview({
                             <Button
                               size="small"
                               type="tertiary"
-                              loading={testingName === remote.name}
-                              onClick={() => void handleTestRemote(remote.name)}
+                              aria-label={`打开 ${remote.name} 的连接设置`}
+                              onClick={() => setFilter("storage", remote.name)}
                             >
-                              测试
-                            </Button>
-                            {onBrowseRemote && (
-                              <Button
-                                size="small"
-                                type="tertiary"
-                                onClick={() => onBrowseRemote(remote)}
-                              >
-                                浏览
-                              </Button>
-                            )}
-                            <Button
-                              size="small"
-                              type="tertiary"
-                              onClick={() => onRepair(remote)}
-                            >
-                              配置
+                              连接设置
                             </Button>
                           </div>
                         </div>
@@ -1846,7 +1931,7 @@ export function SyncOverview({
                   </div>
                 ) : (
                   <p className="muted">
-                    尚未添加远程存储连接，点击右上角「添加远程连接」开始配置。
+                    尚未添加远程存储连接。
                   </p>
                 )}
               </SectionCard>
@@ -1854,23 +1939,6 @@ export function SyncOverview({
           </div>
         )}
       </div>
-
-      <TaskDetailDrawer
-        job={drawerJob}
-        initialTab={drawer?.tab ?? "overview"}
-        engines={engines}
-        remotes={remotes}
-        onClose={() => setDrawer(null)}
-        onEdit={(job) => {
-          setDrawer(null);
-          onEdit?.(job);
-        }}
-        onClone={(job) => {
-          setDrawer(null);
-          onClone?.(job);
-        }}
-        onJobsChanged={onJobsChanged}
-      />
     </div>
   );
 }
@@ -1885,7 +1953,7 @@ function SyncTaskRow({
   checked,
   onSelect,
   onNavigate,
-  onOpenDrawer,
+  taskHref,
   onEdit,
   onClone,
   onToggle,
@@ -1906,7 +1974,10 @@ function SyncTaskRow({
   checked: boolean;
   onSelect: (checked: boolean) => void;
   onNavigate: (path: string) => void;
-  onOpenDrawer: (tab: TaskTab) => void;
+  taskHref: (
+    tab: TaskTab,
+    intent?: "mirrorPreview" | "conflicts" | "failed",
+  ) => string;
   onEdit: () => void;
   onClone: () => void;
   onToggle: () => void;
@@ -1921,7 +1992,8 @@ function SyncTaskRow({
   const status = resolveEffectiveSyncStatus(job);
   const meta = getContinuousSyncMeta(job);
   const legacy = isLegacyOpenListJob(job, engines);
-  const details = `/tasks?jobId=${job.id}&tab=overview`;
+  const details = taskHref("overview");
+  const records = taskHref("records");
   const effectivePaused = Boolean(liveJob?.paused ?? job.paused);
   const effectiveRunning = Boolean(job.running || liveJob?.running);
   const liveMetrics =
@@ -1941,19 +2013,38 @@ function SyncTaskRow({
       return resolveRemoteChain(seg, remotes).hasCrypt;
     });
 
-  const needsAuth =
-    groupRemote &&
-    /登录状态已失效|认证失败|令牌已过期/.test(status.error);
-  const localPermission =
-    /本地.*(?:无权限|未授权|权限不足|权限被拒绝)|未授权(?:的)?本地|无法读取本地授权目录/.test(
-      status.error,
+  const errorInfo = resolveSyncError(status);
+  const needsAuth = errorInfo.type === "auth";
+  const localPermission = errorInfo.type === "local_permission";
+  const recoveryRemote = (() => {
+    const candidates = remotes.filter((remote) =>
+      getJobMountNames(job).some(
+        (mount) => mount.toLowerCase() === remote.name.toLowerCase(),
+      ),
     );
+    if (errorInfo.endpoint) {
+      return (
+        candidates.find(
+          (remote) =>
+            remote.name.toLowerCase() === errorInfo.endpoint.toLowerCase(),
+        ) ?? null
+      );
+    }
+    return groupRemote ?? (candidates.length === 1 ? candidates[0] : null);
+  })();
   const lastSuccess = formatRelativeSyncTime(status.lastSuccess);
+  const nextAction = formatSyncNextAction(status);
   const waitingForRetry =
     status.state === "error" &&
     !needsAuth &&
     !localPermission &&
     (status.retryAt ?? 0) > Date.now() / 1000;
+  const failedRecords =
+    status.state === "error" &&
+    job.method !== 3 &&
+    (errorInfo.type === "transfer" ||
+      errorInfo.type === "connection" ||
+      errorInfo.type === "remote_permission");
   const mirrorNeedsReview = requiresFirstMirrorPreview(job);
   const failed =
     status.state === "error" ||
@@ -1996,7 +2087,7 @@ function SyncTaskRow({
         {
           label: "同步记录",
           icon: <IconHistory aria-hidden="true" />,
-          onClick: () => onNavigate(`/tasks?jobId=${job.id}&tab=records`),
+          onClick: () => onNavigate(records),
         },
         {
           label: "数据一致性校验",
@@ -2011,7 +2102,7 @@ function SyncTaskRow({
                     ? `冲突处理 (${status.conflictCount})`
                     : "冲突处理",
                 icon: <IconAlertTriangle aria-hidden="true" />,
-                onClick: () => onNavigate(`${details}&conflicts=1`),
+                onClick: () => onNavigate(taskHref("overview", "conflicts")),
               },
             ]
           : []),
@@ -2202,7 +2293,7 @@ function SyncTaskRow({
             <div className="sync-overview-status-line">
               <SyncStatusTag status={status} />
               <Link
-                to={`/tasks?jobId=${job.id}&tab=records`}
+                to={records}
                 className="sync-overview-inline-link"
               >
                 查看实时进度
@@ -2219,13 +2310,26 @@ function SyncTaskRow({
             <div className="sync-overview-status-line">
               <SyncStatusTag status={status} />
               {waitingForRetry ? (
-                <span className="sync-overview-sub muted">等待自动重试</span>
+                <span className="sync-overview-sub muted">{nextAction || "等待自动重试"}</span>
               ) : status.failures > 1 ? (
                 <span className="sync-overview-error">
                   连续失败 {status.failures} 次
                 </span>
               ) : null}
             </div>
+            <div className="sync-overview-sub muted">
+              {lastSuccess ? `最近成功 ${lastSuccess}` : "尚未成功同步"}
+            </div>
+            {(status.pendingChanges !== 0 || nextAction) && (
+              <div className="sync-overview-sub muted">
+                {status.pendingChanges < 0
+                  ? "待完整核对"
+                  : status.pendingChanges > 0
+                    ? `${status.pendingChanges} 项待同步`
+                    : "没有待同步变更"}
+                {nextAction ? ` · ${nextAction}` : ""}
+              </div>
+            )}
             {status.error && (
               <div className="sync-overview-error" title={status.error}>
                 {status.error}
@@ -2276,11 +2380,17 @@ function SyncTaskRow({
                 (liveJob.lastTask.sumSize ?? 0) > 0)
                 ? ` · ${liveJob.lastTask.successNum ?? 0}/${liveJob.lastTask.allNum ?? 0} 项`
                 : ""}
+              {nextAction ? ` · ${nextAction}` : ""}
             </div>
             {status.state === "waiting_window" && job.windowEnable && (
               <div className="sync-overview-warn">
                 将在 {job.windowStart || "00:00"}–{job.windowEnd || "06:00"}{" "}
                 恢复
+              </div>
+            )}
+            {status.connectionPaused && (
+              <div className="sync-overview-warn">
+                所属连接已暂停，恢复连接后继续
               </div>
             )}
             {mirrorNeedsReview && (
@@ -2299,12 +2409,12 @@ function SyncTaskRow({
         {!legacy && (
           <>
             {status.state === "error" &&
-              (needsAuth && groupRemote ? (
+              (needsAuth && recoveryRemote ? (
                 <Button
                   size="small"
                   type="warning"
                   theme="light"
-                  onClick={() => onRepair(groupRemote)}
+                  onClick={() => onRepair(recoveryRemote)}
                 >
                   重新授权
                 </Button>
@@ -2317,22 +2427,31 @@ function SyncTaskRow({
                 >
                   查看本地授权
                 </Button>
+              ) : failedRecords ? (
+                <Link
+                  className="sync-overview-cta-link is-warning"
+                  to={taskHref("records", "failed")}
+                >
+                  查看失败记录并重试
+                </Link>
               ) : null)}
             {Boolean(status.conflictCount) && (
               <Link
                 className="sync-overview-cta-link is-warning"
-                to={`${details}&conflicts=1`}
+                to={taskHref("overview", "conflicts")}
               >
                 查看冲突
               </Link>
             )}
             {mirrorNeedsReview && (
-              <Link
+              <button
+                type="button"
                 className="sync-overview-cta-link is-primary"
-                to={`${details}&mirrorPreview=1`}
+                onClick={onToggle}
+                disabled={busy}
               >
                 预览并启动
-              </Link>
+              </button>
             )}
           </>
         )}
@@ -2352,7 +2471,7 @@ function SyncTaskRow({
               <Button
                 size="small"
                 type="tertiary"
-                onClick={() => onOpenDrawer("overview")}
+                onClick={() => onNavigate(details)}
               >
                 详情
               </Button>
@@ -2392,9 +2511,7 @@ function SyncTaskRow({
                     size="small"
                     label="查看实时进度"
                     icon={<IconActivity aria-hidden="true" />}
-                    onClick={() =>
-                      onNavigate(`/tasks?jobId=${job.id}&tab=records`)
-                    }
+                    onClick={() => onNavigate(records)}
                   />
                 </>
               ) : (
@@ -2428,7 +2545,7 @@ function SyncTaskRow({
                 disabled={busy}
                 onClick={onEdit}
               />
-              <ActionMenu size="small" actions={menuActions} disabled={busy} />
+              <ActionMenu size="small" actions={menuActions} disabled={busy} zIndex={999} />
             </>
           )}
         </div>

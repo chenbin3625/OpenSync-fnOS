@@ -135,9 +135,10 @@ test("creates a WebDAV storage and continuous task, then edits without changing 
     await expect(
       page.locator(".storage-card").filter({ hasText: name }).getByRole("heading"),
     ).toBeVisible();
-    await page.goto("/app/opensync/sync");
+    const workbenchPath = `/app/opensync/sync?${new URLSearchParams({ storage: name })}`;
+    await page.goto(workbenchPath);
     await page.getByRole("button", { name: "新建同步任务", exact: true }).click();
-    const dialog = page.getByRole("dialog");
+    const dialog = page.locator(".task-editor-modal");
     await dialog
       .getByRole("button", { name: "切换为自由多对多 / 云对云模式", exact: true })
       .click();
@@ -182,7 +183,7 @@ test("creates a WebDAV storage and continuous task, then edits without changing 
       isCron: 3,
       method: 0,
     });
-    await expect(page.getByRole("dialog")).not.toBeVisible();
+    await expect(dialog).not.toBeVisible();
     const jobs = await (
       await request.get("/app/opensync/svr/job?pageNum=1&pageSize=100")
     ).json();
@@ -195,13 +196,20 @@ test("creates a WebDAV storage and continuous task, then edits without changing 
     expect(job.enable).toBe(1);
     expect(job.srcPath).toContain("/Photos");
     expect(job.dstPath).toContain("/Backup");
-    // 创建后自动定位到新建任务
-    await expect(page).toHaveURL(new RegExp(`jobId=${jobId}`));
+    await expect(page).toHaveURL(
+      `${workbenchPath}&jobId=${jobId}&tab=overview`,
+    );
+    const drawer = page.locator(".task-detail-drawer");
+    await expect(drawer).toContainText(name);
+    await expect(drawer.getByRole("link", { name: "完整页面打开" })).toHaveAttribute(
+      "href",
+      `/app/opensync/tasks?${new URLSearchParams({ storage: name, jobId: String(jobId), tab: "overview" })}`,
+    );
     const forceMobileClick = testInfo.project.name.includes("mobile");
-    await page
+    await drawer
       .locator(".overview-card")
       .getByRole("button", { name: "编辑任务", exact: true })
-      .click({ force: forceMobileClick });
+      .click();
     await expect(
       page.getByRole("tab", { name: "过滤规则", exact: true }),
     ).toBeVisible();

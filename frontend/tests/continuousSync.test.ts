@@ -4,11 +4,13 @@ import { formatNextRun, formatSchedule, formatSchedulePlan } from "../src/pages/
 import {
   formatContinuousSyncPlan,
   formatRelativeSyncTime,
+  formatSyncNextAction,
   getContinuousSyncMeta,
   isSyncStatusError,
   jobStatusDotClass,
   parseJobExtraFlagsObject,
   resolveEffectiveSyncStatus,
+  resolveSyncError,
 } from "../src/lib/continuousSync";
 import type { JobForm } from "../src/lib/taskForm";
 import type { JobItem } from "../src/types";
@@ -152,5 +154,34 @@ describe("continuous synchronization", () => {
       }),
     ).toBe("job-dot job-dot--paused");
     expect(jobStatusDotClass(baseJob)).toBe("job-dot job-dot--synced");
+  });
+
+  it("classifies legacy recovery messages and prefers the next retry timestamp", () => {
+    const nowMs = 1_700_000_000_000;
+    const status = {
+      state: "error" as const,
+      pendingChanges: 2,
+      lastSuccess: 0,
+      lastPoll: 0,
+      nextPoll: 1_700_000_120,
+      retryAt: 1_700_000_090,
+      error: "登录状态已失效，请重新授权",
+      failures: 2,
+    };
+    expect(resolveSyncError(status)).toMatchObject({ type: "auth", side: "remote" });
+    expect(formatSyncNextAction(status, nowMs)).toContain("下次重试");
+    expect(
+      resolveSyncError({
+        ...status,
+        error: "本地授权目录未授权",
+        errorType: "local_permission",
+        errorSide: "local",
+        errorEndpoint: "/本地/photos",
+      }),
+    ).toMatchObject({
+      type: "local_permission",
+      side: "local",
+      endpoint: "/本地/photos",
+    });
   });
 });

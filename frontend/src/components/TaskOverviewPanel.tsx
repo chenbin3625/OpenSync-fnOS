@@ -33,9 +33,11 @@ import {
   formatMinutesShort,
   formatRelativeSyncTime,
   formatSecondsShort,
+  formatSyncNextAction,
   getContinuousSyncMeta,
   parseJobExtraFlagsObject,
   resolveEffectiveSyncStatus,
+  resolveSyncError,
   syncStatusLabels,
   syncStatusTone,
 } from "./SyncStatus";
@@ -70,6 +72,9 @@ export interface TaskOverviewPanelProps {
   runKey: string;
   onRun: () => void;
   onOpenRecords?: () => void;
+  onOpenFailedRecords?: () => void;
+  onRepairConnection?: () => void;
+  onLocalFolders?: () => void;
   onOpenRealtime?: () => void;
   onCheck: () => void;
   onOpenConflicts: () => void;
@@ -90,6 +95,9 @@ export function TaskOverviewPanel({
   runKey,
   onRun,
   onOpenRecords,
+  onOpenFailedRecords,
+  onRepairConnection,
+  onLocalFolders,
   onOpenRealtime,
   onCheck,
   onOpenConflicts,
@@ -142,6 +150,8 @@ export function TaskOverviewPanel({
     [job.enable, running, paused, job.syncStatus],
   );
   const statusTone = syncStatusTone(effectiveStatus.state);
+  const syncError = resolveSyncError(effectiveStatus);
+  const nextAction = formatSyncNextAction(effectiveStatus);
 
   const liveMetrics = useMemo(() => {
     if (!currentTask) return null;
@@ -374,6 +384,9 @@ export function TaskOverviewPanel({
       case "idle":
         return "按周计划待命中";
       case "paused":
+        if (effectiveStatus.connectionPaused) {
+          return enabled ? "所属连接已暂停" : "任务与所属连接均已暂停";
+        }
         return "持续同步已暂停";
       case "error":
         return effectiveStatus.failures > 1
@@ -410,9 +423,23 @@ export function TaskOverviewPanel({
       case "idle":
         return formatWeeklyScheduleSummary(extraFlags.weeklySchedule);
       case "paused":
+        if (effectiveStatus.connectionPaused) {
+          return enabled
+            ? "所属连接已暂停，在连接设置中恢复后将继续自动同步"
+            : "所属连接与当前任务均已暂停；恢复连接时不会自动唤醒手动暂停的任务";
+        }
         return "恢复同步后将自动对账并补齐暂停期间产生的变更";
       case "error":
-        return "系统将按退避策略自动重试，你也可以修复存储后点击立即重试";
+        if (syncError.type === "auth") {
+          return "更新远端连接凭据后，系统会自动补齐待同步变更";
+        }
+        if (syncError.type === "local_permission") {
+          return "授权飞牛本地目录后，系统会自动补齐待同步变更";
+        }
+        if (syncError.type === "rate_limited") {
+          return nextAction || "系统会按限流退避策略自动重试";
+        }
+        return nextAction || "系统将按退避策略自动重试，你也可以查看失败记录逐项重试";
       default:
         return "";
     }
@@ -634,6 +661,44 @@ export function TaskOverviewPanel({
                   >
                     查看传输明细
                   </Button>
+                ) : effectiveStatus.state === "error" && syncError.type === "auth" && onRepairConnection ? (
+                  <Button
+                    size="small"
+                    type="warning"
+                    theme="light"
+                    icon={<IconRefresh aria-hidden="true" />}
+                    disabled={busy}
+                    onClick={onRepairConnection}
+                  >
+                    重新授权
+                  </Button>
+                ) : effectiveStatus.state === "error" && syncError.type === "local_permission" && onLocalFolders ? (
+                  <Button
+                    size="small"
+                    type="warning"
+                    theme="light"
+                    icon={<IconFolderStroked aria-hidden="true" />}
+                    disabled={busy}
+                    onClick={onLocalFolders}
+                  >
+                    查看本地授权
+                  </Button>
+                ) : effectiveStatus.state === "error" &&
+                  syncError.type !== "rate_limited" &&
+                  syncError.type !== "auth" &&
+                  syncError.type !== "local_permission" &&
+                  onOpenFailedRecords &&
+                  job.method !== 3 ? (
+                  <Button
+                    size="small"
+                    type="warning"
+                    theme="light"
+                    icon={<IconChevronRight aria-hidden="true" />}
+                    iconPosition="right"
+                    onClick={onOpenFailedRecords}
+                  >
+                    查看失败记录
+                  </Button>
                 ) : effectiveStatus.state === "error" && enabled ? (
                   <Button
                     size="small"
@@ -790,6 +855,12 @@ export function TaskOverviewPanel({
                 <strong className="continuous-metric-value">
                   {formatMinutesShort(meta.auditIntervalMin)} ·{" "}
                   {formatSecondsShort(meta.debounceSec)}
+                </strong>
+              </div>
+              <div className="continuous-metric">
+                <span className="continuous-metric-label">下一次动作</span>
+                <strong className="continuous-metric-value" title={nextAction || undefined}>
+                  {nextAction || (effectiveStatus.state === "paused" ? "暂停中" : "等待触发")}
                 </strong>
               </div>
             </div>

@@ -243,6 +243,18 @@ export const handlers = [
     });
     return err ? fail(err) : ok(null);
   }),
+  http.put(`${apiBase}/native/storage/policy`, async ({ request }) => {
+    const body = await readBody(request);
+    if (!body || typeof body.name !== "string") return fail("缺少必要参数");
+    const err = mockStore.updateNativeRemotePolicy({
+      name: body.name,
+      pollIntervalSec: Number(body.pollIntervalSec || 0),
+      weeklySchedule: body.weeklySchedule,
+      bwLimit: typeof body.bwLimit === "string" ? body.bwLimit : "",
+      paused: Boolean(body.paused),
+    });
+    return err ? fail(err) : ok(null);
+  }),
   http.delete(`${apiBase}/native/storage`, ({ request }) => {
     const name = new URL(request.url).searchParams.get("name") || "";
     if (!name.trim()) return fail("缺少必要参数");

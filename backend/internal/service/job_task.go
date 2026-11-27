@@ -16,16 +16,23 @@ import (
 
 // JobTask represents a running sync task executed by the built-in rclone engine.
 type JobTask struct {
-	TaskID                int64
-	JobClient             *JobClient
-	Job                   map[string]interface{}
-	nativeConfig          native.Config
-	nativeStats           atomic.Pointer[nativeProgressSnapshot]
-	nativePlannedMu       sync.Mutex
-	nativePlanned         *nativePlannedProgress
-	rcController          *native.RCController
-	bwLimitUserOverridden atomic.Bool
-	CreateTime            float64
+	TaskID                  int64
+	JobClient               *JobClient
+	Job                     map[string]interface{}
+	nativeConfig            native.Config
+	nativeStats             atomic.Pointer[nativeProgressSnapshot]
+	nativePlannedMu         sync.Mutex
+	nativePlanned           *nativePlannedProgress
+	rcController            *native.RCController
+	bwLimitUserOverridden   atomic.Bool
+	connectionBwMu          sync.Mutex
+	connectionBwLimits      map[string]string
+	connectionBwSystem      string
+	taskBaseBwLimit         string
+	taskExplicitBw          bool
+	connectionGroupReleases []func()
+	connectionBwInherited   bool
+	CreateTime              float64
 
 	FinishMu       sync.Mutex
 	FinishedCounts map[taskStatus]int
@@ -83,11 +90,47 @@ type JobTask struct {
 func newJobTask(taskID int64, jc *JobClient) (*JobTask, error) {
 	job := jc.jobSnapshot()
 	limits := taskRuntimeLimitsForJob(job)
-	var rcCtrl *native.RCController
+	cfg, err := loadNative(util.ToInt64(job["alistId"]))
+	if err != nil {
+		return nil, err
+	}
+	if cfg == nil {
+		return nil, publicError(legacyOpenListJobDisabledMsg)
+	}
+	explicitExtra, _, _ := parseNativeExtraFlags(job["extraFlags"])
+	weeklyInherited := util.ToInt(job["__connectionWeeklyInherited"]) == 1 || job["__connectionWeeklyInherited"] == true
+	explicitTaskBw := strings.TrimSpace(util.StringValue(job["bwLimit"])) != "" || (explicitExtra.WeeklySchedule != nil && !weeklyInherited)
+	taskBaseBwLimit := ""
 	if ws := EvaluateWeeklySchedule(job, time.Now()); ws.Enabled {
-		rcCtrl = native.NewRCController(effectiveJobBwLimitAt(job, time.Now()))
+		taskBaseBwLimit = effectiveJobBwLimitAt(job, time.Now())
 	} else if jobBw := strings.TrimSpace(util.StringValue(job["bwLimit"])); jobBw != "" {
-		rcCtrl = native.NewRCController(jobBw)
+		taskBaseBwLimit = jobBw
+	}
+	connectionPolicies := connectionPoliciesForJob(job, cfg)
+	connectionGroupsForTask := make([]*connectionBandwidthGroup, 0, len(connectionPolicies))
+	initialConnectionRate := ""
+	for name, policy := range connectionPolicies {
+		group := getConnectionBandwidthGroup(name, policy)
+		if group == nil {
+			continue
+		}
+		connectionGroupsForTask = append(connectionGroupsForTask, group)
+		if policy.BwLimit != "" {
+			initialConnectionRate = minBandwidthRate(initialConnectionRate, policy.BwLimit, time.Now())
+		}
+	}
+	connectionBwInherited := initialConnectionRate != ""
+	var rcCtrl *native.RCController
+	if len(connectionGroupsForTask) > 0 {
+		initialRate := initialConnectionRate
+		if taskBaseBwLimit != "" {
+			initialRate = minBandwidthRate(initialRate, taskBaseBwLimit, time.Now())
+		} else {
+			initialRate = minBandwidthRate(initialRate, native.GetGlobalBwLimit(), time.Now())
+		}
+		rcCtrl = native.NewRCController(initialRate)
+	} else if taskBaseBwLimit != "" {
+		rcCtrl = native.NewRCController(taskBaseBwLimit)
 	} else {
 		globalBw := globalDefaultBwLimit()
 		if native.GetGlobalBwLimit() != globalBw {
@@ -96,29 +139,27 @@ func newJobTask(taskID int64, jc *JobClient) (*JobTask, error) {
 		rcCtrl = native.NewGlobalRCController()
 	}
 	jt := &JobTask{
-		TaskID:         taskID,
-		JobClient:      jc,
-		Job:            job,
-		rcController:   rcCtrl,
-		CreateTime:     float64(time.Now().Unix()),
-		FinishedCounts: make(map[taskStatus]int),
-		FinishedSizes:  make(map[taskStatus]int64),
-		Doing:          make(map[int64]*CopyItem),
-		Waiting:        newCopyQueueWithCapacity(defaultCopyQueueCapacity),
-		cachedLimits:   &limits,
+		TaskID:                taskID,
+		JobClient:             jc,
+		Job:                   job,
+		rcController:          rcCtrl,
+		connectionBwLimits:    make(map[string]string),
+		connectionBwSystem:    native.GetGlobalBwLimit(),
+		taskBaseBwLimit:       taskBaseBwLimit,
+		taskExplicitBw:        explicitTaskBw,
+		connectionBwInherited: connectionBwInherited,
+		CreateTime:            float64(time.Now().Unix()),
+		FinishedCounts:        make(map[taskStatus]int),
+		FinishedSizes:         make(map[taskStatus]int64),
+		Doing:                 make(map[int64]*CopyItem),
+		Waiting:               newCopyQueueWithCapacity(defaultCopyQueueCapacity),
+		cachedLimits:          &limits,
 	}
 	jt.ctx, jt.cancel = newTaskContext(config.GetConfig().Server.Timeout)
-	id := util.ToInt64(job["alistId"])
-	cfg, err := loadNative(id)
-	if err != nil {
-		jt.cancel()
-		return nil, err
-	}
-	if cfg == nil {
-		jt.cancel()
-		return nil, publicError(legacyOpenListJobDisabledMsg)
-	}
 	jt.nativeConfig = cfg
+	for _, group := range connectionGroupsForTask {
+		jt.connectionGroupReleases = append(jt.connectionGroupReleases, group.register(jt))
+	}
 	return jt, nil
 }
 
@@ -221,6 +262,109 @@ func (jt *JobTask) requestBreak() {
 	}
 }
 
+func (jt *JobTask) recomputeEffectiveBwLimitLocked(now time.Time) string {
+	combined := ""
+	hasConnCap := false
+	for _, value := range jt.connectionBwLimits {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		hasConnCap = true
+		combined = minBandwidthRate(combined, trimmed, now)
+	}
+	jt.connectionBwInherited = hasConnCap
+	if jt.taskBaseBwLimit != "" {
+		combined = minBandwidthRate(combined, jt.taskBaseBwLimit, now)
+	} else if !jt.taskExplicitBw {
+		combined = minBandwidthRate(combined, jt.connectionBwSystem, now)
+	}
+	return combined
+}
+
+func (jt *JobTask) applyConnectionBwLimit(ctx context.Context, key, rate string) error {
+	if jt == nil || jt.rcController == nil || jt.bwLimitUserOverridden.Load() {
+		return nil
+	}
+	jt.connectionBwMu.Lock()
+	if jt.connectionBwLimits == nil {
+		jt.connectionBwLimits = make(map[string]string)
+	}
+	trimmed := strings.TrimSpace(rate)
+	if trimmed == "" {
+		delete(jt.connectionBwLimits, key)
+	} else {
+		jt.connectionBwLimits[key] = trimmed
+	}
+	combined := jt.recomputeEffectiveBwLimitLocked(time.Now())
+	jt.connectionBwMu.Unlock()
+	return jt.rcController.SetBwLimit(ctx, combined)
+}
+
+func (jt *JobTask) clearConnectionBwLimit(key string) {
+	if jt == nil || jt.rcController == nil || jt.bwLimitUserOverridden.Load() {
+		return
+	}
+	jt.connectionBwMu.Lock()
+	hadEntry := jt.connectionBwLimits[key] != ""
+	hadInherited := jt.connectionBwInherited
+	delete(jt.connectionBwLimits, key)
+	combined := jt.recomputeEffectiveBwLimitLocked(time.Now())
+	jt.connectionBwMu.Unlock()
+	if !hadEntry && !hadInherited {
+		return
+	}
+	_ = jt.rcController.SetBwLimit(context.Background(), combined)
+}
+
+func (jt *JobTask) setConnectionSystemLimit(ctx context.Context, rate string) error {
+	if jt == nil || jt.rcController == nil || jt.bwLimitUserOverridden.Load() {
+		return nil
+	}
+	jt.connectionBwMu.Lock()
+	jt.connectionBwSystem = strings.TrimSpace(rate)
+	hasConnCap := jt.connectionBwInherited
+	combined := jt.recomputeEffectiveBwLimitLocked(time.Now())
+	jt.connectionBwMu.Unlock()
+	if !hasConnCap {
+		return nil
+	}
+	return jt.rcController.SetBwLimit(ctx, combined)
+}
+
+func (jt *JobTask) updateTaskBaseBwLimit(ctx context.Context, rate string) error {
+	if jt == nil || jt.rcController == nil || jt.bwLimitUserOverridden.Load() {
+		return nil
+	}
+	jt.connectionBwMu.Lock()
+	jt.taskBaseBwLimit = strings.TrimSpace(rate)
+	combined := jt.recomputeEffectiveBwLimitLocked(time.Now())
+	jt.connectionBwMu.Unlock()
+	return jt.rcController.SetBwLimit(ctx, combined)
+}
+
+func (jt *JobTask) attachConnectionGroup(group *connectionBandwidthGroup) {
+	if jt == nil || group == nil {
+		return
+	}
+	// A task is normally registered during construction. Dynamic policy edits
+	// can add a group later, so use the group's id as the idempotence key.
+	jt.connectionBwMu.Lock()
+	if jt.connectionBwLimits == nil {
+		jt.connectionBwLimits = make(map[string]string)
+	}
+	if _, exists := jt.connectionBwLimits[group.key]; exists {
+		jt.connectionBwMu.Unlock()
+		return
+	}
+	jt.connectionBwLimits[group.key] = ""
+	jt.connectionBwMu.Unlock()
+	release := group.register(jt)
+	jt.connectionBwMu.Lock()
+	jt.connectionGroupReleases = append(jt.connectionGroupReleases, release)
+	jt.connectionBwMu.Unlock()
+}
+
 func (jt *JobTask) controller() *native.RCController {
 	if jt == nil {
 		return nil
@@ -301,6 +445,12 @@ func (jt *JobTask) ApplyGlobalBwLimit(ctx context.Context, rate string) error {
 	}
 	if !jobTaskInheritsGlobalBwLimit(jt.Job) {
 		return nil
+	}
+	jt.connectionBwMu.Lock()
+	hasConnCap := jt.connectionBwInherited
+	jt.connectionBwMu.Unlock()
+	if hasConnCap {
+		return jt.setConnectionSystemLimit(ctx, rate)
 	}
 	if jt.rcController.InheritsGlobal() {
 		if err := native.SetGlobalBwLimit(rate); err != nil {

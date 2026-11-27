@@ -1,6 +1,4 @@
 import {
-  lazy,
-  Suspense,
   useEffect,
   useId,
   useMemo,
@@ -63,13 +61,6 @@ import {
   resolveEffectiveSyncStatus,
   syncStatusTone,
 } from "../components/SyncStatus";
-
-const JobEditor = lazy(() => import("./TaskEditor"));
-const StorageEditor = lazy(() =>
-  import("../components/NativeStorageEditor").then(({ NativeStorageEditor }) => ({
-    default: NativeStorageEditor,
-  })),
-);
 
 type InsightTab = "trend" | "quota";
 type RecentFeedFilter = "all" | "success" | "failed" | "delete";
@@ -174,10 +165,6 @@ export default function Dashboard() {
   const [trendRange, setTrendRange] = useState<7 | 30>(7);
   const [insightTab, setInsightTab] = useState<InsightTab>("trend");
   const [feedFilter, setFeedFilter] = useState<RecentFeedFilter>("all");
-  const [nativeModalMode, setNativeModalMode] = useState<"local" | "form" | null>(
-    null,
-  );
-  const [taskEditorOpen, setTaskEditorOpen] = useState(false);
   const [hoveredSampleIndex, setHoveredSampleIndex] = useState<number | null>(
     null,
   );
@@ -324,7 +311,7 @@ export default function Dashboard() {
   const failedJobsCount = allJobs.filter(isJobFailed).length;
   const legacyJobCount = allJobs.filter((job) => isLegacyOpenListJob(job, engines.data)).length;
   const openJobDetail = (job: DashboardJobItem) => {
-    navigate(`/tasks?jobId=${job.id}&tab=overview`);
+    navigate(`/sync?jobId=${job.id}`);
   };
   const openTaskList = (status = "all") => {
     navigate(status === "all" ? "/sync" : `/sync?status=${status}`);
@@ -528,7 +515,7 @@ export default function Dashboard() {
                       <Button
                         size="small"
                         type="tertiary"
-                        onClick={() => setNativeModalMode("local")}
+                        onClick={() => navigate("/sync?storage=__local__&view=settings&action=local-folders")}
                       >
                         {localReady ? "查看授权目录" : "检查授权状态"}
                       </Button>
@@ -560,7 +547,7 @@ export default function Dashboard() {
                       <Button
                         size="small"
                         type="tertiary"
-                        onClick={() => setNativeModalMode("form")}
+                        onClick={() => navigate("/sync?action=add-connection")}
                       >
                         添加远程连接
                       </Button>
@@ -583,7 +570,7 @@ export default function Dashboard() {
                         size="small"
                         type="primary"
                         theme="solid"
-                        onClick={() => setTaskEditorOpen(true)}
+                        onClick={() => navigate("/sync?action=new-task")}
                       >
                         新建同步任务
                       </Button>
@@ -787,7 +774,7 @@ export default function Dashboard() {
                 ]
                   .filter(Boolean)
                   .join(" ")}
-                onClick={() => navigate("/engines")}
+                onClick={() => navigate("/sync?view=settings")}
               >
                 <div className="dashboard-kpi-head">
                   <span className="dashboard-kpi-label">
@@ -1429,7 +1416,7 @@ export default function Dashboard() {
                       <Button
                         size="small"
                         theme="borderless"
-                        onClick={() => navigate("/engines")}
+                        onClick={() => navigate("/sync?view=settings")}
                       >
                         存储管理
                       </Button>
@@ -1704,7 +1691,7 @@ export default function Dashboard() {
                       return (
                         <Link
                           key={`${item.taskId ?? 0}-${item.id ?? title}-${item.createTime ?? 0}`}
-                          to={`/tasks?jobId=${item.jobId}&tab=history`}
+                          to={`/sync?jobId=${item.jobId}&tab=records`}
                           className="dashboard-recent-row"
                         >
                           <div className="dashboard-recent-row__main">
@@ -1771,55 +1758,6 @@ export default function Dashboard() {
           </div>
         )}
       </LoadState>
-
-      {nativeModalMode && (
-        <Suspense fallback={null}>
-          <StorageEditor
-            engine={engines.data?.find((e) => e.kind === "rclone") || engines.data?.[0]}
-            mode={nativeModalMode}
-            onClose={() => setNativeModalMode(null)}
-            onChanged={() => {
-              void nativeStorage.refresh(true);
-              void engines.refresh(true);
-            }}
-            onSaved={() => {
-              setNativeModalMode(null);
-              void nativeStorage.refresh(true);
-              void engines.refresh(true);
-              window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
-            }}
-          />
-        </Suspense>
-      )}
-
-      {taskEditorOpen && (
-        <Suspense fallback={null}>
-          <JobEditor
-            job={null}
-            engines={engines.data || []}
-            existingJobs={[]}
-            onStorageChanged={() => {
-              void nativeStorage.refresh(true);
-              void engines.refresh(true);
-            }}
-            onNavigateEngines={() => {
-              setTaskEditorOpen(false);
-              navigate("/engines");
-            }}
-            onClose={() => setTaskEditorOpen(false)}
-            onSaved={(result) => {
-              setTaskEditorOpen(false);
-              window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
-              void refreshAll();
-              if (result.createdId) {
-                navigate(
-                  `/tasks?jobId=${result.createdId}&tab=overview${result.mirrorPreviewId ? "&mirrorPreview=1" : ""}`,
-                );
-              }
-            }}
-          />
-        </Suspense>
-      )}
 
     </div>
   );

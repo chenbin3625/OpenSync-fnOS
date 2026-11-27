@@ -1,4 +1,10 @@
-import type { JobItem, NativeExtraFlags, SyncStatus } from "../types";
+import type {
+  JobItem,
+  NativeExtraFlags,
+  SyncErrorSide,
+  SyncErrorType,
+  SyncStatus,
+} from "../types";
 import { formatTimestamp } from "../utils/date";
 
 export type SyncDirectionKey = "oneway" | "bidirectional";
@@ -49,6 +55,88 @@ export function syncStatusTone(state?: SyncStatus["state"]): SyncStatusTone {
 
 export function isSyncStatusError(status?: SyncStatus | null): boolean {
   return Boolean(status && status.state === "error");
+}
+
+export interface SyncErrorInfo {
+  type: SyncErrorType | "";
+  side: SyncErrorSide | "";
+  endpoint: string;
+}
+
+function classifyLegacySyncError(message: string): Pick<SyncErrorInfo, "type" | "side"> {
+  const low = message.trim().toLowerCase();
+  if (!low) return { type: "", side: "" };
+  if (
+    low.includes("登录状态已失效") ||
+    low.includes("认证失败") ||
+    low.includes("令牌已过期") ||
+    low.includes("cookie 过期") ||
+    low.includes("token expired") ||
+    low.includes("unauthorized") ||
+    low.includes("invalid_grant")
+  ) {
+    return { type: "auth", side: "remote" };
+  }
+  if (low.includes("限流") || low.includes("too many requests") || low.includes("429")) {
+    return { type: "rate_limited", side: "remote" };
+  }
+  if (
+    low.includes("本地授权目录") ||
+    low.includes("未授权本地") ||
+    low.includes("本地无权限") ||
+    low.includes("无法读取本地") ||
+    low.includes("本地权限") ||
+    (low.includes("本地") &&
+      (low.includes("权限被拒绝") ||
+        low.includes("权限不足") ||
+        low.includes("不可访问")))
+  ) {
+    return { type: "local_permission", side: "local" };
+  }
+  if (
+    low.includes("无目录访问权限") ||
+    low.includes("accessdenied") ||
+    low.includes("permission denied") ||
+    low.includes("forbidden") ||
+    low.includes("403")
+  ) {
+    return { type: "remote_permission", side: "remote" };
+  }
+  if (
+    low.includes("超时") ||
+    low.includes("连接") ||
+    low.includes("域名解析") ||
+    low.includes("no such host") ||
+    low.includes("i/o timeout") ||
+    low.includes("deadline exceeded") ||
+    low.includes("tls:")
+  ) {
+    return { type: "connection", side: "remote" };
+  }
+  return { type: "transfer", side: "unknown" };
+}
+
+export function resolveSyncError(status?: SyncStatus | null): SyncErrorInfo {
+  if (!status) return { type: "", side: "", endpoint: "" };
+  const fallback = classifyLegacySyncError(status.error || "");
+  return {
+    type: status.errorType || fallback.type,
+    side: status.errorSide || fallback.side,
+    endpoint: status.errorEndpoint || "",
+  };
+}
+
+export function formatSyncNextAction(
+  status?: SyncStatus | null,
+  nowMs = Date.now(),
+): string {
+  if (!status || status.state === "paused") return "";
+  const now = Math.floor(nowMs / 1000);
+  const retryAt = Number(status.retryAt || 0);
+  if (retryAt > now) return `下次重试 ${formatTimestamp(retryAt, true)}`;
+  const nextPoll = Number(status.nextPoll || 0);
+  if (nextPoll > now) return `下次检查 ${formatTimestamp(nextPoll, true)}`;
+  return "";
 }
 
 export function parseJobExtraFlagsObject(

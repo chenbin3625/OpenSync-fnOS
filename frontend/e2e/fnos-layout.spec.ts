@@ -128,18 +128,17 @@ test("desktop sidebar is 220px with icon menus and bottom settings", async ({
   await expect(sidebar).toBeVisible();
   expect((await sidebar.boundingBox())?.width).toBe(220);
   await expect(sidebar.locator("nav .nav-link .nav-label")).toHaveText([
+    "同步工作台",
     "总览看板",
-    "同步任务",
-    "存储管理",
     "通知配置",
   ]);
   const firstNav = sidebar.locator("nav .nav-link").first();
-  await expect(firstNav).toHaveText("总览看板");
+  await expect(firstNav).toHaveText("同步工作台");
   const firstNavBox = await firstNav.boundingBox();
   expect(firstNavBox?.width).toBe(204);
   expect(firstNavBox?.height).toBe(36);
   await expect(firstNav).toHaveCSS("font-size", "14px");
-  const syncNav = sidebar.getByRole("link", { name: "同步任务", exact: true });
+  const syncNav = sidebar.getByRole("link", { name: "同步工作台", exact: true });
   const syncNavBox = await syncNav.boundingBox();
   expect(syncNavBox?.width).toBe(204);
   expect(syncNavBox?.height).toBe(36);
@@ -322,9 +321,8 @@ test("mobile task tabs fit inside the page toolbar", async ({ page }) => {
   await routeMobileTaskFixture(page);
   await page.goto("/app/opensync/tasks?tab=overview");
   await expect(page.locator(".mobile-navigation a")).toHaveText([
+    "同步工作台",
     "总览看板",
-    "同步任务",
-    "存储管理",
     "通知配置",
     "设置",
   ]);

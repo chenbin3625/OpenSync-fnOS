@@ -8008,8 +8008,7 @@ body[theme-mode="dark"] .bw-mode-btn.is-active {
   min-width: 0;
 }
 
-.wizard-pair-summary,
-.wizard-route-pill {
+.wizard-pair-summary {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -8029,6 +8028,34 @@ body[theme-mode="dark"] .bw-mode-btn.is-active {
 .wizard-pair-arrow {
   font-weight: 700;
   color: var(--semi-color-primary);
+}
+
+.wizard-impact {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: baseline;
+  gap: 6px 12px;
+  margin: 0;
+  padding: 10px 14px;
+  border: 1px solid var(--semi-color-border);
+  border-radius: var(--radius);
+  background: var(--surface-soft);
+  font-size: var(--font-size-small);
+}
+
+.wizard-impact dt {
+  font-weight: 600;
+}
+
+.wizard-impact dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.wizard-impact-route {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
 }
 
 /* Step 2: 3 Direction Cards + Delete Policy Radio Cards + Inline Crypt */
@@ -9007,6 +9034,64 @@ body[theme-mode="dark"] .bw-mode-btn.is-active {
   flex-direction: column;
   gap: 10px;
   font-size: var(--font-size-body);
+}
+
+.sync-connection-policy {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+
+.sync-connection-policy__head,
+.sync-connection-policy__schedule-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sync-connection-policy__head h3 {
+  margin: 0;
+}
+
+.sync-connection-policy__head p {
+  margin: 6px 0 0;
+}
+
+.sync-connection-policy__fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin: 20px 0;
+}
+
+.sync-connection-policy__fields label {
+  display: grid;
+  gap: 6px;
+}
+
+.sync-connection-policy__fields input {
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text-primary);
+}
+
+.sync-connection-policy__schedule-head {
+  margin-bottom: 8px;
+}
+
+.sync-connection-policy__hint {
+  margin: 16px 0;
+  line-height: 1.6;
+}
+
+@media (max-width: 720px) {
+  .sync-connection-policy__fields {
+    grid-template-columns: 1fr;
+  }
 }
 
 .sync-settings-quota {

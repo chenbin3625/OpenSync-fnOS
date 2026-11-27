@@ -2,6 +2,7 @@ import { test, expect, type Page } from "@playwright/test";
 
 interface MockEnvOptions {
   coldStart?: boolean;
+  jobs?: Record<string, unknown>[];
 }
 
 async function setupWorkbenchMock(page: Page, options: MockEnvOptions = {}) {
@@ -32,7 +33,7 @@ async function setupWorkbenchMock(page: Page, options: MockEnvOptions = {}) {
         },
       ];
 
-  const jobs: Record<string, unknown>[] = coldStart
+  const jobs: Record<string, unknown>[] = options.jobs ?? (coldStart
     ? []
     : [
         {
@@ -103,7 +104,7 @@ async function setupWorkbenchMock(page: Page, options: MockEnvOptions = {}) {
             failures: 0,
           },
         },
-      ];
+      ]);
 
   const recentItems = coldStart
     ? []
@@ -317,9 +318,17 @@ async function setupWorkbenchMock(page: Page, options: MockEnvOptions = {}) {
           results: [],
         });
       }
+      const targets = jobs.filter((job) => payload.ids?.includes(Number(job.id)));
+      for (const job of targets) {
+        if (payload.action === "run") job.running = true;
+        if (payload.action === "stop") {
+          job.running = false;
+          job.queued = false;
+        }
+      }
       return success({
         action: payload.action,
-        succeeded: 1,
+        succeeded: targets.length,
         failed: 0,
         results: [],
       });
@@ -358,6 +367,80 @@ async function setupWorkbenchMock(page: Page, options: MockEnvOptions = {}) {
   return { batchCalls };
 }
 
+test("connection and selection batches submit only eligible IDs in the displayed scope", async ({ page }) => {
+  page.setDefaultTimeout(8000);
+  const jobs = [
+    { id: 1, remark: "A 待执行", storage: "PhotoCloud" },
+    { id: 2, remark: "A 排队中", storage: "PhotoCloud", queued: true },
+    { id: 3, remark: "B 运行中", storage: "SafeCrypt", running: true },
+    { id: 4, remark: "B 待执行", storage: "SafeCrypt" },
+    { id: 5, remark: "A 暂停镜像", storage: "PhotoCloud", enable: 0, method: 1 },
+  ].map(({ storage, ...job }) => ({
+    enable: 1,
+    method: 0,
+    isCron: 3,
+    alistId: 1,
+    srcPath: JSON.stringify([`/本地/Photos/${job.id}`]),
+    dstPath: JSON.stringify([`/${storage}/Backup/${job.id}`]),
+    ...job,
+  }));
+  const { batchCalls } = await setupWorkbenchMock(page, { jobs });
+  await page.goto("/app/opensync/sync?storage=PhotoCloud");
+
+  const workbench = page.getByTestId("sync-workbench");
+  const buttons = workbench.getByRole("button");
+  const modal = page.getByRole("dialog");
+  await expect(workbench.locator(".sync-overview-row")).toHaveCount(3);
+  await expect(buttons.filter({ hasText: "全部立即同步" })).toHaveCount(0);
+  await expect(buttons.filter({ hasText: "全部中止" })).toHaveCount(0);
+  await expect(page.getByTestId("global-sync-bar").getByRole("button")).toHaveCount(0);
+  await workbench.getByRole("button", { name: "当前列表中止（1）" }).click();
+  await expect(modal).toContainText("「PhotoCloud」的当前列表中的 1 个任务");
+  await modal.getByRole("button", { name: "取消", exact: true }).click();
+  expect(batchCalls).toEqual([]);
+
+  await workbench.getByRole("button", { name: "当前列表立即同步（1）" }).click();
+  await expect(workbench.getByRole("button", { name: "当前列表立即同步（0）" })).toBeDisabled();
+  await workbench.getByRole("button", { name: "当前列表中止（2）" }).click();
+  await expect(modal).toContainText("「PhotoCloud」的当前列表中的 2 个任务");
+  await modal.getByRole("button", { name: "确认", exact: true }).click();
+  await expect(workbench.getByRole("button", { name: "当前列表中止（0）" })).toBeDisabled();
+  expect(batchCalls).toEqual([
+    { action: "run", ids: [1] },
+    { action: "stop", ids: [1, 2] },
+  ]);
+
+  await page.getByTestId("connection-item-SafeCrypt").click();
+  await expect(workbench.getByRole("button", { name: "当前列表中止（1）" })).toBeEnabled();
+  await expect(workbench.getByRole("button", { name: "当前列表立即同步（1）" })).toBeEnabled();
+  await page.getByTestId("connection-item-all").click();
+  await expect(workbench.getByRole("button", { name: "全部立即同步（3）" })).toBeEnabled();
+  await expect(workbench.getByRole("button", { name: "全部中止（1）" })).toBeEnabled();
+
+  const search = workbench.getByRole("textbox", { name: "搜索任务名称或路径" });
+  await search.fill("B 待执行");
+  await expect(workbench.getByRole("button", { name: "当前列表立即同步（1）" })).toBeEnabled();
+  await expect(workbench.getByRole("button", { name: "当前列表中止（0）" })).toBeDisabled();
+  await workbench.getByRole("button", { name: "重置筛选" }).click();
+
+  const rows = workbench.locator(".sync-overview-row");
+  await rows.filter({ hasText: "A 暂停镜像" }).locator(".semi-checkbox").click();
+  await expect(workbench.getByRole("button", { name: "批量恢复同步（0）" })).toBeDisabled();
+  await rows.filter({ hasText: "B 运行中" }).locator(".semi-checkbox").click();
+  await expect(workbench.getByRole("button", { name: "批量立即同步（0）" })).toBeDisabled();
+  await workbench.getByRole("button", { name: "批量中止传输（1）" }).click();
+  await expect(modal).toContainText("已勾选任务中的 1 个任务");
+  await modal.getByRole("button", { name: "确认", exact: true }).click();
+  await expect(workbench.getByRole("button", { name: "全部中止（0）" })).toBeDisabled();
+  expect(batchCalls.at(-1)).toEqual({ action: "stop", ids: [3] });
+
+  await workbench.getByRole("button", { name: "全部立即同步（4）" }).click();
+  await expect(modal).toContainText("全部连接中的 4 个任务");
+  await modal.getByRole("button", { name: "确认", exact: true }).click();
+  await expect(workbench.getByRole("button", { name: "全部立即同步（0）" })).toBeDisabled();
+  expect(batchCalls.at(-1)).toEqual({ action: "run", ids: [1, 2, 3, 4] });
+});
+
 test("dashboard shows cold-start 3-step onboarding when empty", async ({ page }) => {
   await setupWorkbenchMock(page, { coldStart: true });
   await page.goto("/app/opensync/dashboard");
@@ -367,6 +450,9 @@ test("dashboard shows cold-start 3-step onboarding when empty", async ({ page })
   await expect(guide.getByText("确认飞牛本地授权目录")).toBeVisible();
   await expect(guide.getByText("添加云盘或远程存储")).toBeVisible();
   await expect(guide.getByText("创建第一个同步任务")).toBeVisible();
+  await guide.getByRole("button", { name: "新建同步任务" }).click();
+  await expect(page).toHaveURL(/\/app\/opensync\/sync$/);
+  await expect(page.getByRole("dialog", { name: "新建持续同步任务" })).toBeVisible();
 });
 
 test("master-detail workbench, drawer watchDegraded banner, global sync bar & recent feed", async ({ page }) => {
@@ -413,6 +499,13 @@ test("master-detail workbench, drawer watchDegraded banner, global sync bar & re
   await page.getByRole("tab", { name: "同步历史" }).click();
   await expect(page.locator(".sync-history-card")).toBeVisible();
   await expect(page.getByText("draft.docx", { exact: true })).toBeVisible();
+  await expect(page.getByText("IMG_001.jpg", { exact: true })).toHaveCount(0);
+  await page.locator(".sync-history-card").getByRole("link", { name: "查看任务" }).click();
+  await expect(drawer.getByRole("tab", { name: "同步记录", selected: true })).toBeVisible();
+  expect(new URL(page.url()).searchParams.get("jobId")).toBe("3");
+  await drawer.getByRole("button", { name: "close" }).click();
+  await expect(drawer).toHaveCount(0);
+  await expect(page).toHaveURL(/storage=__local__&view=history$/);
 
   // Switch to Connection Settings on PhotoCloud and test connection
   await page.getByTestId("connection-item-PhotoCloud").click();
@@ -428,6 +521,9 @@ test("master-detail workbench, drawer watchDegraded banner, global sync bar & re
   await expect(feed.getByText("IMG_001.jpg", { exact: true })).toBeVisible();
   await feed.getByRole("button", { name: "异常" }).click();
   await expect(feed.getByText("draft.docx", { exact: true })).toBeVisible();
+  await feed.getByRole("link", { name: "draft.docx" }).click();
+  await expect(drawer.getByRole("tab", { name: "同步记录", selected: true })).toBeVisible();
+  await expect(page.getByTestId("connection-item-local")).toHaveAttribute("aria-pressed", "true");
 });
 
 test("mobile layout keeps header reachable and zero horizontal overflow", async ({ page }) => {
@@ -440,4 +536,148 @@ test("mobile layout keeps header reachable and zero horizontal overflow", async 
     () => document.documentElement.scrollWidth > window.innerWidth,
   );
   expect(overflow).toBe(false);
+});
+
+test("unified connection policy pause/limit and failed-record recovery stay in workbench", async ({
+  page,
+}) => {
+  const policyWrites: Array<Record<string, unknown>> = [];
+  let remotePaused = false;
+  let remoteBwLimit = "";
+  let remotePoll = 0;
+
+  await page.route("**/app/opensync/svr/**", async (route) => {
+    const req = route.request();
+    const url = new URL(req.url());
+    const ok = (data: unknown) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ code: 200, data, msg: "" }),
+      });
+
+    if (url.pathname.endsWith("/session")) {
+      return ok({ uid: 1, development: false, version: "0.1.0" });
+    }
+    if (url.pathname.endsWith("/version/latest")) {
+      return ok({ hasUpdate: false, latestVersion: "0.1.0" });
+    }
+    if (url.pathname.endsWith("/native/storage/policy") && req.method() === "PUT") {
+      const body = req.postDataJSON() as Record<string, unknown>;
+      policyWrites.push(body);
+      remotePaused = Boolean(body.paused);
+      remoteBwLimit = String(body.bwLimit || "");
+      remotePoll = Number(body.pollIntervalSec || 0);
+      return ok(null);
+    }
+    if (url.pathname.endsWith("/native/storage")) {
+      return ok({
+        engineId: 1,
+        enabled: true,
+        rcloneAvailable: true,
+        localRoots: [{ id: "Photos", path: "/vol1/Photos" }],
+        remotes: [
+          {
+            name: "PhotoCloud",
+            type: "webdav",
+            summary: "https://dav.example.com",
+            options: {},
+            configuredSecrets: [],
+            usedByJobs: ["照片同步"],
+            usedByCrypts: [],
+            pollIntervalSec: remotePoll,
+            bwLimit: remoteBwLimit,
+            paused: remotePaused,
+          },
+        ],
+      });
+    }
+    if (url.pathname.endsWith("/alist")) {
+      return ok([{ id: 1, kind: "rclone", url: "rclone://native", remark: "内置存储" }]);
+    }
+    if (url.pathname.endsWith("/dashboard")) {
+      return ok({ kpi: { runningJobs: 0 }, jobs: [] });
+    }
+    if (url.pathname.endsWith("/job/items")) {
+      return ok({ dataList: [], count: 0 });
+    }
+    if (url.pathname.endsWith("/job") && url.searchParams.has("current")) {
+      return ok(null);
+    }
+    if (url.pathname.endsWith("/job")) {
+      return ok({
+        count: 1,
+        dataList: [
+          {
+            id: 21,
+            enable: 1,
+            remark: "照片同步",
+            alistId: 1,
+            method: 0,
+            isCron: 3,
+            srcPath: '["/本地/Photos"]',
+            dstPath: '["/PhotoCloud/Photos"]',
+            syncStatus: {
+              state: remotePaused ? "paused" : "error",
+              pendingChanges: 2,
+              lastSuccess: 1700000000,
+              lastPoll: 1700000000,
+              nextPoll: 1700000060,
+              error: remotePaused ? "" : "传输失败：目标磁盘空间不足",
+              errorType: remotePaused ? "" : "transfer",
+              errorSide: remotePaused ? "" : "remote",
+              errorEndpoint: remotePaused ? "" : "PhotoCloud",
+              failures: remotePaused ? 0 : 1,
+              connectionPaused: remotePaused,
+            },
+          },
+        ],
+      });
+    }
+    return ok(null);
+  });
+
+  await page.goto("/app/opensync/sync?storage=PhotoCloud");
+  await expect(page.getByTestId("connection-item-PhotoCloud")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+
+  // Phase 2 recovery CTA opens the unified workbench drawer directly on failed records
+  await page.getByRole("link", { name: "查看失败记录并重试" }).click();
+  await expect(page).toHaveURL(/\/sync\?storage=PhotoCloud&jobId=21&tab=records&hasError=1$/);
+  const drawer = page.locator(".task-detail-drawer");
+  await expect(drawer.getByRole("tab", { name: "同步记录", selected: true })).toBeVisible();
+  await drawer.getByRole("button", { name: "close" }).click();
+  await expect(drawer).toHaveCount(0);
+
+  // Phase 3 one-click pause connection from banner persists and reflects on rail + row
+  await page.locator(".sync-connection-banner").getByRole("button", { name: "暂停连接" }).click();
+  await expect.poll(() => policyWrites.length).toBe(1);
+  expect(policyWrites[0]).toMatchObject({ name: "PhotoCloud", paused: true });
+  await expect(page.getByTestId("connection-item-PhotoCloud")).toContainText("已暂停");
+  await expect(page.locator(".sync-overview-row")).toContainText("所属连接已暂停");
+
+  // Save shared cap and poll interval in Connection Settings, then resume connection
+  await page.getByRole("tab", { name: "连接设置" }).click();
+  const policyCard = page.getByTestId("connection-policy-editor");
+  await policyCard.locator('input[type="number"]').fill("300");
+  await policyCard.locator('input[type="text"]').fill("10M");
+  await policyCard.getByRole("button", { name: "保存连接策略" }).click();
+  await expect.poll(() => policyWrites.length).toBe(2);
+  expect(policyWrites[1]).toMatchObject({
+    name: "PhotoCloud",
+    pollIntervalSec: 300,
+    bwLimit: "10M",
+    paused: true,
+  });
+  await expect(page.locator(".sync-connection-banner")).toContainText("共享限速 10M");
+
+  await page.locator(".sync-connection-banner").getByRole("button", { name: "恢复连接" }).click();
+  await expect.poll(() => policyWrites.length).toBe(3);
+  expect(policyWrites[2]).toMatchObject({
+    name: "PhotoCloud",
+    pollIntervalSec: 300,
+    bwLimit: "10M",
+    paused: false,
+  });
 });

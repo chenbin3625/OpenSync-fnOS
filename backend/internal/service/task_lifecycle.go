@@ -38,6 +38,15 @@ func (jt *JobTask) releaseSlotNow() {
 // and the task context.
 func (jt *JobTask) cancelTaskRuntime() {
 	jt.cancelPersistFlush()
+	jt.connectionBwMu.Lock()
+	groupReleases := append([]func(){}, jt.connectionGroupReleases...)
+	jt.connectionGroupReleases = nil
+	jt.connectionBwMu.Unlock()
+	for _, release := range groupReleases {
+		if release != nil {
+			release()
+		}
+	}
 	jt.runtimeMu.Lock()
 	cancel := jt.cancel
 	releaseSlot := jt.releaseEngineSlot
@@ -157,7 +166,13 @@ func (jt *JobTask) completeContinuousRun(status taskStatus, message string) {
 	if status != taskStatusSuccess && status != taskStatusNoSync && message == "" {
 		message = "本轮同步未全部完成，待处理变更已保留，将自动重试"
 	}
-	if err := mapper.CompleteSyncRun(util.ToInt64(jt.Job["id"]), jt.SyncGeneration, redactSensitiveError(message)); err != nil {
+	message = redactSensitiveError(message)
+	if err := mapper.CompleteSyncRun(
+		util.ToInt64(jt.Job["id"]),
+		jt.SyncGeneration,
+		message,
+		syncErrorForJob(jt.Job, message),
+	); err != nil {
 		log.Printf("Task %d failed to checkpoint continuous sync: %v", jt.TaskID, err)
 	}
 }

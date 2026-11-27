@@ -399,8 +399,9 @@ test("shows helpful onboarding CTAs when /sync has no jobs or local folders", as
 
   await page.goto("/app/opensync/sync");
   await expect(page.getByText(/尚未配置存储连接或本地授权目录/)).toBeVisible();
-  await page.getByRole("button", { name: "前往存储管理", exact: true }).click();
-  await expect(page).toHaveURL(/\/engines$/);
+  await page.getByRole("button", { name: "前往连接设置", exact: true }).click();
+  await expect(page).toHaveURL(/\/sync\?view=settings$/);
+  await expect(page.getByTestId("sync-workbench-settings")).toBeVisible();
 });
 
 test("shows status dot on mobile job chips and avoids /tasks header overflow", async ({
