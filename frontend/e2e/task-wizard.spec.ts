@@ -188,7 +188,8 @@ test("standard 3-step wizard hides /本地 & ~12hex, disambiguates duplicate loc
   expect(await dialog.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
 
   // Step 3 (Optional): Weekly schedule grid + collapsed rclone expert drawer + 4 presets
-  await dialog.getByRole("button", { name: "同步计划与过滤", exact: true }).click();
+  await dialog.getByRole("button", { name: "进阶设置", exact: true }).click();
+  await expect(dialog.locator(".wizard-impact")).toContainText("/aliyun-Vault-crypt");
 
   // Expert rclone drawer must be collapsed by default
   const expertToggle = dialog.getByRole("button", {
@@ -351,6 +352,7 @@ test("supports download endpoint reversal, inline crypt reuse, bidirectional syn
   // Test download direction hides one-way delete vs shows download banner
   await dialog.getByRole("radio", { name: /^仅下载云端更改/ }).click();
   await expect(dialog.getByText("目标端为 NAS 本地目录")).toBeVisible();
+  await expect(dialog.locator(".wizard-impact")).toContainText("NAS Work←云端 /od/Sync");
 
   // Switch to bidirectional sync -> hides one-way delete policy radios and offers reusable crypt
   await dialog.getByRole("radio", { name: /^双向同步/ }).click();
@@ -367,7 +369,7 @@ test("supports download endpoint reversal, inline crypt reuse, bidirectional syn
   );
 
   // Advance to Step 3 and test brush painting on the weekly schedule grid
-  await dialog.getByRole("button", { name: "同步计划与过滤", exact: true }).click();
+  await dialog.getByRole("button", { name: "进阶设置", exact: true }).click();
   await dialog.getByRole("radio", { name: /^按周计划调度/ }).click();
   await dialog.getByRole("button", { name: /涂抹：暂停/ }).click();
   const cell0 = dialog.locator('[role="gridcell"][data-day="2"][data-hour="10"]');

@@ -12,11 +12,13 @@ import type { JobItem } from "../types";
 interface GlobalSyncBarProps {
   jobs: JobItem[];
   variant?: "sidebar" | "mobile";
+  showActions: boolean;
 }
 
 export function GlobalSyncBar({
   jobs,
   variant = "sidebar",
+  showActions,
 }: GlobalSyncBarProps) {
   const [toggling, setToggling] = useState(false);
   const activeJobs = useMemo(
@@ -206,7 +208,7 @@ export function GlobalSyncBar({
           />
           <span className="global-sync-bar__label">{summary.statusLabel}</span>
         </div>
-        {(summary.hasPausable || summary.hasResumable) && (
+        {showActions && (summary.hasPausable || summary.hasResumable) && (
           <Button
             size="small"
             theme="borderless"

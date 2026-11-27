@@ -49,7 +49,7 @@ test("connects a first WebDAV account inline and reuses it from the sync home", 
   });
 
   await page.goto("/app/opensync/sync");
-  await expect(page.getByRole("heading", { name: "同步任务", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "同步工作台", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "新建同步任务", exact: true }).click();
   const dialog = page.getByRole("dialog");
   await dialog.getByRole("button", { name: "添加网盘连接", exact: true }).click();
@@ -68,16 +68,21 @@ test("connects a first WebDAV account inline and reuses it from the sync home", 
   await dialog.getByRole("button", { name: "下一步", exact: true }).click();
   await expect(dialog.getByRole("radio", { name: /^仅上传本地更改/, checked: true })).toBeVisible();
   await expect(dialog.getByRole("radio", { name: /^不删除目标端文件/, checked: true })).toBeVisible();
+  const impact = dialog.locator(".wizard-impact");
+  await expect(impact).toContainText("云端 /PhotoCloud/Backup");
+  await expect(impact).toContainText("保留目标端独有文件");
+  await expect(impact).toContainText("比对判定有差异时覆盖目标端同名文件");
   await dialog.getByRole("button", { name: "保存", exact: true }).click();
-  await expect(page).toHaveURL(/\/tasks\?jobId=1/);
+  await expect(page).toHaveURL(/\/sync$/);
+  const drawer = page.locator(".task-detail-drawer");
+  await expect(drawer).toContainText("Photos · PhotoCloud");
   expect(savedJobs[0]).toMatchObject({
     remark: "Photos · PhotoCloud", srcPath: ["/本地/Photos"], dstPath: ["/PhotoCloud/Backup"], method: 0, isCron: 3, enable: 1,
   });
 
-  await page.goto("/app/opensync/sync");
+  await drawer.getByRole("link", { name: "完整页面打开" }).click();
+  await expect(page).toHaveURL(/\/tasks\?jobId=1&tab=overview$/);
   const group = page.locator(".sync-connection-group").filter({ hasText: "PhotoCloud" });
-  await expect(group.getByRole("link", { name: "Photos · PhotoCloud" })).toBeVisible();
-  await group.getByRole("link", { name: "Photos · PhotoCloud" }).click();
   const detail = page.locator(".overview-card .overview-head-actions");
   await detail.getByRole("button", { name: "暂停同步", exact: true }).click();
   await detail.getByRole("button", { name: "恢复同步", exact: true }).click();
@@ -88,6 +93,91 @@ test("connects a first WebDAV account inline and reuses it from the sync home", 
   await expect(
     dialog.getByRole("tree", { name: "云端存储连接列表" }).getByRole("button", { name: "Backup", exact: true }),
   ).toBeVisible();
+});
+
+test("creates a mirror in the current connection and enables it only after read-only preview", async ({ page }) => {
+  let saved: Record<string, unknown> | undefined;
+  let previewFinished = false;
+  const writes: { action: string; body: unknown }[] = [];
+  await page.route("**/app/opensync/svr/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const success = (data: unknown) => route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ code: 200, data, msg: "" }),
+    });
+    if (url.pathname.endsWith("/session")) return success({ uid: 1, development: false, version: "test" });
+    if (url.pathname.endsWith("/native/storage")) {
+      return success({
+        engineId: 1, enabled: true, rcloneAvailable: true,
+        localRoots: [{ id: "Photos", path: "/vol1/Photos" }],
+        remotes: ["CloudA", "CloudB"].map((name) => ({ name, type: "webdav", options: {} })),
+      });
+    }
+    if (url.pathname.endsWith("/alist")) {
+      const path = url.searchParams.get("path");
+      return success(path ? (path === "/CloudA" ? [{ path: "Backup" }] : [])
+        : [{ id: 1, kind: "rclone", url: "rclone://native", remark: "内置存储" }]);
+    }
+    if (url.pathname.endsWith("/job/dry-run")) {
+      if (request.method() === "POST") writes.push({ action: "preview", body: request.postDataJSON() });
+      return success({
+        jobId: 7, status: previewFinished ? "completed" : "running", method: 1,
+        copyCount: 0, updateCount: 0, deleteCount: 1, moveCount: 0, mkdirCount: 0, items: [],
+      });
+    }
+    if (url.pathname.endsWith("/job")) {
+      if (request.method() === "POST") {
+        saved = request.postDataJSON();
+        writes.push({ action: "save", body: saved });
+        return success({ id: 7 });
+      }
+      if (request.method() === "PUT") {
+        writes.push({ action: "enable", body: request.postDataJSON() });
+        saved = { ...saved, enable: 1 };
+        return success(null);
+      }
+      if (url.searchParams.has("current")) return success(null);
+      return success({
+        count: saved ? 1 : 0,
+        dataList: saved ? [{ ...saved, id: 7, srcPath: JSON.stringify(saved.srcPath), dstPath: JSON.stringify(saved.dstPath) }] : [],
+      });
+    }
+    return success(null);
+  });
+
+  await page.goto("/app/opensync/sync?storage=CloudA");
+  await expect(page.getByTestId("connection-item-CloudA")).toBeVisible();
+  await page.getByRole("button", { name: "新建同步任务", exact: true }).click();
+  const editor = page.locator(".task-editor-modal");
+  await editor.locator('[data-virtual-path="/本地/Photos"]').click();
+  await editor.getByRole("tree", { name: "云端存储连接列表" }).getByRole("button", { name: "Backup", exact: true }).click();
+  await editor.getByRole("button", { name: "下一步", exact: true }).click();
+  await editor.getByRole("radio", { name: /^完全镜像清理目标多余文件/ }).click();
+  await expect(editor.locator(".wizard-impact")).toContainText("清理目标端独有文件");
+  await editor.getByRole("button", { name: "保存并预览", exact: true }).click();
+
+  await expect(editor).toBeHidden();
+  await expect(page).toHaveURL(/\/sync\?storage=CloudA$/);
+  const drawer = page.locator(".task-detail-drawer");
+  const preview = page.getByRole("dialog", { name: /^镜像影响预览/ });
+  const confirm = preview.getByRole("button", { name: "确认并启动镜像", exact: true });
+  await expect(drawer).toContainText("Photos · CloudA");
+  await expect(preview).toBeVisible();
+  await expect(preview.getByRole("button", { name: "中止预览", exact: true })).toBeVisible();
+  await expect(confirm).toHaveCount(0);
+  await expect.poll(() => writes.map(({ action }) => action)).toEqual(["save", "preview"]);
+  expect(writes[0].body).toMatchObject({ method: 1, enable: 0, srcPath: ["/本地/Photos"], dstPath: ["/CloudA/Backup"] });
+  expect(writes[1].body).toEqual({ id: 7 });
+
+  previewFinished = true;
+  await expect(confirm).toBeVisible();
+  expect(writes).toHaveLength(2);
+  await confirm.click();
+  await expect(preview).toBeHidden();
+  await expect(drawer.getByRole("button", { name: "暂停同步", exact: true })).toBeVisible();
+  expect(writes.at(-1)).toEqual({ action: "enable", body: { id: "7", pause: false } });
+  await expect(page).toHaveURL(/\/sync\?storage=CloudA$/);
 });
 
 test("edits a legacy upload as one-way sync and updates deletion policy and polling", async ({ page }) => {
@@ -145,7 +235,7 @@ test("edits a legacy upload as one-way sync and updates deletion policy and poll
   await dialog.getByRole("tab", { name: "同步方向与安全", exact: true }).click();
   await expect(dialog.getByRole("radio", { name: /^仅上传本地更改/, checked: true })).toBeVisible();
   await dialog.getByRole("radio", { name: /^完全镜像清理目标多余文件/ }).click();
-  await dialog.getByRole("tab", { name: "过滤规则与同步计划", exact: true }).click();
+  await dialog.getByRole("tab", { name: "进阶设置", exact: true }).click();
   const cadenceToggle = dialog.getByRole("button", { name: /轮询频率、防抖与任务通知绑定/ });
   if ((await cadenceToggle.getAttribute("aria-expanded")) !== "true") {
     await cadenceToggle.click();

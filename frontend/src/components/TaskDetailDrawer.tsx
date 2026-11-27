@@ -33,8 +33,9 @@ const SyncRecords = lazy(() =>
 );
 
 interface TaskDetailDrawerProps {
-  job: JobItem | null;
+  job: JobItem;
   initialTab?: TaskTab;
+  initialMirrorPreview?: boolean;
   engines: AlistItem[];
   remotes: NativeRemoteItem[];
   onClose: () => void;
@@ -46,6 +47,7 @@ interface TaskDetailDrawerProps {
 export function TaskDetailDrawer({
   job,
   initialTab = "overview",
+  initialMirrorPreview = false,
   engines,
   remotes,
   onClose,
@@ -58,26 +60,19 @@ export function TaskDetailDrawer({
   const [recordsRefreshKey, setRecordsRefreshKey] = useState(0);
   const [checkOpen, setCheckOpen] = useState(false);
   const [conflictsOpen, setConflictsOpen] = useState(false);
-  const [mirrorPreviewOpen, setMirrorPreviewOpen] = useState(false);
+  const [mirrorPreviewOpen, setMirrorPreviewOpen] = useState(initialMirrorPreview);
   const actions = useAction();
-
-  useEffect(() => {
-    setTab(initialTab);
-    setCheckOpen(false);
-    setConflictsOpen(false);
-    setMirrorPreviewOpen(false);
-  }, [job?.id, initialTab]);
 
   const currentTask = useResource(
     (signal) =>
-      job && !isLegacyOpenListJob(job, engines)
+      !isLegacyOpenListJob(job, engines)
         ? api.current(job.id, signal)
         : Promise.resolve(null),
-    [job?.id, engines.length],
+    [job.id, engines.length],
   );
 
   useEffect(() => {
-    if (!job || tab !== "overview") return;
+    if (tab !== "overview") return;
     if (!job.running && !currentTask.data) return;
     const timer = window.setInterval(() => {
       if (document.visibilityState === "visible") {
@@ -85,9 +80,7 @@ export function TaskDetailDrawer({
       }
     }, 3000);
     return () => window.clearInterval(timer);
-  }, [job?.id, job?.running, currentTask.data, currentTask.refresh, tab]);
-
-  if (!job) return null;
+  }, [job.running, currentTask.data, currentTask.refresh, tab]);
 
   const currentForJob =
     currentTask.data?.taskId && !isLegacyOpenListJob(job, engines)
@@ -140,6 +133,7 @@ export function TaskDetailDrawer({
       visible
       placement="right"
       width={isMobile ? "100%" : 740}
+      zIndex={999 /* Semi modals use 1000 and can open alongside the drawer. */}
       className="task-detail-drawer"
       title={
         <div className="task-drawer-title">

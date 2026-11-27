@@ -29,6 +29,7 @@ import {
 import { BisyncConflictsModal } from "../components/BisyncConflictsModal";
 import { CheckModal } from "../components/CheckModal";
 import { DryRunModal } from "../components/DryRunModal";
+import { TaskDetailDrawer } from "../components/TaskDetailDrawer";
 import { TaskOverviewPanel } from "../components/TaskOverviewPanel";
 import { SyncOverview } from "./SyncOverview";
 import { jobStatusDotClass } from "../components/SyncStatus";
@@ -42,6 +43,7 @@ import {
   resolveJobSelection,
   resolveTaskTab,
   type JobForm,
+  type TaskTab,
 } from "../lib/taskForm";
 import type { TaskEditorSavedResult } from "./TaskEditor";
 import {
@@ -103,6 +105,11 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
     open: false,
     job: null,
   });
+  const [drawer, setDrawer] = useState<{
+    jobId: number;
+    tab: TaskTab;
+    mirrorPreview?: boolean;
+  } | null>(null);
   const [checkJob, setCheckJob] = useState<JobItem | null>(null);
   const [conflictsOpen, setConflictsOpen] = useState(false);
   const [recordsRefreshKey, setRecordsRefreshKey] = useState(0);
@@ -110,6 +117,7 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
   const mobileJobButtons = useRef<Array<HTMLButtonElement | null>>([]);
   const actions = useAction();
   const list = jobs.data?.dataList || [];
+  const drawerJob = drawer ? list.find((job) => job.id === drawer.jobId) : undefined;
   const { job: selected, replaceWith } = resolveJobSelection(overview ? [] : list, selectedId, {
     pendingId: pendingCreatedId,
     refreshing: jobs.loading,
@@ -267,8 +275,8 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
     return () => window.clearInterval(interval);
   }, [hasOverviewRunning, dashboard.refresh, jobs.refresh]);
 
-  const refreshJobs = async (options?: { skipCurrentTask?: boolean }) => {
-    await jobs.refresh(true);
+  const refreshJobs = async (options?: { skipCurrentTask?: boolean; silent?: boolean }) => {
+    await jobs.refresh(options?.silent ?? true);
     window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
     if (overview) {
       await dashboard.refresh(true);
@@ -331,7 +339,7 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
   const handleToggleJob = (job: JobItem, running = Boolean(job.running)) => {
     if (requiresFirstMirrorPreview(job)) {
       if (overview) {
-        navigate(`/tasks?jobId=${job.id}&tab=overview&mirrorPreview=1`);
+        setDrawer({ jobId: job.id, tab: "overview", mirrorPreview: true });
       } else {
         update({ mirrorPreview: 1 });
       }
@@ -404,13 +412,19 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
       {overview ? (
         <>
           <Header
-            title="同步任务"
+            title="同步工作台"
             actions={
               <Button
                 type="primary"
                 theme="solid"
                 icon={<IconPlusStroked aria-hidden="true" />}
-                onClick={() => setEditor({ open: true, job: null })}
+                onClick={() => {
+                  const storageName = params.get("storage");
+                  const initialRemote = storage.data?.remotes.find(
+                    (remote) => remote.name.toLowerCase() === storageName?.toLowerCase(),
+                  )?.name;
+                  setEditor({ open: true, job: null, initialRemote });
+                }}
               >
                 新建同步任务
               </Button>
@@ -433,6 +447,7 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
               engines={engines.data || []}
               busy={actions.busy}
               onAdd={(initialRemote) => setEditor({ open: true, job: null, initialRemote })}
+              onOpenTask={(jobId, tab) => setDrawer({ jobId, tab })}
               onEdit={(job) => setEditor({ open: true, job })}
               onClone={handleCloneJob}
               onToggle={handleToggleJob}
@@ -634,6 +649,23 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
         )}
       </div>
       </>}
+      {drawer && drawerJob && (
+        <TaskDetailDrawer
+          key={drawerJob.id}
+          job={drawerJob}
+          initialTab={drawer.tab}
+          initialMirrorPreview={drawer.mirrorPreview}
+          engines={engines.data || []}
+          remotes={storage.data?.remotes || []}
+          onClose={() => setDrawer(null)}
+          onEdit={(job) => {
+            setDrawer(null);
+            setEditor({ open: true, job });
+          }}
+          onClone={handleCloneJob}
+          onJobsChanged={() => refreshJobs({ skipCurrentTask: true })}
+        />
+      )}
       {mirrorPreview && selected && (
         <DryRunModal
           jobId={selected.id}
@@ -719,10 +751,16 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
               setEditor({ open: false, job: null });
               const createdId = result.createdId;
               const mirrorPreviewId = result.mirrorPreviewId;
-              if (overview && (createdId || mirrorPreviewId)) {
+              if (overview) {
                 const targetId = createdId ?? mirrorPreviewId;
-                window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
-                navigate(`/tasks?jobId=${targetId}&tab=overview${mirrorPreviewId ? "&mirrorPreview=1" : ""}`);
+                if (targetId) {
+                  setDrawer({
+                    jobId: targetId,
+                    tab: "overview",
+                    mirrorPreview: mirrorPreviewId === targetId,
+                  });
+                }
+                void refreshJobs({ skipCurrentTask: true, silent: false });
                 return;
               }
               if (createdId) {

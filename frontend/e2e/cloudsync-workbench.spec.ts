@@ -2,6 +2,7 @@ import { test, expect, type Page } from "@playwright/test";
 
 interface MockEnvOptions {
   coldStart?: boolean;
+  jobs?: Record<string, unknown>[];
 }
 
 async function setupWorkbenchMock(page: Page, options: MockEnvOptions = {}) {
@@ -32,7 +33,7 @@ async function setupWorkbenchMock(page: Page, options: MockEnvOptions = {}) {
         },
       ];
 
-  const jobs: Record<string, unknown>[] = coldStart
+  const jobs: Record<string, unknown>[] = options.jobs ?? (coldStart
     ? []
     : [
         {
@@ -103,7 +104,7 @@ async function setupWorkbenchMock(page: Page, options: MockEnvOptions = {}) {
             failures: 0,
           },
         },
-      ];
+      ]);
 
   const recentItems = coldStart
     ? []
@@ -317,9 +318,17 @@ async function setupWorkbenchMock(page: Page, options: MockEnvOptions = {}) {
           results: [],
         });
       }
+      const targets = jobs.filter((job) => payload.ids?.includes(Number(job.id)));
+      for (const job of targets) {
+        if (payload.action === "run") job.running = true;
+        if (payload.action === "stop") {
+          job.running = false;
+          job.queued = false;
+        }
+      }
       return success({
         action: payload.action,
-        succeeded: 1,
+        succeeded: targets.length,
         failed: 0,
         results: [],
       });
@@ -357,6 +366,80 @@ async function setupWorkbenchMock(page: Page, options: MockEnvOptions = {}) {
 
   return { batchCalls };
 }
+
+test("connection and selection batches submit only eligible IDs in the displayed scope", async ({ page }) => {
+  page.setDefaultTimeout(8000);
+  const jobs = [
+    { id: 1, remark: "A 待执行", storage: "PhotoCloud" },
+    { id: 2, remark: "A 排队中", storage: "PhotoCloud", queued: true },
+    { id: 3, remark: "B 运行中", storage: "SafeCrypt", running: true },
+    { id: 4, remark: "B 待执行", storage: "SafeCrypt" },
+    { id: 5, remark: "A 暂停镜像", storage: "PhotoCloud", enable: 0, method: 1 },
+  ].map(({ storage, ...job }) => ({
+    enable: 1,
+    method: 0,
+    isCron: 3,
+    alistId: 1,
+    srcPath: JSON.stringify([`/本地/Photos/${job.id}`]),
+    dstPath: JSON.stringify([`/${storage}/Backup/${job.id}`]),
+    ...job,
+  }));
+  const { batchCalls } = await setupWorkbenchMock(page, { jobs });
+  await page.goto("/app/opensync/sync?storage=PhotoCloud");
+
+  const workbench = page.getByTestId("sync-workbench");
+  const buttons = workbench.getByRole("button");
+  const modal = page.getByRole("dialog");
+  await expect(workbench.locator(".sync-overview-row")).toHaveCount(3);
+  await expect(buttons.filter({ hasText: "全部立即同步" })).toHaveCount(0);
+  await expect(buttons.filter({ hasText: "全部中止" })).toHaveCount(0);
+  await expect(page.getByTestId("global-sync-bar").getByRole("button")).toHaveCount(0);
+  await workbench.getByRole("button", { name: "当前列表中止（1）" }).click();
+  await expect(modal).toContainText("「PhotoCloud」的当前列表中的 1 个任务");
+  await modal.getByRole("button", { name: "取消", exact: true }).click();
+  expect(batchCalls).toEqual([]);
+
+  await workbench.getByRole("button", { name: "当前列表立即同步（1）" }).click();
+  await expect(workbench.getByRole("button", { name: "当前列表立即同步（0）" })).toBeDisabled();
+  await workbench.getByRole("button", { name: "当前列表中止（2）" }).click();
+  await expect(modal).toContainText("「PhotoCloud」的当前列表中的 2 个任务");
+  await modal.getByRole("button", { name: "确认", exact: true }).click();
+  await expect(workbench.getByRole("button", { name: "当前列表中止（0）" })).toBeDisabled();
+  expect(batchCalls).toEqual([
+    { action: "run", ids: [1] },
+    { action: "stop", ids: [1, 2] },
+  ]);
+
+  await page.getByTestId("connection-item-SafeCrypt").click();
+  await expect(workbench.getByRole("button", { name: "当前列表中止（1）" })).toBeEnabled();
+  await expect(workbench.getByRole("button", { name: "当前列表立即同步（1）" })).toBeEnabled();
+  await page.getByTestId("connection-item-all").click();
+  await expect(workbench.getByRole("button", { name: "全部立即同步（3）" })).toBeEnabled();
+  await expect(workbench.getByRole("button", { name: "全部中止（1）" })).toBeEnabled();
+
+  const search = workbench.getByRole("textbox", { name: "搜索任务名称或路径" });
+  await search.fill("B 待执行");
+  await expect(workbench.getByRole("button", { name: "当前列表立即同步（1）" })).toBeEnabled();
+  await expect(workbench.getByRole("button", { name: "当前列表中止（0）" })).toBeDisabled();
+  await workbench.getByRole("button", { name: "重置筛选" }).click();
+
+  const rows = workbench.locator(".sync-overview-row");
+  await rows.filter({ hasText: "A 暂停镜像" }).locator(".semi-checkbox").click();
+  await expect(workbench.getByRole("button", { name: "批量恢复同步（0）" })).toBeDisabled();
+  await rows.filter({ hasText: "B 运行中" }).locator(".semi-checkbox").click();
+  await expect(workbench.getByRole("button", { name: "批量立即同步（0）" })).toBeDisabled();
+  await workbench.getByRole("button", { name: "批量中止传输（1）" }).click();
+  await expect(modal).toContainText("已勾选任务中的 1 个任务");
+  await modal.getByRole("button", { name: "确认", exact: true }).click();
+  await expect(workbench.getByRole("button", { name: "全部中止（0）" })).toBeDisabled();
+  expect(batchCalls.at(-1)).toEqual({ action: "stop", ids: [3] });
+
+  await workbench.getByRole("button", { name: "全部立即同步（4）" }).click();
+  await expect(modal).toContainText("全部连接中的 4 个任务");
+  await modal.getByRole("button", { name: "确认", exact: true }).click();
+  await expect(workbench.getByRole("button", { name: "全部立即同步（0）" })).toBeDisabled();
+  expect(batchCalls.at(-1)).toEqual({ action: "run", ids: [1, 2, 3, 4] });
+});
 
 test("dashboard shows cold-start 3-step onboarding when empty", async ({ page }) => {
   await setupWorkbenchMock(page, { coldStart: true });

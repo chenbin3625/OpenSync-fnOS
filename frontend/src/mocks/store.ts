@@ -3350,13 +3350,13 @@ export class MockStore {
     const abortTargetIds = new Set<number>();
 
     let targetIds: number[];
-    if (isBulkAll || !ids?.length) {
+    if (isBulkAll) {
       const legacyEngineIds = new Set(
         this.engines.filter((e) => e.kind !== "rclone").map((e) => e.id),
       );
       targetIds = [];
       for (const job of this.jobs) {
-        if (isBulkAll && legacyEngineIds.has(job.alistId)) continue;
+        if (legacyEngineIds.has(job.alistId)) continue;
         if (normalizedAction === "run_all" && job.enable !== 1) continue;
         if (normalizedAction === "enable_all") {
           if (job.enable === 1) continue;
@@ -3388,7 +3388,7 @@ export class MockStore {
         targetIds.push(job.id);
       }
     } else {
-      targetIds = ids;
+      targetIds = ids ?? [];
     }
 
     let succeeded = 0;

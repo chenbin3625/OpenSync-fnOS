@@ -87,6 +87,7 @@ import {
   isExcludePatternEnabled,
   jobToForm,
   parseExcludeFolders,
+  requiresFirstMirrorPreview,
   resolveAutoCompareModeForDst,
   shouldClearExcludeFoldersOnSrcChange,
   systemDirFilterGroups,
@@ -144,7 +145,7 @@ export interface TaskEditorSavedResult {
 const wizardEditorTabs = [
   { key: "folders", label: "选择同步文件夹", optional: false },
   { key: "safety", label: "同步方向与安全", optional: false },
-  { key: "plan", label: "过滤规则与同步计划", optional: true },
+  { key: "plan", label: "进阶设置", optional: true },
 ] as const;
 
 const freeEditorTabs = [
@@ -238,12 +239,12 @@ const oneWayDeleteModeCards: Array<{
     key: "none",
     title: "不删除目标端文件",
     badge: "默认推荐",
-    desc: "增量备份模式：只追加与更新文件，永远保留目标端已有文件，误删风险最低",
+    desc: "保留目标端独有文件。同名文件按下方规则处理",
   },
   {
     key: "tracked",
     title: "仅同步本任务产生的删除",
-    desc: "基线追踪删除：仅清理曾由本任务同步过去且在源端被删的文件，不影响目标端原有其他内容",
+    desc: "只清理本任务曾同步、后来在源端被删除的文件",
   },
   {
     key: "mirror",
@@ -576,6 +577,19 @@ export default function TaskEditor({
     return errs[0] ?? "";
   }, [inlineCryptErrors]);
 
+  const inlineCryptTarget = useMemo(
+    () => !isFreeMode && inlineCryptDraft.enabled && wizardDirection !== "download"
+      ? analyzeInlineCryptTarget(wizardRemotePath, nativeStorage.data?.remotes)
+      : null,
+    [isFreeMode, inlineCryptDraft.enabled, wizardDirection, wizardRemotePath, nativeStorage.data?.remotes],
+  );
+  const inlineCryptName = inlineCryptDraft.values.name.trim();
+  const wizardFinalRemotePath = inlineCryptTarget?.supported
+    ? (inlineCryptDraft.mode === "reuse"
+        ? inlineCryptDraft.reuseEncryptedPath
+        : inlineCryptName && `/${inlineCryptName}`) || wizardRemotePath
+    : wizardRemotePath;
+
   const effectiveStepErrors = useMemo<[string, string, string]>(() => {
     if (isFreeMode) {
       return [
@@ -837,60 +851,39 @@ export default function TaskEditor({
           let finalForm = mergedForm;
           let createdCryptNow = false;
 
-          if (!isFreeMode && inlineCryptDraft.enabled && wizardDirection !== "download") {
-            let finalRemote = wizardRemotePath;
-            const targetInfo = analyzeInlineCryptTarget(
-              wizardRemotePath,
-              nativeStorage.data?.remotes,
-            );
-            if (!targetInfo.alreadyEncrypted && targetInfo.supported) {
-              if (
-                inlineCryptDraft.mode === "reuse" &&
-                inlineCryptDraft.reuseEncryptedPath
-              ) {
-                finalRemote = inlineCryptDraft.reuseEncryptedPath;
-              } else {
-                const cryptName = inlineCryptDraft.values.name.trim();
-                if (createdInlineCryptName !== cryptName) {
-                  const options = buildQuickCryptOptions(
-                    {
-                      remoteName: targetInfo.remoteName,
-                      subPath: targetInfo.subPath,
-                    },
-                    inlineCryptDraft.values,
-                    {
-                      managedByJob: true,
-                      managedJobLabel: finalForm.remark.trim() || undefined,
-                    },
-                  );
-                  await api.saveNativeStorage({
-                    name: cryptName,
-                    options,
-                  });
-                  setCreatedInlineCryptName(cryptName);
-                  createdCryptNow = true;
-                  dirCacheRef.current?.invalidateEngine(finalForm.alistId);
-                  try {
-                    const fresh = await api.nativeStorageState();
-                    nativeStorage.setData(fresh);
-                  } catch {
-                    void nativeStorage.refresh(true);
-                  }
-                }
-                finalRemote = `/${cryptName}`;
+          if (inlineCryptTarget?.supported) {
+            if (inlineCryptDraft.mode === "create" && createdInlineCryptName !== inlineCryptName) {
+              const options = buildQuickCryptOptions(
+                {
+                  remoteName: inlineCryptTarget.remoteName,
+                  subPath: inlineCryptTarget.subPath,
+                },
+                inlineCryptDraft.values,
+                {
+                  managedByJob: true,
+                  managedJobLabel: finalForm.remark.trim() || undefined,
+                },
+              );
+              await api.saveNativeStorage({ name: inlineCryptName, options });
+              setCreatedInlineCryptName(inlineCryptName);
+              createdCryptNow = true;
+              dirCacheRef.current?.invalidateEngine(finalForm.alistId);
+              try {
+                const fresh = await api.nativeStorageState();
+                nativeStorage.setData(fresh);
+              } catch {
+                void nativeStorage.refresh(true);
               }
-
-              const updatedEndpoints = applyWizardEndpoints(
+            }
+            finalForm = {
+              ...finalForm,
+              ...applyWizardEndpoints(
                 wizardDirection,
                 wizardDeleteMode,
                 wizardNasPath,
-                finalRemote,
-              );
-              finalForm = {
-                ...finalForm,
-                ...updatedEndpoints,
-              };
-            }
+                wizardFinalRemotePath,
+              ),
+            };
           }
 
           const pathsChanged =
@@ -902,7 +895,8 @@ export default function TaskEditor({
           const reviewMirror =
             finalForm.isCron === 3 &&
             finalForm.method === 1 &&
-            (!job || job.method !== 1 || pathsChanged);
+            (!job || job.method !== 1 || pathsChanged ||
+              (finalForm.enable && requiresFirstMirrorPreview(job)));
 
           const payload = buildJobPayload(
             reviewMirror ? { ...finalForm, enable: false } : finalForm,
@@ -1140,15 +1134,15 @@ export default function TaskEditor({
     [nativeStorage.data?.remotes, form.srcPath, form.dstPath],
   );
 
-  const wizardPathConflict = useMemo(() => {
-    if (isFreeMode || !wizardNasPath || !wizardRemotePath) return "";
+  const wizardPathPreview = useMemo(() => {
+    if (isFreeMode || !wizardNasPath || !wizardFinalRemotePath) return null;
     const endpoints = applyWizardEndpoints(
       wizardDirection,
       wizardDeleteMode,
       wizardNasPath,
-      wizardRemotePath,
+      wizardFinalRemotePath,
     );
-    const preview = buildSyncPathPreview({
+    return buildSyncPathPreview({
       srcPaths: endpoints.srcPath,
       dstPaths: endpoints.dstPath,
       storedDstMap: job?.dstMap,
@@ -1157,11 +1151,10 @@ export default function TaskEditor({
       currentJobId: job?.id,
       engineId: form.alistId,
     });
-    return preview.conflicts[0] || "";
   }, [
     isFreeMode,
     wizardNasPath,
-    wizardRemotePath,
+    wizardFinalRemotePath,
     wizardDirection,
     wizardDeleteMode,
     job?.dstMap,
@@ -1255,7 +1248,8 @@ export default function TaskEditor({
     showStepError(2, "maxFileSize");
 
   const primaryActionIsNext = isNew && step === 0;
-  const step2OptionalBtnLabel = isFreeMode ? "过滤规则" : "同步计划与过滤";
+  const step2OptionalBtnLabel = currentTabs[2].label;
+  const saveLabel = isNew && form.isCron === 3 && form.method === 1 ? "保存并预览" : "保存";
 
   const nasDisplaySummary = wizardNasPath
     ? formatNasDisplayPath(wizardNasPath, nativeStorage.data?.localRoots)
@@ -1267,6 +1261,57 @@ export default function TaskEditor({
       : wizardDirection === "download"
         ? "←"
         : "→";
+
+  const bidirectional = wizardDirection === "bidirectional";
+  const resolvedDestination = wizardPathPreview?.items[0]?.resolvedDst;
+  const nasLanding = wizardDirection === "download" && resolvedDestination
+    ? formatNasDisplayPath(resolvedDestination, nativeStorage.data?.localRoots)
+    : nasDisplaySummary;
+  const cloudLanding = wizardDirection === "upload" && resolvedDestination
+    ? resolvedDestination.replace(/\/$/, "")
+    : wizardFinalRemotePath;
+  const wizardConflictOptions = bidirectional
+    ? [
+        { value: 0, label: "保留较新版本（另一版本删除）" },
+        { value: 1, label: "保留源端版本（另一版本删除）" },
+        { value: 2, label: "保留双方冲突副本（推荐）" },
+      ]
+    : [...conflictPolicyOptions];
+  const deleteImpact = bidirectional
+    ? "任一端删除的文件可同步删除对端对应文件。"
+    : wizardDeleteMode === "mirror"
+      ? "清理目标端独有文件。新建镜像需先只读预览，再确认启动。"
+      : wizardDeleteMode === "tracked"
+        ? "清理本任务曾同步、后来在源端被删除的文件。"
+        : "保留目标端独有文件。";
+  const conflictImpact = bidirectional
+    ? `单端修改会更新对端文件。双端冲突时${wizardConflictOptions[form.conflictPolicy]?.label ?? wizardConflictOptions[0].label}。`
+    : form.conflictPolicy === 1
+      ? "跳过目标端已有的同名文件。"
+      : form.conflictPolicy === 2
+        ? "更新同名文件时，将旧目标文件重命名为冲突副本。"
+        : `比对判定有差异时覆盖目标端同名文件。${form.trashEnable ? "旧文件先移入回收站。" : ""}`;
+  const wizardImpact = (
+    <dl className="wizard-impact" aria-label="同步影响">
+      <dt>最终落点</dt>
+      <dd>
+        <div className="wizard-impact-route">
+          <span>NAS {nasLanding || "未选择"}</span>
+          <span className="wizard-pair-arrow">{wizardDirectionArrow}</span>
+          <span>云端 {cloudLanding || "未选择"}</span>
+        </div>
+        <span className="muted">
+          {bidirectional
+            ? "文件直接写入对端所选目录，保留相对路径。"
+            : "源目录内的文件直接写入所示目标位置，保留相对路径。"}
+        </span>
+      </dd>
+      <dt>删除影响</dt>
+      <dd>{deleteImpact}</dd>
+      <dt>同名文件</dt>
+      <dd>{conflictImpact}</dd>
+    </dl>
+  );
 
   const renderContinuousCadenceControls = (stepIndex: number) => (
     <>
@@ -1978,7 +2023,7 @@ export default function TaskEditor({
               loading={action.busy}
               onClick={primaryActionIsNext ? nextStep : save}
             >
-              {primaryActionIsNext ? "下一步" : "保存"}
+              {primaryActionIsNext ? "下一步" : saveLabel}
             </Button>
           </div>
         )}
@@ -2008,6 +2053,7 @@ export default function TaskEditor({
                       <button
                         key={tab.key}
                         type="button"
+                        aria-label={tab.optional ? `${tab.label}（可选）` : undefined}
                         className={`task-step-btn${isCurrent ? " is-active" : ""}${isDone ? " is-done" : ""}`}
                         aria-current={isCurrent ? "step" : undefined}
                         onClick={() => goToStep(index)}
@@ -2143,10 +2189,10 @@ export default function TaskEditor({
                     </div>
                   )}
 
-                  {wizardPathConflict && (
+                  {wizardPathPreview?.conflicts[0] && (
                     <div className="sync-method-banner is-warning" role="alert">
                       <IconAlertTriangle aria-hidden="true" size="small" />
-                      <span>{wizardPathConflict}</span>
+                      <span>{wizardPathPreview.conflicts[0]}</span>
                     </div>
                   )}
 
@@ -2182,13 +2228,7 @@ export default function TaskEditor({
 
               {!isFreeMode && panelMounted("safety") && (
                 <div className="form-section" style={panelStyle("safety")}>
-                  <div className="wizard-route-pill" role="status">
-                    <span>NAS {nasDisplaySummary || "未选择"}</span>
-                    <span className="wizard-pair-arrow" aria-hidden="true">
-                      {wizardDirectionArrow}
-                    </span>
-                    <span>云端 {wizardRemotePath || "未选择"}</span>
-                  </div>
+                  {activePanel === "safety" && wizardImpact}
 
                   <Field label="同步方向" ariaLabel="同步方向">
                     <div
@@ -2229,7 +2269,7 @@ export default function TaskEditor({
                     </div>
                   </Field>
 
-                  {wizardDirection !== "bidirectional" && (
+                  {!bidirectional && (
                     <Field label="目标端删除策略" ariaLabel="单向删除策略">
                       <div className="field-group">
                         <div
@@ -2285,6 +2325,14 @@ export default function TaskEditor({
                       </div>
                     </Field>
                   )}
+
+                  <Field label="同名文件处理">
+                    <Select
+                      value={form.conflictPolicy}
+                      optionList={wizardConflictOptions}
+                      onChange={(v) => change("conflictPolicy", Number(v))}
+                    />
+                  </Field>
 
                   <InlineCryptPanel
                     draft={inlineCryptDraft}
@@ -2350,43 +2398,12 @@ export default function TaskEditor({
                     )}
                   </div>
 
-                  <div className="form-grid form-grid--two">
-                    <Field label="文件比对方式">
-                      <Select
-                        value={form.compareMode}
-                        optionList={compareModeOptions.map((o) => ({
-                          label: o.label,
-                          value: o.value,
-                        }))}
-                        onChange={(v) => {
-                          setCompareModeSource("manual");
-                          change("compareMode", Number(v));
-                        }}
-                      />
-                    </Field>
-                    <Field label="同名冲突处理">
-                      <Select
-                        value={form.conflictPolicy}
-                        optionList={conflictPolicyOptions.map((o) => ({
-                          label:
-                            wizardDirection === "bidirectional"
-                              ? [
-                                  "保留较新版本（另一版本删除）",
-                                  "保留源端版本（目标版本删除）",
-                                  "保留双方冲突副本（推荐）",
-                                ][o.value]
-                              : o.label,
-                          value: o.value,
-                        }))}
-                        onChange={(v) => change("conflictPolicy", Number(v))}
-                      />
-                    </Field>
-                  </div>
                 </div>
               )}
 
               {!isFreeMode && panelMounted("plan") && (
                 <div className="form-section" style={panelStyle("plan")}>
+                  {activePanel === "plan" && wizardImpact}
                   <SettingRow
                     label="启用持续同步"
                     variant="bordered"
@@ -2398,6 +2415,17 @@ export default function TaskEditor({
                       onChange={(value) => change("enable", value)}
                     />
                   </SettingRow>
+
+                  <Field label="文件比对方式">
+                    <Select
+                      value={form.compareMode}
+                      optionList={[...compareModeOptions]}
+                      onChange={(v) => {
+                        setCompareModeSource("manual");
+                        change("compareMode", Number(v));
+                      }}
+                    />
+                  </Field>
 
                   <Field
                     label="同步运行计划（7×24 周历调度）"
