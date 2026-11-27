@@ -46,6 +46,7 @@ import type {
   NativeBrowseResult,
   NativeDirEntry,
   NativeImportPreview,
+  NativeOpenListDiscoverResult,
   NativeRemoteItem,
   NativeSizeInfo,
   NativeStorageState,
@@ -215,6 +216,119 @@ export const remoteTypeGroups: readonly RemoteTypeGroup[] = [
 export const creatableRemoteTypes: RemoteFormType[] = remoteTypeGroups.flatMap(
   (group) => [...group.types],
 );
+
+export interface HotStorageCardSpec {
+  id: string;
+  title: string;
+  type: RemoteFormType;
+  badge: string;
+  desc: string;
+  presetName?: string;
+  provider?: string;
+  vendor?: string;
+  url?: string;
+  forcePathStyle?: boolean;
+  isOpenListTemplate?: boolean;
+}
+
+export interface DomesticOpenListHintCard {
+  id: string;
+  title: string;
+  desc: string;
+  suggestedName: string;
+}
+
+export const hotStorageCards: readonly HotStorageCardSpec[] = [
+  {
+    id: "quark",
+    title: "夸克网盘",
+    type: "quark",
+    badge: "内置直连",
+    desc: "扫码免密授权，直连上传下载",
+  },
+  {
+    id: "pan123",
+    title: "123云盘",
+    type: "pan123",
+    badge: "内置直连",
+    desc: "Web 登录或 OpenAPI 客户端接入",
+  },
+  {
+    id: "openlist",
+    title: "OpenList / AList (WebDAV)",
+    type: "webdav",
+    badge: "国内网盘桥接",
+    desc: "支持同机自动探测与仅大小比对",
+    presetName: "openlist",
+    vendor: "other",
+    url: "http://127.0.0.1:5244/dav",
+    isOpenListTemplate: true,
+  },
+  {
+    id: "webdav",
+    title: "标准 WebDAV",
+    type: "webdav",
+    badge: "通用协议",
+    desc: "Nextcloud / OwnCloud / 坚果云等",
+    vendor: "other",
+  },
+  {
+    id: "aliyun-oss",
+    title: "阿里云 OSS / MinIO / S3",
+    type: "s3",
+    badge: "对象存储",
+    desc: "S3 协议兼容（OSS / MinIO / COS / R2）",
+    provider: "Alibaba",
+  },
+  {
+    id: "smb",
+    title: "SMB / SFTP",
+    type: "smb",
+    badge: "局域网 / 主机",
+    desc: "NAS SMB 共享（表单内也可切换 SFTP）",
+  },
+  {
+    id: "onedrive",
+    title: "OneDrive",
+    type: "onedrive",
+    badge: "OAuth 授权",
+    desc: "个人版、商业版与 SharePoint",
+  },
+  {
+    id: "drive",
+    title: "Google Drive",
+    type: "drive",
+    badge: "OAuth 授权",
+    desc: "网页授权或 Service Account",
+  },
+];
+
+export const domesticDriveOpenListHints: readonly DomesticOpenListHintCard[] = [
+  {
+    id: "aliyunpan",
+    title: "阿里云盘",
+    desc: "通过 OpenList / AList 挂载后以 WebDAV 接入",
+    suggestedName: "openlist-aliyun",
+  },
+  {
+    id: "baidupan",
+    title: "百度网盘",
+    desc: "通过 OpenList / AList 挂载并自动探测本机端口",
+    suggestedName: "openlist-baidu",
+  },
+  {
+    id: "pan115",
+    title: "115网盘",
+    desc: "通过 OpenList / AList WebDAV 挂载（建议仅按大小比对）",
+    suggestedName: "openlist-115",
+  },
+  {
+    id: "cloud189",
+    title: "天翼云盘",
+    desc: "通过 OpenList / AList WebDAV 挂载使用",
+    suggestedName: "openlist-189",
+  },
+];
 
 const creatableRemoteTypeSet = new Set<RemoteFormType>(creatableRemoteTypes);
 
@@ -978,7 +1092,7 @@ export function validateRemoteDraft(
 
 export function NativeStorageEditor({
   engine,
-  mode: view,
+  mode: initialMode,
   editRemote = null,
   initialBrowsePath = "/",
   onClose,
@@ -993,6 +1107,11 @@ export function NativeStorageEditor({
   onSaved?: (remoteName?: string) => void;
   onChanged?: () => void;
 }) {
+  const [view, setView] = useState<NativeEditorMode>(initialMode);
+  useEffect(() => {
+    setView(initialMode);
+  }, [initialMode]);
+
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [state, setState] = useState<NativeStorageState | null>(null);
@@ -1005,7 +1124,10 @@ export function NativeStorageEditor({
   const [savingEngine, setSavingEngine] = useState(false);
   // Single remote add/edit form
   const initialDraftValue = useMemo(
-    () => (view === "form" && editRemote ? draftFromRemote(editRemote) : emptyDraft("s3")),
+    () =>
+      initialMode === "form" && editRemote
+        ? draftFromRemote(editRemote)
+        : emptyDraft("s3"),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
   );
@@ -1020,6 +1142,17 @@ export function NativeStorageEditor({
   const [testingForm, setTestingForm] = useState(false);
   const [formTestResult, setFormTestResult] =
     useState<NativeStorageTestResult | null>(null);
+  const [selectedHotCardId, setSelectedHotCardId] = useState<string>(() =>
+    editRemote ? "" : "aliyun-oss",
+  );
+  const [activeOpenListHint, setActiveOpenListHint] = useState<string>("");
+  const [showMoreProtocols, setShowMoreProtocols] = useState(() =>
+    Boolean(editRemote),
+  );
+  const [discoveringOpenList, setDiscoveringOpenList] = useState(false);
+  const [discoverOpenListResult, setDiscoverOpenListResult] =
+    useState<NativeOpenListDiscoverResult | null>(null);
+  const [discoverCustomPort, setDiscoverCustomPort] = useState("5244");
   const [advancedOpen, setAdvancedOpen] = useState(() =>
     Boolean(
       initialDraftValue.options.proxy_url ||
@@ -1683,9 +1816,116 @@ export function NativeStorageEditor({
       ...emptyDraft(nextType),
       name: prev.name,
     }));
+    setActiveOpenListHint("");
+    setDiscoverOpenListResult(null);
     setOauthAdvancedOpen(false);
     setFieldErrors({});
     setFormTestResult(null);
+  };
+
+  const applyHotCard = (card: HotStorageCardSpec) => {
+    if (draft.authSessionId) {
+      void api.cancelNativeStorageAuth(draft.authSessionId).catch(() => undefined);
+    }
+    setSelectedHotCardId(card.id);
+    setActiveOpenListHint("");
+    setDraft((prev) => {
+      const next = {
+        ...emptyDraft(card.type),
+        name: card.presetName ? prev.name || card.presetName : prev.name,
+        ...(card.provider ? { provider: card.provider } : {}),
+        ...(card.vendor ? { vendor: card.vendor } : {}),
+        ...(card.forcePathStyle !== undefined
+          ? { forcePathStyle: card.forcePathStyle }
+          : {}),
+      };
+      if (card.url) {
+        next.options = { url: card.url };
+      }
+      return next;
+    });
+    if (!card.isOpenListTemplate) {
+      setDiscoverOpenListResult(null);
+    }
+    setOauthAdvancedOpen(false);
+    setFieldErrors({});
+    setFormTestResult(null);
+  };
+
+  const applySuggestedOpenListConfig = (
+    res: NativeOpenListDiscoverResult,
+    preferredName?: string,
+  ) => {
+    const suggested = res.suggestedConfig;
+    if (!suggested) return;
+    if (draft.authSessionId) {
+      void api.cancelNativeStorageAuth(draft.authSessionId).catch(() => undefined);
+    }
+    setSelectedHotCardId("openlist");
+    setDraft((prev) => ({
+      ...emptyDraft("webdav"),
+      name: prev.name.trim() ? prev.name : preferredName || suggested.name || "openlist",
+      vendor: suggested.vendor || "other",
+      options: {
+        ...prev.options,
+        url: suggested.url,
+      },
+    }));
+    setFieldErrors({});
+    setFormTestResult(null);
+  };
+
+  const handleDiscoverOpenList = async (autoFillPreferredName?: string) => {
+    if (discoveringOpenList) return;
+    const rawPort = discoverCustomPort.trim();
+    const parsedPort = rawPort ? Number(rawPort) : undefined;
+    if (
+      rawPort &&
+      (!Number.isInteger(parsedPort) || parsedPort! < 1 || parsedPort! > 65535)
+    ) {
+      Toast.warning("探测端口需为 1–65535 的整数");
+      return;
+    }
+    setDiscoveringOpenList(true);
+    try {
+      const ports = parsedPort && parsedPort !== 5244 ? [parsedPort, 5244] : undefined;
+      const res = await api.discoverOpenList(ports ? { ports } : {});
+      setDiscoverOpenListResult(res);
+      if (res.found && res.suggestedConfig) {
+        if (autoFillPreferredName) {
+          applySuggestedOpenListConfig(res, autoFillPreferredName);
+        }
+        Toast.success(res.message);
+      } else {
+        Toast.info(res.message);
+      }
+    } catch (err) {
+      errorToast(err);
+    } finally {
+      setDiscoveringOpenList(false);
+    }
+  };
+
+  const applyDomesticOpenListHint = (hint: DomesticOpenListHintCard) => {
+    if (draft.authSessionId) {
+      void api.cancelNativeStorageAuth(draft.authSessionId).catch(() => undefined);
+    }
+    setSelectedHotCardId("openlist");
+    setActiveOpenListHint(hint.title);
+    setDraft((prev) => ({
+      ...emptyDraft("webdav"),
+      name: prev.name.trim() ? prev.name : hint.suggestedName,
+      vendor: "other",
+      options: {
+        url:
+          discoverOpenListResult?.suggestedConfig?.url ||
+          prev.options.url ||
+          "http://127.0.0.1:5244/dav",
+      },
+    }));
+    setFieldErrors({});
+    setFormTestResult(null);
+    void handleDiscoverOpenList(hint.suggestedName);
   };
 
   const handleAuthCompleted = useCallback((result: CompletedAuthSession) => {
@@ -2233,141 +2473,178 @@ export function NativeStorageEditor({
         ) : view === "form" ? (
           <div className="editor-form">
             {!draft.editing && (
-              <div className="native-quick-picks" role="group" aria-label="常用远程存储模板">
-                <span className="muted">快捷模板：</span>
-                {(
-                  [
-                    {
-                      label: "OpenList / AList (WebDAV)",
-                      apply: () => {
-                        setDraft((prev) => ({
-                          ...emptyDraft("webdav"),
-                          name: prev.name || "openlist",
-                          vendor: "other",
-                          options: {
-                            url: "http://127.0.0.1:5244/dav",
-                          },
-                        }));
-                        setFieldErrors({});
-                        setFormTestResult(null);
-                      },
-                    },
-                    {
-                      label: "夸克网盘",
-                      apply: () => handleFormTypeChange("quark"),
-                    },
-                    {
-                      label: "123云盘",
-                      apply: () => handleFormTypeChange("pan123"),
-                    },
-                    {
-                      label: "阿里云 OSS (S3)",
-                      apply: () => {
-                        setDraft((prev) => ({
-                          ...emptyDraft("s3"),
-                          name: prev.name,
-                          provider: "Alibaba",
-                        }));
-                        setFieldErrors({});
-                        setFormTestResult(null);
-                      },
-                    },
-                    {
-                      label: "MinIO / 自建 S3",
-                      apply: () => {
-                        setDraft((prev) => ({
-                          ...emptyDraft("s3"),
-                          name: prev.name,
-                          provider: "Minio",
-                          forcePathStyle: true,
-                        }));
-                        setFieldErrors({});
-                        setFormTestResult(null);
-                      },
-                    },
-                    {
-                      label: "SMB 局域网共享",
-                      apply: () => handleFormTypeChange("smb"),
-                    },
-                    {
-                      label: "SFTP",
-                      apply: () => handleFormTypeChange("sftp"),
-                    },
-                    {
-                      label: "OneDrive",
-                      apply: () => handleFormTypeChange("onedrive"),
-                    },
-                    {
-                      label: "Google Drive",
-                      apply: () => handleFormTypeChange("drive"),
-                    },
-                  ] as const
-                ).map((preset) => (
-                  <button
-                    key={preset.label}
-                    type="button"
-                    className="native-quick-chip"
-                    onClick={preset.apply}
-                  >
-                    {preset.label}
-                  </button>
-                ))}
+              <div className="native-storage-catalog">
+                <div className="native-catalog-header">
+                  <span className="native-catalog-title">热门网盘与常用存储</span>
+                  <div className="native-secondary-actions">
+                    <Button
+                      size="small"
+                      type="tertiary"
+                      aria-expanded={showMoreProtocols}
+                      onClick={() => setShowMoreProtocols((v) => !v)}
+                    >
+                      更多 30+ 协议（rclone 全量）
+                    </Button>
+                    <Button
+                      size="small"
+                      type="tertiary"
+                      icon={<IconUpload aria-hidden="true" />}
+                      onClick={() => setView("import")}
+                    >
+                      导入 rclone.conf
+                    </Button>
+                  </div>
+                </div>
+
+                <div
+                  className="native-hot-cards"
+                  role="group"
+                  aria-label="热门网盘与常用存储"
+                >
+                  {hotStorageCards.map((card) => {
+                    const isSelected = selectedHotCardId === card.id;
+                    return (
+                      <button
+                        key={card.id}
+                        type="button"
+                        aria-label={card.title}
+                        aria-pressed={isSelected}
+                        className={`native-hot-card${isSelected ? " is-selected" : ""}`}
+                        onClick={() => applyHotCard(card)}
+                      >
+                        <div className="native-hot-card-top">
+                          <span className="native-hot-card-title">
+                            {card.title}
+                          </span>
+                          <Tag
+                            size="small"
+                            type="light"
+                            color={isSelected ? "blue" : "grey"}
+                          >
+                            {card.badge}
+                          </Tag>
+                        </div>
+                        <span className="native-hot-card-desc">{card.desc}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div
+                  className="native-domestic-hints"
+                  role="group"
+                  aria-label="通过 OpenList / AList 接入国内网盘"
+                >
+                  <div className="native-domestic-head">
+                    <span className="muted">
+                      需通过本机 OpenList / AList 挂载的国内网盘：
+                    </span>
+                    <Button
+                      size="small"
+                      type="secondary"
+                      loading={discoveringOpenList}
+                      icon={<IconRefresh aria-hidden="true" />}
+                      onClick={() => void handleDiscoverOpenList()}
+                    >
+                      检测本机 OpenList / AList
+                    </Button>
+                  </div>
+                  <div className="native-domestic-chips">
+                    {domesticDriveOpenListHints.map((hint) => (
+                      <button
+                        key={hint.id}
+                        type="button"
+                        className={`native-quick-chip${
+                          activeOpenListHint === hint.title ? " is-selected" : ""
+                        }`}
+                        title={hint.desc}
+                        onClick={() => applyDomesticOpenListHint(hint)}
+                      >
+                        {hint.title}
+                      </button>
+                    ))}
+                  </div>
+                  {activeOpenListHint && (
+                    <div className="sync-method-banner">
+                      <IconInfoCircle aria-hidden="true" size="small" />
+                      <span>
+                        已为 <strong>{activeOpenListHint}</strong> 切换为 OpenList / AList WebDAV 模板（推荐 <code>vendor = other</code> + 任务「仅按文件大小」比对）。请在下方填写或自动探测本机 OpenList WebDAV 地址与凭据。
+                      </span>
+                    </div>
+                  )}
+                </div>
               </div>
             )}
-            <div className="form-grid form-grid--two">
-              <Field
-                label="存储类型"
-                required
-                hint={draft.editing ? "已保存的存储类型不可变更" : undefined}
-              >
-                <Select
-                  aria-label="存储类型"
-                  value={draft.type}
-                  disabled={draft.editing}
-                  filter={(input, option) => {
-                    const query = input.trim().toLowerCase();
-                    if (!query) return true;
-                    const label = String(option.label ?? "").toLowerCase();
-                    const val = String(option.value ?? "").toLowerCase();
-                    const groupLabel = (
-                      remoteTypeGroupLabelByType.get(
-                        option.value as RemoteFormType,
-                      ) || ""
-                    ).toLowerCase();
-                    return (
-                      label.includes(query) ||
-                      val.includes(query) ||
-                      groupLabel.includes(query)
-                    );
-                  }}
-                  onChange={(v) => handleFormTypeChange(v as RemoteFormType)}
+
+            <div
+              className={
+                draft.editing || showMoreProtocols
+                  ? "form-grid form-grid--two"
+                  : "form-grid"
+              }
+            >
+              {(draft.editing || showMoreProtocols) && (
+                <Field
+                  label="存储类型"
+                  required
+                  hint={
+                    draft.editing
+                      ? "已保存的存储类型不可变更"
+                      : "支持 30+ 种 rclone 协议与网盘后端"
+                  }
                 >
-                  {draft.editing && !creatableRemoteTypeSet.has(draft.type) && (
-                    <Select.OptGroup key="existing" label="已配置类型">
-                      <Select.Option
-                        key={draft.type}
-                        value={draft.type}
-                        label={remoteTypeLabels[draft.type] || draft.type}
-                      >
-                        {remoteTypeLabels[draft.type] || draft.type}
-                      </Select.Option>
-                    </Select.OptGroup>
-                  )}
-                  {remoteTypeGroups.map((group) => (
-                    <Select.OptGroup key={group.key} label={group.label}>
-                      {group.types.map((t) => (
+                  <Select
+                    aria-label="存储类型"
+                    value={draft.type}
+                    disabled={draft.editing}
+                    filter={(input, option) => {
+                      const query = input.trim().toLowerCase();
+                      if (!query) return true;
+                      const label = String(option.label ?? "").toLowerCase();
+                      const val = String(option.value ?? "").toLowerCase();
+                      const groupLabel = (
+                        remoteTypeGroupLabelByType.get(
+                          option.value as RemoteFormType,
+                        ) || ""
+                      ).toLowerCase();
+                      return (
+                        label.includes(query) ||
+                        val.includes(query) ||
+                        groupLabel.includes(query)
+                      );
+                    }}
+                    onChange={(v) => {
+                      setSelectedHotCardId("");
+                      handleFormTypeChange(v as RemoteFormType);
+                    }}
+                  >
+                    {draft.editing && !creatableRemoteTypeSet.has(draft.type) && (
+                      <Select.OptGroup key="existing" label="已配置类型">
                         <Select.Option
-                          key={t}
-                          value={t}
-                          label={remoteTypeLabels[t]}
+                          key={draft.type}
+                          value={draft.type}
+                          label={remoteTypeLabels[draft.type] || draft.type}
                         >
-                          {remoteTypeLabels[t]}
+                          {remoteTypeLabels[draft.type] || draft.type}
                         </Select.Option>
-                      ))}
-                    </Select.OptGroup>
-                  ))}
-                </Select>
-              </Field>
+                      </Select.OptGroup>
+                    )}
+                    {remoteTypeGroups.map((group) => (
+                      <Select.OptGroup key={group.key} label={group.label}>
+                        {group.types.map((t) => (
+                          <Select.Option
+                            key={t}
+                            value={t}
+                            label={remoteTypeLabels[t]}
+                          >
+                            {remoteTypeLabels[t]}
+                          </Select.Option>
+                        ))}
+                      </Select.OptGroup>
+                    ))}
+                  </Select>
+                </Field>
+              )}
               <Field
                 label="存储名称"
                 required
@@ -2517,6 +2794,71 @@ export function NativeStorageEditor({
 
             {draft.type === "webdav" && (
               <>
+                <div
+                  className="native-openlist-discover-box"
+                  role="region"
+                  aria-label="OpenList / AList 同机自动发现"
+                >
+                  <div className="native-openlist-discover-row">
+                    <span className="native-catalog-title">
+                      OpenList / AList 同机自动发现
+                    </span>
+                    <Input
+                      className="native-openlist-port-input"
+                      aria-label="OpenList 本机端口"
+                      value={discoverCustomPort}
+                      disabled={discoveringOpenList}
+                      onChange={(v) => setDiscoverCustomPort(v)}
+                      placeholder="5244"
+                    />
+                    <Button
+                      size="small"
+                      type="secondary"
+                      loading={discoveringOpenList}
+                      icon={<IconRefresh aria-hidden="true" />}
+                      onClick={() => void handleDiscoverOpenList()}
+                    >
+                      探测本机端口
+                    </Button>
+                  </div>
+                  {discoverOpenListResult && (
+                    <div className="native-openlist-discover-result">
+                      <div className="engine-meta-stack">
+                        <span
+                          className={
+                            discoverOpenListResult.found ? "" : "muted"
+                          }
+                        >
+                          {discoverOpenListResult.message}
+                        </span>
+                        {discoverOpenListResult.suggestedConfig && (
+                          <span className="muted">
+                            {
+                              discoverOpenListResult.suggestedConfig
+                                .recommendationNote
+                            }
+                          </span>
+                        )}
+                      </div>
+                      {discoverOpenListResult.found &&
+                        discoverOpenListResult.suggestedConfig && (
+                          <Button
+                            size="small"
+                            type="primary"
+                            theme="light"
+                            onClick={() => {
+                              applySuggestedOpenListConfig(
+                                discoverOpenListResult,
+                              );
+                              Toast.success("已一键填充 OpenList WebDAV 建议配置");
+                            }}
+                          >
+                            一键填充配置
+                          </Button>
+                        )}
+                    </div>
+                  )}
+                </div>
                 <Field
                   label="WebDAV 地址"
                   required

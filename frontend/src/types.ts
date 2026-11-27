@@ -134,6 +134,68 @@ export interface NativeExportResult {
   filename: string;
 }
 
+export interface NativeOpenListDiscoverCandidate {
+  endpoint: string;
+  baseUrl: string;
+  reachable: boolean;
+  statusCode?: number;
+  authRequired: boolean;
+  latencyMs: number;
+  serverType?: string;
+  error?: string;
+}
+
+export interface NativeOpenListSuggestedConfig {
+  name: string;
+  type: string;
+  vendor: string;
+  url: string;
+  compareMode: number;
+  compareModeLabel: string;
+  recommendationNote: string;
+}
+
+export interface NativeOpenListDiscoverResult {
+  found: boolean;
+  message: string;
+  suggestedConfig?: NativeOpenListSuggestedConfig;
+  candidates: NativeOpenListDiscoverCandidate[];
+  checkedAt: number;
+}
+
+export interface NativeCryptRecoveryBundle {
+  version: number;
+  generatedAt: number;
+  remoteName: string;
+  underlyingRemote: string;
+  underlyingSubPath?: string;
+  remote: string;
+  filenameEncryption: string;
+  filenameEncoding: string;
+  directoryNameEncryption: string;
+  noDataEncryption: boolean;
+  suffix?: string;
+  hasPassword: boolean;
+  hasPassword2: boolean;
+  managedByJob: boolean;
+  managedJobLabel?: string;
+  rcloneSnippetTemplate: string;
+  rcloneCommand: string;
+  recoverySteps: string[];
+  warning: string;
+}
+
+export interface NativeCryptRecoveryResult {
+  name: string;
+  passwordChecked: boolean;
+  passwordVerified?: boolean;
+  password2Checked: boolean;
+  password2Verified?: boolean;
+  verifyMessage?: string;
+  bundle: NativeCryptRecoveryBundle;
+  recoveryText: string;
+}
+
 export interface NativeAboutInfo {
   supported: boolean;
   total?: number;

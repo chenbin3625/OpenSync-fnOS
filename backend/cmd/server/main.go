@@ -121,6 +121,8 @@ func newRouterWithVersionChecker(development bool, allowedOrigins []string, chec
 	api.POST("/native/storage/test", handler.TestNativeStorage)
 	api.POST("/native/storage/rename", handler.RenameNativeStorage)
 	api.POST("/native/storage/export", handler.ExportNativeConfig)
+	api.POST("/native/storage/discover-openlist", handler.DiscoverOpenList)
+	api.POST("/native/storage/crypt-recovery", handler.CryptRecovery)
 	api.POST("/native/storage/about", handler.AboutNativeStorage)
 	api.POST("/native/storage/browse", handler.BrowseNativeStorage)
 	api.POST("/native/storage/mkdir", handler.MkdirNativeStorage)
@@ -142,6 +144,7 @@ func newRouterWithVersionChecker(development bool, allowedOrigins []string, chec
 	api.DELETE("/native/storage/auth", handler.CancelNativeStorageAuth)
 	api.POST("/native/storage/import/preview", handler.PreviewNativeImport)
 	api.POST("/native/storage/import", handler.ImportNativeStorage)
+	r.GET(prefix+"/oauth/callback", serveOAuthCallbackPage)
 	api.GET("/alist", handler.GetAlist)
 	api.GET("/alist/health", handler.GetAlistHealth)
 	api.DELETE("/alist", handler.DeleteAlist)
@@ -607,5 +610,318 @@ func (p *socketPublisher) discard() {
 		p.lock = nil
 	}
 }
+
+func serveOAuthCallbackPage(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(oauthCallbackHTML))
+}
+
+const oauthCallbackHTML = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OpenSync OAuth 授权回调</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f6f7fb;
+      --card: #ffffff;
+      --border: #e2e6f0;
+      --text: #161b26;
+      --muted: #5c667a;
+      --primary: #2563eb;
+      --primary-hover: #1d4ed8;
+      --ok-bg: rgba(22, 163, 74, 0.12);
+      --ok-fg: #15803d;
+      --err-bg: rgba(220, 38, 38, 0.12);
+      --err-fg: #b91c1c;
+      --warn-bg: rgba(217, 119, 6, 0.12);
+      --warn-fg: #b45309;
+      --code-bg: #f1f5f9;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f1420;
+        --card: #161d2f;
+        --border: #27324d;
+        --text: #f1f5f9;
+        --muted: #94a3b8;
+        --primary: #3b82f6;
+        --primary-hover: #2563eb;
+        --ok-bg: rgba(34, 197, 94, 0.16);
+        --ok-fg: #86efac;
+        --err-bg: rgba(248, 113, 113, 0.16);
+        --err-fg: #fca5a5;
+        --warn-bg: rgba(251, 191, 36, 0.16);
+        --warn-fg: #fde68a;
+        --code-bg: #0b101b;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 20px;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    .card {
+      width: 100%;
+      max-width: 580px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 24px;
+      box-shadow: 0 12px 32px rgba(15, 23, 42, 0.08);
+      display: grid;
+      gap: 16px;
+    }
+    .head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    h1 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 600;
+    }
+    .badge {
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      background: var(--warn-bg);
+      color: var(--warn-fg);
+    }
+    .badge.is-ok { background: var(--ok-bg); color: var(--ok-fg); }
+    .badge.is-err { background: var(--err-bg); color: var(--err-fg); }
+    .desc {
+      margin: 0;
+      font-size: 14px;
+      line-height: 1.6;
+      color: var(--muted);
+    }
+    .kv {
+      display: grid;
+      gap: 8px;
+      padding: 12px 14px;
+      border-radius: 10px;
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      font-size: 13px;
+    }
+    .kv-row {
+      display: grid;
+      grid-template-columns: 92px 1fr;
+      gap: 8px;
+      align-items: baseline;
+    }
+    .kv-key { color: var(--muted); font-weight: 500; }
+    .kv-val {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      word-break: break-all;
+    }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+    button {
+      appearance: none;
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 9px 14px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+    button.primary {
+      background: var(--primary);
+      border-color: var(--primary);
+      color: #ffffff;
+    }
+    button.primary:hover { background: var(--primary-hover); }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    .status-line {
+      font-size: 13px;
+      color: var(--muted);
+      min-height: 18px;
+    }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <div class="head">
+      <h1>OpenSync 网盘 OAuth 授权回调助手</h1>
+      <span id="statusBadge" class="badge">正在解析…</span>
+    </div>
+    <p id="leadDesc" class="desc">正在提取浏览器地址栏中的授权回调参数…</p>
+    <section class="kv" aria-label="提取到的回调参数">
+      <div class="kv-row">
+        <span class="kv-key">code 授权码</span>
+        <span id="valCode" class="kv-val">—</span>
+      </div>
+      <div class="kv-row">
+        <span class="kv-key">state 状态</span>
+        <span id="valState" class="kv-val">—</span>
+      </div>
+      <div class="kv-row">
+        <span class="kv-key">error 错误</span>
+        <span id="valError" class="kv-val">—</span>
+      </div>
+      <div class="kv-row">
+        <span class="kv-key">回调参数串</span>
+        <span id="valQuery" class="kv-val">—</span>
+      </div>
+    </section>
+    <div class="actions">
+      <button id="copyQueryBtn" type="button" class="primary">一键复制回调参数</button>
+      <button id="copyUrlBtn" type="button">复制完整回调网址</button>
+      <button id="postOpenerBtn" type="button" hidden>重新回传给授权向导</button>
+    </div>
+    <div id="statusLine" class="status-line" role="status" aria-live="polite"></div>
+  </main>
+  <script>
+    (function () {
+      function parseParams() {
+        var params = new URLSearchParams(window.location.search || "");
+        if (!params.get("code") && !params.get("error") && window.location.hash) {
+          var rawHash = window.location.hash.replace(/^#/, "");
+          var qIndex = rawHash.indexOf("?");
+          if (qIndex >= 0) {
+            rawHash = rawHash.slice(qIndex + 1);
+          }
+          rawHash = rawHash.replace(/^[/?&]+/, "");
+          if (rawHash.indexOf("=") >= 0) {
+            params = new URLSearchParams(rawHash);
+          }
+        }
+        return params;
+      }
+
+      var params = parseParams();
+      var code = (params.get("code") || "").trim();
+      var state = (params.get("state") || "").trim();
+      var error = (params.get("error") || "").trim();
+      var errorDescription = (params.get("error_description") || "").trim();
+      var queryString = params.toString() ? "?" + params.toString() : "";
+
+      var badgeEl = document.getElementById("statusBadge");
+      var leadEl = document.getElementById("leadDesc");
+      var valCode = document.getElementById("valCode");
+      var valState = document.getElementById("valState");
+      var valError = document.getElementById("valError");
+      var valQuery = document.getElementById("valQuery");
+      var statusLine = document.getElementById("statusLine");
+      var copyQueryBtn = document.getElementById("copyQueryBtn");
+      var copyUrlBtn = document.getElementById("copyUrlBtn");
+      var postOpenerBtn = document.getElementById("postOpenerBtn");
+
+      valCode.textContent = code || "（未携带）";
+      valState.textContent = state || "（未携带）";
+      valError.textContent = error ? (errorDescription ? error + " — " + errorDescription : error) : "无";
+      valQuery.textContent = queryString || "（无参数）";
+
+      if (error) {
+        badgeEl.textContent = "授权失败";
+        badgeEl.className = "badge is-err";
+        leadEl.textContent = "网盘返回了授权拒绝或错误信息。你可以返回 OpenSync 重新发起授权，或复制下方参数排查问题。";
+      } else if (code) {
+        badgeEl.textContent = "已提取授权码";
+        badgeEl.className = "badge is-ok";
+        leadEl.textContent = "授权参数已提取就绪。若原 OpenSync 授权向导仍在等待，页面会尝试自动回传；你也可以一键复制下方参数粘贴到向导完成连接。";
+      } else {
+        badgeEl.textContent = "未检测到 code";
+        badgeEl.className = "badge";
+        leadEl.textContent = "当前地址中未包含 code 或 error 参数。请确认在网盘登录页点击「同意授权」并跳转后再复制。";
+        copyQueryBtn.disabled = true;
+      }
+
+      function sendToOpener(manual) {
+        if (!window.opener || window.opener.closed) {
+          if (manual) {
+            statusLine.textContent = "未检测到原授权向导窗口，请点击左侧「一键复制回调参数」并手动粘贴。";
+          }
+          return false;
+        }
+        try {
+          window.opener.postMessage({
+            type: "opensync:oauth-callback",
+            callbackUrl: window.location.href,
+            query: queryString,
+            code: code,
+            state: state,
+            error: error,
+            errorDescription: errorDescription
+          }, window.location.origin);
+          statusLine.textContent = "已向同源 OpenSync 授权向导自动回传回调参数，可切回原标签页查看结果。";
+          return true;
+        } catch (err) {
+          statusLine.textContent = "自动回传失败，请点击上方按钮复制回调参数并手动粘贴。";
+          return false;
+        }
+      }
+
+      function copyText(text, successMsg) {
+        if (!text) return;
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(function () {
+            statusLine.textContent = successMsg;
+          }).catch(function () {
+            fallbackCopy(text, successMsg);
+          });
+          return;
+        }
+        fallbackCopy(text, successMsg);
+      }
+
+      function fallbackCopy(text, successMsg) {
+        var ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        try {
+          document.execCommand("copy");
+          statusLine.textContent = successMsg;
+        } catch (e) {
+          statusLine.textContent = "浏览器禁止剪贴板访问，请手动选中上方回调参数复制。";
+        }
+        document.body.removeChild(ta);
+      }
+
+      copyQueryBtn.addEventListener("click", function () {
+        copyText(queryString, "已复制回调参数（" + queryString + "），请回到 OpenSync 授权向导粘贴提交。");
+      });
+      copyUrlBtn.addEventListener("click", function () {
+        copyText(window.location.href, "已复制完整回调网址，请回到 OpenSync 授权向导粘贴提交。");
+      });
+
+      if (window.opener && !window.opener.closed) {
+        postOpenerBtn.hidden = false;
+        postOpenerBtn.addEventListener("click", function () {
+          sendToOpener(true);
+        });
+        if (code || error) {
+          sendToOpener(false);
+        }
+      } else if (code || error) {
+        statusLine.textContent = "未检测到原窗口句柄（可能是从其他设备或标签打开），请点击「一键复制回调参数」并粘贴到授权向导。";
+      }
+    })();
+  </script>
+</body>
+</html>`
 
 var errServiceAlreadyRunning = errors.New("service is already running")

@@ -3,6 +3,9 @@ package native
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -95,6 +98,8 @@ var openSyncMetaFields = map[string]bool{
 	"proxy_url":            true,
 	"allow_hashcheck":      true,
 	"max_concurrent_jobs":  true,
+	"managed_by_job":       true,
+	"managed_job_label":    true,
 }
 
 var fields = map[string]string{
@@ -135,7 +140,7 @@ var fields = map[string]string{
 	"fichier":             "api_key shared_folder file_password folder_password cdn insecure_skip_verify proxy_url description",
 	"gofile":              "access_token root_folder_id account_id list_chunk insecure_skip_verify proxy_url description",
 	"pixeldrain":          "api_key root_folder_id api_url insecure_skip_verify proxy_url description",
-	"crypt":               "remote password password2 filename_encryption directory_name_encryption filename_encoding suffix no_data_encryption description",
+	"crypt":               "remote password password2 filename_encryption directory_name_encryption filename_encoding suffix no_data_encryption description managed_by_job managed_job_label",
 	"chunker":             "remote chunk_size name_format start_from meta_format hash_type fail_hard transactions description",
 	"compress":            "remote mode level ram_cache_limit description",
 	"hasher":              "remote hashes max_age auto_size description",
@@ -812,6 +817,41 @@ func RedactParams(p map[string]string) (public map[string]string, secrets []stri
 		secrets = []string{}
 	}
 	return public, secrets
+}
+
+var rcloneObscureKey = []byte{
+	0x9c, 0x93, 0x5b, 0x48, 0x73, 0x0a, 0x55, 0x4d,
+	0x6b, 0xfd, 0x7c, 0x63, 0xc8, 0x86, 0xa9, 0x2b,
+	0xd3, 0x90, 0x19, 0x8e, 0xb8, 0x12, 0x8a, 0xfb,
+	0xf4, 0xde, 0x16, 0x2b, 0x8b, 0x95, 0xf6, 0x38,
+}
+
+func revealObscured(obscured string) (string, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(obscured))
+	if err != nil {
+		return "", errors.New("混淆密码格式无效")
+	}
+	if len(raw) < aes.BlockSize {
+		return "", errors.New("混淆密码长度不足")
+	}
+	iv := raw[:aes.BlockSize]
+	ciphertext := raw[aes.BlockSize:]
+	block, err := aes.NewCipher(rcloneObscureKey)
+	if err != nil {
+		return "", err
+	}
+	plain := make([]byte, len(ciphertext))
+	cipher.NewCTR(block, iv).XORKeyStream(plain, ciphertext)
+	return string(plain), nil
+}
+
+// VerifyObscured compares candidatePlain against a stored rclone-obscured secret in constant time.
+func VerifyObscured(obscured, candidatePlain string) (bool, error) {
+	revealed, err := revealObscured(obscured)
+	if err != nil {
+		return false, err
+	}
+	return subtle.ConstantTimeCompare([]byte(revealed), []byte(candidatePlain)) == 1, nil
 }
 
 // RemoteSummary produces a concise, non-sensitive summary string for UI cards.
@@ -1957,6 +1997,12 @@ func ValidateEntry(name string, p map[string]string, plainSecrets bool) error {
 		}
 		if strings.TrimSpace(p["remote"]) == "" {
 			return fmt.Errorf("%s 缺少底层路径", name)
+		}
+		if err := validateBoolField(name, "managed_by_job", p["managed_by_job"]); err != nil {
+			return err
+		}
+		if len([]rune(p["managed_job_label"])) > 128 {
+			return fmt.Errorf("%s 的关联任务标签长度不能超过 128 个字符", name)
 		}
 	case "chunker", "compress", "hasher", "alias", "archive":
 		if strings.TrimSpace(p["remote"]) == "" {

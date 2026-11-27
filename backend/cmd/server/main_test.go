@@ -16,6 +16,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gin-gonic/gin"
 )
 
 // shortSocketDir keeps the socket path under the unix-socket length limit,
@@ -547,5 +549,28 @@ func TestSocketPublisherDiscardUnlinksBeforeReleasingLock(t *testing.T) {
 	publish.discard()
 	if _, err := os.Lstat(socket); err != nil {
 		t.Fatalf("second instance socket removed by stale discard: %v", err)
+	}
+}
+
+func TestOAuthCallbackPageServesNoStoreHTMLWithoutUnescapedReflection(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := newRouter(true, nil)
+
+	req := httptest.NewRequest(http.MethodGet, prefix+"/oauth/callback?code=c123&state=s456&xss=%3Cscript%3Ealert(1)%3C/script%3E", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET %s/oauth/callback status = %d, want 200", prefix, w.Code)
+	}
+	if cc := w.Header().Get("Cache-Control"); !strings.Contains(cc, "no-store") {
+		t.Fatalf("Cache-Control = %q, want no-store", cc)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "opensync:oauth-callback") || !strings.Contains(body, "postMessage") {
+		t.Fatal("oauth callback page missing postMessage bridge")
+	}
+	if strings.Contains(body, "<script>alert(1)</script>") {
+		t.Fatal("oauth callback page must never reflect unescaped query payload into HTML")
 	}
 }

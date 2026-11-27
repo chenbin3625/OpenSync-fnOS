@@ -382,3 +382,55 @@ func TestExportINIConvertsLocalCompositeTargets(t *testing.T) {
 		t.Fatal("revoked local directory was silently exported")
 	}
 }
+
+func TestManagedByJobMetaFieldsAndVerifyObscured(t *testing.T) {
+	cfg := Config{
+		"oss": {"type": "s3", "provider": "Alibaba", "endpoint": "oss-cn-hangzhou.aliyuncs.com", "access_key_id": "ak", "secret_access_key": "sk"},
+		"jobcrypt": {
+			"type":              "crypt",
+			"remote":            "oss:bucket/sub",
+			"password":          "rAQf7UB6wZfqqcBaXxUdqkXyQkExn_ALOhM",
+			"managed_by_job":    "true",
+			"managed_job_label": "自动照片备份",
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("cfg.Validate() error: %v", err)
+	}
+	pub, _ := RedactParams(cfg["jobcrypt"])
+	if pub["managed_by_job"] != "true" || pub["managed_job_label"] != "自动照片备份" {
+		t.Fatalf("RedactParams should expose managed_by_job & managed_job_label, got %+v", pub)
+	}
+	exported, err := cfg.ExportINI(context.Background(), []string{"jobcrypt"}, "")
+	if err != nil {
+		t.Fatalf("ExportINI() error: %v", err)
+	}
+	if strings.Contains(exported, "managed_by_job") || strings.Contains(exported, "managed_job_label") {
+		t.Fatalf("ExportINI must strip OpenSync metadata fields:\n%s", exported)
+	}
+
+	// Non-crypt remote rejects managed_by_job.
+	badCfg := Config{
+		"oss": {
+			"type":           "s3",
+			"provider":       "Alibaba",
+			"endpoint":       "oss-cn-hangzhou.aliyuncs.com",
+			"access_key_id":  "ak",
+			"secret_access_key": "sk",
+			"managed_by_job": "true",
+		},
+	}
+	if err := badCfg.Validate(); err == nil {
+		t.Fatal("expected non-crypt remote with managed_by_job to fail validation")
+	}
+
+	// VerifyObscured verifies known rclone obscured output for "testsecret".
+	ok, err := VerifyObscured("rAQf7UB6wZfqqcBaXxUdqkXyQkExn_ALOhM", "testsecret")
+	if err != nil || !ok {
+		t.Fatalf("VerifyObscured(matching) = %v, %v, want true, nil", ok, err)
+	}
+	okWrong, err := VerifyObscured("rAQf7UB6wZfqqcBaXxUdqkXyQkExn_ALOhM", "wrongsecret")
+	if err != nil || okWrong {
+		t.Fatalf("VerifyObscured(mismatch) = %v, %v, want false, nil", okWrong, err)
+	}
+}

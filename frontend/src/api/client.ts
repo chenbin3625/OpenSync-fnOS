@@ -14,9 +14,11 @@ import type {
   NativeAboutInfo,
   NativeAuthStepSnapshot,
   NativeBrowseResult,
+  NativeCryptRecoveryResult,
   NativeExportResult,
   NativeImportPreview,
   NativeImportResult,
+  NativeOpenListDiscoverResult,
   NativeRenameResult,
   NativeSizeInfo,
   NativeStorageState,
@@ -350,6 +352,20 @@ export const api = {
     }),
   exportNativeConfig: (data: { names?: string[]; password?: string }) =>
     request<NativeExportResult>("/native/storage/export", {
+      method: "POST",
+      data,
+    }),
+  discoverOpenList: (data?: { ports?: number[]; endpoints?: string[] }) =>
+    request<NativeOpenListDiscoverResult>("/native/storage/discover-openlist", {
+      method: "POST",
+      data: data ?? {},
+    }),
+  getCryptRecovery: (data: {
+    name: string;
+    verifyPassword?: string;
+    verifyPassword2?: string;
+  }) =>
+    request<NativeCryptRecoveryResult>("/native/storage/crypt-recovery", {
       method: "POST",
       data,
     }),

@@ -134,6 +134,28 @@ func ExportNativeConfig(c *gin.Context) {
 	})
 }
 
+func DiscoverOpenList(c *gin.Context) {
+	var in service.NativeOpenListDiscoverInput
+	if !bindJSONStrict(c, &in) {
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	handleService(c, func() (interface{}, error) {
+		return service.DiscoverOpenList(c.Request.Context(), in)
+	})
+}
+
+func CryptRecovery(c *gin.Context) {
+	var in service.NativeCryptRecoveryInput
+	if !bindJSONStrict(c, &in) {
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	handleService(c, func() (interface{}, error) {
+		return service.BuildCryptRecoveryBundle(c.Request.Context(), in)
+	})
+}
+
 func AboutNativeStorage(c *gin.Context) {
 	var in service.NativeAboutInput
 	if !bindJSONStrict(c, &in) {

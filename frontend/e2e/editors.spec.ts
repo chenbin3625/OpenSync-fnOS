@@ -1229,6 +1229,7 @@ test("task editor quick-enables end-to-end crypt storage for remote destination"
       type: "crypt",
       remote: "aliyun:backup/encrypted",
       password: "StrongPass#2026",
+      managed_by_job: "true",
     },
   });
 

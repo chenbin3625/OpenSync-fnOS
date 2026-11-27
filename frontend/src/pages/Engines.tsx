@@ -7,17 +7,20 @@ import {
   IconAlertTriangle,
   IconBarChartVStroked,
   IconChainStroked,
+  IconChevronRight,
   IconDeleteStroked,
   IconDownload,
   IconEditStroked,
   IconFolderStroked,
   IconInfoCircle,
+  IconKey,
   IconLockStroked,
   IconPlusStroked,
   IconRefresh,
   IconUpload,
 } from "@douyinfe/semi-icons";
 import { api } from "../api/client";
+import { CryptRecoveryModal } from "../components/CryptRecoveryModal";
 import {
   NativeStorageEditor,
   remoteTypeLabels,
@@ -78,6 +81,10 @@ export default function Engines() {
     Record<string, NativeAboutInfo>
   >({});
   const [deletingName, setDeletingName] = useState<string | null>(null);
+  const [jobCryptExpanded, setJobCryptExpanded] = useState(false);
+  const [cryptRecoveryRemoteName, setCryptRecoveryRemoteName] = useState<
+    string | null
+  >(null);
 
   const state = nativeState.data;
   const nativeEngine = engines.data?.find(
@@ -410,216 +417,325 @@ export default function Engines() {
               }
             />
 
-            {/* Cards 2..N: One card per configured remote storage */}
-            {state.remotes.map((item) => {
-              const st = storageStatusMap.get(`/${item.name}`);
-              const healthy = st ? isStorageHealthy(st) : undefined;
-              const testRes = testResults[item.name];
-              const aboutRes = aboutResults[item.name];
-              const activeJobs = Number(item.activeJobs || 0);
-              const queuedJobs = Number(item.queuedJobs || 0);
-              const isLocked =
-                item.usedByJobs.length > 0 || item.usedByCrypts.length > 0;
-              const allRefsAreCrypt =
-                item.usedByCrypts.length > 0 &&
-                item.usedByCrypts.every(
-                  (name) =>
-                    state.remotes.find((r) => r.name === name)?.type === "crypt",
+            {/* Cards 2..N: Remote storage cards (excluding job-managed crypt channels) */}
+            {(() => {
+              const allRemotes = state.remotes || [];
+              const isJobManagedCrypt = (r: NativeRemoteItem) =>
+                r.type === "crypt" && r.options?.managed_by_job === "true";
+              const regularRemotes = allRemotes.filter(
+                (r) => !isJobManagedCrypt(r),
+              );
+              const managedJobCryptRemotes = allRemotes.filter(isJobManagedCrypt);
+
+              const renderRemoteCard = (item: NativeRemoteItem) => {
+                const st = storageStatusMap.get(`/${item.name}`);
+                const healthy = st ? isStorageHealthy(st) : undefined;
+                const testRes = testResults[item.name];
+                const aboutRes = aboutResults[item.name];
+                const activeJobs = Number(item.activeJobs || 0);
+                const queuedJobs = Number(item.queuedJobs || 0);
+                const isLocked =
+                  item.usedByJobs.length > 0 || item.usedByCrypts.length > 0;
+                const allRefsAreCrypt =
+                  item.usedByCrypts.length > 0 &&
+                  item.usedByCrypts.every(
+                    (name) =>
+                      state.remotes.find((r) => r.name === name)?.type ===
+                      "crypt",
+                  );
+                const lockHint =
+                  item.usedByCrypts.length > 0
+                    ? allRefsAreCrypt
+                      ? `正被加密存储 ${item.usedByCrypts.join("、")} 引用`
+                      : `正被其他存储 ${item.usedByCrypts.join("、")} 引用`
+                    : item.usedByJobs.length > 0
+                      ? `正被任务 ${item.usedByJobs.join("、")} 使用`
+                      : "";
+                const canEncrypt = canCreateCryptFromRemote(item, state.remotes);
+                const jobManagedLabel = item.options?.managed_job_label;
+
+                return (
+                  <ResourceCard
+                    key={item.name}
+                    className="engine-item storage-card"
+                    title={
+                      <span className="engine-title-row">
+                        <span>{item.name}</span>
+                        <Tag
+                          size="small"
+                          type="light"
+                          color={item.type === "crypt" ? "violet" : "blue"}
+                        >
+                          {item.type === "crypt" ? (
+                            <span className="storage-type-tag-inner">
+                              <IconLockStroked
+                                aria-hidden="true"
+                                size="extra-small"
+                              />
+                              <span>
+                                {remoteTypeLabels[item.type] || item.type}
+                              </span>
+                            </span>
+                          ) : (
+                            remoteTypeLabels[item.type] || item.type
+                          )}
+                        </Tag>
+                        {item.type === "crypt" &&
+                          item.options?.managed_by_job === "true" && (
+                            <Tag size="small" type="light" color="cyan">
+                              {jobManagedLabel
+                                ? `任务：${jobManagedLabel}`
+                                : "任务向导创建"}
+                            </Tag>
+                          )}
+                        {testRes ? (
+                          <Tag
+                            size="small"
+                            type="light"
+                            color={
+                              testRes.ok
+                                ? testRes.warning
+                                  ? "orange"
+                                  : "green"
+                                : "red"
+                            }
+                          >
+                            {testRes.ok
+                              ? `正常 · ${testRes.latencyMs}ms`
+                              : "连接异常"}
+                          </Tag>
+                        ) : healthy === true ? (
+                          <Tag size="small" type="light" color="green">
+                            正常
+                          </Tag>
+                        ) : healthy === false ? (
+                          <Tag size="small" type="light" color="red">
+                            连接异常
+                          </Tag>
+                        ) : (
+                          <Tag size="small" type="light" color="grey">
+                            未检测
+                          </Tag>
+                        )}
+                        {item.usedByJobs.length > 0 && (
+                          <Tag
+                            size="small"
+                            type="light"
+                            color="cyan"
+                            className="engine-clickable-tag"
+                            onClick={() =>
+                              navigate(
+                                `/sync?storage=${encodeURIComponent(item.name)}`,
+                              )
+                            }
+                          >
+                            {item.usedByJobs.length} 个任务
+                          </Tag>
+                        )}
+                        {Number(item.maxConcurrentJobs || 0) > 0 && (
+                          <Tag size="small" type="light" color="violet">
+                            单存储限 {item.maxConcurrentJobs} 并发
+                          </Tag>
+                        )}
+                        {item.usedByCrypts.length > 0 && (
+                          <Tag size="small" type="light" color="violet">
+                            {allRefsAreCrypt
+                              ? "已关联加密存储"
+                              : "被其他存储引用"}
+                          </Tag>
+                        )}
+                        {(activeJobs > 0 || queuedJobs > 0) && (
+                          <Tag size="small" type="light" color="cyan">
+                            运行 {activeJobs}
+                            {queuedJobs > 0 ? ` · 排队 ${queuedJobs}` : ""}
+                          </Tag>
+                        )}
+                      </span>
+                    }
+                    subtitle={
+                      item.summary || remoteTypeLabels[item.type] || item.type
+                    }
+                    meta={
+                      <div className="engine-meta-stack">
+                        {health && health.lastCheckedAt > 0 && (
+                          <div className="item-meta">
+                            挂载路径 /{item.name} · 最近检测{" "}
+                            {formatTimestamp(health.lastCheckedAt, true)}
+                          </div>
+                        )}
+                        {healthy === false && st?.status && !testRes && (
+                          <div className="inline-error">{st.status}</div>
+                        )}
+                        {renderAboutSummary(aboutRes)}
+                        {testRes && (
+                          <div
+                            className={`native-inline-test ${
+                              testRes.ok
+                                ? testRes.warning
+                                  ? "is-warn"
+                                  : "is-ok"
+                                : "is-error"
+                            }`}
+                          >
+                            <span>
+                              {testRes.message}（{testRes.latencyMs}ms）
+                            </span>
+                            {testRes.warning && (
+                              <span className="native-inline-test-sub">
+                                {testRes.warning}
+                              </span>
+                            )}
+                          </div>
+                        )}
+                        {item.type === "crypt" && (
+                          <div className="crypt-card-guidance-actions">
+                            <Button
+                              size="small"
+                              type="tertiary"
+                              icon={<IconKey aria-hidden="true" />}
+                              disabled={anyBusy}
+                              onClick={() => setCryptRecoveryRemoteName(item.name)}
+                            >
+                              导出密钥恢复包
+                            </Button>
+                            <Button
+                              size="small"
+                              type="tertiary"
+                              icon={<IconFolderStroked aria-hidden="true" />}
+                              disabled={anyBusy}
+                              onClick={() =>
+                                setModal({
+                                  mode: "browse",
+                                  initialBrowsePath: `/${item.name}`,
+                                })
+                              }
+                            >
+                              从加密存储一键还原到本地
+                            </Button>
+                          </div>
+                        )}
+                      </div>
+                    }
+                    actions={
+                      <>
+                        <IconButton
+                          label={
+                            testingName === item.name
+                              ? "测试中…"
+                              : `测试连接 ${item.name}`
+                          }
+                          icon={<IconChainStroked aria-hidden="true" />}
+                          disabled={anyBusy}
+                          ariaBusy={testingName === item.name}
+                          onClick={() => void handleTestRemote(item.name)}
+                        />
+                        <IconButton
+                          label={`浏览与恢复 ${item.name}`}
+                          icon={<IconFolderStroked aria-hidden="true" />}
+                          disabled={anyBusy}
+                          onClick={() =>
+                            setModal({
+                              mode: "browse",
+                              initialBrowsePath: `/${item.name}`,
+                            })
+                          }
+                        />
+                        <IconButton
+                          label={
+                            aboutLoadingName === item.name
+                              ? "查询空间中…"
+                              : `查看空间 ${item.name}`
+                          }
+                          icon={<IconBarChartVStroked aria-hidden="true" />}
+                          disabled={anyBusy}
+                          ariaBusy={aboutLoadingName === item.name}
+                          onClick={() => void handleAboutStorage(item.name)}
+                        />
+                        {item.type === "crypt" && (
+                          <IconButton
+                            label={`导出 ${item.name} 密钥恢复包`}
+                            icon={<IconKey aria-hidden="true" />}
+                            disabled={anyBusy}
+                            onClick={() => setCryptRecoveryRemoteName(item.name)}
+                          />
+                        )}
+                        {canEncrypt && (
+                          <IconButton
+                            label={`基于 ${item.name} 创建加密存储`}
+                            icon={<IconLockStroked aria-hidden="true" />}
+                            disabled={anyBusy}
+                            onClick={() => setCryptSourceRemote(item)}
+                          />
+                        )}
+                        <IconButton
+                          label={`编辑 ${item.name}`}
+                          icon={<IconEditStroked aria-hidden="true" />}
+                          disabled={anyBusy}
+                          onClick={() =>
+                            setModal({ mode: "form", editRemote: item })
+                          }
+                        />
+                        <IconButton
+                          label={
+                            isLocked
+                              ? `无法删除：${lockHint}`
+                              : `删除 ${item.name}`
+                          }
+                          icon={<IconDeleteStroked aria-hidden="true" />}
+                          danger
+                          disabled={anyBusy}
+                          ariaBusy={deletingName === item.name}
+                          onClick={() => handleDeleteRemote(item)}
+                        />
+                      </>
+                    }
+                  />
                 );
-              const lockHint =
-                item.usedByCrypts.length > 0
-                  ? allRefsAreCrypt
-                    ? `正被加密存储 ${item.usedByCrypts.join("、")} 引用`
-                    : `正被其他存储 ${item.usedByCrypts.join("、")} 引用`
-                  : item.usedByJobs.length > 0
-                    ? `正被任务 ${item.usedByJobs.join("、")} 使用`
-                    : "";
-              const canEncrypt = canCreateCryptFromRemote(item, state.remotes);
+              };
 
               return (
-                <ResourceCard
-                  key={item.name}
-                  className="engine-item storage-card"
-                  title={
-                    <span className="engine-title-row">
-                      <span>{item.name}</span>
-                      <Tag
-                        size="small"
-                        type="light"
-                        color={item.type === "crypt" ? "violet" : "blue"}
+                <>
+                  {regularRemotes.map(renderRemoteCard)}
+                  {managedJobCryptRemotes.length > 0 && (
+                    <div
+                      className="managed-job-crypt-section"
+                      role="region"
+                      aria-label="任务专属加密通道（可展开查看/管理）"
+                    >
+                      <button
+                        type="button"
+                        className="managed-job-crypt-toggle"
+                        aria-expanded={jobCryptExpanded}
+                        onClick={() => setJobCryptExpanded((v) => !v)}
                       >
-                        {item.type === "crypt" ? (
-                          <span className="storage-type-tag-inner">
-                            <IconLockStroked aria-hidden="true" size="extra-small" />
-                            <span>{remoteTypeLabels[item.type] || item.type}</span>
-                          </span>
-                        ) : (
-                          remoteTypeLabels[item.type] || item.type
-                        )}
-                      </Tag>
-                      {testRes ? (
-                        <Tag
-                          size="small"
-                          type="light"
-                          color={
-                            testRes.ok
-                              ? testRes.warning
-                                ? "orange"
-                                : "green"
-                              : "red"
-                          }
-                        >
-                          {testRes.ok
-                            ? `正常 · ${testRes.latencyMs}ms`
-                            : "连接异常"}
-                        </Tag>
-                      ) : healthy === true ? (
-                        <Tag size="small" type="light" color="green">
-                          正常
-                        </Tag>
-                      ) : healthy === false ? (
-                        <Tag size="small" type="light" color="red">
-                          连接异常
-                        </Tag>
-                      ) : (
-                        <Tag size="small" type="light" color="grey">
-                          未检测
-                        </Tag>
-                      )}
-                      {item.usedByJobs.length > 0 && (
-                        <Tag
-                          size="small"
-                          type="light"
-                          color="cyan"
-                          className="engine-clickable-tag"
-                          onClick={() =>
-                            navigate(`/sync?storage=${encodeURIComponent(item.name)}`)
-                          }
-                        >
-                          {item.usedByJobs.length} 个任务
-                        </Tag>
-                      )}
-                      {Number(item.maxConcurrentJobs || 0) > 0 && (
-                        <Tag size="small" type="light" color="violet">
-                          单存储限 {item.maxConcurrentJobs} 并发
-                        </Tag>
-                      )}
-                      {item.usedByCrypts.length > 0 && (
-                        <Tag size="small" type="light" color="violet">
-                          {allRefsAreCrypt ? "已关联加密存储" : "被其他存储引用"}
-                        </Tag>
-                      )}
-                      {(activeJobs > 0 || queuedJobs > 0) && (
-                        <Tag size="small" type="light" color="cyan">
-                          运行 {activeJobs}
-                          {queuedJobs > 0 ? ` · 排队 ${queuedJobs}` : ""}
-                        </Tag>
-                      )}
-                    </span>
-                  }
-                  subtitle={item.summary || (remoteTypeLabels[item.type] || item.type)}
-                  meta={
-                    <div className="engine-meta-stack">
-                      {health && health.lastCheckedAt > 0 && (
-                        <div className="item-meta">
-                          挂载路径 /{item.name} · 最近检测{" "}
-                          {formatTimestamp(health.lastCheckedAt, true)}
-                        </div>
-                      )}
-                      {healthy === false && st?.status && !testRes && (
-                        <div className="inline-error">{st.status}</div>
-                      )}
-                      {renderAboutSummary(aboutRes)}
-                      {testRes && (
-                        <div
-                          className={`native-inline-test ${
-                            testRes.ok
-                              ? testRes.warning
-                                ? "is-warn"
-                                : "is-ok"
-                              : "is-error"
-                          }`}
-                        >
-                          <span>
-                            {testRes.message}（{testRes.latencyMs}ms）
-                          </span>
-                          {testRes.warning && (
-                            <span className="native-inline-test-sub">
-                              {testRes.warning}
-                            </span>
-                          )}
+                        <span className="managed-job-crypt-toggle-left">
+                          <IconChevronRight
+                            aria-hidden="true"
+                            size="small"
+                            className={`managed-job-crypt-chevron${
+                              jobCryptExpanded ? " is-open" : ""
+                            }`}
+                          />
+                          <IconLockStroked aria-hidden="true" size="small" />
+                          <span>任务专属加密通道（可展开查看/管理）</span>
+                          <Tag size="small" type="light" color="violet">
+                            {managedJobCryptRemotes.length} 个
+                          </Tag>
+                        </span>
+                        <span className="muted managed-job-crypt-toggle-hint">
+                          {jobCryptExpanded ? "收起" : "展开管理"}
+                        </span>
+                      </button>
+                      {jobCryptExpanded && (
+                        <div className="managed-job-crypt-list">
+                          {managedJobCryptRemotes.map(renderRemoteCard)}
                         </div>
                       )}
                     </div>
-                  }
-                  actions={
-                    <>
-                      <IconButton
-                        label={
-                          testingName === item.name
-                            ? "测试中…"
-                            : `测试连接 ${item.name}`
-                        }
-                        icon={<IconChainStroked aria-hidden="true" />}
-                        disabled={anyBusy}
-                        ariaBusy={testingName === item.name}
-                        onClick={() => void handleTestRemote(item.name)}
-                      />
-                      <IconButton
-                        label={`浏览与恢复 ${item.name}`}
-                        icon={<IconFolderStroked aria-hidden="true" />}
-                        disabled={anyBusy}
-                        onClick={() =>
-                          setModal({
-                            mode: "browse",
-                            initialBrowsePath: `/${item.name}`,
-                          })
-                        }
-                      />
-                      <IconButton
-                        label={
-                          aboutLoadingName === item.name
-                            ? "查询空间中…"
-                            : `查看空间 ${item.name}`
-                        }
-                        icon={<IconBarChartVStroked aria-hidden="true" />}
-                        disabled={anyBusy}
-                        ariaBusy={aboutLoadingName === item.name}
-                        onClick={() => void handleAboutStorage(item.name)}
-                      />
-                      {canEncrypt && (
-                        <IconButton
-                          label={`基于 ${item.name} 创建加密存储`}
-                          icon={<IconLockStroked aria-hidden="true" />}
-                          disabled={anyBusy}
-                          onClick={() => setCryptSourceRemote(item)}
-                        />
-                      )}
-                      <IconButton
-                        label={`编辑 ${item.name}`}
-                        icon={<IconEditStroked aria-hidden="true" />}
-                        disabled={anyBusy}
-                        onClick={() =>
-                          setModal({ mode: "form", editRemote: item })
-                        }
-                      />
-                      <IconButton
-                        label={
-                          isLocked
-                            ? `无法删除：${lockHint}`
-                            : `删除 ${item.name}`
-                        }
-                        icon={<IconDeleteStroked aria-hidden="true" />}
-                        danger
-                        disabled={anyBusy}
-                        ariaBusy={deletingName === item.name}
-                        onClick={() => handleDeleteRemote(item)}
-                      />
-                    </>
-                  }
-                />
+                  )}
+                </>
               );
-            })}
+            })()}
 
             {state.remotes.length === 0 && (
               <div className="sync-method-banner">
@@ -672,6 +788,9 @@ export default function Engines() {
                   : "例如 encrypted"
             }
             onClose={() => setCryptSourceRemote(null)}
+            onOpenRestore={(cryptName) =>
+              setModal({ mode: "browse", initialBrowsePath: `/${cryptName}` })
+            }
             onCreated={async ({ cryptName }) => {
               Toast.success(`已创建加密存储「${cryptName}」`);
               setCryptSourceRemote(null);
@@ -680,6 +799,16 @@ export default function Engines() {
           />
         );
       })()}
+
+      {cryptRecoveryRemoteName && (
+        <CryptRecoveryModal
+          remoteName={cryptRecoveryRemoteName}
+          onClose={() => setCryptRecoveryRemoteName(null)}
+          onOpenRestore={(name) =>
+            setModal({ mode: "browse", initialBrowsePath: `/${name}` })
+          }
+        />
+      )}
 
     </div>
   );

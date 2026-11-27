@@ -42,6 +42,7 @@ import { BwLimitEditor } from "../components/BwLimitEditor";
 import { ExcludeTree } from "../components/ExcludeTree";
 import { FileTypeFilter } from "../components/FileTypeFilter";
 import { QuickCryptModal } from "../components/QuickCryptModal";
+import { CryptRecoveryModal } from "../components/CryptRecoveryModal";
 import { RemotePaths } from "../components/RemotePaths";
 import { SyncPathPreview } from "../components/SyncPathPreview";
 import {
@@ -231,6 +232,10 @@ export default function TaskEditor({
   }
   const [remoteTreeEpoch, setRemoteTreeEpoch] = useState(0);
   const [quickCryptOpen, setQuickCryptOpen] = useState(false);
+  const [cryptRecoveryRemote, setCryptRecoveryRemote] = useState<string | null>(
+    null,
+  );
+  const [cryptRestorePath, setCryptRestorePath] = useState<string | null>(null);
   const notifications = useResource((signal) => api.notifications(signal));
   const systemSettings = useResource((signal) => api.settings(signal));
   const [bwLimitError, setBwLimitError] = useState<string | null>(null);
@@ -1220,25 +1225,50 @@ export default function TaskEditor({
                     </div>
                   )}
                   {dstEncryption.encryptable.length === 0 &&
-                    dstEncryption.encrypted.length > 0 && (
-                      <div
-                        className="sync-method-banner is-success quick-crypt-banner"
-                        role="status"
-                      >
-                        <IconLockStroked aria-hidden="true" size="small" />
-                        <span>
-                          已启用端到端加密（目标加密存储：
-                          <strong>
-                            {Array.from(
-                              new Set(
-                                dstEncryption.encrypted.map((item) => item.remoteName),
-                              ),
-                            ).join("、")}
-                          </strong>
-                          ），文件将在上传前于本地加密。
-                        </span>
-                      </div>
-                    )}
+                    dstEncryption.encrypted.length > 0 && (() => {
+                      const primaryEncryptedName =
+                        dstEncryption.encrypted[0]?.remoteName || "";
+                      const encryptedNames = Array.from(
+                        new Set(
+                          dstEncryption.encrypted.map((item) => item.remoteName),
+                        ),
+                      );
+                      return (
+                        <div
+                          className="sync-method-banner is-success quick-crypt-banner"
+                          role="status"
+                        >
+                          <IconLockStroked aria-hidden="true" size="small" />
+                          <span>
+                            已启用端到端加密（目标加密存储：
+                            <strong>{encryptedNames.join("、")}</strong>
+                            ），文件将在上传前于本地加密。
+                          </span>
+                          {primaryEncryptedName && (
+                            <div className="quick-crypt-banner-actions">
+                              <Button
+                                size="small"
+                                type="tertiary"
+                                onClick={() =>
+                                  setCryptRecoveryRemote(primaryEncryptedName)
+                                }
+                              >
+                                导出密钥恢复包
+                              </Button>
+                              <Button
+                                size="small"
+                                type="tertiary"
+                                onClick={() =>
+                                  setCryptRestorePath(`/${primaryEncryptedName}`)
+                                }
+                              >
+                                从加密存储一键还原到本地
+                              </Button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
                   <SyncPathPreview
                     srcPaths={form.srcPath}
                     dstPaths={form.dstPath}
@@ -2644,9 +2674,25 @@ export default function TaskEditor({
           targets={dstEncryption.encryptable}
           remotes={nativeStorage.data?.remotes || []}
           isEditingJob={!isNew}
+          managedByJob
+          managedJobLabel={form.remark.trim() || undefined}
           onClose={() => setQuickCryptOpen(false)}
           onReuseExisting={handleQuickCryptReuse}
           onCreated={handleQuickCryptCreated}
+        />
+      )}
+      {cryptRecoveryRemote && (
+        <CryptRecoveryModal
+          remoteName={cryptRecoveryRemote}
+          onClose={() => setCryptRecoveryRemote(null)}
+          onOpenRestore={(name) => setCryptRestorePath(`/${name}`)}
+        />
+      )}
+      {cryptRestorePath && (
+        <NativeStorageEditor
+          mode="browse"
+          initialBrowsePath={cryptRestorePath}
+          onClose={() => setCryptRestorePath(null)}
         />
       )}
     </RemoteDirCacheProvider>

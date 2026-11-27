@@ -56,6 +56,75 @@ function extractFirstUrl(text?: string): string | undefined {
   return match[0].replace(/[.,;!?]+$/, "");
 }
 
+export interface ParsedCallbackSnippet {
+  recognized: boolean;
+  hasCode: boolean;
+  errorParam?: string;
+  errorDescription?: string;
+  kindLabel?: string;
+}
+
+export function analyzeOAuthCallbackInput(raw: string): ParsedCallbackSnippet {
+  const trimmed = raw.trim().replace(/^["'<>`]+|["'<>`]+$/g, "").trim();
+  if (!trimmed) return { recognized: false, hasCode: false };
+
+  let queryStr = "";
+  let kindLabel = "回调参数";
+  if (trimmed.includes("://")) {
+    try {
+      const u = new URL(trimmed);
+      if (u.search) {
+        queryStr = u.search.slice(1);
+        kindLabel = "完整回调网址";
+      } else if (u.hash) {
+        const frag = u.hash.replace(/^#/, "");
+        const qIdx = frag.indexOf("?");
+        queryStr = qIdx >= 0 ? frag.slice(qIdx + 1) : frag.replace(/^[/?&]+/, "");
+        kindLabel = "回调 URL 片段";
+      }
+    } catch {
+      return { recognized: false, hasCode: false };
+    }
+  } else if (trimmed.includes("?")) {
+    const idx = trimmed.indexOf("?");
+    const afterQ = trimmed.slice(idx + 1);
+    const beforeQ = trimmed.slice(0, idx);
+    if (beforeQ.includes("#")) {
+      queryStr = afterQ.replace(/^[?&]+/, "");
+      kindLabel = "回调 URL 片段";
+    } else {
+      const hashIdx = afterQ.indexOf("#");
+      queryStr = hashIdx >= 0 ? afterQ.slice(0, hashIdx) : afterQ;
+      kindLabel = beforeQ ? "回调地址/路径" : "纯查询串 (?code=...)";
+    }
+  } else if (trimmed.includes("#")) {
+    const [, afterHash = ""] = trimmed.split("#", 2);
+    const cleanedFrag = afterHash.replace(/^[/?&]+/, "");
+    if (cleanedFrag.includes("=")) {
+      queryStr = cleanedFrag;
+      kindLabel = "回调 URL 片段";
+    }
+  } else if (trimmed.includes("=")) {
+    queryStr = trimmed.replace(/^[?&/]+/, "").split("#")[0];
+    kindLabel = "查询参数片段";
+  }
+
+  if (!queryStr) return { recognized: false, hasCode: false };
+  const params = new URLSearchParams(queryStr);
+  const code = (params.get("code") || "").trim();
+  const errorParam = (params.get("error") || "").trim();
+  const errorDescription = (params.get("error_description") || "").trim();
+  if (!code && !errorParam) {
+    return { recognized: false, hasCode: false };
+  }
+  return {
+    recognized: true,
+    hasCode: Boolean(code),
+    ...(errorParam ? { errorParam, errorDescription } : {}),
+    kindLabel,
+  };
+}
+
 function localizeAuthQuestion(
   remoteType: string,
   q: NativeAuthQuestion,
@@ -404,6 +473,62 @@ export function NativeStorageAuthWizard({
     };
   }, [step, applySnapshot]);
 
+  const submitCallbackText = useCallback(
+    async (rawInput: string) => {
+      if (!step?.sessionId || submitting) return;
+      const trimmed = rawInput.trim();
+      if (!trimmed) {
+        setStepError("请粘贴授权完成后浏览器地址栏中的回调网址、?code=... 查询串或 URL 片段");
+        return;
+      }
+      setSubmitting(true);
+      setStepError("");
+      try {
+        const next = await api.submitNativeStorageAuthCallback({
+          sessionId: step.sessionId,
+          callbackUrl: trimmed,
+        });
+        applySnapshot(next);
+      } catch (err) {
+        setStepError(err instanceof Error ? err.message : "提交回调地址失败");
+      } finally {
+        setSubmitting(false);
+      }
+    },
+    [step?.sessionId, submitting, applySnapshot],
+  );
+
+  // Listen for same-origin postMessage events sent by /app/opensync/oauth/callback.
+  useEffect(() => {
+    if (!step || step.status !== "oauth" || !step.sessionId) {
+      return;
+    }
+    const handleMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) return;
+      const data = event.data as
+        | { type?: string; callbackUrl?: string; query?: string }
+        | null
+        | undefined;
+      if (!data || data.type !== "opensync:oauth-callback") return;
+      const candidate = String(data.callbackUrl || data.query || "").trim();
+      if (!candidate) return;
+      setCallbackInput(candidate);
+      setStepError("");
+      const parsed = analyzeOAuthCallbackInput(candidate);
+      if (parsed.recognized) {
+        Toast.success("已自动接收授权回调参数，正在完成连接…");
+        void submitCallbackText(candidate);
+      }
+    };
+    window.addEventListener("message", handleMessage);
+    return () => window.removeEventListener("message", handleMessage);
+  }, [step, submitCallbackText]);
+
+  const parsedCallbackInput = useMemo(
+    () => analyzeOAuthCallbackInput(callbackInput),
+    [callbackInput],
+  );
+
   const handleStart = async () => {
     if (activeSessionRef.current) {
       void api.cancelNativeStorageAuth(activeSessionRef.current).catch(() => undefined);
@@ -444,25 +569,7 @@ export function NativeStorageAuthWizard({
   };
 
   const handleSubmitCallback = async () => {
-    if (!step?.sessionId) return;
-    const trimmed = callbackInput.trim();
-    if (!trimmed) {
-      setStepError("请粘贴授权完成后浏览器地址栏中的回调网址");
-      return;
-    }
-    setSubmitting(true);
-    setStepError("");
-    try {
-      const next = await api.submitNativeStorageAuthCallback({
-        sessionId: step.sessionId,
-        callbackUrl: trimmed,
-      });
-      applySnapshot(next);
-    } catch (err) {
-      setStepError(err instanceof Error ? err.message : "提交回调地址失败");
-    } finally {
-      setSubmitting(false);
-    }
+    await submitCallbackText(callbackInput);
   };
 
   const handleContinueQuestion = async () => {
@@ -652,8 +759,14 @@ export function NativeStorageAuthWizard({
           <li>
             点击下方按钮在新标签页登录 <strong>{remoteLabel}</strong> 并同意授权。
           </li>
-          <li>授权后返回此页，向导检测到结果后会自动继续。</li>
-          <li>如果授权后打开了无法访问的页面，请复制地址栏里的<strong>完整网址</strong>，回到这里粘贴并提交。</li>
+          <li>
+            若 NAS 通过局域网访问且浏览器跳转到无法打开的 <code>localhost</code>，可将地址栏中的{" "}
+            <code>http://localhost:53682</code> 替换为当前系统地址 +{" "}
+            <code>/app/opensync/oauth/callback</code>（保留后面的 <code>?code=...</code> 参数）打开即可自动回传。
+          </li>
+          <li>
+            也可以直接复制浏览器地址栏里的<strong>完整回调网址</strong>、<strong>?code=...&state=... 查询串</strong>或 <strong>#code=... URL 片段</strong>粘贴到下方自动提交。
+          </li>
         </ol>
 
         <div className="native-auth-actions">
@@ -679,6 +792,13 @@ export function NativeStorageAuthWizard({
         <Field
           label="粘贴授权后的浏览器回调网址"
           error={stepError || undefined}
+          hint={
+            parsedCallbackInput.recognized && !stepError
+              ? parsedCallbackInput.errorParam
+                ? `已识别网盘错误响应：${parsedCallbackInput.errorParam}`
+                : `已自动识别${parsedCallbackInput.kindLabel}中的授权码（code），可点击「完成授权」立即提交`
+              : "支持完整回调 URL、?code=...&state=... 查询串或 #code=... URL 片段（粘贴即识别提交）"
+          }
         >
           <div className="native-password-row">
             <Input
@@ -689,8 +809,20 @@ export function NativeStorageAuthWizard({
                 setCallbackInput(v);
                 if (stepError) setStepError("");
               }}
+              onPaste={(e) => {
+                if (submitting) return;
+                const pasted = e.clipboardData?.getData("text") || "";
+                const parsed = analyzeOAuthCallbackInput(pasted);
+                if (parsed.hasCode) {
+                  e.preventDefault();
+                  setCallbackInput(pasted);
+                  setStepError("");
+                  Toast.success(`已识别${parsed.kindLabel}，正在自动提交授权…`);
+                  void submitCallbackText(pasted);
+                }
+              }}
               onEnterPress={() => void handleSubmitCallback()}
-              placeholder={`例如 ${redirectHint}?code=...&state=...`}
+              placeholder={`例如 ${redirectHint}?code=...&state=... 或直接粘贴 ?code=...`}
             />
             <Button
               type="primary"

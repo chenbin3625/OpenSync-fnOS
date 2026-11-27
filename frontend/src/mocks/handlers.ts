@@ -276,6 +276,33 @@ export const handlers = [
     );
     return typeof res === "string" ? fail(res) : ok(res);
   }),
+  http.post(`${apiBase}/native/storage/discover-openlist`, async ({ request }) => {
+    const body = await readBody(request);
+    if (!body) return fail("请求内容无效");
+    const res = mockStore.discoverOpenList({
+      ports: Array.isArray(body.ports)
+        ? body.ports.map((p) => Number(p)).filter((p) => Number.isFinite(p))
+        : undefined,
+      endpoints: Array.isArray(body.endpoints)
+        ? body.endpoints.map(String)
+        : undefined,
+    });
+    return typeof res === "string" ? fail(res) : ok(res);
+  }),
+  http.post(`${apiBase}/native/storage/crypt-recovery`, async ({ request }) => {
+    const body = await readBody(request);
+    if (!body || typeof body.name !== "string") return fail("请指定加密存储名称");
+    const res = mockStore.getCryptRecovery({
+      name: body.name,
+      verifyPassword:
+        typeof body.verifyPassword === "string" ? body.verifyPassword : undefined,
+      verifyPassword2:
+        typeof body.verifyPassword2 === "string"
+          ? body.verifyPassword2
+          : undefined,
+    });
+    return typeof res === "string" ? fail(res) : ok(res);
+  }),
   http.post(`${apiBase}/native/storage/about`, async ({ request }) => {
     const body = await readBody(request);
     if (!body || typeof body.name !== "string") return fail("缺少必要参数");
