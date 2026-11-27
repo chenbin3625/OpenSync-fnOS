@@ -78,7 +78,7 @@ function validateJobInput(body: Record<string, unknown>): string | null {
     return "双向同步模式只允许一个源目录和一个目标目录";
   }
   const isCron = Number(body.isCron ?? 0);
-  if (!Number.isInteger(isCron) || isCron < 0 || isCron > 2) {
+  if (!Number.isInteger(isCron) || isCron < 0 || isCron > 3) {
     return "缺少必要参数";
   }
   if (isCron === 0 && Number(body.interval ?? 0) <= 0) {

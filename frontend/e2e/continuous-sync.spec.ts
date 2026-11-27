@@ -26,8 +26,8 @@ test("connects a first WebDAV account inline and reuses it from the sync home", 
     }
     if (url.pathname.endsWith("/alist")) {
       const path = url.searchParams.get("path");
-      if (path === "/") return success([{ path: "本地" }, { path: cloud }]);
-      if (path === "/本地") return success([{ path: "Photos" }]);
+      if (path === "/") return success([...(localAuthorized ? [{ path: "本地" }] : []), ...(cloud ? [{ path: cloud }] : [])]);
+      if (path === "/本地") return success(localAuthorized ? [{ path: "Photos" }] : []);
       if (path === `/${cloud}`) return success([{ path: "Backup" }]);
       if (path) return success([]);
       return success([{ id: 1, remark: "内置存储", url: "native://rclone" }]);
@@ -59,16 +59,15 @@ test("connects a first WebDAV account inline and reuses it from the sync home", 
   await expect(dialog.getByRole("heading", { name: "新建持续同步任务", exact: true })).toBeVisible();
   await expect(dialog.getByRole("status").filter({ hasText: "文件夹访问权限" })).toBeVisible();
   localAuthorized = true;
-  await dialog.getByRole("button", { name: "刷新目录" }).click();
-  await expect(dialog.getByRole("radio", { name: /^单向同步/, checked: true })).toBeVisible();
+  await dialog.getByRole("button", { name: "刷新目录", exact: true }).click();
 
-  const picker = dialog.locator(".remote-paths");
-  await picker.nth(0).getByRole("combobox").click();
-  await page.locator('.remote-paths-dropdown [role="treeitem"][data-key="/本地/Photos"]').click();
-  await picker.nth(1).getByRole("combobox").click();
-  await page.locator('.remote-paths-dropdown [role="treeitem"][data-key="/PhotoCloud/Backup"]').click();
+  // Select NAS root + Cloud subfolder in 2-column Wizard Step 1
+  await dialog.locator('[data-virtual-path="/本地/Photos"]').click();
+  await dialog.getByRole("tree", { name: "云端存储连接列表" }).getByRole("button", { name: "Backup", exact: true }).click();
   await expect(dialog.getByRole("textbox", { name: "任务名称" })).toHaveAttribute("placeholder", "Photos · PhotoCloud");
   await dialog.getByRole("button", { name: "下一步", exact: true }).click();
+  await expect(dialog.getByRole("radio", { name: /^仅上传本地更改/, checked: true })).toBeVisible();
+  await expect(dialog.getByRole("radio", { name: /^不删除目标端文件/, checked: true })).toBeVisible();
   await dialog.getByRole("button", { name: "保存", exact: true }).click();
   await expect(page).toHaveURL(/\/tasks\?jobId=1/);
   expect(savedJobs[0]).toMatchObject({
@@ -86,8 +85,9 @@ test("connects a first WebDAV account inline and reuses it from the sync home", 
   await page.getByRole("button", { name: "返回任务列表" }).click();
   await group.getByRole("button", { name: "添加同步任务" }).click();
   await expect(dialog.getByRole("heading", { name: "新建持续同步任务", exact: true })).toBeVisible();
-  await dialog.getByRole("combobox", { name: "选择目标目录" }).click();
-  await expect(page.locator('.remote-paths-dropdown [role="treeitem"][data-key="/PhotoCloud/Backup"]')).toBeVisible();
+  await expect(
+    dialog.getByRole("tree", { name: "云端存储连接列表" }).getByRole("button", { name: "Backup", exact: true }),
+  ).toBeVisible();
 });
 
 test("edits a legacy upload as one-way sync and updates deletion policy and polling", async ({ page }) => {
@@ -99,6 +99,13 @@ test("edits a legacy upload as one-way sync and updates deletion policy and poll
     const url = new URL(req.url());
     const success = (data: unknown) => route.fulfill({ contentType: "application/json", body: JSON.stringify({ code: 200, data, msg: "" }) });
     if (url.pathname.endsWith("/session")) return success({ uid: 1, development: false, version: "test" });
+    if (url.pathname.endsWith("/native/storage")) {
+      return success({
+        engineId: 1, enabled: true, rcloneAvailable: true, remark: "内置存储",
+        localRoots: [{ id: "root", path: "/vol1/root" }],
+        remotes: [{ name: "Cloud", type: "webdav", summary: "", options: {}, usedByJobs: [], usedByCrypts: [], configuredSecrets: [] }],
+      });
+    }
     if (url.pathname.endsWith("/alist") && url.searchParams.has("alistId")) return success([]);
     if (url.pathname.endsWith("/alist")) return success([{ id: 1, remark: "测试引擎", url: "https://engine.test" }]);
     if (url.pathname.endsWith("/job/dry-run")) {
@@ -135,9 +142,14 @@ test("edits a legacy upload as one-way sync and updates deletion policy and poll
 
   await page.locator(".overview-card").getByRole("button", { name: "编辑任务", exact: true }).click();
   const dialog = page.getByRole("dialog");
-  await expect(dialog.getByRole("radio", { name: /^单向同步/, checked: true })).toBeVisible();
-  await dialog.getByRole("switch", { name: "镜像对齐", exact: true }).click();
-  await dialog.getByRole("tab", { name: "同步设置", exact: true }).click();
+  await dialog.getByRole("tab", { name: "同步方向与安全", exact: true }).click();
+  await expect(dialog.getByRole("radio", { name: /^仅上传本地更改/, checked: true })).toBeVisible();
+  await dialog.getByRole("radio", { name: /^完全镜像清理目标多余文件/ }).click();
+  await dialog.getByRole("tab", { name: "过滤规则与同步计划", exact: true }).click();
+  const cadenceToggle = dialog.getByRole("button", { name: /轮询频率、防抖与任务通知绑定/ });
+  if ((await cadenceToggle.getAttribute("aria-expanded")) !== "true") {
+    await cadenceToggle.click();
+  }
   await dialog.getByRole("textbox", { name: "远端检测间隔（秒）", exact: true }).fill("15");
   await dialog.getByRole("textbox", { name: "完整核对间隔（分钟）", exact: true }).fill("60");
   expect(await dialog.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
@@ -145,19 +157,18 @@ test("edits a legacy upload as one-way sync and updates deletion policy and poll
   await expect(dialog.getByRole("button", { name: "确认并启动镜像", exact: true })).toBeVisible();
   expect(saved).toMatchObject({ enable: 0, isCron: 3, method: 1, srcPath: ["/本地/root/source"], dstPath: ["/Cloud/target"] });
   const savedFlags = JSON.parse(String(saved?.extraFlags));
-  expect(savedFlags).toMatchObject({ syncPollIntervalSec: 15, syncAuditIntervalMin: 60 });
+  expect(savedFlags).toMatchObject({
+    syncPollIntervalSec: 15,
+    syncAuditIntervalMin: 60,
+    syncDirectionMode: "upload",
+    oneWayDeleteMode: "mirror",
+  });
   expect(savedFlags).not.toHaveProperty("syncDirection");
   expect(saved).not.toHaveProperty("syncStatus");
   expect(previews).toBe(1);
   await dialog.getByRole("button", { name: "确认并启动镜像", exact: true }).click();
   await expect(dialog).toBeHidden();
   expect(enabled).toBe(true);
-
-  await page.getByRole("button", { name: "返回任务列表", exact: true }).click();
-  await page.getByRole("button", { name: "新建同步任务", exact: true }).click();
-  await expect(page.getByRole("dialog").getByRole("radiogroup", { name: "同步方向" })).toBeVisible();
-  await expect(page.getByRole("dialog").getByRole("switch", { name: "镜像对齐", exact: true })).toBeVisible();
-  await page.getByRole("dialog").getByRole("button", { name: "取消", exact: true }).click();
 });
 
 test("offers one-click fix when switching a multi-destination task to bidirectional sync", async ({ page }) => {

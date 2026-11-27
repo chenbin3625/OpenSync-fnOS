@@ -583,6 +583,7 @@ export class MockStore {
   private nextAuthSessionSeq = 1;
   private engineHealthMap = new Map<number, EngineHealth>();
   private nativeRemotes = new Map<string, Record<string, string>>();
+  private customDirs = new Map<string, string[]>();
   private nativeLocalRoots: NativeLocalRoot[] = [
     { path: "/vol1/1000/Photos", id: "Photos~a1b2c3d4e5f6" },
     { path: "/vol2/1000/Backup", id: "Backup~1234567890ab" },
@@ -724,24 +725,39 @@ export class MockStore {
   // [{"path": "<name>"}]; the frontend tolerates both shapes, so mock mode
   // should exercise the real one.
   listPaths(path: string): { path: string }[] {
-    if (path === "/") {
-      return [...new Set([
+    const clean = (path || "/").replace(/\/+$/, "") || "/";
+    const custom = this.customDirs.get(clean) || [];
+    const withCustom = (names: string[]) =>
+      Array.from(new Set([...names, ...custom])).map((name) => ({ path: name }));
+    if (clean === "/") {
+      return withCustom([
         ...defaultPaths["/"].map((item) => item.name),
         ...(this.nativeLocalRoots.length ? ["本地"] : []),
         ...this.nativeRemotes.keys(),
-      ])].map((name) => ({ path: name }));
+      ]);
     }
-    if (path === "/本地") return this.nativeLocalRoots.map((root) => ({ path: root.id }));
-    const [, mount, ...relative] = path.split("/");
+    if (clean === "/本地") {
+      return withCustom(this.nativeLocalRoots.map((root) => root.id));
+    }
+    const [, mount, ...relative] = clean.split("/");
     if (this.nativeRemotes.has(mount)) {
-      return (defaultPaths[`/${relative.join("/")}`] || []).map((item) => ({ path: item.name }));
+      const defaults = (defaultPaths[`/${relative.join("/")}`] || []).map(
+        (item) => item.name,
+      );
+      return withCustom(defaults);
     }
     if (mount === "本地") {
       const [root, ...folders] = relative;
-      const label = this.nativeLocalRoots.find((item) => item.id === root)?.path.split("/").at(-1);
-      return (defaultPaths[`/${[label, ...folders].join("/")}`] || []).map((item) => ({ path: item.name }));
+      const label = this.nativeLocalRoots
+        .find((item) => item.id === root)
+        ?.path.split("/")
+        .at(-1);
+      const defaults = (
+        defaultPaths[`/${[label, ...folders].join("/")}`] || []
+      ).map((item) => item.name);
+      return withCustom(defaults);
     }
-    return (defaultPaths[path] || []).map((item) => ({ path: item.name }));
+    return withCustom((defaultPaths[clean] || []).map((item) => item.name));
   }
 
   saveEngine(input: EngineInput): AlistItem {
@@ -2216,7 +2232,17 @@ export class MockStore {
   }
 
   mkdirNativeStorage(path: string): string | null {
-    if (!path?.trim() || path.trim() === "/") return "请提供有效目录路径";
+    const clean = (path || "").trim().replace(/\/+$/, "");
+    if (!clean || clean === "/") return "请提供有效目录路径";
+    const lastSlash = clean.lastIndexOf("/");
+    const parent = lastSlash <= 0 ? "/" : clean.slice(0, lastSlash);
+    const child = lastSlash >= 0 ? clean.slice(lastSlash + 1) : clean;
+    if (child && child !== "." && child !== "..") {
+      const existing = this.customDirs.get(parent) || [];
+      if (!existing.includes(child)) {
+        this.customDirs.set(parent, [...existing, child]);
+      }
+    }
     return null;
   }
 

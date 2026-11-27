@@ -851,6 +851,9 @@ test("task editor previews destination folders live across path rules and edit d
   await page.goto("/app/opensync/sync");
   await page.getByRole("button", { name: "新建同步任务", exact: true }).click();
   const dialog = page.getByRole("dialog");
+  await dialog
+    .getByRole("button", { name: "切换为自由多对多 / 云对云模式", exact: true })
+    .click();
   const preview = dialog.getByRole("region", { name: "同步位置预览" });
   await expect(preview).toContainText("选择源路径和目标路径后");
 
@@ -1041,6 +1044,9 @@ test("guides no-engine onboarding, detects cross-job conflicts, and deduplicates
   await page.getByRole("button", { name: "返回任务列表", exact: true }).click();
   await page.getByRole("button", { name: "新建同步任务", exact: true }).click();
   const dialog = page.getByRole("dialog");
+  await dialog
+    .getByRole("button", { name: "切换为自由多对多 / 云对云模式", exact: true })
+    .click();
   await dialog.getByRole("textbox", { name: "任务名称", exact: true }).fill("新任务");
 
   const trees = dialog.locator(".remote-paths");
@@ -1200,6 +1206,9 @@ test("task editor quick-enables end-to-end crypt storage for remote destination"
     .filter({ hasText: "新建持续同步任务" })
     .first();
   await expect(editorDialog).toBeVisible();
+  await editorDialog
+    .getByRole("button", { name: "切换为自由多对多 / 云对云模式", exact: true })
+    .click();
 
   const manualInput = editorDialog.getByPlaceholder("/存储名称/存储桶/子目录");
   await manualInput.fill("/aliyun/backup");

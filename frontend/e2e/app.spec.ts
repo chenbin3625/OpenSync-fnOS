@@ -45,14 +45,33 @@ test("opens task editor with step navigation", async ({ page }) => {
     page.getByRole("heading", { name: "新建持续同步任务", exact: true }),
   ).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "基础与路径", exact: true }),
+    page.getByRole("heading", { name: "选择同步文件夹", exact: true }),
   ).toBeVisible();
   await expect(page.getByLabel("当前步骤")).toHaveText("步骤 1 / 3");
-  const dialogBox = await page.locator(".editor-modal .semi-modal").boundingBox();
   const viewport = page.viewportSize();
+  const wizardBox = await page.locator(".editor-modal .semi-modal").boundingBox();
   if ((viewport?.width || 0) >= 1000) {
-    expect(dialogBox?.width).toBeGreaterThanOrEqual(560);
-    expect(dialogBox?.width).toBeLessThanOrEqual(620);
+    expect(wizardBox?.width).toBeGreaterThanOrEqual(700);
+    expect(wizardBox?.width).toBeLessThanOrEqual(780);
+  }
+  await expect(
+    page.getByRole("button", { name: "下一步", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "下一步", exact: true }),
+  ).toHaveCSS("height", "36px");
+
+  // Switching to Free Mode preserves existing advanced dual-direction UI & 620px modal width
+  await dialog
+    .getByRole("button", { name: "切换为自由多对多 / 云对云模式", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "基础与路径", exact: true }),
+  ).toBeVisible();
+  const freeBox = await page.locator(".editor-modal .semi-modal").boundingBox();
+  if ((viewport?.width || 0) >= 1000) {
+    expect(freeBox?.width).toBeGreaterThanOrEqual(560);
+    expect(freeBox?.width).toBeLessThanOrEqual(620);
   }
   const directions = dialog.getByRole("radiogroup", { name: "同步方向", exact: true });
   await expect(directions.getByRole("radio")).toHaveCount(2);
@@ -61,12 +80,6 @@ test("opens task editor with step navigation", async ({ page }) => {
   await expect(dialog.locator(".sync-method-banner")).toContainText(
     "不会删除目标端已有文件",
   );
-  await expect(
-    page.getByRole("button", { name: "下一步", exact: true }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "下一步", exact: true }),
-  ).toHaveCSS("height", "36px");
   await page.getByRole("button", { name: "取消", exact: true }).click();
   await expect(page.getByRole("dialog")).not.toBeVisible();
 });

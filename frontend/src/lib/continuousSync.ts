@@ -87,7 +87,11 @@ export function getContinuousSyncMeta(job: {
     directionKey: bidirectional ? "bidirectional" : "oneway",
     directionLabel: bidirectional ? "双向同步" : "单向同步",
     arrow: bidirectional ? "⇄" : "→",
-    syncDelete: bidirectional || method === 1,
+    syncDelete:
+      bidirectional ||
+      method === 1 ||
+      extra.oneWayDeleteMode === "tracked" ||
+      extra.oneWayDeleteMode === "mirror",
     pollIntervalSec: poll,
     auditIntervalMin: audit,
     debounceSec: debounce,

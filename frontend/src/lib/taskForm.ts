@@ -1,4 +1,11 @@
-import type { JobItem, NativeExtraFlags, NativeRemoteItem } from "../types";
+import type {
+  JobItem,
+  NativeExtraFlags,
+  NativeRemoteItem,
+  OneWayDeleteMode,
+  SyncDirectionMode,
+  WeeklyScheduleConfig,
+} from "../types";
 import {
   defaultCronFields,
   defaultExclude,
@@ -18,6 +25,11 @@ import {
   type ExistingJobPathSummary,
 } from "./syncPathPreview";
 import { validateBwLimitExpression } from "./bwLimit";
+import {
+  cloneWeeklySchedule,
+  normalizeWeeklySchedule,
+  validateWeeklySchedule,
+} from "./weeklySchedule";
 
 function parseNotifyIdList(value: unknown): number[] {
   if (Array.isArray(value)) {
@@ -47,7 +59,25 @@ function parseNotifyIdList(value: unknown): number[] {
   return [];
 }
 
-function emptyNativeExtraFlags(): Required<NativeExtraFlags> {
+type NormalizedNativeExtraFlags = Required<
+  Omit<NativeExtraFlags, "weeklySchedule">
+> & {
+  weeklySchedule: WeeklyScheduleConfig | undefined;
+};
+
+function parseSyncDirectionMode(value: unknown): SyncDirectionMode | "" {
+  return value === "bidirectional" || value === "upload" || value === "download"
+    ? value
+    : "";
+}
+
+function parseOneWayDeleteMode(value: unknown): OneWayDeleteMode | "" {
+  return value === "none" || value === "tracked" || value === "mirror"
+    ? value
+    : "";
+}
+
+function emptyNativeExtraFlags(): NormalizedNativeExtraFlags {
   return {
     noUpdateModtime: false,
     inplace: false,
@@ -83,10 +113,13 @@ function emptyNativeExtraFlags(): Required<NativeExtraFlags> {
     directStream: false,
     bisyncMaxDelete: 0,
     bisyncForce: false,
+    syncDirectionMode: "",
+    oneWayDeleteMode: "",
+    weeklySchedule: undefined,
   };
 }
 
-function parseNativeExtraFlags(value: unknown): Required<NativeExtraFlags> {
+function parseNativeExtraFlags(value: unknown): NormalizedNativeExtraFlags {
   const empty = emptyNativeExtraFlags();
   if (!value) return empty;
   let obj: Record<string, unknown> | null = null;
@@ -146,6 +179,9 @@ function parseNativeExtraFlags(value: unknown): Required<NativeExtraFlags> {
     directStream: Boolean(obj.directStream),
     bisyncMaxDelete: Math.min(100, num("bisyncMaxDelete")),
     bisyncForce: Boolean(obj.bisyncForce),
+    syncDirectionMode: parseSyncDirectionMode(obj.syncDirectionMode),
+    oneWayDeleteMode: parseOneWayDeleteMode(obj.oneWayDeleteMode),
+    weeklySchedule: normalizeWeeklySchedule(obj.weeklySchedule),
   };
 }
 
@@ -197,6 +233,13 @@ function serializeNativeExtraFlags(flags: NativeExtraFlags | undefined): string 
   if (Number(flags.bisyncMaxDelete || 0) > 0)
     out.bisyncMaxDelete = Math.min(100, Math.trunc(Number(flags.bisyncMaxDelete)));
   if (flags.bisyncForce) out.bisyncForce = true;
+  const dirMode = parseSyncDirectionMode(flags.syncDirectionMode);
+  if (dirMode) out.syncDirectionMode = dirMode;
+  const delMode = parseOneWayDeleteMode(flags.oneWayDeleteMode);
+  if (delMode && dirMode !== "bidirectional") out.oneWayDeleteMode = delMode;
+  if (flags.weeklySchedule?.enabled) {
+    out.weeklySchedule = cloneWeeklySchedule(flags.weeklySchedule);
+  }
   return Object.keys(out).length > 0 ? JSON.stringify(out) : "";
 }
 
@@ -644,6 +687,7 @@ export interface JobValidationOptions {
   existingJobs?: readonly ExistingJobPathSummary[];
   sizeEnabled?: { min?: boolean; max?: boolean };
   remotes?: readonly NativeRemoteItem[];
+  mode?: "wizard" | "free";
 }
 
 const containerRequiredBackends = new Set([
@@ -1031,6 +1075,7 @@ export type JobFieldErrorKey =
   | "trashDir"
   | "interval"
   | "window"
+  | "weeklySchedule"
   | "notifyIds"
   | "bwLimit"
   | CronFieldKey
@@ -1086,7 +1131,13 @@ export function validateJobFormFields(
   const fields: Partial<Record<JobFieldErrorKey, string>> = {};
 
   // Step 0: 基础与路径（任务名称、存储引擎、同步方式、源路径、目标路径与跨任务冲突）
+  const isWizardMode = options.mode === "wizard";
   const step0Errors: string[] = [];
+  const step1Errors: string[] = [];
+  const step2Errors: string[] = [];
+  const planStepErrors = isWizardMode ? step2Errors : step1Errors;
+  const trashStepErrors = isWizardMode ? step1Errors : step0Errors;
+
   if (!form.remark.trim()) {
     fields.remark = "请输入任务名称";
     step0Errors.push(fields.remark);
@@ -1156,15 +1207,14 @@ export function validateJobFormFields(
     const trashErr = validateTrashDir(form.trashDir);
     if (trashErr) {
       fields.trashDir = trashErr;
-      step0Errors.push(fields.trashDir);
+      trashStepErrors.push(fields.trashDir);
     }
   }
 
-  // Step 1: 同步设置（持续同步轮询 / 完整核对 / 变动静默 / 时间窗口 / 通知绑定）
-  const step1Errors: string[] = [];
+  // Sync cadence / weekly schedule / notify / bandwidth checks
   if (form.method === 2 && form.isCron === 3) {
     fields.interval = "当前仅支持持续同步模式，请使用单向同步或双向同步";
-    step1Errors.push(fields.interval);
+    planStepErrors.push(fields.interval);
   }
   const poll = Number(form.extraFlags?.syncPollIntervalSec ?? 0);
   const audit = Number(form.extraFlags?.syncAuditIntervalMin ?? 0);
@@ -1174,13 +1224,13 @@ export function validateJobFormFields(
     (audit !== 0 && (!Number.isInteger(audit) || audit < 1 || audit > 10080))
   ) {
     fields.interval = "远端检测间隔需为 10–86400 秒，完整核对间隔需为 1–10080 分钟";
-    step1Errors.push(fields.interval);
+    planStepErrors.push(fields.interval);
   } else if (
     debounce !== 0 &&
     (!Number.isInteger(debounce) || debounce < 2 || debounce > 3600)
   ) {
     fields.interval = "变动合并等待需为 2–3600 秒的整数";
-    step1Errors.push(fields.interval);
+    planStepErrors.push(fields.interval);
   }
   if (form.windowEnable) {
     const hhmm = /^([01]\d|2[0-3]):([0-5]\d)$/;
@@ -1188,24 +1238,28 @@ export function validateJobFormFields(
     const e = form.windowEnd.trim();
     if (!hhmm.test(s) || !hhmm.test(e)) {
       fields.window = "时间窗口格式必须为 HH:MM（如 23:00）";
-      step1Errors.push(fields.window);
+      planStepErrors.push(fields.window);
     } else if (s === e) {
       fields.window = "时间窗口的开始时间与结束时间不能相同";
-      step1Errors.push(fields.window);
+      planStepErrors.push(fields.window);
     }
+  }
+  const weeklyErr = validateWeeklySchedule(form.extraFlags?.weeklySchedule);
+  if (weeklyErr) {
+    fields.weeklySchedule = weeklyErr;
+    planStepErrors.push(weeklyErr);
   }
   if (form.notifyMode === 1 && form.notifyIds.length === 0) {
     fields.notifyIds = "已选择指定通知渠道，请至少选择一个渠道";
-    step1Errors.push(fields.notifyIds);
+    planStepErrors.push(fields.notifyIds);
   }
   const bwLimitError = validateBwLimitExpression(form.bwLimit);
   if (bwLimitError) {
     fields.bwLimit = bwLimitError;
-    step1Errors.push(bwLimitError);
+    planStepErrors.push(bwLimitError);
   }
 
   // Step 2: 过滤规则（文件大小上下限）
-  const step2Errors: string[] = [];
   const minValue = parseFileSizeInput(form.minFileSize);
   const maxValue = parseFileSizeInput(form.maxFileSize);
   const minRawEmpty =

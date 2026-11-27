@@ -138,6 +138,9 @@ test("creates a WebDAV storage and continuous task, then edits without changing 
     await page.goto("/app/opensync/sync");
     await page.getByRole("button", { name: "新建同步任务", exact: true }).click();
     const dialog = page.getByRole("dialog");
+    await dialog
+      .getByRole("button", { name: "切换为自由多对多 / 云对云模式", exact: true })
+      .click();
     const manualPath = dialog.getByPlaceholder("/存储名称/存储桶/子目录");
     await manualPath.fill(`/${name}/Photos`);
     await dialog.getByRole("button", { name: "添加到源路径", exact: true }).click();
