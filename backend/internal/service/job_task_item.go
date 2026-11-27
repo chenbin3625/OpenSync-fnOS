@@ -110,7 +110,7 @@ func NewCopyJobTaskItem(taskID int64, srcPath, dstPath, fileName string, fileSiz
 		Type:        copyType,
 		AlistTaskID: alistTaskID,
 		Status:      status,
-		ErrMsg:      errMsg,
+		ErrMsg:      redactSensitiveErrorPtr(errMsg),
 		CreateTime:  createTime,
 	}
 }
@@ -125,7 +125,7 @@ func NewDeleteJobTaskItem(taskID int64, dstPath, fileName string, fileSize inter
 		FileSize:   fileSize,
 		Type:       taskItemTypeDelete,
 		Status:     status,
-		ErrMsg:     errMsg,
+		ErrMsg:     redactSensitiveErrorPtr(errMsg),
 		CreateTime: createTime,
 	}
 }

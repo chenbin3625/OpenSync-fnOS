@@ -6,6 +6,74 @@ import type {
 import { stripNativeLocalRootID } from "./syncPathPreview";
 import type { JobForm } from "./taskForm";
 
+export interface WizardFolderChildNode {
+  name: string;
+  fullPath: string;
+}
+
+/**
+ * Normalizes `api.paths` directory listing items into child folder nodes without
+ * duplicating parent prefixes. The backend returns full virtual paths in
+ * `item.path` (e.g. `/本地/sync~92618e31210e/rime`, `/jianguoyun/sync`) and
+ * display names in `item.name`; legacy mocks may return relative names only.
+ */
+export function normalizeWizardFolderChildren(
+  parentPath: string,
+  entries?: readonly { name?: string; path?: string }[] | null,
+): WizardFolderChildNode[] {
+  const cleanParent =
+    parentPath === "/" ? "/" : `/${parentPath.replace(/^\/+|\/+$/g, "")}`;
+  const seen = new Set<string>();
+  const out: WizardFolderChildNode[] = [];
+  for (const item of entries || []) {
+    const rawPath = String(item?.path ?? "").trim();
+    const rawName = String(item?.name ?? "").trim();
+    let fullPath = "";
+    let name = "";
+    if (rawPath.startsWith("/")) {
+      const trimmedPath = rawPath.replace(/^\/+|\/+$/g, "");
+      if (!trimmedPath) continue;
+      const segs = trimmedPath.split("/").filter(Boolean);
+      const lastSeg = segs[segs.length - 1] || "";
+      if (!lastSeg || lastSeg === "." || lastSeg === "..") continue;
+      fullPath = `/${trimmedPath}`;
+      name =
+        rawName && rawName !== "." && rawName !== ".." ? rawName : lastSeg;
+    } else {
+      const seg = (rawName || rawPath).replace(/^\/+|\/+$/g, "");
+      if (!seg || seg === "." || seg === "..") continue;
+      fullPath = cleanParent === "/" ? `/${seg}` : `${cleanParent}/${seg}`;
+      name = seg;
+    }
+    if (seen.has(fullPath)) continue;
+    seen.add(fullPath);
+    out.push({ name, fullPath });
+  }
+  return out;
+}
+
+/**
+ * Extracts fallback `NativeLocalRoot` items from `/本地` child listings when
+ * `localRoots` metadata was not supplied separately.
+ */
+export function extractFallbackLocalRoots(
+  entries?: readonly WizardFolderChildNode[] | null,
+): NativeLocalRoot[] {
+  const out: NativeLocalRoot[] = [];
+  const seen = new Set<string>();
+  for (const entry of entries || []) {
+    const segs = entry.fullPath.replace(/^\/+/, "").split("/").filter(Boolean);
+    const id = segs[segs.length - 1] || entry.name;
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push({
+      id,
+      path: entry.name.startsWith("/") ? entry.name : "",
+    });
+  }
+  return out;
+}
+
 export interface LocalRootDisplayItem {
   id: string;
   virtualPath: string;

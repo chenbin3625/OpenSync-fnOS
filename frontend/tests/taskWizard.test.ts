@@ -8,6 +8,7 @@ import {
 import {
   applyWizardEndpoints,
   canSwitchBackToWizard,
+  extractFallbackLocalRoots,
   extractWizardPaths,
   formatLocalRootDisplayItems,
   formatNasDisplayPath,
@@ -15,6 +16,7 @@ import {
   inferWizardDirection,
   isNativeLocalPath,
   isWizardCompatibleExistingJob,
+  normalizeWizardFolderChildren,
 } from "../src/lib/taskWizard";
 import { applyWeeklyScheduleTemplate } from "../src/lib/weeklySchedule";
 import type { JobItem } from "../src/types";
@@ -261,5 +263,56 @@ describe("taskWizard helpers", () => {
     const trashWizard = validateJobFormFields(badTrash, { mode: "wizard" });
     expect(trashWizard.stepErrors[0]).toBe("");
     expect(trashWizard.stepErrors[1]).toContain("相对路径");
+  });
+
+  it("normalizes absolute backend folder paths without duplicating parent prefixes (issue #18)", () => {
+    // Local NAS subfolder: backend returns { name: "rime", path: "/本地/sync~92618e31210e/rime" }
+    expect(
+      normalizeWizardFolderChildren("/本地/sync~92618e31210e", [
+        { name: "rime", path: "/本地/sync~92618e31210e/rime" },
+      ]),
+    ).toEqual([
+      { name: "rime", fullPath: "/本地/sync~92618e31210e/rime" },
+    ]);
+
+    // Deeper nested local subfolder
+    expect(
+      normalizeWizardFolderChildren("/本地/sync~92618e31210e/rime", [
+        { name: "build", path: "/本地/sync~92618e31210e/rime/build" },
+      ]),
+    ).toEqual([
+      { name: "build", fullPath: "/本地/sync~92618e31210e/rime/build" },
+    ]);
+
+    // Cloud remote subfolder: backend returns { name: "sync", path: "/jianguoyun/sync" }
+    expect(
+      normalizeWizardFolderChildren("/jianguoyun", [
+        { name: "sync", path: "/jianguoyun/sync" },
+      ]),
+    ).toEqual([{ name: "sync", fullPath: "/jianguoyun/sync" }]);
+
+    // Fallback when backend or mock only provides absolute path without name
+    expect(
+      normalizeWizardFolderChildren("/jianguoyun/sync", [
+        { path: "/jianguoyun/sync/notes" },
+      ]),
+    ).toEqual([{ name: "notes", fullPath: "/jianguoyun/sync/notes" }]);
+
+    // Fallback when entry only has relative name
+    expect(
+      normalizeWizardFolderChildren("/jianguoyun", [
+        { name: "docs" },
+        { name: "." },
+        { name: ".." },
+      ]),
+    ).toEqual([{ name: "docs", fullPath: "/jianguoyun/docs" }]);
+
+    // Fallback `/本地` root listing extracts root ID and host path
+    const localEntries = normalizeWizardFolderChildren("/本地", [
+      { name: "/vol1/1000/主文件夹/sync", path: "/本地/sync~92618e31210e" },
+    ]);
+    expect(extractFallbackLocalRoots(localEntries)).toEqual([
+      { id: "sync~92618e31210e", path: "/vol1/1000/主文件夹/sync" },
+    ]);
   });
 });

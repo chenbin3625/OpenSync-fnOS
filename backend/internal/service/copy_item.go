@@ -95,8 +95,19 @@ func (ci *CopyItem) toJobTaskItemLocked(taskID int64) JobTaskItem {
 		ci.AlistTaskID, ci.Status, ci.ErrMsg, ci.IsPath, ci.CopyType, ci.CreateTime)
 }
 
-var sensitiveErrorQueryPattern = regexp.MustCompile(`(?i)([?&](?:tempauth|sig|token|access_token|authorization)=)[^&\s<>"']+`)
+var sensitiveErrorQueryPattern = regexp.MustCompile(`(?i)([?&](?:tempauth|sig|token|access_token|authorization|x-amz-signature|x-amz-security-token|x-amz-credential)=)[^&\s<>"']+`)
 
 func redactSensitiveError(message string) string {
 	return sensitiveErrorQueryPattern.ReplaceAllString(message, "$1****")
+}
+
+func redactSensitiveErrorPtr(errMsg *string) *string {
+	if errMsg == nil {
+		return nil
+	}
+	redacted := redactSensitiveError(*errMsg)
+	if redacted == *errMsg {
+		return errMsg
+	}
+	return &redacted
 }

@@ -26,16 +26,16 @@ import {
   validateManualSyncPath,
 } from "../lib/taskForm";
 import {
+  extractFallbackLocalRoots,
   extractRemoteRootAndSubPath,
   formatLocalRootDisplayItems,
   formatNasDisplayPath,
+  normalizeWizardFolderChildren,
+  type WizardFolderChildNode,
 } from "../lib/taskWizard";
 import type { NativeLocalRoot, NativeRemoteItem } from "../types";
 
-interface FolderChildNode {
-  name: string;
-  fullPath: string;
-}
+type FolderChildNode = WizardFolderChildNode;
 
 const REMOTE_TYPE_LABELS: Record<string, string> = {
   s3: "S3 对象存储",
@@ -102,18 +102,7 @@ function useLazyFolderMap(
         const entries = dirCache
           ? await dirCache.fetchPaths(engineId, cleanParent, { force })
           : await api.paths(engineId, cleanParent);
-        const list = (entries || [])
-          .map((item) => {
-            const rawName = String(item.path ?? item.name ?? "")
-              .replace(/^\/+|\/+$/g, "");
-            if (!rawName || rawName === "." || rawName === "..") return null;
-            const fullPath =
-              cleanParent === "/"
-                ? `/${rawName}`
-                : `${cleanParent}/${rawName}`;
-            return { name: rawName, fullPath };
-          })
-          .filter((n): n is FolderChildNode => Boolean(n));
+        const list = normalizeWizardFolderChildren(cleanParent, entries);
         setChildrenMap((prev) => ({ ...prev, [cleanParent]: list }));
         return list;
       } catch (err) {
@@ -271,18 +260,18 @@ export function NasLocalFolderPicker({
   const { childrenMap, loadingMap, errorMap, loadFolderChildren } =
     useLazyFolderMap(engineId, dirCache, epoch);
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(() => new Set());
-  const [fallbackRootIds, setFallbackRootIds] = useState<string[]>([]);
+  const [fallbackRoots, setFallbackRoots] = useState<NativeLocalRoot[]>([]);
 
   useEffect(() => {
     if (localRoots && localRoots.length > 0) {
-      setFallbackRootIds([]);
+      setFallbackRoots([]);
       return;
     }
     if (!engineId) return;
     let cancelled = false;
     void loadFolderChildren("/本地").then((entries) => {
       if (!cancelled) {
-        setFallbackRootIds(entries.map((e) => e.name));
+        setFallbackRoots(extractFallbackLocalRoots(entries));
       }
     });
     return () => {
@@ -294,8 +283,8 @@ export function NasLocalFolderPicker({
     if (localRoots && localRoots.length > 0) {
       return [...localRoots];
     }
-    return fallbackRootIds.map((id) => ({ id, path: "" }));
-  }, [localRoots, fallbackRootIds]);
+    return fallbackRoots;
+  }, [localRoots, fallbackRoots]);
 
   const displayRoots = useMemo(
     () => formatLocalRootDisplayItems(effectiveRoots),

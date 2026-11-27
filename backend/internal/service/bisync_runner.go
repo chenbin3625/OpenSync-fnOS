@@ -694,7 +694,7 @@ func (jt *JobTask) runNativeBisync() error {
 				renameOK = false
 				s := fmt.Sprintf("创建冲突副本失败：%v", err)
 				jt.CopyHook(path.Dir(fromVirt), path.Dir(toVirt), path.Base(cf.RelPath), max(aSize, bSize), "", taskStatusFailed, &s, taskItemFile, taskItemTypeMove, time.Now().Unix())
-				_ = mapper.RecordBisyncEntryError(jobID, cf.RelPath, false, s, time.Now().Unix())
+				_ = mapper.RecordBisyncEntryError(jobID, cf.RelPath, false, redactSensitiveError(s), time.Now().Unix())
 				runErrs = append(runErrs, err)
 			}
 		}
@@ -800,7 +800,7 @@ func (jt *JobTask) runNativeBisync() error {
 		if err := cfg.Mkdir(ctx, target, sessOpts); err != nil {
 			s := err.Error()
 			jt.CopyHook(bisyncVirtualPath(rootB, path.Dir(rel)), bisyncVirtualPath(rootA, path.Dir(rel)), path.Base(rel), nil, "", taskStatusFailed, &s, taskItemPath, taskItemTypeCopy, time.Now().Unix())
-			_ = mapper.RecordBisyncEntryError(jobID, rel, true, s, time.Now().Unix())
+			_ = mapper.RecordBisyncEntryError(jobID, rel, true, redactSensitiveError(s), time.Now().Unix())
 			runErrs = append(runErrs, err)
 			continue
 		}
@@ -820,7 +820,7 @@ func (jt *JobTask) runNativeBisync() error {
 		if err := cfg.Mkdir(ctx, target, sessOpts); err != nil {
 			s := err.Error()
 			jt.CopyHook(bisyncVirtualPath(rootA, path.Dir(rel)), bisyncVirtualPath(rootB, path.Dir(rel)), path.Base(rel), nil, "", taskStatusFailed, &s, taskItemPath, taskItemTypeCopy, time.Now().Unix())
-			_ = mapper.RecordBisyncEntryError(jobID, rel, true, s, time.Now().Unix())
+			_ = mapper.RecordBisyncEntryError(jobID, rel, true, redactSensitiveError(s), time.Now().Unix())
 			runErrs = append(runErrs, err)
 			continue
 		}
@@ -867,7 +867,7 @@ func (jt *JobTask) runNativeBisync() error {
 			if err := cfg.MovePath(ctx, fromVirt, toVirt, false, sessOpts); err != nil {
 				s := err.Error()
 				jt.CopyHook(path.Dir(fromVirt), path.Dir(toVirt), path.Base(mv.From)+" → "+path.Base(mv.To), mv.NodeA.Size, "", taskStatusFailed, &s, taskItemFile, taskItemTypeMove, time.Now().Unix())
-				_ = mapper.RecordBisyncEntryError(jobID, mv.To, false, s, time.Now().Unix())
+				_ = mapper.RecordBisyncEntryError(jobID, mv.To, false, redactSensitiveError(s), time.Now().Unix())
 				runErrs = append(runErrs, err)
 				continue
 			}
@@ -1077,7 +1077,7 @@ func (jt *JobTask) runNativeBisync() error {
 		}
 		flush()
 		for rel, msgText := range failedRels {
-			_ = mapper.RecordBisyncEntryError(jobID, rel, false, msgText, time.Now().Unix())
+			_ = mapper.RecordBisyncEntryError(jobID, rel, false, redactSensitiveError(msgText), time.Now().Unix())
 		}
 		if copyErr != nil {
 			runErrs = append(runErrs, copyErr)
@@ -1161,7 +1161,7 @@ func (jt *JobTask) runNativeBisync() error {
 			if delErr != nil {
 				s := delErr.Error()
 				jt.DelHook(dir, name, d.Size, taskStatusFailed, &s, boolToTaskItemObject(d.IsDir), time.Now().Unix())
-				_ = mapper.RecordBisyncEntryError(jobID, d.RelPath, d.IsDir, s, time.Now().Unix())
+				_ = mapper.RecordBisyncEntryError(jobID, d.RelPath, d.IsDir, redactSensitiveError(s), time.Now().Unix())
 				runErrs = append(runErrs, delErr)
 				continue
 			}
