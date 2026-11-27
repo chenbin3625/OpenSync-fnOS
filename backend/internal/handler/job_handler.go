@@ -8,6 +8,7 @@ import (
 	"opensync/internal/msg"
 	"opensync/internal/service"
 	"opensync/pkg/util"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -435,6 +436,99 @@ func DeleteTasksBatch(c *gin.Context) {
 		}
 		return gin.H{"deleted": deleted}, nil
 	})
+}
+
+// GetRecentTaskItems handles GET /svr/job/items/recent
+func GetRecentTaskItems(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	req := make(map[string]interface{})
+
+	if pageNumStr := strings.TrimSpace(c.Query("pageNum")); pageNumStr != "" {
+		pn, err := parseRequiredID(pageNumStr)
+		if err != nil {
+			respondError(c, msg.T(msg.LostPart))
+			return
+		}
+		req["pageNum"] = pn
+	}
+	if pageSizeStr := strings.TrimSpace(c.Query("pageSize")); pageSizeStr != "" {
+		ps, err := parseRequiredID(pageSizeStr)
+		if err != nil {
+			respondError(c, msg.T(msg.LostPart))
+			return
+		}
+		req["pageSize"] = ps
+	}
+	if jobIDStr := strings.TrimSpace(c.Query("jobId")); jobIDStr != "" {
+		jobID, err := parseRequiredID(jobIDStr)
+		if err != nil {
+			respondError(c, msg.T(msg.LostPart))
+			return
+		}
+		req["jobId"] = jobID
+	}
+	if rawJobIDs := c.QueryArray("jobIds"); len(rawJobIDs) > 0 {
+		jobIDs := make([]int64, 0, len(rawJobIDs))
+		for _, raw := range rawJobIDs {
+			for _, part := range strings.Split(raw, ",") {
+				part = strings.TrimSpace(part)
+				if part == "" {
+					continue
+				}
+				id, err := parseRequiredID(part)
+				if err != nil {
+					respondError(c, msg.T(msg.LostPart))
+					return
+				}
+				jobIDs = append(jobIDs, id)
+			}
+		}
+		if len(jobIDs) > 0 {
+			req["jobIds"] = jobIDs
+		}
+	}
+	if storage := strings.TrimSpace(c.Query("storage")); storage != "" {
+		req["storage"] = storage
+	}
+	if statusStr := strings.TrimSpace(c.Query("status")); statusStr != "" {
+		statusVal, err := strconv.Atoi(statusStr)
+		if err != nil || (statusVal < -1 || statusVal > 20) {
+			respondError(c, msg.T(msg.LostPart))
+			return
+		}
+		req["status"] = statusVal
+	}
+	if typeStr := strings.TrimSpace(c.Query("type")); typeStr != "" {
+		typeVal, err := strconv.Atoi(typeStr)
+		if err != nil || typeVal < 0 || typeVal > 10 {
+			respondError(c, msg.T(msg.LostPart))
+			return
+		}
+		req["type"] = typeVal
+	}
+	if isPathStr := strings.TrimSpace(c.Query("isPath")); isPathStr != "" {
+		if isPathStr != "0" && isPathStr != "1" {
+			respondError(c, msg.T(msg.LostPart))
+			return
+		}
+		req["isPath"] = isPathStr
+	}
+	if hasErrStr := strings.TrimSpace(c.Query("hasError")); hasErrStr != "" {
+		switch strings.ToLower(hasErrStr) {
+		case "1", "true":
+			req["hasError"] = 1
+		case "0", "false":
+			req["hasError"] = 0
+		default:
+			respondError(c, msg.T(msg.LostPart))
+			return
+		}
+	}
+	if kw := strings.TrimSpace(c.Query("keyword")); kw != "" {
+		req["keyword"] = kw
+	}
+
+	handleService(c, func() (interface{}, error) { return service.GetRecentTaskItemList(req) })
 }
 
 // ExportTaskItems handles GET /svr/job/items/export

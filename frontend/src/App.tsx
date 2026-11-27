@@ -33,13 +33,14 @@ import {
 } from "@douyinfe/semi-icons";
 import { api, sessionExpiredEvent } from "./api/client";
 import { errorToast, InlineNotice, LoadingPanel } from "./components/common";
+import { GlobalSyncBar } from "./components/GlobalSyncBar";
 import { VersionContext, VersionLink } from "./components/VersionLink";
 import {
   notifyUpdateAvailable,
   updateNoticeKey,
 } from "./components/updateNotice";
 import { applyTheme, connectHost } from "./lib/host";
-import { useResource } from "./lib/hooks";
+import { useMediaQuery, useResource } from "./lib/hooks";
 import { createGuardedRefresh } from "./lib/sessionGuard";
 import { buildTaskSearchParams } from "./lib/taskForm";
 import {
@@ -109,6 +110,7 @@ function jobStatusDotClass(job: JobItem): string {
 
 function Shell({ children, version }: { children: ReactNode; version: string }) {
   const { pathname, search } = useLocation();
+  const isMobile = useMediaQuery("(max-width: 640px)");
   const [theme, setTheme] = useState<"light" | "dark">("light");
   const [taskMenuOpen, setTaskMenuOpen] = useState(false);
   const [taskMenuTouched, setTaskMenuTouched] = useState(false);
@@ -346,6 +348,7 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
               </NavLink>
             ))}
           </nav>
+          {!isMobile && <GlobalSyncBar jobs={taskItems} variant="sidebar" />}
           <div className="sidebar-settings">
             <NavLink
               to="/settings"
@@ -362,6 +365,7 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
         <main className="app-workspace">
           <Suspense fallback={<LoadingPanel />}>{children}</Suspense>
         </main>
+        {isMobile && <GlobalSyncBar jobs={taskItems} variant="mobile" />}
         <nav className="mobile-navigation" aria-label="主导航">
           {[sections[1], sections[0], ...sections.slice(2)].map((s) => (
             <NavLink

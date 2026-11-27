@@ -1,4 +1,5 @@
 import type {
+  AlistItem,
   JobItem,
   NativeExtraFlags,
   NativeRemoteItem,
@@ -1909,4 +1910,54 @@ export function summarizeJobFilters(
   }
 
   return items;
+}
+
+/** Extracts top-level storage mount names referenced by a job's source and destination paths. */
+export function getJobMountNames(
+  job: Pick<JobItem, "srcPath" | "dstPath">,
+): string[] {
+  const seen = new Set<string>();
+  const mounts: string[] = [];
+  for (const raw of [
+    ...parseJobPathList(job.srcPath),
+    ...parseJobPathList(job.dstPath),
+  ]) {
+    const first = raw.trim().replace(/^\/+/, "").split("/")[0]?.trim();
+    if (!first) continue;
+    const key = first.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    mounts.push(first);
+  }
+  return mounts;
+}
+
+/** Checks whether any path on a job traverses an encrypted (crypt) remote. */
+export function jobHasCryptRemote(
+  job: Pick<JobItem, "alistId" | "srcPath" | "dstPath">,
+  engines?: readonly AlistItem[] | null,
+  remotes?: readonly NativeRemoteItem[] | null,
+): boolean {
+  const detailsByLower = new Map<string, { type?: string; hasCrypt?: string }>();
+  const typesByLower = new Map<string, string>();
+  const eng = engines?.find((e) => e.id === job.alistId) ?? engines?.[0];
+  if (eng) {
+    for (const [k, v] of Object.entries(eng.remoteDetails || {})) {
+      detailsByLower.set(k.toLowerCase(), v);
+    }
+    for (const [k, v] of Object.entries(eng.remotes || {})) {
+      typesByLower.set(k.toLowerCase(), v);
+    }
+  }
+  for (const remote of remotes || []) {
+    const key = remote.name.toLowerCase();
+    if (!typesByLower.has(key)) typesByLower.set(key, remote.type);
+    if (remote.type === "crypt") typesByLower.set(key, "crypt");
+  }
+  return getJobMountNames(job).some((seg) => {
+    const key = seg.toLowerCase();
+    const detail = detailsByLower.get(key);
+    if (detail?.hasCrypt === "true" || detail?.type === "crypt") return true;
+    return typesByLower.get(key) === "crypt";
+  });
 }

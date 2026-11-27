@@ -308,6 +308,8 @@ export interface SyncStatus {
   failures: number;
   retryAt?: number;
   direction?: string;
+  watchDegraded?: boolean;
+  watchDegradedReason?: string;
   pollIntervalSec?: number;
   auditIntervalMin?: number;
   debounceSec?: number;
@@ -540,6 +542,32 @@ export interface TaskItemPageData extends PageData<TaskItem> {
   errorGroups?: TaskErrorGroup[];
 }
 
+export interface RecentTaskItem extends TaskItem {
+  jobId: number;
+  jobName: string;
+  jobMethod: number;
+}
+
+export interface RecentTaskItemStats {
+  allNum: number;
+  waitNum: number;
+  runningNum: number;
+  successNum: number;
+  failNum: number;
+  otherNum: number;
+  deleteNum: number;
+  errorNum: number;
+  sumSize: number;
+}
+
+export interface RecentTaskItemsPageData {
+  dataList: RecentTaskItem[];
+  count: number;
+  pageNum: number;
+  pageSize: number;
+  stats: RecentTaskItemStats;
+}
+
 export type TaskNumKey = "wait" | "running" | "success" | "fail" | "other";
 
 export interface ScanProgress {
@@ -706,11 +734,24 @@ export interface DashboardOverview {
   storageQuotas?: DashboardQuotaItem[];
 }
 
+export interface BatchJobSkippedItem {
+  jobId: number;
+  jobName: string;
+  reason: string;
+}
+
 export interface BatchJobActionResult {
   action: string;
   succeeded: number;
   failed: number;
-  results: Array<{ jobId: number; ok: boolean; error?: string }>;
+  skipped?: number;
+  skippedJobs?: BatchJobSkippedItem[];
+  results: Array<{
+    jobId: number;
+    ok: boolean;
+    skipped?: boolean;
+    error?: string;
+  }>;
 }
 
 export interface DryRunItem {

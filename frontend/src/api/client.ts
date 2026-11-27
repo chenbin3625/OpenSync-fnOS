@@ -27,6 +27,7 @@ import type {
   NativeTrashItem,
   NotifyItem,
   PageData,
+  RecentTaskItemsPageData,
   SystemBackupPayload,
   SystemImportSummary,
   SystemSettings,
@@ -532,7 +533,15 @@ export const api = {
       return result;
     }),
   batchJobAction: (
-    action: "run" | "stop" | "enable" | "disable" | "run_all" | "stop_all",
+    action:
+      | "run"
+      | "stop"
+      | "enable"
+      | "disable"
+      | "run_all"
+      | "stop_all"
+      | "enable_all"
+      | "disable_all",
     ids?: number[],
   ) =>
     request<BatchJobActionResult>("/job/batch", {
@@ -570,6 +579,36 @@ export const api = {
   ) =>
     request<TaskItemPageData>("/job", {
       params: { taskId, ...params },
+      signal,
+    }),
+  recentTaskItems: (
+    params: {
+      pageNum?: number;
+      pageSize?: number;
+      jobId?: number | string;
+      jobIds?: Array<number | string> | string;
+      storage?: string;
+      status?: number | string;
+      type?: number | string;
+      isPath?: number | string;
+      hasError?: boolean | number | string;
+      keyword?: string;
+    } = {},
+    signal?: AbortSignal,
+  ) =>
+    request<RecentTaskItemsPageData>("/job/items/recent", {
+      params: {
+        ...params,
+        jobIds: Array.isArray(params.jobIds)
+          ? params.jobIds.join(",")
+          : params.jobIds,
+        hasError:
+          params.hasError === true
+            ? 1
+            : params.hasError === false
+              ? 0
+              : params.hasError,
+      },
       signal,
     }),
   exportTaskItemsUrl: (

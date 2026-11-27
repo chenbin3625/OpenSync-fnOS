@@ -44,6 +44,8 @@ func TestNewFeatureHTTPHandlers(t *testing.T) {
 	router.GET("/svr/alist/health", GetAlistHealth)
 	router.POST("/svr/job/filter/test", TestJobFilter)
 	router.POST("/svr/job/tasks/delete", DeleteTasksBatch)
+	router.POST("/svr/job/batch", BatchJobAction)
+	router.GET("/svr/job/items/recent", GetRecentTaskItems)
 	router.GET("/svr/job/items/export", ExportTaskItems)
 
 	// 1. Dashboard endpoint
@@ -111,6 +113,18 @@ func TestNewFeatureHTTPHandlers(t *testing.T) {
 	})
 
 	w = httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/svr/job/items/recent?pageNum=1&pageSize=10&hasError=0", nil))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"jobName":"H"`) || !strings.Contains(w.Body.String(), `"ok.txt"`) {
+		t.Fatalf("GET /svr/job/items/recent status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/svr/job/items/recent?jobId=bad", nil))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("GET /svr/job/items/recent?jobId=bad status=%d, want 400", w.Code)
+	}
+
+	w = httptest.NewRecorder()
 	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/svr/job/items/export?taskId=1", nil))
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "ok.txt") {
 		t.Fatalf("GET /svr/job/items/export status=%d body=%s", w.Code, w.Body.String())
@@ -122,6 +136,22 @@ func TestNewFeatureHTTPHandlers(t *testing.T) {
 	router.ServeHTTP(w, delReq)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"deleted":1`) {
 		t.Fatalf("POST /svr/job/tasks/delete status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	// 5b. Batch enable_all / disable_all endpoints
+	batchReq := httptest.NewRequest(http.MethodPost, "/svr/job/batch", strings.NewReader(`{"action":"enable_all"}`))
+	batchReq.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, batchReq)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"action":"enable_all"`) {
+		t.Fatalf("POST /svr/job/batch enable_all status=%d body=%s", w.Code, w.Body.String())
+	}
+	batchReq = httptest.NewRequest(http.MethodPost, "/svr/job/batch", strings.NewReader(`{"action":"disable_all"}`))
+	batchReq.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, batchReq)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"action":"disable_all"`) {
+		t.Fatalf("POST /svr/job/batch disable_all status=%d body=%s", w.Code, w.Body.String())
 	}
 
 	// 6. Health endpoint

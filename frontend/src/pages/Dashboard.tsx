@@ -1,10 +1,12 @@
 import {
+  lazy,
+  Suspense,
   useEffect,
   useId,
   useMemo,
   useState,
 } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Progress from "@douyinfe/semi-ui/lib/es/progress";
 import Tag from "@douyinfe/semi-ui/lib/es/tag";
@@ -24,6 +26,7 @@ import { api } from "../api/client";
 import {
   Header,
   InlineNotice,
+  LoadingPanel,
   LoadState,
   SectionCard,
 } from "../components/common";
@@ -41,10 +44,13 @@ import {
   splitSpeedParts,
 } from "../lib/dashboardMetrics";
 import { isDeepEqual, useResource } from "../lib/hooks";
+import { formatDisplayPath } from "../lib/syncPathPreview";
 import { isLegacyOpenListJob } from "../lib/taskForm";
 import {
   formatDuration,
   formatSize,
+  taskItemStatusNames,
+  taskTypeNames,
 } from "./Home/homeUtils";
 import { calcTaskDisplayPercent } from "./Home/taskRows";
 import type {
@@ -52,12 +58,21 @@ import type {
   DashboardSpeedSample,
 } from "../types";
 import {
+  formatRelativeSyncTime,
   isSyncStatusError,
   resolveEffectiveSyncStatus,
   syncStatusTone,
 } from "../components/SyncStatus";
 
+const JobEditor = lazy(() => import("./TaskEditor"));
+const StorageEditor = lazy(() =>
+  import("../components/NativeStorageEditor").then(({ NativeStorageEditor }) => ({
+    default: NativeStorageEditor,
+  })),
+);
+
 type InsightTab = "trend" | "quota";
+type RecentFeedFilter = "all" | "success" | "failed" | "delete";
 
 const FAILED_STATUSES = [3, 5, 6, 7];
 const SPEED_CHART_WIDTH = 600;
@@ -154,9 +169,15 @@ export default function Dashboard() {
   const chartGradientId = useId();
   const dashboard = useResource((signal) => api.dashboard(signal));
   const engines = useResource((signal) => api.engines(signal));
+  const nativeStorage = useResource((signal) => api.nativeStorageState(signal));
 
   const [trendRange, setTrendRange] = useState<7 | 30>(7);
   const [insightTab, setInsightTab] = useState<InsightTab>("trend");
+  const [feedFilter, setFeedFilter] = useState<RecentFeedFilter>("all");
+  const [nativeModalMode, setNativeModalMode] = useState<"local" | "form" | null>(
+    null,
+  );
+  const [taskEditorOpen, setTaskEditorOpen] = useState(false);
   const [hoveredSampleIndex, setHoveredSampleIndex] = useState<number | null>(
     null,
   );
@@ -165,8 +186,28 @@ export default function Dashboard() {
   >([]);
   const [bwNowTick, setBwNowTick] = useState<Date>(() => new Date());
 
+  const recentFeed = useResource(
+    (signal) =>
+      api.recentTaskItems(
+        {
+          pageNum: 1,
+          pageSize: 12,
+          status: feedFilter === "success" ? 2 : undefined,
+          type: feedFilter === "delete" ? 1 : undefined,
+          hasError: feedFilter === "failed" ? 1 : undefined,
+        },
+        signal,
+      ),
+    [feedFilter],
+  );
+
   const refreshAll = async () => {
-    await Promise.all([dashboard.refresh(), engines.refresh()]);
+    await Promise.all([
+      dashboard.refresh(),
+      engines.refresh(),
+      nativeStorage.refresh(true),
+      recentFeed.refresh(true),
+    ]);
   };
 
   const data = dashboard.data;
@@ -202,10 +243,28 @@ export default function Dashboard() {
     const timer = window.setInterval(() => {
       if (document.visibilityState === "visible") {
         void dashboard.refresh(true);
+        if (hasLiveActivity) void recentFeed.refresh(true);
       }
     }, pollMs);
     return () => window.clearInterval(timer);
-  }, [dashboard.refresh, hasLiveActivity]);
+  }, [dashboard.refresh, recentFeed.refresh, hasLiveActivity]);
+
+  useEffect(() => {
+    const onJobsChanged = () => {
+      void dashboard.refresh(true);
+      void engines.refresh(true);
+      void nativeStorage.refresh(true);
+      void recentFeed.refresh(true);
+    };
+    window.addEventListener("opensync:jobs-changed", onJobsChanged);
+    return () =>
+      window.removeEventListener("opensync:jobs-changed", onJobsChanged);
+  }, [
+    dashboard.refresh,
+    engines.refresh,
+    nativeStorage.refresh,
+    recentFeed.refresh,
+  ]);
 
   const realtime = useMemo(
     () => deriveDashboardRealtime(data, localSpeedHistory),
@@ -417,6 +476,122 @@ export default function Dashboard() {
                 message={`检测到 ${legacyJobCount} 个旧版 OpenList 同步任务已自动停用。当前版本已移除 OpenList 引擎，请删除旧任务后在「存储管理」接入对应存储并重新创建。`}
               />
             )}
+
+            {allJobs.length === 0 && (() => {
+              const localRoots = nativeStorage.data?.localRoots || [];
+              const remotes = nativeStorage.data?.remotes || [];
+              const localReady = localRoots.length > 0;
+              const remoteReady = remotes.length > 0;
+              const localPreview = localRoots
+                .slice(0, 2)
+                .map((r) => r.path)
+                .join("、");
+              const remotePreview = remotes
+                .slice(0, 3)
+                .map((r) => r.name)
+                .join("、");
+              return (
+                <SectionCard
+                  className="dashboard-onboarding-card"
+                  data-testid="dashboard-onboarding"
+                  title="3 步完成首次同步配置"
+                  extra={
+                    <span className="muted">
+                      参考 Cloud Sync 快速接入本地与云端存储
+                    </span>
+                  }
+                >
+                  <div className="dashboard-onboarding-grid">
+                    <div
+                      className={`dashboard-onboarding-step${localReady ? " is-done" : ""}`}
+                    >
+                      <div className="dashboard-onboarding-step__head">
+                        <span className="dashboard-onboarding-step__num">1</span>
+                        <div className="dashboard-onboarding-step__title">
+                          <strong>确认飞牛本地授权目录</strong>
+                          <Tag
+                            color={localReady ? "green" : "amber"}
+                            size="small"
+                            type="light"
+                          >
+                            {localReady
+                              ? `已授权 ${localRoots.length} 个目录`
+                              : "待授权目录"}
+                          </Tag>
+                        </div>
+                      </div>
+                      <p className="dashboard-onboarding-step__desc muted">
+                        {localReady
+                          ? `可用目录：${localPreview}${localRoots.length > 2 ? " 等" : ""}`
+                          : "请先在飞牛桌面「应用管理 → OpenSync → 文件权限」中授予需要备份的共享目录访问权限。"}
+                      </p>
+                      <Button
+                        size="small"
+                        type="tertiary"
+                        onClick={() => setNativeModalMode("local")}
+                      >
+                        {localReady ? "查看授权目录" : "检查授权状态"}
+                      </Button>
+                    </div>
+
+                    <div
+                      className={`dashboard-onboarding-step${remoteReady ? " is-done" : ""}`}
+                    >
+                      <div className="dashboard-onboarding-step__head">
+                        <span className="dashboard-onboarding-step__num">2</span>
+                        <div className="dashboard-onboarding-step__title">
+                          <strong>添加云盘或远程存储</strong>
+                          <Tag
+                            color={remoteReady ? "green" : "grey"}
+                            size="small"
+                            type="light"
+                          >
+                            {remoteReady
+                              ? `已连接 ${remotes.length} 个`
+                              : "本地互备可跳过"}
+                          </Tag>
+                        </div>
+                      </div>
+                      <p className="dashboard-onboarding-step__desc muted">
+                        {remoteReady
+                          ? `已接入：${remotePreview}${remotes.length > 3 ? " 等" : ""}`
+                          : "支持阿里云盘、OneDrive、WebDAV（OpenList）、S3、SFTP 等云存储连接。"}
+                      </p>
+                      <Button
+                        size="small"
+                        type="tertiary"
+                        onClick={() => setNativeModalMode("form")}
+                      >
+                        添加远程连接
+                      </Button>
+                    </div>
+
+                    <div className="dashboard-onboarding-step">
+                      <div className="dashboard-onboarding-step__head">
+                        <span className="dashboard-onboarding-step__num">3</span>
+                        <div className="dashboard-onboarding-step__title">
+                          <strong>创建第一个同步任务</strong>
+                          <Tag color="blue" size="small" type="light">
+                            最后一步
+                          </Tag>
+                        </div>
+                      </div>
+                      <p className="dashboard-onboarding-step__desc muted">
+                        选定来源与目标目录、同步方向（连续守护/双向/镜像）以及删除与冲突保护策略即可开始备份。
+                      </p>
+                      <Button
+                        size="small"
+                        type="primary"
+                        theme="solid"
+                        onClick={() => setTaskEditorOpen(true)}
+                      >
+                        新建同步任务
+                      </Button>
+                    </div>
+                  </div>
+                </SectionCard>
+              );
+            })()}
 
             {/* 4 Core KPI Cards */}
             <div className="dashboard-kpi-grid">
@@ -1440,9 +1615,211 @@ export default function Dashboard() {
               )}
             </div>
 
+            {(allJobs.length > 0 ||
+              (recentFeed.data?.count ?? 0) > 0 ||
+              Boolean(recentFeed.error)) && (
+              <SectionCard
+                className="dashboard-recent-card"
+                data-testid="dashboard-recent-feed"
+                title="最近同步动态"
+                extra={
+                  <div className="dashboard-recent-head-actions">
+                    <div
+                      className="dashboard-recent-filters"
+                      role="group"
+                      aria-label="同步动态筛选"
+                    >
+                      {(
+                        [
+                          { id: "all", label: "全部" },
+                          { id: "success", label: "成功" },
+                          { id: "failed", label: "异常" },
+                          { id: "delete", label: "删除" },
+                        ] as const
+                      ).map((opt) => (
+                        <Button
+                          key={opt.id}
+                          size="small"
+                          theme={feedFilter === opt.id ? "solid" : "borderless"}
+                          type={feedFilter === opt.id ? "primary" : "tertiary"}
+                          onClick={() => setFeedFilter(opt.id)}
+                        >
+                          {opt.label}
+                        </Button>
+                      ))}
+                    </div>
+                    <Link to="/sync" className="dashboard-panel-link">
+                      进入工作台
+                      <IconChevronRight aria-hidden="true" />
+                    </Link>
+                  </div>
+                }
+              >
+                {recentFeed.error && !recentFeed.data && (
+                  <InlineNotice
+                    role="alert"
+                    message={recentFeed.error}
+                    retrying={recentFeed.loading}
+                    onRetry={() => void recentFeed.refresh(true)}
+                  />
+                )}
+                {recentFeed.data?.stats && recentFeed.data.stats.allNum > 0 && (
+                  <div className="dashboard-recent-stats muted">
+                    <span>共 {recentFeed.data.stats.allNum} 条记录</span>
+                    <span>成功 {recentFeed.data.stats.successNum}</span>
+                    {recentFeed.data.stats.errorNum > 0 && (
+                      <span className="dashboard-recent-stat--danger">
+                        异常 {recentFeed.data.stats.errorNum}
+                      </span>
+                    )}
+                    {recentFeed.data.stats.deleteNum > 0 && (
+                      <span>删除 {recentFeed.data.stats.deleteNum}</span>
+                    )}
+                    <span>已传输 {formatSize(recentFeed.data.stats.sumSize)}</span>
+                  </div>
+                )}
+                {recentFeed.data?.dataList?.length ? (
+                  <div className="dashboard-recent-list">
+                    {recentFeed.data.dataList.map((item) => {
+                      const hasError = Boolean(item.errMsg) || item.status === 7;
+                      const isDelete = item.type === 1;
+                      const statusTone = hasError
+                        ? "red"
+                        : item.status === 2
+                          ? "green"
+                          : item.status === 1
+                            ? "blue"
+                            : "grey";
+                      const statusText =
+                        taskItemStatusNames[item.status] || "已处理";
+                      const typeText =
+                        item.type !== undefined
+                          ? taskTypeNames[item.type] || ""
+                          : "";
+                      const title =
+                        item.fileName ||
+                        item.srcPath ||
+                        item.dstPath ||
+                        "未命名条目";
+                      return (
+                        <Link
+                          key={`${item.taskId ?? 0}-${item.id ?? title}-${item.createTime ?? 0}`}
+                          to={`/tasks?jobId=${item.jobId}&tab=history`}
+                          className="dashboard-recent-row"
+                        >
+                          <div className="dashboard-recent-row__main">
+                            <div className="dashboard-recent-row__title">
+                              <Tag color={statusTone} size="small" type="light">
+                                {statusText}
+                              </Tag>
+                              {typeText && (
+                                <Tag
+                                  color={isDelete ? "amber" : "grey"}
+                                  size="small"
+                                  type="light"
+                                >
+                                  {typeText}
+                                </Tag>
+                              )}
+                              <strong title={title}>{title}</strong>
+                            </div>
+                            <span
+                              className="dashboard-recent-row__meta muted"
+                              title={`${item.jobName} · ${item.srcPath || ""} → ${item.dstPath || ""}`}
+                            >
+                              {item.jobName}
+                              {item.srcPath
+                                ? ` · ${formatDisplayPath(item.srcPath)}`
+                                : ""}
+                              {item.dstPath
+                                ? ` → ${formatDisplayPath(item.dstPath)}`
+                                : ""}
+                            </span>
+                            {item.errMsg && (
+                              <span
+                                className="dashboard-recent-row__error"
+                                title={item.errMsg}
+                              >
+                                {item.errMsg}
+                              </span>
+                            )}
+                          </div>
+                          <div className="dashboard-recent-row__side muted">
+                            <span>
+                              {item.isPath === 1
+                                ? "目录"
+                                : formatSize(item.fileSize || 0)}
+                            </span>
+                            <span>
+                              {formatRelativeSyncTime(item.createTime)}
+                            </span>
+                          </div>
+                        </Link>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="dashboard-recent-empty muted">
+                    {feedFilter === "all"
+                      ? "暂无最近文件同步动态，任务执行后将在此实时显示。"
+                      : "当前筛选下暂无文件记录。"}
+                  </p>
+                )}
+              </SectionCard>
+            )}
+
           </div>
         )}
       </LoadState>
+
+      {nativeModalMode && (
+        <Suspense fallback={null}>
+          <StorageEditor
+            engine={engines.data?.find((e) => e.kind === "rclone") || engines.data?.[0]}
+            mode={nativeModalMode}
+            onClose={() => setNativeModalMode(null)}
+            onChanged={() => {
+              void nativeStorage.refresh(true);
+              void engines.refresh(true);
+            }}
+            onSaved={() => {
+              setNativeModalMode(null);
+              void nativeStorage.refresh(true);
+              void engines.refresh(true);
+              window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
+            }}
+          />
+        </Suspense>
+      )}
+
+      {taskEditorOpen && (
+        <Suspense fallback={null}>
+          <JobEditor
+            job={null}
+            engines={engines.data || []}
+            existingJobs={[]}
+            onStorageChanged={() => {
+              void nativeStorage.refresh(true);
+              void engines.refresh(true);
+            }}
+            onNavigateEngines={() => {
+              setTaskEditorOpen(false);
+              navigate("/engines");
+            }}
+            onClose={() => setTaskEditorOpen(false)}
+            onSaved={(result) => {
+              setTaskEditorOpen(false);
+              window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
+              void refreshAll();
+              if (result.createdId) {
+                navigate(
+                  `/tasks?jobId=${result.createdId}&tab=overview${result.mirrorPreviewId ? "&mirrorPreview=1" : ""}`,
+                );
+              }
+            }}
+          />
+        </Suspense>
+      )}
 
     </div>
   );

@@ -150,6 +150,7 @@ func newRouterWithVersionChecker(development bool, allowedOrigins []string, chec
 	api.DELETE("/alist", handler.DeleteAlist)
 	api.GET("/job", handler.GetJob)
 	api.GET("/job/stream", handler.StreamJobCurrent)
+	api.GET("/job/items/recent", handler.GetRecentTaskItems)
 	api.GET("/job/items/export", handler.ExportTaskItems)
 	api.GET("/job/dry-run", handler.GetDryRun)
 	api.GET("/job/check", handler.GetJobCheck)

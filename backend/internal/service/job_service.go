@@ -1927,6 +1927,88 @@ func GetTaskItemList(req map[string]interface{}) (map[string]interface{}, error)
 	return result, nil
 }
 
+// GetRecentTaskItemList returns paginated cross-job recent sync items and statistics.
+func GetRecentTaskItemList(req map[string]interface{}) (map[string]interface{}, error) {
+	params := make(map[string]interface{}, len(req))
+	for k, v := range req {
+		params[k] = v
+	}
+	if storage := strings.TrimSpace(util.StringValue(params["storage"])); storage != "" {
+		_, hasJobID := params["jobId"]
+		_, hasJobIDs := params["jobIds"]
+		if !hasJobID && !hasJobIDs {
+			matchedIDs, err := findJobIDsForStorage(storage)
+			if err != nil {
+				return nil, fmt.Errorf("resolve storage jobs: %w", err)
+			}
+			params["jobIds"] = matchedIDs
+		}
+	}
+	result, err := mapper.GetRecentJobTaskItemList(params)
+	if err != nil {
+		if pub := publicErrorIf(err, msg.T(msg.LostPart)); pub != nil {
+			return nil, pub
+		}
+		return nil, err
+	}
+	return result, nil
+}
+
+func findJobIDsForStorage(storage string) ([]int64, error) {
+	allJobs, err := mapper.GetJobListAll()
+	if err != nil {
+		return nil, err
+	}
+	legacyEngineIDs := legacyOpenListAlistIDs()
+	target := strings.TrimSpace(storage)
+	localOnly := target == "__local__"
+	matched := make([]int64, 0)
+	for _, job := range allJobs {
+		id := util.ToInt64(job["id"])
+		if id <= 0 || legacyEngineIDs[util.ToInt64(job["alistId"])] {
+			continue
+		}
+		paths := append(parsePathList(job["srcPath"]), parsePathList(job["dstPath"])...)
+		if localOnly {
+			hasAny := false
+			onlyLocal := true
+			for _, p := range paths {
+				seg := firstPathSegment(p)
+				if seg == "" {
+					continue
+				}
+				hasAny = true
+				if !strings.EqualFold(seg, native.Local) {
+					onlyLocal = false
+					break
+				}
+			}
+			if hasAny && onlyLocal {
+				matched = append(matched, id)
+			}
+			continue
+		}
+		for _, p := range paths {
+			if strings.EqualFold(firstPathSegment(p), target) {
+				matched = append(matched, id)
+				break
+			}
+		}
+	}
+	return matched, nil
+}
+
+func firstPathSegment(p string) string {
+	trimmed := strings.Trim(strings.TrimSpace(p), "/")
+	if trimmed == "" {
+		return ""
+	}
+	if idx := strings.IndexByte(trimmed, '/'); idx >= 0 {
+		return trimmed[:idx]
+	}
+	return trimmed
+}
+
 // RemoveTask deletes a task
 func RemoveTask(taskID int64) error {
 	task, err := mapper.GetJobTaskByID(taskID)
