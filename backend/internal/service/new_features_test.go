@@ -578,3 +578,93 @@ func TestDashboardOverviewWithBuiltInEngine(t *testing.T) {
 		t.Fatalf("invalid config defaults: %+v", cfg)
 	}
 }
+
+func TestBatchEnableDisableAllAndRecentTaskItems(t *testing.T) {
+	_, cleanup := setupFullFeatureTestDB(t)
+	defer cleanup()
+	isolateJobClientRegistryForTest(t)
+
+	alistID, err := EnsureNativeEngine()
+	if err != nil {
+		t.Fatalf("EnsureNativeEngine: %v", err)
+	}
+
+	// Job 1: paused incremental continuous sync (eligible for enable_all)
+	j1, err := mapper.AddJob(map[string]interface{}{
+		"enable": 0, "remark": "增量备份", "srcPath": `["/本地/Photos"]`, "dstPath": `["/Aliyun/Photos"]`,
+		"alistId": alistID, "method": 0, "isCron": 3,
+	})
+	if err != nil {
+		t.Fatalf("AddJob j1: %v", err)
+	}
+	// Job 2: paused mirror continuous sync with no prior success (must be skipped by enable_all)
+	j2, err := mapper.AddJob(map[string]interface{}{
+		"enable": 0, "remark": "未预览镜像", "srcPath": `["/本地/Media"]`, "dstPath": `["/Aliyun/Media"]`,
+		"alistId": alistID, "method": 1, "isCron": 3,
+	})
+	if err != nil {
+		t.Fatalf("AddJob j2: %v", err)
+	}
+	// Job 3: local-to-local manual job (must not fail disable_all)
+	j3, err := mapper.AddJob(map[string]interface{}{
+		"enable": 1, "remark": "本地互备", "srcPath": `["/本地/A"]`, "dstPath": `["/本地/B"]`,
+		"alistId": alistID, "method": 0, "isCron": 2,
+	})
+	if err != nil {
+		t.Fatalf("AddJob j3: %v", err)
+	}
+
+	enableRes, err := BatchJobAction("enable_all", nil)
+	if err != nil {
+		t.Fatalf("BatchJobAction(enable_all): %v", err)
+	}
+	if enableRes["succeeded"] != 1 || enableRes["failed"] != 0 || enableRes["skipped"] != 1 {
+		t.Fatalf("unexpected enable_all result: %+v", enableRes)
+	}
+	skippedJobs, _ := enableRes["skippedJobs"].([]map[string]interface{})
+	if len(skippedJobs) != 1 || skippedJobs[0]["jobId"] != j2 || skippedJobs[0]["jobName"] != "未预览镜像" {
+		t.Fatalf("unexpected skippedJobs: %+v", skippedJobs)
+	}
+
+	row1, _ := mapper.GetJobByID(j1)
+	row2, _ := mapper.GetJobByID(j2)
+	if int(row1["enable"].(int64)) != 1 || int(row2["enable"].(int64)) != 0 {
+		t.Fatalf("job enable states after enable_all: j1=%v j2=%v", row1["enable"], row2["enable"])
+	}
+
+	disableRes, err := BatchJobAction("disable_all", nil)
+	if err != nil {
+		t.Fatalf("BatchJobAction(disable_all): %v", err)
+	}
+	if disableRes["succeeded"] != 1 || disableRes["failed"] != 0 {
+		t.Fatalf("unexpected disable_all result: %+v", disableRes)
+	}
+	row1After, _ := mapper.GetJobByID(j1)
+	if int(row1After["enable"].(int64)) != 0 {
+		t.Fatalf("expected j1 disabled after disable_all, got %v", row1After["enable"])
+	}
+
+	// Recent task items filtered by storage name and __local__
+	t1, _ := mapper.AddJobTask(j1, time.Now().Unix())
+	t3, _ := mapper.AddJobTask(j3, time.Now().Unix())
+	_ = mapper.AddJobTaskItemMany([]map[string]interface{}{
+		{"taskId": t1, "srcPath": "/本地/Photos/1.jpg", "dstPath": "/Aliyun/Photos/1.jpg", "isPath": 0, "fileName": "1.jpg", "fileSize": int64(100), "type": 0, "status": 2},
+		{"taskId": t3, "srcPath": "/本地/A/doc.txt", "dstPath": "/本地/B/doc.txt", "isPath": 0, "fileName": "doc.txt", "fileSize": int64(200), "type": 0, "status": 7, "errMsg": "disk full"},
+	})
+
+	aliyunRecent, err := GetRecentTaskItemList(map[string]interface{}{"storage": "Aliyun", "pageNum": 1, "pageSize": 10})
+	if err != nil {
+		t.Fatalf("GetRecentTaskItemList(Aliyun): %v", err)
+	}
+	if aliyunRecent["count"] != int64(1) {
+		t.Fatalf("Aliyun recent count = %v, want 1", aliyunRecent["count"])
+	}
+
+	localRecent, err := GetRecentTaskItemList(map[string]interface{}{"storage": "__local__", "pageNum": 1, "pageSize": 10})
+	if err != nil {
+		t.Fatalf("GetRecentTaskItemList(__local__): %v", err)
+	}
+	if localRecent["count"] != int64(1) {
+		t.Fatalf("__local__ recent count = %v, want 1", localRecent["count"])
+	}
+}

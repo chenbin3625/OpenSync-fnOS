@@ -240,6 +240,9 @@ func ensureIndexes(db *sql.DB) {
 		"CREATE INDEX IF NOT EXISTS idx_job_task_status_job ON job_task(status, jobId)",
 		"CREATE INDEX IF NOT EXISTS idx_job_task_effective_time ON job_task(COALESCE(NULLIF(runTime, 0), createTime), id)",
 		"CREATE INDEX IF NOT EXISTS idx_job_task_item_task_time ON job_task_item(taskId, createTime DESC, id DESC)",
+		// Cross-task recent items feed walks items newest-first without scanning
+		// and sorting the full job_task_item table.
+		"CREATE INDEX IF NOT EXISTS idx_job_task_item_recent ON job_task_item(createTime DESC, id DESC)",
 		// idx_job_task_item_task_status(taskId, status) is a strict prefix of
 		// the status_time index, so it only added write cost.
 		"DROP INDEX IF EXISTS idx_job_task_item_task_status",

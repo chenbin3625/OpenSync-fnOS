@@ -460,8 +460,88 @@ export const handlers = [
   http.post(`${apiBase}/job/batch`, async ({ request }) => {
     const body = await readBody(request);
     if (!body || typeof body.action !== "string") return fail("缺少必要参数");
-    const ids = Array.isArray(body.ids) ? body.ids.map(Number).filter(Number.isFinite) : undefined;
-    return ok(mockStore.batchJobAction(body.action, ids));
+    const action = body.action.trim().toLowerCase();
+    if (
+      ![
+        "run",
+        "stop",
+        "enable",
+        "disable",
+        "run_all",
+        "stop_all",
+        "enable_all",
+        "disable_all",
+      ].includes(action)
+    ) {
+      return fail("不支持的批量操作");
+    }
+    const ids = Array.isArray(body.ids)
+      ? body.ids.map(Number).filter(Number.isFinite)
+      : undefined;
+    return ok(mockStore.batchJobAction(action, ids));
+  }),
+  http.get(`${apiBase}/job/items/recent`, ({ request }) => {
+    const query = new URL(request.url).searchParams;
+    const parseIntParam = (key: string): number | undefined | "invalid" => {
+      const raw = query.get(key)?.trim();
+      if (!raw) return undefined;
+      if (!/^-?\d+$/.test(raw)) return "invalid";
+      return Number(raw);
+    };
+    const pageNum = parseIntParam("pageNum");
+    const pageSize = parseIntParam("pageSize");
+    const jobId = parseIntParam("jobId");
+    const status = parseIntParam("status");
+    const type = parseIntParam("type");
+    const isPath = parseIntParam("isPath");
+    if (
+      pageNum === "invalid" ||
+      pageSize === "invalid" ||
+      jobId === "invalid" ||
+      status === "invalid" ||
+      type === "invalid" ||
+      isPath === "invalid"
+    ) {
+      return fail("缺少必要参数");
+    }
+
+    let jobIds: number[] | undefined;
+    const rawJobIds = query.getAll("jobIds");
+    if (rawJobIds.length > 0) {
+      const tokens = rawJobIds
+        .flatMap((v) => v.split(","))
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const parsedIds: number[] = [];
+      for (const token of tokens) {
+        if (!/^\d+$/.test(token)) return fail("缺少必要参数");
+        parsedIds.push(Number(token));
+      }
+      if (parsedIds.length > 0) jobIds = parsedIds;
+    }
+
+    let hasError: number | undefined;
+    const rawHasError = query.get("hasError")?.trim().toLowerCase();
+    if (rawHasError) {
+      if (rawHasError === "1" || rawHasError === "true") hasError = 1;
+      else if (rawHasError === "0" || rawHasError === "false") hasError = 0;
+      else return fail("缺少必要参数");
+    }
+
+    return ok(
+      mockStore.listRecentTaskItems({
+        pageNum,
+        pageSize,
+        jobId,
+        jobIds,
+        storage: query.get("storage")?.trim() || undefined,
+        status,
+        type,
+        isPath,
+        hasError,
+        keyword: query.get("keyword")?.trim() || undefined,
+      }),
+    );
   }),
   http.post(`${apiBase}/job/tasks/delete`, async ({ request }) => {
     const body = await readBody(request);

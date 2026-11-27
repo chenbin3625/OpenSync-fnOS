@@ -2,6 +2,7 @@ import type {
   AlistItem,
   AppLogsResponse,
   BatchJobActionResult,
+  BatchJobSkippedItem,
   CurrentTaskData,
   DashboardOverview,
   DryRunResult,
@@ -25,6 +26,9 @@ import type {
   NotifyItem,
   PageData,
   RealtimeTaskItemPage,
+  RecentTaskItem,
+  RecentTaskItemsPageData,
+  RecentTaskItemStats,
   SystemBackupPayload,
   SystemImportSummary,
   SystemSettings,
@@ -48,6 +52,7 @@ export type MockStoreSeed = {
   notifications?: NotifyInput[];
   settings?: Partial<SystemSettings>;
   history?: Record<number, Partial<TaskRecord>[]>;
+  taskItems?: Record<number, TaskItem[]>;
 };
 
 // Mirrors backend/internal/config/config.go defaults; mock mode must not show
@@ -308,6 +313,45 @@ function includesStatus(status: number, requested: number): boolean {
   return requested === -1
     ? ![0, 1, 2, 7].includes(status)
     : status === requested;
+}
+
+function parseJsonPathList(raw?: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.map((v) => String(v || "").trim()).filter(Boolean)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function firstPathSegment(pathValue: string): string {
+  const trimmed = pathValue.trim().replace(/^\/+|\/+$/g, "");
+  if (!trimmed) return "";
+  const slashIdx = trimmed.indexOf("/");
+  return slashIdx >= 0 ? trimmed.slice(0, slashIdx) : trimmed;
+}
+
+function jobMatchesStorage(job: JobItem, storage: string): boolean {
+  const target = storage.trim().toLowerCase();
+  if (!target) return true;
+  const paths = [
+    ...parseJsonPathList(job.srcPath),
+    ...parseJsonPathList(job.dstPath),
+  ];
+  if (target === "__local__") {
+    let hasAny = false;
+    for (const p of paths) {
+      const seg = firstPathSegment(p);
+      if (!seg) continue;
+      hasAny = true;
+      if (seg !== "本地") return false;
+    }
+    return hasAny;
+  }
+  return paths.some((p) => firstPathSegment(p).toLowerCase() === target);
 }
 
 
@@ -659,6 +703,20 @@ export class MockStore {
       }
     } else if (seed.jobs === undefined && this.jobs.length > 0) {
       this.histories.set(this.jobs[0].id, createDemoTaskRecords());
+    }
+
+    if (seed.taskItems) {
+      for (const [taskId, items] of Object.entries(seed.taskItems)) {
+        this.taskItems.set(
+          Number(taskId),
+          items.map((item, idx) => ({
+            ...item,
+            id: numberValue(item.id, idx + 1),
+            taskId: numberValue(item.taskId, Number(taskId)),
+            createTime: numberValue(item.createTime, now()),
+          })),
+        );
+      }
     }
 
     if (seed.jobs === undefined && this.jobs[0]) this.runJob(this.jobs[0].id);
@@ -2401,6 +2459,127 @@ export class MockStore {
     };
   }
 
+  listRecentTaskItems(
+    params: {
+      pageNum?: number;
+      pageSize?: number;
+      jobId?: number;
+      jobIds?: number[];
+      storage?: string;
+      status?: number;
+      type?: number;
+      isPath?: number;
+      hasError?: number;
+      keyword?: string;
+    } = {},
+  ): RecentTaskItemsPageData {
+    const pageNum = Math.max(1, params.pageNum || 1);
+    const pageSize = Math.min(500, Math.max(1, params.pageSize || 20));
+    const emptyStats: RecentTaskItemStats = {
+      allNum: 0,
+      waitNum: 0,
+      runningNum: 0,
+      successNum: 0,
+      failNum: 0,
+      otherNum: 0,
+      deleteNum: 0,
+      errorNum: 0,
+      sumSize: 0,
+    };
+
+    const legacyEngineIds = new Set(
+      this.engines.filter((e) => e.kind !== "rclone").map((e) => e.id),
+    );
+    let jobs = this.jobs.filter((job) => !legacyEngineIds.has(job.alistId));
+    if (params.jobId !== undefined) {
+      jobs = jobs.filter((job) => job.id === params.jobId);
+    } else if (params.jobIds !== undefined) {
+      const allowed = new Set(params.jobIds);
+      jobs = jobs.filter((job) => allowed.has(job.id));
+    } else if (params.storage?.trim()) {
+      const targetStorage = params.storage.trim();
+      jobs = jobs.filter((job) => jobMatchesStorage(job, targetStorage));
+    }
+
+    const enriched: RecentTaskItem[] = [];
+    for (const job of jobs) {
+      const jobName = job.remark?.trim() || `同步任务 #${job.id}`;
+      const seenTaskIds = new Set<number>();
+      const current = this.currentTasks.get(job.id);
+      if (current) seenTaskIds.add(current.taskId);
+      for (const rec of this.histories.get(job.id) || []) {
+        seenTaskIds.add(rec.id);
+      }
+      for (const taskId of seenTaskIds) {
+        const items = this.taskItems.get(taskId) || [];
+        for (const item of items) {
+          enriched.push({
+            ...item,
+            taskId: item.taskId ?? taskId,
+            jobId: job.id,
+            jobName,
+            jobMethod: job.method,
+          });
+        }
+      }
+    }
+
+    const keyword = params.keyword?.trim().toLowerCase() || "";
+    const filtered = enriched
+      .filter((item) => {
+        if (params.status !== undefined && !includesStatus(item.status, params.status)) {
+          return false;
+        }
+        if (params.type !== undefined && item.type !== params.type) {
+          return false;
+        }
+        if (params.isPath !== undefined && item.isPath !== params.isPath) {
+          return false;
+        }
+        if (params.hasError === 1 && !item.errMsg) return false;
+        if (params.hasError === 0 && item.errMsg) return false;
+        if (keyword) {
+          const text = `${item.fileName || ""} ${item.srcPath || ""} ${
+            item.dstPath || ""
+          } ${item.errMsg || ""} ${item.jobName}`.toLowerCase();
+          if (!text.includes(keyword)) return false;
+        }
+        return true;
+      })
+      .sort(
+        (a, b) =>
+          (b.createTime ?? 0) - (a.createTime ?? 0) ||
+          Number(b.id ?? 0) - Number(a.id ?? 0),
+      );
+
+    const stats = filtered.reduce<RecentTaskItemStats>(
+      (acc, item) => {
+        acc.allNum += 1;
+        if (item.status === 0) acc.waitNum += 1;
+        else if (item.status === 1) acc.runningNum += 1;
+        else if (item.status === 2) acc.successNum += 1;
+        else if (item.status === 7) acc.failNum += 1;
+        else acc.otherNum += 1;
+        if (item.type === 1) acc.deleteNum += 1;
+        if (item.errMsg) acc.errorNum += 1;
+        if (item.status === 2 && item.type !== 1) {
+          acc.sumSize += item.fileSize || 0;
+        }
+        return acc;
+      },
+      { ...emptyStats },
+    );
+
+    const start = (pageNum - 1) * pageSize;
+    return {
+      dataList: filtered.slice(start, start + pageSize),
+      count: filtered.length,
+      pageNum,
+      pageSize,
+      stats,
+    };
+  }
+
   /** Raw (unredacted) params for tests that assert the redaction round-trip. */
   getRawNotificationParams(id: number): string {
     return this.notifications.find((item) => item.id === id)?.params ?? "";
@@ -2613,11 +2792,59 @@ export class MockStore {
   }
 
   batchJobAction(action: string, ids?: number[]): BatchJobActionResult {
-    const targetIds =
-      action === "run_all" || action === "stop_all" || !ids?.length
-        ? this.jobs.map((j) => j.id)
-        : ids;
+    const normalizedAction = action.trim().toLowerCase();
+    const isBulkAll =
+      normalizedAction === "run_all" ||
+      normalizedAction === "stop_all" ||
+      normalizedAction === "enable_all" ||
+      normalizedAction === "disable_all";
     const results: BatchJobActionResult["results"] = [];
+    const skippedJobs: BatchJobSkippedItem[] = [];
+    let skipped = 0;
+    const abortTargetIds = new Set<number>();
+
+    let targetIds: number[];
+    if (isBulkAll || !ids?.length) {
+      const legacyEngineIds = new Set(
+        this.engines.filter((e) => e.kind !== "rclone").map((e) => e.id),
+      );
+      targetIds = [];
+      for (const job of this.jobs) {
+        if (isBulkAll && legacyEngineIds.has(job.alistId)) continue;
+        if (normalizedAction === "run_all" && job.enable !== 1) continue;
+        if (normalizedAction === "enable_all") {
+          if (job.enable === 1) continue;
+          const hasLastSuccess =
+            (job.syncStatus?.lastSuccess ?? 0) > 0 ||
+            (this.histories.get(job.id) || []).some((rec) => rec.status === 2);
+          if (job.method === 1 && job.isCron === 3 && !hasLastSuccess) {
+            const jobName = job.remark?.trim() || `同步任务 #${job.id}`;
+            const reason = "未完成首次镜像影响预览，已安全跳过";
+            skipped += 1;
+            skippedJobs.push({ jobId: job.id, jobName, reason });
+            results.push({
+              jobId: job.id,
+              ok: false,
+              skipped: true,
+              error: reason,
+            });
+            continue;
+          }
+        } else if (normalizedAction === "disable_all") {
+          const running = this.currentTasks.has(job.id);
+          if (job.isCron === 2) {
+            if (!running) continue;
+            abortTargetIds.add(job.id);
+          } else if (job.enable !== 1 && !running) {
+            continue;
+          }
+        }
+        targetIds.push(job.id);
+      }
+    } else {
+      targetIds = ids;
+    }
+
     let succeeded = 0;
     let failed = 0;
     for (const id of targetIds) {
@@ -2627,14 +2854,36 @@ export class MockStore {
         results.push({ jobId: id, ok: false, error: "任务不存在" });
         continue;
       }
-      if (action === "run" || action === "run_all") this.runJob(id);
-      else if (action === "stop" || action === "stop_all") this.abortJob(id);
-      else if (action === "enable") job.enable = 1;
-      else if (action === "disable") this.pauseJob(id);
+      if (normalizedAction === "run" || normalizedAction === "run_all") {
+        this.runJob(id);
+      } else if (
+        normalizedAction === "stop" ||
+        normalizedAction === "stop_all"
+      ) {
+        this.abortJob(id);
+      } else if (
+        normalizedAction === "enable" ||
+        normalizedAction === "enable_all"
+      ) {
+        job.enable = 1;
+      } else if (
+        normalizedAction === "disable" ||
+        normalizedAction === "disable_all"
+      ) {
+        if (abortTargetIds.has(id)) this.abortJob(id);
+        else this.pauseJob(id);
+      }
       succeeded += 1;
       results.push({ jobId: id, ok: true });
     }
-    return { action, succeeded, failed, results };
+    return {
+      action: normalizedAction,
+      succeeded,
+      failed,
+      skipped,
+      skippedJobs,
+      results,
+    };
   }
 
   deleteTasksBatch(taskIds: number[]): number {

@@ -549,20 +549,30 @@ func GetDashboardOverview() (map[string]interface{}, error) {
 }
 
 // BatchJobAction executes a bulk operation across specified (or all) jobs.
-// Supported actions: "run", "stop", "enable", "disable", "run_all", "stop_all".
+// Supported actions: "run", "stop", "enable", "disable", "run_all", "stop_all", "enable_all", "disable_all".
 func BatchJobAction(action string, jobIDs []int64) (map[string]interface{}, error) {
 	action = strings.ToLower(strings.TrimSpace(action))
 	switch action {
-	case "run", "stop", "enable", "disable", "run_all", "stop_all":
+	case "run", "stop", "enable", "disable", "run_all", "stop_all", "enable_all", "disable_all":
 	default:
 		return nil, publicError(msg.T(msg.BatchActionInvalid))
 	}
 
 	targetIDs := jobIDs
-	if action == "run_all" || action == "stop_all" {
+	results := make([]map[string]interface{}, 0, len(targetIDs))
+	skippedJobs := make([]map[string]interface{}, 0)
+	skipped := 0
+	abortTargetIDs := make(map[int64]bool)
+
+	if action == "run_all" || action == "stop_all" || action == "enable_all" || action == "disable_all" {
 		allJobs, err := mapper.GetJobListAll()
 		if err != nil {
 			return nil, fmt.Errorf("batch load jobs: %w", err)
+		}
+		legacyEngineIDs := legacyOpenListAlistIDs()
+		var syncStates map[int64]mapper.SyncState
+		if action == "enable_all" {
+			syncStates, _ = mapper.ListSyncStates()
 		}
 		targetIDs = make([]int64, 0, len(allJobs))
 		for _, j := range allJobs {
@@ -570,14 +580,61 @@ func BatchJobAction(action string, jobIDs []int64) (map[string]interface{}, erro
 			if id <= 0 {
 				continue
 			}
-			if action == "run_all" && util.ToInt(j["enable"]) != 1 {
+			if legacyEngineIDs[util.ToInt64(j["alistId"])] {
 				continue
+			}
+			enable := util.ToInt(j["enable"])
+			switch action {
+			case "run_all":
+				if enable != 1 {
+					continue
+				}
+			case "enable_all":
+				if enable == 1 {
+					continue
+				}
+				// Mirror continuous tasks that have never completed a successful sync
+				// must go through a read-only dry-run preview before being enabled.
+				if util.ToInt(j["method"]) == 1 && util.ToInt(j["isCron"]) == 3 && syncStates[id].LastSuccess <= 0 {
+					skipped++
+					jobName := strings.TrimSpace(util.StringValue(j["remark"]))
+					if jobName == "" {
+						jobName = fmt.Sprintf("同步任务 #%d", id)
+					}
+					reason := "未完成首次镜像影响预览，已安全跳过"
+					skippedJobs = append(skippedJobs, map[string]interface{}{
+						"jobId":   id,
+						"jobName": jobName,
+						"reason":  reason,
+					})
+					results = append(results, map[string]interface{}{
+						"jobId":   id,
+						"ok":      false,
+						"skipped": true,
+						"error":   reason,
+					})
+					continue
+				}
+			case "disable_all":
+				running := false
+				jobClientListMu.RLock()
+				if client := jobClientList[id]; client != nil && client.currentTask() != nil {
+					running = true
+				}
+				jobClientListMu.RUnlock()
+				if util.ToInt(j["isCron"]) == 2 {
+					if !running {
+						continue
+					}
+					abortTargetIDs[id] = true
+				} else if enable != 1 && !running {
+					continue
+				}
 			}
 			targetIDs = append(targetIDs, id)
 		}
 	}
 
-	results := make([]map[string]interface{}, 0, len(targetIDs))
 	succeeded := 0
 	failed := 0
 	for _, id := range targetIDs {
@@ -590,10 +647,14 @@ func BatchJobAction(action string, jobIDs []int64) (map[string]interface{}, erro
 			err = DoJobManual(id)
 		case "stop", "stop_all":
 			err = AbortJob(id)
-		case "enable":
+		case "enable", "enable_all":
 			err = ContinueJob(id)
-		case "disable":
-			err = PauseJob(id)
+		case "disable", "disable_all":
+			if abortTargetIDs[id] {
+				err = AbortJob(id)
+			} else {
+				err = PauseJob(id)
+			}
 		}
 		if err != nil {
 			failed++
@@ -611,10 +672,12 @@ func BatchJobAction(action string, jobIDs []int64) (map[string]interface{}, erro
 		}
 	}
 	return map[string]interface{}{
-		"action":    action,
-		"succeeded": succeeded,
-		"failed":    failed,
-		"results":   results,
+		"action":      action,
+		"succeeded":   succeeded,
+		"failed":      failed,
+		"skipped":     skipped,
+		"skippedJobs": skippedJobs,
+		"results":     results,
 	}, nil
 }
 

@@ -253,3 +253,70 @@ func TestForEachJobTaskItemsByStatusesUsesIDCursorAndKeepsNullCreateTime(t *test
 		t.Fatalf("batches = %v, want [2 2]", batches)
 	}
 }
+
+func TestGetRecentJobTaskItemListEnrichesJobAndStats(t *testing.T) {
+	testDB, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open() error: %v", err)
+	}
+	defer testDB.Close()
+	testDB.SetMaxOpenConns(1)
+	restore := SetDBForTest(testDB)
+	defer restore()
+	InitSQL()
+
+	j1, err := AddJob(map[string]interface{}{
+		"enable": 1, "remark": "相册同步", "srcPath": `["/本地/Photos"]`, "dstPath": `["/CloudA/Photos"]`,
+		"alistId": 1, "method": 0, "isCron": 3,
+	})
+	if err != nil {
+		t.Fatalf("AddJob j1: %v", err)
+	}
+	j2, err := AddJob(map[string]interface{}{
+		"enable": 1, "remark": "", "srcPath": `["/本地/Docs"]`, "dstPath": `["/CloudB/Docs"]`,
+		"alistId": 1, "method": 1, "isCron": 3,
+	})
+	if err != nil {
+		t.Fatalf("AddJob j2: %v", err)
+	}
+	t1, _ := AddJobTask(j1, 1000)
+	t2, _ := AddJobTask(j2, 2000)
+	if err := AddJobTaskItemMany([]map[string]interface{}{
+		{"taskId": t1, "srcPath": "/本地/Photos/a.jpg", "dstPath": "/CloudA/Photos/a.jpg", "isPath": 0, "fileName": "a.jpg", "fileSize": int64(100), "type": 0, "status": 2, "createTime": int64(100)},
+		{"taskId": t2, "srcPath": "/本地/Docs/b.pdf", "dstPath": "/CloudB/Docs/b.pdf", "isPath": 0, "fileName": "b.pdf", "fileSize": int64(250), "type": 0, "status": 7, "errMsg": "timeout", "createTime": int64(200)},
+		{"taskId": t2, "srcPath": nil, "dstPath": "/CloudB/Docs/old.txt", "isPath": 0, "fileName": "old.txt", "fileSize": int64(50), "type": 1, "status": 2, "createTime": int64(300)},
+	}); err != nil {
+		t.Fatalf("AddJobTaskItemMany: %v", err)
+	}
+
+	res, err := GetRecentJobTaskItemList(map[string]interface{}{"pageNum": 1, "pageSize": 2})
+	if err != nil {
+		t.Fatalf("GetRecentJobTaskItemList: %v", err)
+	}
+	if res["count"] != int64(3) {
+		t.Fatalf("count = %#v, want 3", res["count"])
+	}
+	rows := res["dataList"].([]map[string]interface{})
+	if len(rows) != 2 {
+		t.Fatalf("len(rows) = %d, want 2", len(rows))
+	}
+	if rows[0]["fileName"] != "old.txt" || rows[0]["jobName"] != fmt.Sprintf("同步任务 #%d", j2) || rows[0]["dstPath"] != "/CloudB/Docs/old.txt" {
+		t.Fatalf("unexpected newest row: %+v", rows[0])
+	}
+	if rows[1]["fileName"] != "b.pdf" || rows[1]["srcPath"] != "/本地/Docs/b.pdf" {
+		t.Fatalf("unexpected second row: %+v", rows[1])
+	}
+	stats := res["stats"].(map[string]interface{})
+	if stats["allNum"] != int64(3) || stats["successNum"] != int64(2) || stats["failNum"] != int64(1) || stats["deleteNum"] != int64(1) || stats["errorNum"] != int64(1) || stats["sumSize"] != int64(100) {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+
+	filtered, err := GetRecentJobTaskItemList(map[string]interface{}{"jobId": j1, "hasError": 0, "pageNum": 1, "pageSize": 10})
+	if err != nil {
+		t.Fatalf("GetRecentJobTaskItemList(filtered): %v", err)
+	}
+	fRows := filtered["dataList"].([]map[string]interface{})
+	if len(fRows) != 1 || fRows[0]["jobName"] != "相册同步" {
+		t.Fatalf("filtered rows = %+v", fRows)
+	}
+}

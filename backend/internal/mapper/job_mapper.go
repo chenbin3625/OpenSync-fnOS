@@ -1180,6 +1180,181 @@ func GetJobTaskItemList(params map[string]interface{}) (map[string]interface{}, 
 	return FetchAllToPageWithCount(baseSQL, countSQL, params, where.args...)
 }
 
+const recentJobTaskItemSelectColumns = `i.id, i.taskId, jt.jobId, COALESCE(NULLIF(TRIM(j.remark), ''), '同步任务 #' || j.id) AS jobName, j.method AS jobMethod, i.srcPath, i.dstPath, i.isPath, i.fileName, i.fileSize, i.type, i.alistTaskId, i.status, i.progress, i.errMsg, i.createTime`
+
+const recentJobTaskItemJoinFrom = `FROM job_task_item AS i INNER JOIN job_task AS jt ON jt.id = i.taskId INNER JOIN job AS j ON j.id = jt.jobId`
+
+// EmptyRecentTaskItemStats returns zeroed summary counters for recent task items.
+func EmptyRecentTaskItemStats() map[string]interface{} {
+	return map[string]interface{}{
+		"allNum":     int64(0),
+		"waitNum":    int64(0),
+		"runningNum": int64(0),
+		"successNum": int64(0),
+		"failNum":    int64(0),
+		"otherNum":   int64(0),
+		"deleteNum":  int64(0),
+		"errorNum":   int64(0),
+		"sumSize":    int64(0),
+	}
+}
+
+func buildRecentJobTaskItemWhere(params map[string]interface{}) (whereBuilder, bool) {
+	where := newWhereBuilder("WHERE 1=1")
+
+	if jobID, ok := params["jobId"]; ok {
+		id := util.ToInt64(jobID)
+		if id <= 0 {
+			return where, true
+		}
+		where.and("jt.jobId=?", id)
+	} else if rawIDs, hasIDs := params["jobIds"]; hasIDs {
+		jobIDs, _ := rawIDs.([]int64)
+		if len(jobIDs) == 0 {
+			return where, true
+		}
+		clause, idArgs := int64InClause(jobIDs)
+		where.and(fmt.Sprintf("jt.jobId IN (%s)", clause), idArgs...)
+	}
+
+	if status, ok := params["status"]; ok {
+		if util.ToInt(status) == -1 {
+			where.and("i.status NOT IN (0,1,2,7)")
+		} else {
+			where.and("i.status=?", util.ToInt(status))
+		}
+	}
+	if typ, ok := params["type"]; ok {
+		where.and("i.type=?", util.ToInt(typ))
+	}
+	if isPath, ok := params["isPath"]; ok {
+		where.and("i.isPath=?", util.ToInt(isPath))
+	}
+	if hasError, ok := params["hasError"]; ok {
+		if util.ToInt(hasError) == 1 {
+			where.and("i.errMsg IS NOT NULL AND i.errMsg<>''")
+		} else {
+			where.and("(i.errMsg IS NULL OR i.errMsg='')")
+		}
+	}
+	if keyword, ok := params["keyword"]; ok {
+		kw := strings.TrimSpace(fmt.Sprintf("%v", keyword))
+		if kw != "" {
+			like := "%" + escapeLike(kw) + "%"
+			where.and(
+				"(i.fileName LIKE ? ESCAPE '\\' OR i.srcPath LIKE ? ESCAPE '\\' OR i.dstPath LIKE ? ESCAPE '\\' OR i.alistTaskId LIKE ? ESCAPE '\\' OR i.errMsg LIKE ? ESCAPE '\\' OR j.remark LIKE ? ESCAPE '\\')",
+				like, like, like, like, like, like,
+			)
+		}
+	}
+	return where, false
+}
+
+// GetRecentJobTaskItemList gets paginated cross-task recent task items enriched with
+// jobName/srcPath/dstPath and matching summary statistics.
+func GetRecentJobTaskItemList(params map[string]interface{}) (map[string]interface{}, error) {
+	pageParams := make(map[string]interface{}, 2)
+	if params != nil {
+		if ps, ok := params["pageSize"]; ok {
+			pageParams["pageSize"] = ps
+		}
+		if pn, ok := params["pageNum"]; ok {
+			pageParams["pageNum"] = pn
+		}
+	}
+	if _, hasPS := pageParams["pageSize"]; !hasPS {
+		pageParams["pageSize"] = 20
+	}
+	if _, hasPN := pageParams["pageNum"]; !hasPN {
+		pageParams["pageNum"] = 1
+	}
+	ps, pn, _, err := parsePageParams(pageParams)
+	if err != nil {
+		return nil, err
+	}
+	offset, err := pageOffset(ps, pn)
+	if err != nil {
+		return nil, err
+	}
+
+	where, forceEmpty := buildRecentJobTaskItemWhere(params)
+	if forceEmpty {
+		return map[string]interface{}{
+			"dataList": make([]map[string]interface{}, 0),
+			"count":    int64(0),
+			"pageNum":  pn,
+			"pageSize": ps,
+			"stats":    EmptyRecentTaskItemStats(),
+		}, nil
+	}
+
+	statsSQL := fmt.Sprintf(
+		`SELECT
+			COUNT(i.id) AS allNum,
+			COALESCE(SUM(CASE WHEN i.status=0 THEN 1 ELSE 0 END), 0) AS waitNum,
+			COALESCE(SUM(CASE WHEN i.status=1 THEN 1 ELSE 0 END), 0) AS runningNum,
+			COALESCE(SUM(CASE WHEN i.status=2 THEN 1 ELSE 0 END), 0) AS successNum,
+			COALESCE(SUM(CASE WHEN i.status=7 THEN 1 ELSE 0 END), 0) AS failNum,
+			COALESCE(SUM(CASE WHEN i.status NOT IN (0,1,2,7) THEN 1 ELSE 0 END), 0) AS otherNum,
+			COALESCE(SUM(CASE WHEN i.type=1 THEN 1 ELSE 0 END), 0) AS deleteNum,
+			COALESCE(SUM(CASE WHEN i.errMsg IS NOT NULL AND i.errMsg<>'' THEN 1 ELSE 0 END), 0) AS errorNum,
+			COALESCE(SUM(CASE WHEN i.status=2 AND i.type<>1 AND i.fileSize IS NOT NULL THEN i.fileSize ELSE 0 END), 0) AS sumSize
+		 %s %s`,
+		recentJobTaskItemJoinFrom,
+		where.clause,
+	)
+	dataSQL := fmt.Sprintf(
+		`SELECT %s %s %s ORDER BY i.createTime DESC, i.id DESC LIMIT ? OFFSET ?`,
+		recentJobTaskItemSelectColumns,
+		recentJobTaskItemJoinFrom,
+		where.clause,
+	)
+
+	var result map[string]interface{}
+	err = withReadTx(func(tx *sql.Tx) error {
+		var counts jobTaskCounts
+		var deleteNum, errorNum int64
+		if err := tx.QueryRow(statsSQL, where.args...).Scan(
+			&counts.allNum,
+			&counts.waitNum,
+			&counts.runningNum,
+			&counts.successNum,
+			&counts.failNum,
+			&counts.otherNum,
+			&deleteNum,
+			&errorNum,
+			&counts.sumSize,
+		); err != nil {
+			return err
+		}
+
+		dataList := make([]map[string]interface{}, 0)
+		if counts.allNum > 0 && offset < counts.allNum {
+			dataArgs := appendSQLArgs(where.args, ps, offset)
+			rows, err := fetchAllToTable(tx, dataSQL, dataArgs...)
+			if err != nil {
+				return err
+			}
+			dataList = rows
+		}
+		stats := counts.toMap()
+		stats["deleteNum"] = deleteNum
+		stats["errorNum"] = errorNum
+		result = map[string]interface{}{
+			"dataList": dataList,
+			"count":    counts.allNum,
+			"pageNum":  pn,
+			"pageSize": ps,
+			"stats":    stats,
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 const maxExportTaskItemRows = 50000
 
 // GetJobTaskItemsForExport fetches filtered task items bounded by limit for CSV export.

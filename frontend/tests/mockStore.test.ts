@@ -151,4 +151,98 @@ describe("mock store", () => {
     expect(page.dataList).toHaveLength(10);
     expect(page.dataList.every((item) => item.status === 1)).toBe(true);
   });
+
+  it("supports enable_all mirror preview guard and recent task items filtered by storage", () => {
+    const store = createMockStore({
+      engines: [{ id: 1, kind: "rclone", remark: "内置存储", url: "rclone://native" }],
+      jobs: [
+        {
+          id: 1,
+          enable: 0,
+          method: 0,
+          isCron: 3,
+          alistId: 1,
+          remark: "自动备份",
+          srcPath: ["/本地/Photos"],
+          dstPath: ["/Aliyun/Photos"],
+        },
+        {
+          id: 2,
+          enable: 0,
+          method: 1,
+          isCron: 3,
+          alistId: 1,
+          remark: "未预览镜像",
+          srcPath: ["/本地/Media"],
+          dstPath: ["/Aliyun/Media"],
+        },
+        {
+          id: 3,
+          enable: 1,
+          method: 0,
+          isCron: 2,
+          alistId: 1,
+          remark: "本地互备",
+          srcPath: ["/本地/A"],
+          dstPath: ["/本地/B"],
+        },
+      ],
+      history: {
+        1: [{ id: 501, status: 2, createTime: 1_700_000_010 }],
+        3: [{ id: 503, status: 7, createTime: 1_700_000_020 }],
+      },
+      taskItems: {
+        501: [
+          {
+            id: 11,
+            taskId: 501,
+            srcPath: "/本地/Photos/1.jpg",
+            dstPath: "/Aliyun/Photos/1.jpg",
+            fileName: "1.jpg",
+            fileSize: 100,
+            isPath: 0,
+            type: 0,
+            status: 2,
+            createTime: 1_700_000_010,
+          },
+        ],
+        503: [
+          {
+            id: 12,
+            taskId: 503,
+            srcPath: "/本地/A/doc.txt",
+            dstPath: "/本地/B/doc.txt",
+            fileName: "doc.txt",
+            fileSize: 200,
+            isPath: 0,
+            type: 0,
+            status: 7,
+            errMsg: "disk full",
+            createTime: 1_700_000_020,
+          },
+        ],
+      },
+    });
+
+    const enableRes = store.batchJobAction("enable_all");
+    expect(enableRes.succeeded).toBe(1);
+    expect(enableRes.skipped).toBe(1);
+    expect(enableRes.skippedJobs?.[0]?.jobId).toBe(2);
+    expect(store.listJobs().dataList.find((j) => j.id === 1)?.enable).toBe(1);
+    expect(store.listJobs().dataList.find((j) => j.id === 2)?.enable).toBe(0);
+
+    const disableRes = store.batchJobAction("disable_all");
+    expect(disableRes.succeeded).toBe(1);
+    expect(store.listJobs().dataList.find((j) => j.id === 1)?.enable).toBe(0);
+
+    const aliyunRecent = store.listRecentTaskItems({ storage: "Aliyun" });
+    expect(aliyunRecent.count).toBe(1);
+    expect(aliyunRecent.dataList[0].jobName).toBe("自动备份");
+    expect(aliyunRecent.stats.successNum).toBe(1);
+
+    const localRecent = store.listRecentTaskItems({ storage: "__local__" });
+    expect(localRecent.count).toBe(1);
+    expect(localRecent.dataList[0].jobName).toBe("本地互备");
+    expect(localRecent.stats.errorNum).toBe(1);
+  });
 });

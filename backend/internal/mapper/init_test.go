@@ -266,6 +266,9 @@ func TestEnsureIndexesCreatesTaskStatusTimeIndex(t *testing.T) {
 	if !indexExists(testDB, "idx_job_task_item_task_is_path_time") {
 		t.Fatalf("expected idx_job_task_item_task_is_path_time to exist")
 	}
+	if !indexExists(testDB, "idx_job_task_item_recent") {
+		t.Fatalf("expected idx_job_task_item_recent to exist")
+	}
 }
 
 // A database created by an earlier release still has the FTS5 index, its

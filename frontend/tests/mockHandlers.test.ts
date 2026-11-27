@@ -166,4 +166,78 @@ describe("mock HTTP handlers", () => {
     });
     expect(page.data.dataList.every((item) => item.status === 1)).toBe(true);
   });
+
+  it("handles GET /job/items/recent and POST /job/batch enable_all/disable_all", async () => {
+    resetMockStore({
+      engines: [{ id: 1, kind: "rclone", remark: "内置存储", url: "rclone://native" }],
+      jobs: [
+        {
+          id: 1,
+          enable: 0,
+          method: 0,
+          isCron: 3,
+          alistId: 1,
+          remark: "连续任务",
+          srcPath: ["/本地/Docs"],
+          dstPath: ["/OneDrive/Docs"],
+        },
+        {
+          id: 2,
+          enable: 0,
+          method: 1,
+          isCron: 3,
+          alistId: 1,
+          remark: "未预览镜像",
+          srcPath: ["/本地/Media"],
+          dstPath: ["/OneDrive/Media"],
+        },
+      ],
+      history: {
+        1: [{ id: 801, status: 2, createTime: 1_700_000_500 }],
+      },
+      taskItems: {
+        801: [
+          {
+            id: 1,
+            taskId: 801,
+            srcPath: "/本地/Docs/a.pdf",
+            dstPath: "/OneDrive/Docs/a.pdf",
+            fileName: "a.pdf",
+            fileSize: 512,
+            isPath: 0,
+            type: 0,
+            status: 2,
+            createTime: 1_700_000_500,
+          },
+        ],
+      },
+    });
+
+    const enableRes = await json<{
+      code: number;
+      data: { succeeded: number; skipped: number; skippedJobs: { jobId: number }[] };
+    }>(
+      await fetch(`${apiUrl}/job/batch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "enable_all" }),
+      }),
+    );
+    expect(enableRes.data.succeeded).toBe(1);
+    expect(enableRes.data.skipped).toBe(1);
+    expect(enableRes.data.skippedJobs[0].jobId).toBe(2);
+
+    const recent = await json<{
+      code: number;
+      data: { count: number; dataList: { jobName: string }[]; stats: { sumSize: number } };
+    }>(await fetch(`${apiUrl}/job/items/recent?storage=OneDrive&pageNum=1&pageSize=10`));
+    expect(recent.data.count).toBe(1);
+    expect(recent.data.dataList[0].jobName).toBe("连续任务");
+    expect(recent.data.stats.sumSize).toBe(512);
+
+    const badReq = await json<{ code: number }>(
+      await fetch(`${apiUrl}/job/items/recent?pageNum=abc`),
+    );
+    expect(badReq.code).toBe(500);
+  });
 });
