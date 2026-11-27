@@ -43,6 +43,7 @@ import { useResource } from "./lib/hooks";
 import { createGuardedRefresh } from "./lib/sessionGuard";
 import { buildTaskSearchParams } from "./lib/taskForm";
 import {
+  jobStatusDotClass,
   resolveEffectiveSyncStatus,
   syncStatusLabels,
 } from "./components/SyncStatus";
@@ -84,28 +85,6 @@ const sections = [
 export const SessionContext = createContext<{ development: boolean }>({
   development: false,
 });
-
-function jobStatusDotClass(job: JobItem): string {
-  if (job.legacyOpenList) return "job-dot job-dot--error";
-  if (job.syncStatus?.state === "error")
-    return "job-dot job-dot--error";
-  if (job.running && job.paused) return "job-dot job-dot--paused";
-  if (
-    job.running ||
-    job.syncStatus?.state === "syncing" ||
-    job.syncStatus?.state === "scanning" ||
-    job.syncStatus?.state === "pending"
-  )
-    return "job-dot job-dot--running";
-  if (job.queued) return "job-dot job-dot--queued";
-  if (job.syncStatus?.state === "waiting_window")
-    return "job-dot job-dot--paused";
-  if (job.enable !== 1 || job.syncStatus?.state === "paused")
-    return "job-dot job-dot--disabled";
-  if (job.lastStatus && [3, 5, 6, 7].includes(job.lastStatus) && !job.syncStatus)
-    return "job-dot job-dot--error";
-  return "job-dot job-dot--synced";
-}
 
 function Shell({ children, version }: { children: ReactNode; version: string }) {
   const { pathname, search } = useLocation();
@@ -259,6 +238,15 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
       <div className="app-shell">
         <aside className="app-sidebar" aria-label="主菜单">
           <nav aria-label="主导航">
+            <NavLink
+              to={sections[0].path}
+              className={({ isActive }) =>
+                `nav-link${isActive ? " selected" : ""}`
+              }
+            >
+              {sections[0].icon}
+              <span className="nav-label">{sections[0].label}</span>
+            </NavLink>
             <div className="task-nav">
               <NavLink
                 to="/sync"
@@ -333,7 +321,7 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
                 })}
               </div>
             )}
-            {[sections[0], ...sections.slice(2, -1)].map((section) => (
+            {sections.slice(2, -1).map((section) => (
               <NavLink
                 key={section.path}
                 to={section.path}
@@ -363,11 +351,17 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
           <Suspense fallback={<LoadingPanel />}>{children}</Suspense>
         </main>
         <nav className="mobile-navigation" aria-label="主导航">
-          {[sections[1], sections[0], ...sections.slice(2)].map((s) => (
+          {sections.map((s) => (
             <NavLink
               key={s.path}
               to={s.path}
-              className={({ isActive }) => (isActive || (s.path === "/sync" && pathname.startsWith("/tasks")) ? "active" : "")}
+              className={({ isActive }) =>
+                isActive ||
+                (s.path === "/sync" && pathname.startsWith("/tasks")) ||
+                (s.path === "/engines" && pathname.startsWith("/storages"))
+                  ? "active"
+                  : ""
+              }
             >
               {s.icon}
               <span>{s.label}</span>
@@ -425,14 +419,14 @@ function Workspace() {
     <SessionContext value={session.data}>
       <Shell version={session.data.version}>
         <Routes>
-          <Route path="/sync" element={<Tasks key="sync" overview />} />
           <Route path="/dashboard" element={<DashboardRoute />} />
+          <Route path="/sync" element={<Tasks key="sync" overview />} />
           <Route path="/tasks" element={<Tasks key="details" />} />
           <Route path="/engines" element={<Engines />} />
           <Route path="/storages" element={<Engines />} />
           <Route path="/notifications" element={<Notifications />} />
           <Route path="/settings" element={<Settings />} />
-          <Route path="*" element={<Navigate to="/sync" replace />} />
+          <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>
       </Shell>
     </SessionContext>

@@ -1,4 +1,4 @@
-import type { NativeExtraFlags, SyncStatus } from "../types";
+import type { JobItem, NativeExtraFlags, SyncStatus } from "../types";
 import { formatTimestamp } from "../utils/date";
 
 export type SyncDirectionKey = "oneway" | "bidirectional";
@@ -176,4 +176,27 @@ export function resolveEffectiveSyncStatus(job: {
     error: "",
     failures: 0,
   };
+}
+
+export function jobStatusDotClass(job: JobItem): string {
+  if (job.legacyOpenList) return "job-dot job-dot--error";
+  if (job.syncStatus?.state === "error") return "job-dot job-dot--error";
+  if (job.running && job.paused) return "job-dot job-dot--paused";
+  if (
+    job.running ||
+    job.syncStatus?.state === "syncing" ||
+    job.syncStatus?.state === "scanning" ||
+    job.syncStatus?.state === "pending"
+  ) {
+    return "job-dot job-dot--running";
+  }
+  if (job.queued) return "job-dot job-dot--queued";
+  if (job.syncStatus?.state === "waiting_window") return "job-dot job-dot--paused";
+  if (job.enable !== 1 || job.syncStatus?.state === "paused") {
+    return "job-dot job-dot--disabled";
+  }
+  if (job.lastStatus && [3, 5, 6, 7].includes(job.lastStatus) && !job.syncStatus) {
+    return "job-dot job-dot--error";
+  }
+  return "job-dot job-dot--synced";
 }

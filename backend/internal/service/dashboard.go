@@ -747,17 +747,27 @@ func taskItemStatusLabel(s int) string {
 	}
 }
 
-// ExportTaskItems exports filtered task items for a task as CSV.
+// ExportTaskItems exports filtered task items for a task or job as CSV.
 func ExportTaskItems(params map[string]interface{}, format string) (string, string, []byte, error) {
 	if format := strings.ToLower(strings.TrimSpace(format)); format != "" && format != "csv" {
 		return "", "", nil, publicError("仅支持 CSV 导出")
 	}
 	taskID := util.ToInt64(params["taskId"])
-	if taskID <= 0 {
+	jobID := util.ToInt64(params["jobId"])
+	var filename string
+	switch {
+	case taskID > 0:
+		if _, err := mapper.GetJobTaskByID(taskID); err != nil {
+			return "", "", nil, publicErrorIf(err, msg.T(msg.TaskNotFound))
+		}
+		filename = fmt.Sprintf("opensync-task-%d-items.csv", taskID)
+	case jobID > 0:
+		if _, err := mapper.GetJobByID(jobID); err != nil {
+			return "", "", nil, publicErrorIf(err, msg.T(msg.JobNotFound))
+		}
+		filename = fmt.Sprintf("opensync-job-%d-items.csv", jobID)
+	default:
 		return "", "", nil, publicError(msg.T(msg.LostPart))
-	}
-	if _, err := mapper.GetJobTaskByID(taskID); err != nil {
-		return "", "", nil, publicErrorIf(err, msg.T(msg.TaskNotFound))
 	}
 	items, err := mapper.GetJobTaskItemsForExport(params, 50000)
 	if err != nil {
@@ -792,6 +802,5 @@ func ExportTaskItems(params map[string]interface{}, format string) (string, stri
 		})
 	}
 	w.Flush()
-	filename := fmt.Sprintf("opensync-task-%d-items.csv", taskID)
 	return filename, "text/csv; charset=utf-8", buf.Bytes(), nil
 }

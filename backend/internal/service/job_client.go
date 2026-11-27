@@ -523,6 +523,7 @@ func NewJobClient(job map[string]interface{}, isInit bool) (*JobClient, error) {
 
 type markedJobRunOptions struct {
 	sourceTaskID     int64
+	retryJobItems    bool
 	statuses         []taskStatus
 	itemIDs          []int64
 	manual           bool
@@ -557,7 +558,7 @@ func (jc *JobClient) runMarkedJobConfig(sourceTaskID int64, statuses []taskStatu
 func (jc *JobClient) runMarkedJobWithOptions(opts markedJobRunOptions) {
 	// A manual or scheduled full run can drain the same durable inbox. Repair
 	// and historical retries must never acknowledge unrelated pending changes.
-	if opts.syncGeneration == 0 && opts.sourceTaskID == 0 && len(opts.onlyFiles) == 0 {
+	if opts.syncGeneration == 0 && opts.sourceTaskID == 0 && !opts.retryJobItems && len(opts.onlyFiles) == 0 {
 		job := jc.jobSnapshot()
 		extra, _, _ := parseNativeExtraFlags(job["extraFlags"])
 		if util.ToInt(job["isCron"]) == 3 || extra.WatchEnable {
@@ -680,6 +681,10 @@ func (jc *JobClient) runMarkedJobWithOptions(opts markedJobRunOptions) {
 		if len(itemIDs) > 0 {
 			task.RetryItemIDs = append([]int64(nil), itemIDs...)
 		}
+	} else if opts.retryJobItems && len(itemIDs) > 0 {
+		task.RetryJobItems = true
+		task.RetryStatuses = append([]taskStatus(nil), statuses...)
+		task.RetryItemIDs = append([]int64(nil), itemIDs...)
 	}
 	if len(opts.onlyFiles) > 0 {
 		task.OnlyFiles = append([]string(nil), opts.onlyFiles...)
@@ -926,6 +931,47 @@ func (jc *JobClient) DoRetrySelectedTaskItems(sourceTaskID int64, itemIDs []int6
 		return publicError(msg.T(msg.NoFailedTaskItems))
 	}
 	go jc.runMarkedJobConfig(sourceTaskID, retryableTaskStatuses, itemIDs, false)
+	return nil
+}
+
+// DoRetryJobItems replays the specified retryable item IDs across tasks of this job.
+func (jc *JobClient) DoRetryJobItems(itemIDs []int64) error {
+	if jc.isClosing() {
+		return publicError(msg.T(msg.JobNotFound))
+	}
+	if len(itemIDs) == 0 {
+		return publicError(msg.T(msg.NoRetryItemSelected))
+	}
+	historyCleanupMu.Lock()
+	if !jc.tryMarkDoing() {
+		historyCleanupMu.Unlock()
+		return publicError(msg.T(msg.JobRunning))
+	}
+	if jc.isClosing() {
+		jc.markDone()
+		historyCleanupMu.Unlock()
+		return publicError(msg.T(msg.JobNotFound))
+	}
+	if !jc.enabled() {
+		jc.markDone()
+		historyCleanupMu.Unlock()
+		return publicError(msg.T(msg.DisabledJobCannotRun))
+	}
+	historyCleanupMu.Unlock()
+	count, err := mapper.CountJobTaskItemsByJobAndIDs(jc.idSnapshot(), itemIDs, retryableStatusValues())
+	if err != nil {
+		jc.markDone()
+		return fmt.Errorf("count retryable items: %w", err)
+	}
+	if count == 0 {
+		jc.markDone()
+		return publicError(msg.T(msg.NoRetryItemSelected))
+	}
+	go jc.runMarkedJobWithOptions(markedJobRunOptions{
+		retryJobItems: true,
+		statuses:      retryableTaskStatuses,
+		itemIDs:       itemIDs,
+	})
 	return nil
 }
 

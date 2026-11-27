@@ -85,6 +85,7 @@ func boolToTaskItemObject(value bool) taskItemObject {
 type JobTaskItem struct {
 	ID          int64
 	TaskID      int64
+	JobID       int64
 	SrcPath     string
 	DstPath     string
 	IsPath      taskItemObject
@@ -152,6 +153,9 @@ func (item JobTaskItem) ToMap() map[string]interface{} {
 	}
 	if item.ID != 0 {
 		result["id"] = item.ID
+	}
+	if item.JobID > 0 {
+		result["jobId"] = item.JobID
 	}
 	return result
 }

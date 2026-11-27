@@ -1718,7 +1718,9 @@ func (jt *JobTask) runNative() {
 			return jt.context().Err()
 		}
 		var err error
-		if len(jt.RetryItemIDs) > 0 {
+		if jt.RetryJobItems && len(jt.RetryItemIDs) > 0 {
+			err = mapper.ForEachJobTaskItemsByJobAndIDs(jt.jobIDSnapshot(), jt.RetryItemIDs, retryableStatusValues(), retryTaskItemBatchSize, collect)
+		} else if len(jt.RetryItemIDs) > 0 {
 			err = mapper.ForEachJobTaskItemsByIDs(jt.RetrySourceTaskID, jt.RetryItemIDs, retryableStatusValues(), retryTaskItemBatchSize, collect)
 		} else {
 			err = mapper.ForEachJobTaskItemsByStatuses(jt.RetrySourceTaskID, retryableStatusValues(), retryTaskItemBatchSize, collect)

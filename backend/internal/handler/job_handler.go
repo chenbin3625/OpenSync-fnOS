@@ -282,6 +282,29 @@ func UpdateJob(c *gin.Context) {
 		return
 	}
 
+	if req.ID != nil && req.Action != nil {
+		if req.Pause != nil || req.Abort != nil || req.BwLimit != nil || *req.Action != "retry" || len(req.ItemIDs) == 0 {
+			respondError(c, msg.T(msg.LostPart))
+			return
+		}
+		jobID, err := req.ID.parse()
+		if err != nil {
+			respondError(c, err.Error())
+			return
+		}
+		itemIDs := make([]int64, 0, len(req.ItemIDs))
+		for i := range req.ItemIDs {
+			itemID, err := req.ItemIDs[i].parse()
+			if err != nil {
+				respondError(c, err.Error())
+				return
+			}
+			itemIDs = append(itemIDs, itemID)
+		}
+		handleServiceVoid(c, func() error { return service.RetryJobItems(jobID, itemIDs) })
+		return
+	}
+
 	if req.Action != nil || len(req.ItemIDs) > 0 || req.BwLimit != nil {
 		respondError(c, msg.T(msg.LostPart))
 		return
@@ -437,20 +460,59 @@ func DeleteTasksBatch(c *gin.Context) {
 	})
 }
 
-// ExportTaskItems handles GET /svr/job/items/export
-func ExportTaskItems(c *gin.Context) {
-	taskIDStr := c.Query("taskId")
-	if _, err := parseRequiredID(taskIDStr); err != nil {
+func buildJobItemFilterReq(c *gin.Context) map[string]interface{} {
+	req := map[string]interface{}{
+		"pageSize":         c.Query("pageSize"),
+		"pageNum":          c.Query("pageNum"),
+		"status":           c.Query("status"),
+		"type":             c.Query("type"),
+		"isPath":           c.Query("isPath"),
+		"hasError":         c.Query("hasError"),
+		"keyword":          c.Query("keyword"),
+		"startTime":        c.Query("startTime"),
+		"endTime":          c.Query("endTime"),
+		"endTimeExclusive": c.Query("endTimeExclusive"),
+	}
+	if statusIn := c.QueryArray("statusIn"); len(statusIn) > 0 {
+		req["statusIn"] = statusIn
+	}
+	return req
+}
+
+// GetJobItems handles GET /svr/job/items?jobId=...
+func GetJobItems(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	jobID, err := parseRequiredID(c.Query("jobId"))
+	if err != nil {
 		respondError(c, msg.T(msg.LostPart))
 		return
 	}
-	req := map[string]interface{}{
-		"taskId":   taskIDStr,
-		"status":   c.Query("status"),
-		"type":     c.Query("type"),
-		"isPath":   c.Query("isPath"),
-		"hasError": c.Query("hasError"),
-		"keyword":  c.Query("keyword"),
+	req := buildJobItemFilterReq(c)
+	req["jobId"] = jobID
+	removeEmptyStringValues(req)
+	handleService(c, func() (interface{}, error) { return service.GetJobItemList(req) })
+}
+
+// ExportTaskItems handles GET /svr/job/items/export
+func ExportTaskItems(c *gin.Context) {
+	taskIDStr := c.Query("taskId")
+	jobIDStr := c.Query("jobId")
+	req := buildJobItemFilterReq(c)
+	if taskIDStr != "" {
+		if _, err := parseRequiredID(taskIDStr); err != nil {
+			respondError(c, msg.T(msg.LostPart))
+			return
+		}
+		req["taskId"] = taskIDStr
+	} else if jobIDStr != "" {
+		if _, err := parseRequiredID(jobIDStr); err != nil {
+			respondError(c, msg.T(msg.LostPart))
+			return
+		}
+		req["jobId"] = jobIDStr
+	} else {
+		respondError(c, msg.T(msg.LostPart))
+		return
 	}
 	removeEmptyStringValues(req)
 	format := c.Query("format")

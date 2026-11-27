@@ -9,6 +9,7 @@ import type {
   FilterTestResult,
   JobCheckResult,
   JobItem,
+  JobRecentTaskError,
   NativeAboutInfo,
   NativeAuthStepSnapshot,
   NativeBrowseResult,
@@ -28,7 +29,9 @@ import type {
   SystemBackupPayload,
   SystemImportSummary,
   SystemSettings,
+  TaskErrorGroup,
   TaskItem,
+  TaskItemPageData,
   TaskRecord,
 } from "../types";
 import {
@@ -48,6 +51,8 @@ export type MockStoreSeed = {
   notifications?: NotifyInput[];
   settings?: Partial<SystemSettings>;
   history?: Record<number, Partial<TaskRecord>[]>;
+  taskItems?: Record<number, Partial<TaskItem>[]>;
+  jobItems?: Record<number, Partial<TaskItem>[]>;
 };
 
 // Mirrors backend/internal/config/config.go defaults; mock mode must not show
@@ -563,6 +568,7 @@ export class MockStore {
   private currentTasks = new Map<number, CurrentTaskData>();
   private currentItems = new Map<number, TaskItem[]>();
   private taskItems = new Map<number, TaskItem[]>();
+  private seededJobItems = new Map<number, TaskItem[]>();
   private nextEngineId: number;
   private nextJobId: number;
   private nextNotifyId: number;
@@ -581,6 +587,7 @@ export class MockStore {
   private nextAuthSessionSeq = 1;
   private engineHealthMap = new Map<number, EngineHealth>();
   private nativeRemotes = new Map<string, Record<string, string>>();
+  private createdDirs = new Map<string, Set<string>>();
   private nativeLocalRoots: NativeLocalRoot[] = [
     { path: "/vol1/1000/Photos", id: "Photos~a1b2c3d4e5f6" },
     { path: "/vol2/1000/Backup", id: "Backup~1234567890ab" },
@@ -661,6 +668,48 @@ export class MockStore {
       this.histories.set(this.jobs[0].id, createDemoTaskRecords());
     }
 
+    if (seed.taskItems) {
+      for (const [taskId, items] of Object.entries(seed.taskItems)) {
+        this.taskItems.set(
+          Number(taskId),
+          items.map((item, index) => ({
+            id: numberValue(item.id, 10000 + index),
+            taskId: Number(taskId),
+            fileName: item.fileName ?? `file-${index + 1}.dat`,
+            srcPath: item.srcPath ?? "/Photos",
+            dstPath: item.dstPath ?? "/Backup/Nightly",
+            isPath: item.isPath ?? 0,
+            fileSize: item.fileSize ?? 0,
+            type: item.type ?? 0,
+            status: numberValue(item.status, 2),
+            errMsg: item.errMsg,
+            createTime: numberValue(item.createTime, now()),
+          })),
+        );
+      }
+    }
+
+    if (seed.jobItems) {
+      for (const [jobId, items] of Object.entries(seed.jobItems)) {
+        this.seededJobItems.set(
+          Number(jobId),
+          items.map((item, index) => ({
+            id: numberValue(item.id, 20000 + index),
+            taskId: item.taskId,
+            fileName: item.fileName ?? `file-${index + 1}.dat`,
+            srcPath: item.srcPath ?? "/Photos",
+            dstPath: item.dstPath ?? "/Backup/Nightly",
+            isPath: item.isPath ?? 0,
+            fileSize: item.fileSize ?? 0,
+            type: item.type ?? 0,
+            status: numberValue(item.status, 2),
+            errMsg: item.errMsg,
+            createTime: numberValue(item.createTime, now()),
+          })),
+        );
+      }
+    }
+
     if (seed.jobs === undefined && this.jobs[0]) this.runJob(this.jobs[0].id);
   }
 
@@ -722,24 +771,42 @@ export class MockStore {
   // [{"path": "<name>"}]; the frontend tolerates both shapes, so mock mode
   // should exercise the real one.
   listPaths(path: string): { path: string }[] {
-    if (path === "/") {
+    const clean = path === "/" ? "/" : `/${path.replace(/^\/+|\/+$/g, "")}`;
+    const mergeCreated = (base: { path: string }[]) => {
+      const extra = this.createdDirs.get(clean);
+      if (!extra?.size) return base;
+      const seen = new Set(base.map((item) => item.path));
+      const merged = [...base];
+      for (const name of extra) {
+        if (!seen.has(name)) {
+          seen.add(name);
+          merged.push({ path: name });
+        }
+      }
+      return merged;
+    };
+    if (clean === "/") {
       return [...new Set([
         ...defaultPaths["/"].map((item) => item.name),
         ...(this.nativeLocalRoots.length ? ["本地"] : []),
         ...this.nativeRemotes.keys(),
       ])].map((name) => ({ path: name }));
     }
-    if (path === "/本地") return this.nativeLocalRoots.map((root) => ({ path: root.id }));
-    const [, mount, ...relative] = path.split("/");
+    if (clean === "/本地") return this.nativeLocalRoots.map((root) => ({ path: root.id }));
+    const [, mount, ...relative] = clean.split("/");
     if (this.nativeRemotes.has(mount)) {
-      return (defaultPaths[`/${relative.join("/")}`] || []).map((item) => ({ path: item.name }));
+      return mergeCreated(
+        (defaultPaths[`/${relative.join("/")}`] || []).map((item) => ({ path: item.name })),
+      );
     }
     if (mount === "本地") {
       const [root, ...folders] = relative;
       const label = this.nativeLocalRoots.find((item) => item.id === root)?.path.split("/").at(-1);
-      return (defaultPaths[`/${[label, ...folders].join("/")}`] || []).map((item) => ({ path: item.name }));
+      return mergeCreated(
+        (defaultPaths[`/${[label, ...folders].join("/")}`] || []).map((item) => ({ path: item.name })),
+      );
     }
-    return (defaultPaths[path] || []).map((item) => ({ path: item.name }));
+    return mergeCreated((defaultPaths[clean] || []).map((item) => ({ path: item.name })));
   }
 
   saveEngine(input: EngineInput): AlistItem {
@@ -1982,7 +2049,25 @@ export class MockStore {
   }
 
   mkdirNativeStorage(path: string): string | null {
-    if (!path?.trim() || path.trim() === "/") return "请提供有效目录路径";
+    const clean = path?.trim().replace(/^\/+|\/+$/g, "");
+    if (!clean) return "请提供有效目录路径";
+    const segs = clean.split("/").filter(Boolean);
+    if (segs.length < 2 || (segs[0] === "本地" && segs.length < 3)) {
+      return "请先选择上级目录后再创建子文件夹";
+    }
+    let parent = `/${segs[0]}`;
+    for (let i = 1; i < segs.length; i += 1) {
+      const name = segs[i];
+      if (!(segs[0] === "本地" && i === 1)) {
+        let children = this.createdDirs.get(parent);
+        if (!children) {
+          children = new Set();
+          this.createdDirs.set(parent, children);
+        }
+        children.add(name);
+      }
+      parent = `${parent}/${name}`;
+    }
     return null;
   }
 
@@ -2103,6 +2188,7 @@ export class MockStore {
     this.currentTasks.delete(id);
     this.currentItems.delete(id);
     this.histories.delete(id);
+    this.seededJobItems.delete(id);
   }
 
   /** Removes one finished task record, mirroring service.RemoveTask. */
@@ -2237,14 +2323,47 @@ export class MockStore {
     }
   }
 
+  retryJobItems(jobId: number, itemIds: number[]): string | null {
+    const job = this.jobs.find((item) => item.id === jobId);
+    if (!job) return "任务不存在";
+    if (job.enable !== 1) return "任务已暂停，无法重试";
+    if (this.currentTasks.has(jobId)) return "任务正在运行中";
+    const idSet = new Set(itemIds);
+    const matched = this.collectJobItems(jobId).filter(
+      (item) =>
+        typeof item.id === "number" &&
+        idSet.has(item.id) &&
+        item.status !== 2 &&
+        item.status !== 1,
+    );
+    if (matched.length === 0) return "未找到可重试的文件项";
+    const taskId = this.nextTaskId++;
+    const clonedItems = matched.map((item) => ({
+      ...item,
+      taskId,
+      status: 0,
+      progress: 0,
+      errMsg: undefined,
+    }));
+    const task: CurrentTaskData = {
+      ...createDemoTaskView(now(), clonedItems),
+      taskId,
+    };
+    this.currentTasks.set(jobId, task);
+    this.currentItems.set(jobId, clonedItems);
+    this.taskItems.set(taskId, clonedItems);
+    return null;
+  }
+
   updateJobAction(input: {
     id?: number | string;
     taskId?: number | string;
     action?: string;
+    itemIds?: number[];
     pause?: boolean;
     abort?: boolean;
     bwLimit?: string;
-  }): void {
+  }): string | null {
     if (input.taskId !== undefined) {
       const taskId = numberValue(input.taskId, 0);
       if (input.action === "stop") this.stopTask(taskId);
@@ -2254,24 +2373,28 @@ export class MockStore {
       if (input.action === "bwlimit") {
         this.setTaskLiveBwLimit(taskId, input.bwLimit ?? "");
       }
-      return;
+      return null;
     }
     const jobId = numberValue(input.id, 0);
+    if (input.action === "retry") {
+      return this.retryJobItems(jobId, input.itemIds || []);
+    }
     const job = this.jobs.find((item) => item.id === jobId);
-    if (!job) return;
+    if (!job) return null;
     if (input.pause === true) {
       // AbortJob keeps the schedule enabled; PauseJob disables it. Both stop
       // the running task and leave an aborted history row, unlike the old mock
       // which silently deleted the task.
       if (input.abort === true) this.abortJob(jobId);
       else this.pauseJob(jobId);
-      return;
+      return null;
     }
     if (input.pause === false) {
       job.enable = 1;
-      return;
+      return null;
     }
     this.runJob(jobId);
+    return null;
   }
 
   listHistory(
@@ -2358,6 +2481,175 @@ export class MockStore {
     };
   }
 
+  private collectJobItems(jobId: number): TaskItem[] {
+    const combined: TaskItem[] = [];
+    const seenIds = new Set<number | string>();
+    const add = (items: TaskItem[] | undefined, skipInFlight = false) => {
+      if (!items) return;
+      for (const item of items) {
+        if (skipInFlight && (item.status === 0 || item.status === 1)) continue;
+        const key = item.id ?? `${item.taskId ?? 0}:${item.fileName ?? ""}:${combined.length}`;
+        if (seenIds.has(key)) continue;
+        seenIds.add(key);
+        combined.push(item);
+      }
+    };
+    add(this.seededJobItems.get(jobId));
+    const current = this.currentTasks.get(jobId);
+    if (current) {
+      add(this.taskItems.get(current.taskId), true);
+    }
+    for (const rec of this.histories.get(jobId) || []) {
+      add(this.taskItems.get(rec.id));
+    }
+    combined.sort((a, b) => {
+      const dt = (b.createTime || 0) - (a.createTime || 0);
+      if (dt !== 0) return dt;
+      return Number(b.id || 0) - Number(a.id || 0);
+    });
+    return combined;
+  }
+
+  private filterJobTaskItems(
+    items: TaskItem[],
+    params: {
+      status?: number;
+      statusIn?: number[];
+      type?: number;
+      isPath?: number;
+      hasError?: number;
+      keyword?: string;
+      startTime?: number;
+      endTime?: number;
+      endTimeExclusive?: number;
+    },
+  ): TaskItem[] {
+    return items.filter((item) => {
+      if (params.status !== undefined) {
+        if (params.status === -1) {
+          if ([0, 1, 2, 7].includes(item.status)) return false;
+        } else if (!includesStatus(item.status, params.status)) {
+          return false;
+        }
+      } else if (params.statusIn?.length) {
+        if (!params.statusIn.includes(item.status)) return false;
+      }
+      if (params.type !== undefined && item.type !== params.type) return false;
+      if (params.isPath !== undefined && item.isPath !== params.isPath) return false;
+      if (params.startTime !== undefined && (item.createTime || 0) < params.startTime) {
+        return false;
+      }
+      if (params.endTime !== undefined && (item.createTime || 0) > params.endTime) {
+        return false;
+      }
+      if (
+        params.endTimeExclusive !== undefined &&
+        (item.createTime || 0) >= params.endTimeExclusive
+      ) {
+        return false;
+      }
+      if (params.hasError === 1 && !item.errMsg?.trim()) return false;
+      if (params.hasError === 0 && item.errMsg?.trim()) return false;
+      if (params.keyword) {
+        const keyword = params.keyword.toLowerCase();
+        if (
+          !`${item.fileName || ""} ${item.srcPath || ""} ${item.dstPath || ""} ${
+            item.alistTaskId || ""
+          } ${item.errMsg || ""}`
+            .toLowerCase()
+            .includes(keyword)
+        ) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }
+
+  listJobItems(
+    jobId: number,
+    params: {
+      pageNum?: number;
+      pageSize?: number;
+      status?: number;
+      statusIn?: number[];
+      type?: number;
+      isPath?: number;
+      hasError?: number;
+      keyword?: string;
+      startTime?: number;
+      endTime?: number;
+      endTimeExclusive?: number;
+    } = {},
+  ): TaskItemPageData {
+    const allItems = this.collectJobItems(jobId);
+    const scopeItems = this.filterJobTaskItems(allItems, {
+      type: params.type,
+      isPath: params.isPath,
+      startTime: params.startTime,
+      endTime: params.endTime,
+      endTimeExclusive: params.endTimeExclusive,
+    });
+    const errorCounts = new Map<string, number>();
+    for (const item of scopeItems) {
+      const reason = item.errMsg?.trim();
+      if (!reason) continue;
+      errorCounts.set(reason, (errorCounts.get(reason) || 0) + 1);
+    }
+    const errorGroups: TaskErrorGroup[] = [...errorCounts.entries()]
+      .map(([reason, count]) => ({ reason, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 20);
+
+    const recentErrors: JobRecentTaskError[] = [];
+    for (const rec of this.histories.get(jobId) || []) {
+      if (![3, 4, 5, 6, 7].includes(rec.status)) continue;
+      const errMsg = rec.errMsg?.trim();
+      if (!errMsg) continue;
+      if (params.startTime !== undefined && (rec.createTime || 0) < params.startTime) {
+        continue;
+      }
+      if (params.endTime !== undefined && (rec.createTime || 0) > params.endTime) {
+        continue;
+      }
+      if (
+        params.endTimeExclusive !== undefined &&
+        (rec.createTime || 0) >= params.endTimeExclusive
+      ) {
+        continue;
+      }
+      if (params.keyword && !errMsg.toLowerCase().includes(params.keyword.toLowerCase())) {
+        continue;
+      }
+      const recItems = this.taskItems.get(rec.id) || [];
+      const hasFailedItem = recItems.some(
+        (item) => item.status === 7 || Boolean(item.errMsg?.trim()),
+      );
+      if (hasFailedItem) continue;
+      recentErrors.push({
+        id: rec.id,
+        jobId,
+        status: rec.status,
+        errMsg,
+        runTime: rec.runTime || 0,
+        createTime: rec.createTime || 0,
+      });
+      if (recentErrors.length >= 20) break;
+    }
+
+    const filtered = this.filterJobTaskItems(allItems, params);
+    return {
+      dataList: pageDemoRows(
+        filtered,
+        params.pageNum || 1,
+        params.pageSize || 20,
+      ),
+      count: filtered.length,
+      ...(errorGroups.length > 0 ? { errorGroups } : {}),
+      ...(recentErrors.length > 0 ? { recentErrors } : {}),
+    };
+  }
+
   listTaskItems(
     taskId: number,
     params: {
@@ -2369,35 +2661,20 @@ export class MockStore {
       hasError?: number;
       keyword?: string;
     } = {},
-  ): PageData<TaskItem> {
+  ): TaskItemPageData {
     let items = this.taskItems.get(taskId);
     if (!items) {
       items = createDemoTaskItems();
       this.taskItems.set(taskId, items);
     }
-    items = items.filter((item) => {
-      if (params.status !== undefined && !includesStatus(item.status, params.status))
-        return false;
-      if (params.type !== undefined && item.type !== params.type) return false;
-      if (params.isPath !== undefined && item.isPath !== params.isPath) return false;
-      if (params.hasError === 1 && !item.errMsg) return false;
-      if (params.hasError === 0 && item.errMsg) return false;
-      if (params.keyword) {
-        const keyword = params.keyword.toLowerCase();
-        if (
-          !`${item.fileName || ""} ${item.srcPath || ""} ${item.dstPath || ""} ${
-            item.errMsg || ""
-          }`
-            .toLowerCase()
-            .includes(keyword)
-        )
-          return false;
-      }
-      return true;
-    });
+    const filtered = this.filterJobTaskItems(items, params);
     return {
-      dataList: pageDemoRows(items, params.pageNum || 1, params.pageSize || 20),
-      count: items.length,
+      dataList: pageDemoRows(
+        filtered,
+        params.pageNum || 1,
+        params.pageSize || 20,
+      ),
+      count: filtered.length,
     };
   }
 
@@ -2647,9 +2924,11 @@ export class MockStore {
 
   clearJobHistory(jobId: number): number {
     const records = this.histories.get(jobId) || [];
-    const count = records.length;
+    const seeded = this.seededJobItems.get(jobId) || [];
+    const count = records.length + (records.length === 0 ? seeded.length : 0);
     for (const rec of records) this.taskItems.delete(rec.id);
     this.histories.set(jobId, []);
+    this.seededJobItems.delete(jobId);
     return count;
   }
 

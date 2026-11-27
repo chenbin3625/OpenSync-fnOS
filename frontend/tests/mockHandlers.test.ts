@@ -166,4 +166,50 @@ describe("mock HTTP handlers", () => {
     });
     expect(page.data.dataList.every((item) => item.status === 1)).toBe(true);
   });
+
+  it("supports job-level items query, csv export, and cross-batch item retry", async () => {
+    resetMockStore({
+      jobs: [{ id: 3, remark: "汇总记录", enable: 1 }],
+      history: {
+        3: [
+          { id: 301, status: 2, createTime: 100 },
+          { id: 302, status: 6, errMsg: "network unreachable", createTime: 200 },
+        ],
+      },
+      taskItems: {
+        301: [
+          { id: 41, fileName: "ok.jpg", status: 2, createTime: 101 },
+          { id: 42, fileName: "bad.jpg", status: 7, errMsg: "read failed", createTime: 102 },
+        ],
+      },
+    });
+
+    const itemsResp = await fetch(`${apiUrl}/job/items?jobId=3&pageNum=1&pageSize=20`);
+    const itemsBody = await json<{
+      code: number;
+      data: {
+        count: number;
+        errorGroups?: { reason: string; count: number }[];
+        recentErrors?: { errMsg: string }[];
+      };
+    }>(itemsResp);
+    expect(itemsBody.code).toBe(200);
+    expect(itemsBody.data.count).toBe(2);
+    expect(itemsBody.data.errorGroups).toEqual([{ reason: "read failed", count: 1 }]);
+    expect(itemsBody.data.recentErrors?.[0]?.errMsg).toBe("network unreachable");
+
+    const exportResp = await fetch(`${apiUrl}/job/items/export?jobId=3`);
+    expect(exportResp.status).toBe(200);
+    const csv = await exportResp.text();
+    expect(csv).toContain("ok.jpg");
+    expect(csv).toContain("bad.jpg");
+
+    const retryResp = await fetch(`${apiUrl}/job`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "3", action: "retry", itemIds: [42] }),
+    });
+    expect(retryResp.status).toBe(200);
+    expect(await json<{ code: number }>(retryResp)).toMatchObject({ code: 200 });
+  });
 });

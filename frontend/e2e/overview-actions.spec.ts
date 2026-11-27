@@ -223,10 +223,10 @@ test("continuous sync stays on overview and opens realtime details on demand", a
   ).toHaveAttribute("aria-selected", "true");
   await expect(page.locator(".continuous-live-progress")).toBeVisible();
 
-  // 2. Clicking "查看传输明细" navigates to realtime file transfer view.
+  // 2. Clicking "查看传输明细" navigates to unified sync records view.
   await page.getByRole("button", { name: "查看传输明细" }).click();
   await expect(
-    toolbar.getByRole("tab", { name: /实时任务/ }),
+    toolbar.getByRole("tab", { name: /同步记录/ }),
   ).toHaveAttribute("aria-selected", "true");
-  await expect(page).toHaveURL(/jobId=2&tab=realtime$/);
+  await expect(page).toHaveURL(/jobId=2&tab=records$/);
 });

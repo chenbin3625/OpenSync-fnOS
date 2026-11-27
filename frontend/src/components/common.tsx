@@ -347,10 +347,12 @@ export function ActionMenu({
   actions,
   disabled,
   label = "更多操作",
+  size,
 }: {
   actions: MenuAction[];
   disabled?: boolean;
   label?: string;
+  size?: "small" | "default";
 }) {
   return (
     <Dropdown
@@ -368,6 +370,7 @@ export function ActionMenu({
       <Button
         title={label}
         aria-label={label}
+        size={size}
         icon={<IconMoreStroked aria-hidden="true" />}
         theme="borderless"
         type="tertiary"

@@ -58,7 +58,7 @@ func unsafeDeleteTargetMessage(dir, fileName string) string {
 }
 
 func (jt *JobTask) hasRetrySource() bool {
-	return jt.RetrySourceTaskID > 0
+	return jt.RetrySourceTaskID > 0 || (jt.RetryJobItems && len(jt.RetryItemIDs) > 0)
 }
 
 func (jt *JobTask) markScanFinished() {

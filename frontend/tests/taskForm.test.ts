@@ -418,17 +418,18 @@ describe("existing synchronization contracts", () => {
     expect(findBatchMoveJobs("stop_all", jobs)).toEqual([]);
   });
 
-  it("keeps explicit realtime and history tabs stable without auto-jumping on short sync batches", () => {
+  it("keeps explicit overview and records tabs stable without auto-jumping on short sync batches", () => {
     const idle = { settled: true, hasCurrentTask: false };
     expect(parseTaskTab(null)).toBeNull();
     expect(parseTaskTab("invalid")).toBeNull();
-    expect(parseTaskTab("realtime")).toBe("realtime");
+    expect(parseTaskTab("realtime")).toBeNull();
+    expect(parseTaskTab("history")).toBeNull();
+    expect(parseTaskTab("records")).toBe("records");
 
-    expect(resolveTaskTab("realtime", idle)).toBe("realtime");
-    expect(resolveTaskTab("realtime", { settled: true, hasCurrentTask: true })).toBe(
-      "realtime",
+    expect(resolveTaskTab("records", idle)).toBe("records");
+    expect(resolveTaskTab("records", { settled: true, hasCurrentTask: true })).toBe(
+      "records",
     );
-    expect(resolveTaskTab("history", idle)).toBe("history");
     expect(
       resolveTaskTab(null, { settled: true, hasCurrentTask: true, jobRunning: true }),
     ).toBe("overview");
@@ -440,7 +441,7 @@ describe("existing synchronization contracts", () => {
     );
   });
 
-  it("builds task navigation params that open Cloud Sync overview and preserve history", () => {
+  it("builds task navigation params that open Cloud Sync overview and preserve records", () => {
     expect(
       buildTaskSearchParams({ id: 2, running: true }, { onTasksPage: false }).toString(),
     ).toBe("jobId=2");
@@ -448,25 +449,19 @@ describe("existing synchronization contracts", () => {
       buildTaskSearchParams({ id: 2, running: false }, { onTasksPage: false }).toString(),
     ).toBe("jobId=2");
 
-    // Switching from history to another job keeps history
+    // Switching from records to another job keeps records
     expect(
       buildTaskSearchParams(
         { id: 2, running: true },
-        { onTasksPage: true, currentSearch: "jobId=1&tab=history", activeJobId: 1 },
+        { onTasksPage: true, currentSearch: "jobId=1&tab=records", activeJobId: 1 },
       ).toString(),
-    ).toBe("jobId=2&tab=history");
+    ).toBe("jobId=2&tab=records");
 
-    // Switching from overview or realtime to another job lands cleanly on overview
+    // Switching from overview to another job lands cleanly on overview
     expect(
       buildTaskSearchParams(
         { id: 2, running: false },
         { onTasksPage: true, currentSearch: "jobId=1&tab=overview", activeJobId: 1 },
-      ).toString(),
-    ).toBe("jobId=2");
-    expect(
-      buildTaskSearchParams(
-        { id: 2, running: false },
-        { onTasksPage: true, currentSearch: "jobId=1&tab=realtime", activeJobId: 1 },
       ).toString(),
     ).toBe("jobId=2");
 

@@ -126,4 +126,29 @@ describe("remoteDirCache", () => {
     ]);
     expect(loader).toHaveBeenCalledTimes(2);
   });
+
+  it("notifies subscribers when forced refreshes update a directory", async () => {
+    const loader = vi.fn().mockResolvedValueOnce([{ name: "Existing" }]);
+    const cache = createRemoteDirCache(loader);
+    const events: { engineId: number; path: string; entries: { name?: string }[] }[] = [];
+    const unsubscribe = cache.subscribe?.((event) => events.push(event));
+
+    await cache.fetchPaths(1, "/Cloud");
+    loader.mockResolvedValueOnce([{ name: "Existing" }, { name: "Created" }]);
+    await cache.fetchPaths(1, "/Cloud", { force: true });
+
+    expect(events).toEqual([
+      { engineId: 1, path: "/Cloud", entries: [{ name: "Existing" }] },
+      {
+        engineId: 1,
+        path: "/Cloud",
+        entries: [{ name: "Existing" }, { name: "Created" }],
+      },
+    ]);
+
+    unsubscribe?.();
+    loader.mockResolvedValueOnce([{ name: "AfterUnsub" }]);
+    await cache.fetchPaths(1, "/Cloud", { force: true });
+    expect(events).toHaveLength(2);
+  });
 });

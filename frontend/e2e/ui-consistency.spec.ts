@@ -179,7 +179,7 @@ test("320px task controls and realtime status tabs stay on one row", async ({
     ),
   ).toBeLessThan(8);
 
-  await page.goto("/app/opensync/tasks?jobId=1&tab=realtime");
+  await page.goto("/app/opensync/tasks?jobId=1&tab=records");
   const statusTabs = page.locator(".execution-tabs").getByRole("tab");
   await expect(statusTabs).toHaveCount(5);
   const first = await statusTabs.first().boundingBox();
@@ -219,7 +219,7 @@ test("320px settings and overview labels keep a single line", async ({
   await page.goto("/app/opensync/tasks?jobId=1&tab=overview");
   const latestLabel = page
     .locator(".info-row")
-    .filter({ hasText: "最近同步批次" })
+    .filter({ hasText: "最近同步" })
     .locator(":scope > span");
   await expect(latestLabel).toBeVisible();
   expect(

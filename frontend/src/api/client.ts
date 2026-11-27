@@ -560,6 +560,27 @@ export const api = {
     taskId: number | string,
     params: Record<string, unknown> = {},
   ) => buildApiUrl("/job/items/export", { taskId, ...params }),
+  jobItems: (
+    jobId: number | string,
+    params: Record<string, unknown>,
+    signal?: AbortSignal,
+  ) =>
+    request<TaskItemPageData>("/job/items", {
+      params: { jobId, ...params },
+      signal,
+    }),
+  exportJobItemsUrl: (
+    jobId: number | string,
+    params: Record<string, unknown> = {},
+  ) => buildApiUrl("/job/items/export", { jobId, ...params }),
+  retryJobItems: (jobId: number, itemIds: number[]) =>
+    request("/job", {
+      method: "PUT",
+      data: { id: String(jobId), action: "retry", itemIds },
+    }).then((result) => {
+      invalidateJobsCache();
+      return result;
+    }),
   taskAction: (
     taskId: number,
     action: "stop" | "retry" | "pause" | "resume" | "bwlimit",

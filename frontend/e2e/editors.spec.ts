@@ -1115,6 +1115,7 @@ test("task editor quick-enables end-to-end crypt storage for remote destination"
       usedByCrypts: [],
     },
   ];
+  const createdDirs = new Map<string, string[]>();
   let createdStoragePayload: Record<string, unknown> | null = null;
 
   await page.route("**/app/opensync/svr/**", async (route) => {
@@ -1128,6 +1129,21 @@ test("task editor quick-enables end-to-end crypt storage for remote destination"
 
     if (url.pathname.endsWith("/session")) {
       return success({ uid: 1, development: false, version: "test" });
+    }
+    if (url.pathname.endsWith("/native/storage/mkdir") && request.method() === "POST") {
+      const body = request.postDataJSON() as { path: string };
+      const segs = body.path.replace(/^\/+|\/+$/g, "").split("/").filter(Boolean);
+      let acc = "";
+      for (let i = 0; i < segs.length; i += 1) {
+        const parent = acc || "/";
+        acc = `${acc}/${segs[i]}`;
+        if (i >= 1) {
+          const list = createdDirs.get(parent) || [];
+          if (!list.includes(segs[i])) list.push(segs[i]);
+          createdDirs.set(parent, list);
+        }
+      }
+      return success(null);
     }
     if (url.pathname.endsWith("/native/storage") && request.method() === "GET") {
       return success({
@@ -1164,13 +1180,16 @@ test("task editor quick-enables end-to-end crypt storage for remote destination"
           ...remotes.map((r) => ({ name: String(r.name) })),
         ]);
       }
-      if (p === "/本地") {
-        return success([{ name: "Photos" }]);
-      }
-      if (p === "/aliyun") {
-        return success([{ name: "backup" }]);
-      }
-      return success([]);
+      const base =
+        p === "/本地"
+          ? ["Photos"]
+          : p === "/aliyun"
+            ? ["backup"]
+            : [];
+      const extra = createdDirs.get(p) || [];
+      return success(
+        Array.from(new Set([...base, ...extra])).map((name) => ({ name })),
+      );
     }
     if (url.pathname.endsWith("/alist")) {
       return success([
@@ -1200,10 +1219,21 @@ test("task editor quick-enables end-to-end crypt storage for remote destination"
     .filter({ hasText: "新建持续同步任务" })
     .first();
   await expect(editorDialog).toBeVisible();
+  await expect(editorDialog.getByText("手动输入路径")).toHaveCount(0);
+  await expect(editorDialog.getByPlaceholder("/存储名称/存储桶/子目录")).toHaveCount(0);
 
-  const manualInput = editorDialog.getByPlaceholder("/存储名称/存储桶/子目录");
-  await manualInput.fill("/aliyun/backup");
-  await editorDialog.getByRole("button", { name: "添加到目标路径", exact: true }).click();
+  const dstPicker = editorDialog.locator(".remote-paths").nth(1);
+  const popover = page.locator(".remote-paths-dropdown");
+  await dstPicker.locator('[role="combobox"]').click({ position: { x: 2, y: 18 } });
+  await expect(popover).toBeVisible();
+  const aliyunNode = popover.locator('[role="treeitem"][data-key="/aliyun"]');
+  await expect(aliyunNode).toBeVisible();
+  await aliyunNode.locator(".semi-tree-option-expand-icon").click();
+  const backupNode = popover.locator('[role="treeitem"][data-key="/aliyun/backup"]');
+  await expect(backupNode).toBeVisible();
+  await backupNode.locator(".semi-tree-option-label").click();
+  await dstPicker.locator('[role="combobox"]').click({ position: { x: 2, y: 18 } });
+  await expect(popover).toBeHidden();
 
   const cryptBanner = editorDialog.locator(".quick-crypt-banner");
   await expect(cryptBanner).toBeVisible();
@@ -1239,10 +1269,24 @@ test("task editor quick-enables end-to-end crypt storage for remote destination"
     "aliyun-backup-crypt",
   );
 
-  // Add another path beneath the newly created crypt's underlying directory and
-  // verify the modal offers one-click reuse of the existing crypt storage.
-  await manualInput.fill("/aliyun/backup/encrypted/photos");
-  await editorDialog.getByRole("button", { name: "添加到目标路径", exact: true }).click();
+  // Create a nested subfolder under /aliyun/backup directly inside the
+  // directory picker, then verify the modal offers one-click reuse of the
+  // existing crypt storage.
+  await dstPicker.locator('[role="combobox"]').click({ position: { x: 2, y: 18 } });
+  await expect(popover).toBeVisible();
+  await expect(aliyunNode).toBeVisible();
+  if ((await aliyunNode.getAttribute("aria-expanded")) !== "true") {
+    await aliyunNode.locator(".semi-tree-option-expand-icon").click();
+  }
+  await expect(backupNode).toBeVisible();
+  await backupNode.getByRole("button", { name: "在 /aliyun/backup 下新建文件夹" }).click();
+  await popover.getByRole("textbox", { name: "新文件夹名称" }).fill("encrypted/photos");
+  await popover.getByRole("button", { name: "创建", exact: true }).click();
+  await expect(
+    popover.locator('[role="treeitem"][data-key="/aliyun/backup/encrypted/photos"]'),
+  ).toBeVisible();
+  await dstPicker.locator('[role="combobox"]').click({ position: { x: 2, y: 18 } });
+  await expect(popover).toBeHidden();
   await editorDialog
     .locator(".quick-crypt-banner")
     .getByRole("button", { name: "启用端到端加密" })
@@ -1259,4 +1303,160 @@ test("task editor quick-enables end-to-end crypt storage for remote destination"
   await expect(editorDialog.locator(".quick-crypt-banner.is-success")).toContainText(
     "aliyun-backup-crypt",
   );
+});
+
+test("directory picker creates folders inline without manual path input", async ({
+  page,
+}) => {
+  const mkdirCalls: string[] = [];
+  const dirChildren = new Map<string, string[]>([
+    ["/", ["本地", "PhotoCloud", "ReadOnlyMirror"]],
+    ["/本地", ["Photos~a1b2c3d4e5f6"]],
+    ["/本地/Photos~a1b2c3d4e5f6", ["2025"]],
+    ["/PhotoCloud", ["Existing"]],
+    ["/PhotoCloud/Existing", []],
+    ["/ReadOnlyMirror", ["public"]],
+  ]);
+
+  await page.route("**/app/opensync/svr/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const success = (data: unknown) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ code: 200, data, msg: "" }),
+      });
+
+    if (url.pathname.endsWith("/session")) {
+      return success({ uid: 1, development: false, version: "test" });
+    }
+    if (url.pathname.endsWith("/native/storage") && request.method() === "GET") {
+      return success({
+        engineId: 1,
+        enabled: true,
+        remark: "内置存储",
+        maxConcurrentJobs: 2,
+        rcloneAvailable: true,
+        localRoots: [{ id: "Photos~a1b2c3d4e5f6", path: "/vol1/Photos" }],
+        remotes: [
+          {
+            name: "PhotoCloud",
+            type: "webdav",
+            summary: "WebDAV",
+            options: { vendor: "nextcloud" },
+            configuredSecrets: ["pass"],
+            usedByJobs: [],
+            usedByCrypts: [],
+          },
+          {
+            name: "ReadOnlyMirror",
+            type: "http",
+            summary: "HTTP 只读",
+            options: { url: "https://mirror.example.com" },
+            configuredSecrets: [],
+            usedByJobs: [],
+            usedByCrypts: [],
+          },
+        ],
+      });
+    }
+    if (url.pathname.endsWith("/native/storage/mkdir") && request.method() === "POST") {
+      const body = request.postDataJSON() as { path: string };
+      mkdirCalls.push(body.path);
+      const segs = body.path.replace(/^\/+|\/+$/g, "").split("/").filter(Boolean);
+      let cur = `/${segs[0]}`;
+      for (let i = 1; i < segs.length; i += 1) {
+        if (!(segs[0] === "本地" && i === 1)) {
+          const list = dirChildren.get(cur) || [];
+          if (!list.includes(segs[i])) list.push(segs[i]);
+          dirChildren.set(cur, list);
+        }
+        cur = `${cur}/${segs[i]}`;
+        if (!dirChildren.has(cur)) dirChildren.set(cur, []);
+      }
+      return success(null);
+    }
+    if (url.pathname.endsWith("/alist") && url.searchParams.has("alistId")) {
+      const p = url.searchParams.get("path") || "/";
+      return success((dirChildren.get(p) || []).map((name) => ({ name })));
+    }
+    if (url.pathname.endsWith("/alist")) {
+      return success([{ id: 1, remark: "内置存储", url: "native://rclone" }]);
+    }
+    if (url.pathname.endsWith("/job") && url.searchParams.get("current")) {
+      return success(null);
+    }
+    if (url.pathname.endsWith("/job")) {
+      return success({ dataList: [], count: 0 });
+    }
+    return success(null);
+  });
+
+  await page.goto("/app/opensync/sync");
+  await page.getByRole("button", { name: "新建同步任务", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByRole("heading", { name: "新建持续同步任务", exact: true })).toBeVisible();
+  await expect(dialog.getByText("手动输入路径")).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "添加到源路径" })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "添加到目标路径" })).toHaveCount(0);
+
+  const trees = dialog.locator(".remote-paths");
+  const popover = page.locator(".remote-paths-dropdown");
+
+  // 1. Source picker: verify read-only & synthetic roots do not allow folder creation,
+  // and create a folder directly inside an authorized local root.
+  await trees.nth(0).locator('[role="combobox"]').click({ position: { x: 2, y: 18 } });
+  await expect(popover).toBeVisible();
+  await expect(popover.locator('[role="treeitem"][data-key="/"] .remote-paths-row-mkdir')).toHaveCount(0);
+  await expect(popover.locator('[role="treeitem"][data-key="/本地"] .remote-paths-row-mkdir')).toHaveCount(0);
+  await expect(popover.locator('[role="treeitem"][data-key="/ReadOnlyMirror"] .remote-paths-row-mkdir')).toHaveCount(0);
+
+  const localRoot = popover.locator('[role="treeitem"][data-key="/本地/Photos~a1b2c3d4e5f6"]');
+  await expect(localRoot).toBeVisible();
+  await localRoot.getByRole("button", { name: "在 /本地/Photos 下新建文件夹" }).click();
+
+  // Validate invalid folder name inline before creating
+  await popover.getByRole("textbox", { name: "新文件夹名称" }).fill("bad/../name");
+  await popover.getByRole("button", { name: "创建", exact: true }).click();
+  await expect(popover.getByRole("alert")).toContainText("不能包含 . 或 ..");
+
+  await popover.getByRole("textbox", { name: "新文件夹名称" }).fill("SyncInbox");
+  await popover.getByRole("button", { name: "创建", exact: true }).click();
+  await expect.poll(() => mkdirCalls[0]).toBe("/本地/Photos~a1b2c3d4e5f6/SyncInbox");
+  await expect(
+    popover.locator('[role="treeitem"][data-key="/本地/Photos~a1b2c3d4e5f6/SyncInbox"]'),
+  ).toBeVisible();
+  await expect(trees.nth(0)).toContainText("SyncInbox");
+  await trees.nth(0).locator('[role="combobox"]').click({ position: { x: 2, y: 18 } });
+  await expect(popover).toBeHidden();
+
+  // 2. Destination picker: use the toolbar "新建文件夹" button after selecting parent
+  // or directly on /PhotoCloud via row action.
+  await trees.nth(1).locator('[role="combobox"]').click({ position: { x: 2, y: 18 } });
+  await expect(popover).toBeVisible();
+  const cloudNode = popover.locator('[role="treeitem"][data-key="/PhotoCloud"]');
+  await cloudNode.getByRole("button", { name: "在 /PhotoCloud 下新建文件夹" }).click();
+  await popover.getByRole("textbox", { name: "新文件夹名称" }).fill("Backup");
+  await popover.getByRole("button", { name: "创建", exact: true }).click();
+  await expect.poll(() => mkdirCalls[1]).toBe("/PhotoCloud/Backup");
+  await expect(
+    popover.locator('[role="treeitem"][data-key="/PhotoCloud/Backup"]'),
+  ).toBeVisible();
+  await expect(trees.nth(1)).toContainText("Backup");
+
+  // 3. Toolbar "新建文件夹" button + Escape cancel + Enter submit
+  await popover.getByRole("button", { name: "新建文件夹", exact: true }).click();
+  await expect(popover.getByRole("textbox", { name: "新文件夹名称" })).toBeVisible();
+  await popover.getByRole("textbox", { name: "新文件夹名称" }).press("Escape");
+  await expect(popover).toBeVisible();
+  await expect(popover.getByRole("textbox", { name: "新文件夹名称" })).toHaveCount(0);
+
+  await popover.getByRole("button", { name: "新建文件夹", exact: true }).click();
+  await popover.getByRole("textbox", { name: "新文件夹名称" }).fill("2026");
+  await popover.getByRole("textbox", { name: "新文件夹名称" }).press("Enter");
+  await expect.poll(() => mkdirCalls[2]).toBe("/PhotoCloud/Backup/2026");
+  await expect(trees.nth(1)).toContainText("2026");
+  await trees.nth(1).locator('[role="combobox"]').click({ position: { x: 2, y: 18 } });
+  await expect(popover).toBeHidden();
+  expect(await dialog.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
 });

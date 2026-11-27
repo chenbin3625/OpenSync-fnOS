@@ -20,10 +20,10 @@ test.beforeEach(async ({ page }) => {
   );
 });
 
-test("opens the sync task list by default at root path", async ({ page }) => {
+test("opens dashboard by default at root path", async ({ page }) => {
   await page.goto("/app/opensync/");
-  await expect(page).toHaveURL(/\/app\/opensync\/sync$/);
-  await expect(page.getByRole("heading", { name: "同步任务", exact: true })).toBeVisible();
+  await expect(page).toHaveURL(/\/app\/opensync\/dashboard$/);
+  await expect(page.getByRole("heading", { name: "总览看板", exact: true })).toBeVisible();
 });
 
 test("opens usable task workspace without a second login", async ({ page }) => {

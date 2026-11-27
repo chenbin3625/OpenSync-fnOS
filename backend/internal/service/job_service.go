@@ -1614,6 +1614,25 @@ func RetryFailedTaskItems(taskID int64, itemIDs []int64) error {
 			return err
 		}
 	}
+	return retryJobItemsWithJob(job, func(client *JobClient) error {
+		return client.DoRetrySelectedTaskItems(taskID, itemIDs)
+	})
+}
+
+// RetryJobItems replays the selected non-success items of a job across tasks.
+func RetryJobItems(jobID int64, itemIDs []int64) error {
+	job, err := mapper.GetJobByID(jobID)
+	if err != nil {
+		if err := publicErrorIf(err, msg.T(msg.JobNotFound)); err != nil {
+			return err
+		}
+	}
+	return retryJobItemsWithJob(job, func(client *JobClient) error {
+		return client.DoRetryJobItems(itemIDs)
+	})
+}
+
+func retryJobItemsWithJob(job map[string]interface{}, fn func(*JobClient) error) error {
 	if isLegacyOpenListAlistID(util.ToInt64(job["alistId"])) {
 		return publicError(legacyOpenListJobDisabledMsg)
 	}
@@ -1627,7 +1646,7 @@ func RetryFailedTaskItems(taskID int64, itemIDs []int64) error {
 	if !client.enabled() {
 		return publicError(msg.T(msg.DisabledJobCannotRun))
 	}
-	return client.DoRetrySelectedTaskItems(taskID, itemIDs)
+	return fn(client)
 }
 
 // GetJobList returns paginated job list
@@ -1921,6 +1940,40 @@ func GetTaskItemList(req map[string]interface{}) (map[string]interface{}, error)
 	if taskID := util.ToInt64(req["taskId"]); taskID > 0 && result != nil {
 		if groups, gErr := mapper.GetTaskErrorGroups(taskID, 20); gErr == nil && len(groups) > 0 {
 			result["errorGroups"] = groups
+		}
+	}
+	return result, nil
+}
+
+// GetJobItemList returns paginated file sync records across all runs of a job,
+// along with grouped item errors and recent task-level failures without item rows.
+func GetJobItemList(req map[string]interface{}) (map[string]interface{}, error) {
+	jobID := util.ToInt64(req["jobId"])
+	if jobID <= 0 {
+		return nil, publicError(msg.T(msg.LostPart))
+	}
+	if _, err := mapper.GetJobByID(jobID); err != nil {
+		if err := publicErrorIf(err, msg.T(msg.JobNotFound)); err != nil {
+			return nil, err
+		}
+	}
+	queryParams := make(map[string]interface{}, len(req))
+	for k, v := range req {
+		if k == "taskId" {
+			continue
+		}
+		queryParams[k] = v
+	}
+	result, err := mapper.GetJobTaskItemList(queryParams)
+	if err := publicErrorIf(err, msg.T(msg.ListTooLarge)); err != nil {
+		return nil, err
+	}
+	if result != nil {
+		if groups, gErr := mapper.GetJobErrorGroups(jobID, queryParams, 20); gErr == nil && len(groups) > 0 {
+			result["errorGroups"] = groups
+		}
+		if recentErrors, rErr := mapper.GetJobRecentTaskErrors(jobID, queryParams, 20); rErr == nil && len(recentErrors) > 0 {
+			result["recentErrors"] = recentErrors
 		}
 	}
 	return result, nil

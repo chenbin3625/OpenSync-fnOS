@@ -6,6 +6,7 @@ import {
   formatRelativeSyncTime,
   getContinuousSyncMeta,
   isSyncStatusError,
+  jobStatusDotClass,
   parseJobExtraFlagsObject,
   resolveEffectiveSyncStatus,
 } from "../src/lib/continuousSync";
@@ -115,5 +116,41 @@ describe("continuous synchronization", () => {
     expect(resolveEffectiveSyncStatus({ enable: 0 }).state).toBe("paused");
     expect(resolveEffectiveSyncStatus({ enable: 1, running: true }).state).toBe("syncing");
     expect(resolveEffectiveSyncStatus({ enable: 1 }).state).toBe("monitoring");
+
+    const baseJob = stored(draft());
+    expect(jobStatusDotClass({ ...baseJob, legacyOpenList: true })).toBe("job-dot job-dot--error");
+    expect(jobStatusDotClass({ ...baseJob, running: true, paused: true })).toBe("job-dot job-dot--paused");
+    expect(jobStatusDotClass({ ...baseJob, running: true })).toBe("job-dot job-dot--running");
+    expect(jobStatusDotClass({ ...baseJob, queued: true })).toBe("job-dot job-dot--queued");
+    expect(jobStatusDotClass({ ...baseJob, enable: 0 })).toBe("job-dot job-dot--disabled");
+    expect(
+      jobStatusDotClass({
+        ...baseJob,
+        syncStatus: {
+          state: "error",
+          pendingChanges: 0,
+          lastSuccess: 0,
+          lastPoll: 0,
+          nextPoll: 0,
+          error: "boom",
+          failures: 1,
+        },
+      }),
+    ).toBe("job-dot job-dot--error");
+    expect(
+      jobStatusDotClass({
+        ...baseJob,
+        syncStatus: {
+          state: "waiting_window",
+          pendingChanges: 0,
+          lastSuccess: 0,
+          lastPoll: 0,
+          nextPoll: 0,
+          error: "",
+          failures: 0,
+        },
+      }),
+    ).toBe("job-dot job-dot--paused");
+    expect(jobStatusDotClass(baseJob)).toBe("job-dot job-dot--synced");
   });
 });

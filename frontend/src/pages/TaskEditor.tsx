@@ -75,7 +75,6 @@ import {
   updateExcludeFolders,
   updateExcludePatterns,
   validateJobFormFields,
-  validateManualSyncPath,
   type CompareModeSource,
   type JobFieldErrorKey,
   type JobForm,
@@ -224,7 +223,6 @@ export default function TaskEditor({
   }, [defaultEngineId, form.alistId, setForm]);
   const [addingStorage, setAddingStorage] = useState(false);
   const [preferredRemote, setPreferredRemote] = useState(initialRemote);
-  const [nativeTarget, setNativeTarget] = useState("");
   const dirCacheRef = useRef<RemoteDirCache | null>(null);
   if (!dirCacheRef.current) {
     dirCacheRef.current = createRemoteDirCache();
@@ -1081,66 +1079,6 @@ export default function TaskEditor({
                       />
                     </Field>
                   </div>
-
-                  <Field
-                    label="手动输入路径"
-                    hint="支持本地↔本地、本地↔远端、远端↔远端任意组合；仅有单桶权限或目录尚未创建时可直接输入路径。"
-                  >
-                    <div className="field-group">
-                      <Input
-                        value={nativeTarget}
-                        onChange={setNativeTarget}
-                        placeholder="/存储名称/存储桶/子目录"
-                      />
-                      <div className="native-section-actions">
-                        <Button
-                          type="tertiary"
-                          disabled={!nativeTarget.trim()}
-                          onClick={() => {
-                            const check = validateManualSyncPath(
-                              nativeTarget,
-                              nativeStorage.data?.remotes,
-                              { role: "src", method: form.method },
-                            );
-                            if (check.error) {
-                              Toast.warning(check.error);
-                              return;
-                            }
-                            handleSrcPathChange(
-                              form.method === 3
-                                ? [check.normalized]
-                                : Array.from(new Set([...form.srcPath, check.normalized])),
-                            );
-                            setNativeTarget("");
-                          }}
-                        >
-                          添加到源路径
-                        </Button>
-                        <Button
-                          disabled={!nativeTarget.trim()}
-                          onClick={() => {
-                            const check = validateManualSyncPath(
-                              nativeTarget,
-                              nativeStorage.data?.remotes,
-                              { role: "dst", method: form.method },
-                            );
-                            if (check.error) {
-                              Toast.warning(check.error);
-                              return;
-                            }
-                            handleDstPathChange(
-                              form.method === 3
-                                ? [check.normalized]
-                                : Array.from(new Set([...form.dstPath, check.normalized])),
-                            );
-                            setNativeTarget("");
-                          }}
-                        >
-                          添加到目标路径
-                        </Button>
-                      </div>
-                    </div>
-                  </Field>
 
                   {matchedDstStandardWebDAVNames.length > 0 && form.compareMode === 1 && (
                     <div className="sync-method-banner webdav-compare-tip" role="status">

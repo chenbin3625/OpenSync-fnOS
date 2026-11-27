@@ -151,4 +151,45 @@ describe("mock store", () => {
     expect(page.dataList).toHaveLength(10);
     expect(page.dataList.every((item) => item.status === 1)).toBe(true);
   });
+
+  it("exposes directories created by mkdirNativeStorage in listPaths", () => {
+    const store = createMockStore();
+    expect(store.mkdirNativeStorage("/Photos/NewYear/2026")).toBeNull();
+    expect(store.listPaths("/Photos").map((entry) => entry.path)).toContain("NewYear");
+    expect(store.listPaths("/Photos/NewYear").map((entry) => entry.path)).toContain("2026");
+
+    const localRoot = store.getNativeStorageState().localRoots[0];
+    expect(store.mkdirNativeStorage(`/本地/${localRoot.id}/Inbox`)).toBeNull();
+    expect(
+      store.listPaths(`/本地/${localRoot.id}`).map((entry) => entry.path),
+    ).toContain("Inbox");
+    expect(store.mkdirNativeStorage("/本地/OnlyOneSegment")).not.toBeNull();
+  });
+
+  it("aggregates job-level items, error groups, recent task errors, and cross-batch retry", () => {
+    const store = createMockStore({
+      jobs: [{ id: 5, remark: "持续同步", enable: 1 }],
+      history: {
+        5: [
+          { id: 501, status: 2, createTime: 100 },
+          { id: 502, status: 7, errMsg: "io timeout", createTime: 200 },
+          { id: 503, status: 6, errMsg: "scan failed: auth expired", createTime: 300 },
+          { id: 504, status: 8, createTime: 400 },
+        ],
+      },
+      taskItems: {
+        501: [{ id: 11, fileName: "a.jpg", status: 2, createTime: 101 }],
+        502: [{ id: 12, fileName: "b.jpg", status: 7, errMsg: "io timeout", createTime: 201 }],
+      },
+    });
+
+    const page = store.listJobItems(5, { pageNum: 1, pageSize: 20 });
+    expect(page.count).toBe(2);
+    expect(page.dataList.map((i) => i.fileName)).toEqual(["b.jpg", "a.jpg"]);
+    expect(page.errorGroups).toEqual([{ reason: "io timeout", count: 1 }]);
+    expect(page.recentErrors?.map((e) => e.id)).toEqual([503]);
+
+    expect(store.retryJobItems(5, [12])).toBeNull();
+    expect(store.getCurrentTask(5)).not.toBeNull();
+  });
 });

@@ -48,7 +48,7 @@ test("connects a first WebDAV account inline and reuses it from the sync home", 
     return success(null);
   });
 
-  await page.goto("/app/opensync/");
+  await page.goto("/app/opensync/sync");
   await expect(page.getByRole("heading", { name: "同步任务", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "新建同步任务", exact: true }).click();
   const dialog = page.getByRole("dialog");
@@ -65,8 +65,12 @@ test("connects a first WebDAV account inline and reuses it from the sync home", 
   const picker = dialog.locator(".remote-paths");
   await picker.nth(0).getByRole("combobox").click();
   await page.locator('.remote-paths-dropdown [role="treeitem"][data-key="/本地/Photos"]').click();
+  await picker.nth(0).locator('[role="combobox"]').click({ position: { x: 2, y: 18 } });
+  await expect(page.locator(".remote-paths-dropdown")).toBeHidden();
   await picker.nth(1).getByRole("combobox").click();
   await page.locator('.remote-paths-dropdown [role="treeitem"][data-key="/PhotoCloud/Backup"]').click();
+  await picker.nth(1).locator('[role="combobox"]').click({ position: { x: 2, y: 18 } });
+  await expect(page.locator(".remote-paths-dropdown")).toBeHidden();
   await expect(dialog.getByRole("textbox", { name: "任务名称" })).toHaveAttribute("placeholder", "Photos · PhotoCloud");
   await dialog.getByRole("button", { name: "下一步", exact: true }).click();
   await dialog.getByRole("button", { name: "保存", exact: true }).click();
