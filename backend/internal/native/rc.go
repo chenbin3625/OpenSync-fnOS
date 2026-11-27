@@ -25,6 +25,8 @@ type RCController struct {
 	mu               sync.Mutex
 	cond             *sync.Cond
 	paused           atomic.Bool
+	manualPaused     bool
+	connectionPauses map[string]struct{}
 	pausedSince      time.Time
 	pausedAccum      time.Duration
 	inheritsGlobal   bool
@@ -63,6 +65,7 @@ func NewRCController(initialBwLimit string) *RCController {
 		activeProcs:      make(map[int]*rcEndpoint),
 		globalRcloneKeys: make(map[int]int),
 		globalGoKeys:     make(map[int]int),
+		connectionPauses: make(map[string]struct{}),
 	}
 	c.cond = sync.NewCond(&c.mu)
 	c.refreshLocalRateCacheLocked(time.Now())
@@ -77,6 +80,7 @@ func NewGlobalRCController() *RCController {
 		activeProcs:      make(map[int]*rcEndpoint),
 		globalRcloneKeys: make(map[int]int),
 		globalGoKeys:     make(map[int]int),
+		connectionPauses: make(map[string]struct{}),
 	}
 	c.cond = sync.NewCond(&c.mu)
 	return c
@@ -169,6 +173,14 @@ func (c *RCController) BwLimit() string {
 		return defaultGlobalBw.Get()
 	}
 	return spec
+}
+
+// SplitBwRateForShare returns a fair per-stream share of a resolved bandwidth
+// rate. It is exported for the service-level connection limiter so a shared
+// connection cap is divided across active tasks before each task divides its
+// own share across rclone and Go transfer streams.
+func SplitBwRateForShare(activeRate string, divisor int) string {
+	return splitBwRate(activeRate, divisor)
 }
 
 // EffectiveInitialRcloneBwLimit returns the --bwlimit argument a newly launched
@@ -365,6 +377,8 @@ func (c *RCController) ResumeAllProcesses() {
 		return
 	}
 	c.mu.Lock()
+	c.manualPaused = false
+	clear(c.connectionPauses)
 	pids := make([]int, 0, len(c.activeProcs))
 	for _, ep := range c.activeProcs {
 		if ep.pid > 0 {
@@ -389,11 +403,14 @@ func (c *RCController) Pause() error {
 		return errors.New("任务不支持暂停")
 	}
 	c.mu.Lock()
-	if c.paused.Swap(true) {
+	c.manualPaused = true
+	if c.paused.Load() {
 		c.mu.Unlock()
 		return nil
 	}
+	c.paused.Store(true)
 	c.pausedSince = time.Now()
+	c.cond.Broadcast()
 	pids := make([]int, 0, len(c.activeProcs))
 	for _, ep := range c.activeProcs {
 		if ep.pid > 0 {
@@ -426,12 +443,150 @@ func (c *RCController) Pause() error {
 	return firstErr
 }
 
+// PauseForConnection adds a connection-level pause without changing the
+// task's manual pause state. Multiple connections may pause one task and each
+// connection must release only its own pause token.
+func (c *RCController) PauseForConnection(connection string) error {
+	if c == nil {
+		return errors.New("任务不支持暂停")
+	}
+	connection = strings.TrimSpace(connection)
+	if connection == "" {
+		return errors.New("连接名称为空")
+	}
+	c.mu.Lock()
+	if c.connectionPauses == nil {
+		c.connectionPauses = make(map[string]struct{})
+	}
+	if _, exists := c.connectionPauses[connection]; exists {
+		c.mu.Unlock()
+		return nil
+	}
+	c.connectionPauses[connection] = struct{}{}
+	if c.paused.Load() {
+		c.mu.Unlock()
+		return nil
+	}
+	c.paused.Store(true)
+	c.pausedSince = time.Now()
+	c.cond.Broadcast()
+	pids := make([]int, 0, len(c.activeProcs))
+	for _, ep := range c.activeProcs {
+		if ep.pid > 0 {
+			pids = append(pids, ep.pid)
+		}
+	}
+	rcloneKeys := make([]int, 0, len(c.globalRcloneKeys))
+	for _, k := range c.globalRcloneKeys {
+		rcloneKeys = append(rcloneKeys, k)
+	}
+	goKeys := make([]int, 0, len(c.globalGoKeys))
+	for _, k := range c.globalGoKeys {
+		goKeys = append(goKeys, k)
+	}
+	c.mu.Unlock()
+	for _, k := range rcloneKeys {
+		defaultGlobalBw.setRclonePaused(k, true)
+	}
+	for _, k := range goKeys {
+		defaultGlobalBw.setGoPaused(k, true)
+	}
+	var firstErr error
+	for _, pid := range pids {
+		if err := pauseProcess(pid); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// ResumeForConnection releases only a connection-level pause. A manual task
+// pause or another paused connection keeps the transfer suspended.
+func (c *RCController) ResumeForConnection(connection string) error {
+	if c == nil {
+		return errors.New("任务不支持恢复")
+	}
+	connection = strings.TrimSpace(connection)
+	if connection == "" {
+		return errors.New("连接名称为空")
+	}
+	c.mu.Lock()
+	if _, exists := c.connectionPauses[connection]; !exists {
+		c.mu.Unlock()
+		return nil
+	}
+	delete(c.connectionPauses, connection)
+	if c.manualPaused || len(c.connectionPauses) > 0 || !c.paused.Load() {
+		c.mu.Unlock()
+		return nil
+	}
+	c.paused.Store(false)
+	if !c.pausedSince.IsZero() {
+		c.pausedAccum += time.Since(c.pausedSince)
+		c.pausedSince = time.Time{}
+	}
+	c.cond.Broadcast()
+	pids := make([]int, 0, len(c.activeProcs))
+	eps := make([]*rcEndpoint, 0, len(c.activeProcs))
+	for _, ep := range c.activeProcs {
+		if ep.pid > 0 {
+			pids = append(pids, ep.pid)
+		}
+		if ep.addr != "" {
+			cp := *ep
+			eps = append(eps, &cp)
+		}
+	}
+	inherits := c.inheritsGlobal
+	rcloneKeys := make([]int, 0, len(c.globalRcloneKeys))
+	for _, k := range c.globalRcloneKeys {
+		rcloneKeys = append(rcloneKeys, k)
+	}
+	goKeys := make([]int, 0, len(c.globalGoKeys))
+	for _, k := range c.globalGoKeys {
+		goKeys = append(goKeys, k)
+	}
+	shouldSyncRate := !inherits && (c.liveOverridden || (c.bwLimit != "" && c.standaloneActiveSlotCountLocked() > 1))
+	spec := c.bwLimit
+	totalSlots := max(1, c.standaloneActiveSlotCountLocked())
+	c.mu.Unlock()
+	var firstErr error
+	for _, pid := range pids {
+		if err := resumeProcess(pid); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if inherits {
+		for _, k := range rcloneKeys {
+			defaultGlobalBw.setRclonePaused(k, false)
+		}
+		for _, k := range goKeys {
+			defaultGlobalBw.setGoPaused(k, false)
+		}
+	} else if shouldSyncRate && len(eps) > 0 {
+		activeRate, _, _ := ResolveBwLimitAt(spec, time.Now())
+		perSlotRate := splitBwRate(activeRate, totalSlots)
+		go func() {
+			time.Sleep(150 * time.Millisecond)
+			for _, ep := range eps {
+				_ = pushRcloneBwLimit(context.Background(), ep, perSlotRate)
+			}
+		}()
+	}
+	return firstErr
+}
+
 // Resume continues previously paused transfers.
 func (c *RCController) Resume() error {
 	if c == nil {
 		return errors.New("任务不支持恢复")
 	}
 	c.mu.Lock()
+	c.manualPaused = false
+	if len(c.connectionPauses) > 0 || !c.paused.Load() {
+		c.mu.Unlock()
+		return nil
+	}
 	wasPaused := c.paused.Swap(false)
 	if !c.pausedSince.IsZero() {
 		c.pausedAccum += time.Since(c.pausedSince)

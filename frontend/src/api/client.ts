@@ -24,6 +24,7 @@ import type {
   NativeStorageState,
   NativeStorageTestResult,
   NativeTransferTask,
+  WeeklyScheduleConfig,
   NativeTrashItem,
   NotifyItem,
   PageData,
@@ -294,6 +295,13 @@ export const api = {
     clearSecrets?: string[];
     authSessionId?: string;
   }) => request("/native/storage", { method: "PUT", data }),
+  updateNativeStoragePolicy: (data: {
+    name: string;
+    pollIntervalSec: number;
+    weeklySchedule?: WeeklyScheduleConfig;
+    bwLimit: string;
+    paused: boolean;
+  }) => request("/native/storage/policy", { method: "PUT", data }),
   deleteNativeStorage: (name: string) =>
     request("/native/storage", { method: "DELETE", params: { name } }),
   testNativeStorage: (data: {

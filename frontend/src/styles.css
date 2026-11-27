@@ -9009,6 +9009,64 @@ body[theme-mode="dark"] .bw-mode-btn.is-active {
   font-size: var(--font-size-body);
 }
 
+.sync-connection-policy {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+
+.sync-connection-policy__head,
+.sync-connection-policy__schedule-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sync-connection-policy__head h3 {
+  margin: 0;
+}
+
+.sync-connection-policy__head p {
+  margin: 6px 0 0;
+}
+
+.sync-connection-policy__fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin: 20px 0;
+}
+
+.sync-connection-policy__fields label {
+  display: grid;
+  gap: 6px;
+}
+
+.sync-connection-policy__fields input {
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text-primary);
+}
+
+.sync-connection-policy__schedule-head {
+  margin-bottom: 8px;
+}
+
+.sync-connection-policy__hint {
+  margin: 16px 0;
+  line-height: 1.6;
+}
+
+@media (max-width: 720px) {
+  .sync-connection-policy__fields {
+    grid-template-columns: 1fr;
+  }
+}
+
 .sync-settings-quota {
   display: flex;
   flex-direction: column;

@@ -29,6 +29,16 @@ import (
 const EngineURL = "rclone://native"
 const Local = "本地"
 
+// Connection policy keys are stored in the native engine JSON alongside a
+// remote definition. They are OpenSync metadata and are stripped from a
+// standard rclone.conf export.
+const (
+	ConnectionPollIntervalKey   = "sync_poll_interval_sec"
+	ConnectionWeeklyScheduleKey = "sync_weekly_schedule"
+	ConnectionBwLimitKey        = "sync_bw_limit"
+	ConnectionPausedKey         = "sync_paused"
+)
+
 // RedactedSecretPlaceholder is written when exporting a non-secret system backup.
 const RedactedSecretPlaceholder = "***REDACTED***"
 
@@ -94,12 +104,16 @@ var supportedRemoteOrder = []string{
 // openSyncMetaFields are OpenSync-owned per-remote options stripped before
 // emitting standard rclone INI sections or exporting rclone.conf.
 var openSyncMetaFields = map[string]bool{
-	"insecure_skip_verify": true,
-	"proxy_url":            true,
-	"allow_hashcheck":      true,
-	"max_concurrent_jobs":  true,
-	"managed_by_job":       true,
-	"managed_job_label":    true,
+	"insecure_skip_verify":      true,
+	"proxy_url":                 true,
+	"allow_hashcheck":           true,
+	"max_concurrent_jobs":       true,
+	ConnectionPollIntervalKey:   true,
+	ConnectionWeeklyScheduleKey: true,
+	ConnectionBwLimitKey:        true,
+	ConnectionPausedKey:         true,
+	"managed_by_job":            true,
+	"managed_job_label":         true,
 }
 
 var fields = map[string]string{
@@ -1667,7 +1681,8 @@ func ValidateEntry(name string, p map[string]string, plainSecrets bool) error {
 		return fmt.Errorf("存储 %q 的后端类型不受支持", name)
 	}
 	for k, v := range p {
-		if k != "type" && k != "max_concurrent_jobs" && !strings.Contains(" "+allowed+" ", " "+k+" ") {
+		isConnectionPolicy := k == ConnectionPollIntervalKey || k == ConnectionWeeklyScheduleKey || k == ConnectionBwLimitKey || k == ConnectionPausedKey
+		if k != "type" && k != "max_concurrent_jobs" && !isConnectionPolicy && !strings.Contains(" "+allowed+" ", " "+k+" ") {
 			return disallowedFieldError(name, typ, k)
 		}
 		if !regexpKey.MatchString(k) || len(v) > 65536 {
@@ -1686,6 +1701,23 @@ func ValidateEntry(name string, p map[string]string, plainSecrets bool) error {
 		if err != nil || n < 0 || n > 50 {
 			return fmt.Errorf("%s 的单存储最大并发任务数必须为 0–50 的整数", name)
 		}
+	}
+	if poll := p[ConnectionPollIntervalKey]; poll != "" {
+		n, err := strconv.Atoi(poll)
+		if err != nil || (n != 0 && (n < 10 || n > 86400)) {
+			return fmt.Errorf("%s 的连接轮询周期需为 10–86400 秒，0 表示跟随默认值", name)
+		}
+	}
+	if bw := p[ConnectionBwLimitKey]; bw != "" {
+		if err := ValidateBwLimit(bw); err != nil {
+			return fmt.Errorf("%s 的连接共享限速无效：%w", name, err)
+		}
+	}
+	if paused := p[ConnectionPausedKey]; paused != "" && paused != "true" && paused != "false" {
+		return fmt.Errorf("%s 的连接暂停标记必须为 true 或 false", name)
+	}
+	if schedule := strings.TrimSpace(p[ConnectionWeeklyScheduleKey]); schedule != "" && !json.Valid([]byte(schedule)) {
+		return fmt.Errorf("%s 的连接周历配置格式无效", name)
 	}
 	if err := validateBoolField(name, "insecure_skip_verify", p["insecure_skip_verify"]); err != nil {
 		return err

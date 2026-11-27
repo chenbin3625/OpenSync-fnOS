@@ -184,6 +184,14 @@ func ResolveBwLimitAt(spec string, now time.Time) (activeRate string, nextChange
 	return activeRate, nextChange, true
 }
 
+// ResolveBwLimitValue returns the active single-rate value for a bandwidth
+// specification at now. It is useful to combine nested OpenSync limits while
+// keeping timetable evaluation in one place.
+func ResolveBwLimitValue(spec string, now time.Time) string {
+	active, _, _ := ResolveBwLimitAt(spec, now)
+	return active
+}
+
 // ParseBwLimitBytesPerSecAt evaluates rate (single rate, up:down, or timetable)
 // at now and returns the effective bytes-per-second limit (0 = unlimited).
 func ParseBwLimitBytesPerSecAt(rate string, now time.Time) int64 {

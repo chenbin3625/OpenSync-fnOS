@@ -123,6 +123,7 @@ import {
   type FileSizeDrafts,
   type FileSizeUnit,
 } from "./Home/fileSizeUnits";
+import type { WeeklyScheduleConfig } from "../types";
 import type {
   AlistItem,
   FilterTestResult,
@@ -352,6 +353,29 @@ export default function TaskEditor({
 
   const [addingStorage, setAddingStorage] = useState(false);
   const [preferredRemote, setPreferredRemote] = useState(initialRemote);
+  const [inheritedPollSec, setInheritedPollSec] = useState(0);
+  const [inheritedWeeklySchedule, setInheritedWeeklySchedule] =
+    useState<WeeklyScheduleConfig>();
+  useEffect(() => {
+    if (job || initialDraft || !initialRemote || !nativeStorage.data?.remotes) {
+      return;
+    }
+    const remote = nativeStorage.data.remotes.find(
+      (item) => item.name.toLowerCase() === initialRemote.toLowerCase(),
+    );
+    if (!remote) return;
+    setInheritedPollSec(remote.pollIntervalSec || 0);
+    setInheritedWeeklySchedule(remote.weeklySchedule);
+    if (!form.extraFlags?.syncPollIntervalSec && remote.pollIntervalSec) {
+      setPollDraft(String(remote.pollIntervalSec));
+    }
+  }, [
+    form.extraFlags?.syncPollIntervalSec,
+    initialDraft,
+    initialRemote,
+    job,
+    nativeStorage.data?.remotes,
+  ]);
   const dirCacheRef = useRef<RemoteDirCache | null>(null);
   if (!dirCacheRef.current) {
     dirCacheRef.current = createRemoteDirCache();
@@ -406,6 +430,7 @@ export default function TaskEditor({
       seedForm.extraFlags?.syncPollIntervalSec ||
         seedForm.extraFlags?.syncAuditIntervalMin ||
         seedForm.extraFlags?.watchDebounceSec ||
+        inheritedPollSec ||
         seedForm.windowEnable ||
         seedForm.notifyMode === 1,
     ),
@@ -1197,7 +1222,8 @@ export default function TaskEditor({
           ? "镜像会清理目标端独有的文件，包括任务创建前已存在的文件。首次开启镜像时先查看镜像影响预览，再确认启动。"
           : "单向持续增量：源端新增与修改的文件会持续同步至目标端，不会删除目标端已有文件，适合安全备份。";
 
-  const effectivePollSec = form.extraFlags?.syncPollIntervalSec || 60;
+  const effectivePollSec =
+    form.extraFlags?.syncPollIntervalSec || inheritedPollSec || 60;
   const effectiveAuditMin = form.extraFlags?.syncAuditIntervalMin || 1440;
   const effectiveDebounceSec = form.extraFlags?.watchDebounceSec || 30;
 
@@ -1282,7 +1308,7 @@ export default function TaskEditor({
         )}
         <Field
           label="远端检测间隔（秒）"
-          hint="默认 60 秒（10–86400），用于周期发现远端变更及重启后补齐"
+          hint={`${inheritedPollSec && !form.extraFlags?.syncPollIntervalSec ? `继承连接默认 ${inheritedPollSec} 秒；` : ""}默认 60 秒（10–86400），用于周期发现远端变更及重启后补齐`}
           error={showStepError(stepIndex, "interval")}
         >
           <div className="field-group">
@@ -2404,7 +2430,7 @@ export default function TaskEditor({
                     error={showStepError(2, "weeklySchedule")}
                   >
                     <WeeklyScheduleGrid
-                      value={form.extraFlags?.weeklySchedule}
+                      value={form.extraFlags?.weeklySchedule || inheritedWeeklySchedule}
                       onChange={(ws) =>
                         change("extraFlags", {
                           ...form.extraFlags,
@@ -2984,7 +3010,7 @@ export default function TaskEditor({
                         error={showStepError(1, "weeklySchedule")}
                       >
                         <WeeklyScheduleGrid
-                          value={form.extraFlags?.weeklySchedule}
+                          value={form.extraFlags?.weeklySchedule || inheritedWeeklySchedule}
                           onChange={(ws) =>
                             change("extraFlags", {
                               ...form.extraFlags,

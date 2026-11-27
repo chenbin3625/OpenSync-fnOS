@@ -199,6 +199,17 @@ func ImportSystemBackup(payload SystemBackupPayload, conflictMode string) (map[s
 				} else {
 					RemoveEngineHealth(existingID)
 					engineQueue.RefreshLimit(existingID, maxConcurrent)
+					if tokenPtr != nil {
+						if restoredCfg, cfgErr := native.Decode(*tokenPtr); cfgErr == nil {
+							refreshNativeStorageConcurrencyLimits(restoredCfg)
+							for remoteName, params := range restoredCfg {
+								if policy, pErr := parseConnectionPolicy(params); pErr == nil {
+									updateConnectionBandwidthGroup(remoteName, policy)
+									refreshConnectionPolicyJobs(remoteName, restoredCfg, false)
+								}
+							}
+						}
+					}
 					enginesUpdated++
 				}
 			} else {

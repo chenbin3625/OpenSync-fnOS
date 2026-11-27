@@ -1143,6 +1143,18 @@ export class MockStore {
           usedByCrypts,
           activeJobs: 0,
           queuedJobs: 0,
+          pollIntervalSec: Number(params.sync_poll_interval_sec || 0) || 0,
+          weeklySchedule: params.sync_weekly_schedule
+            ? (() => {
+                try {
+                  return JSON.parse(params.sync_weekly_schedule);
+                } catch {
+                  return undefined;
+                }
+              })()
+            : undefined,
+          bwLimit: params.sync_bw_limit || "",
+          paused: params.sync_paused === "true",
         };
       });
     return {
@@ -1170,6 +1182,33 @@ export class MockStore {
     );
     this.engineHealthMap.delete(engine.id);
     return this.getNativeStorageState();
+  }
+
+  updateNativeRemotePolicy(input: {
+    name: string;
+    pollIntervalSec: number;
+    weeklySchedule?: unknown;
+    bwLimit: string;
+    paused: boolean;
+  }): string | null {
+    const key = [...this.nativeRemotes.keys()].find(
+      (name) => name.toLowerCase() === input.name.trim().toLowerCase(),
+    );
+    if (!key) return `存储 "${input.name}" 不存在`;
+    const params = this.nativeRemotes.get(key)!;
+    delete params.sync_poll_interval_sec;
+    delete params.sync_weekly_schedule;
+    delete params.sync_bw_limit;
+    delete params.sync_paused;
+    if (input.pollIntervalSec > 0) {
+      params.sync_poll_interval_sec = String(input.pollIntervalSec);
+    }
+    if (input.weeklySchedule) {
+      params.sync_weekly_schedule = JSON.stringify(input.weeklySchedule);
+    }
+    if (input.bwLimit.trim()) params.sync_bw_limit = input.bwLimit.trim();
+    if (input.paused) params.sync_paused = "true";
+    return null;
   }
 
   saveNativeRemote(input: {
