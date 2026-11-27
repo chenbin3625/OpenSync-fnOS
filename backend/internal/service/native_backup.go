@@ -667,6 +667,9 @@ func SaveNativeStorage(ctx context.Context, in NativeStorageInput) error {
 	if e == nil && id > 0 {
 		refreshNativeStorageConcurrencyLimits(c)
 		RemoveEngineHealth(id)
+		if replaced && len(replacedNames) > 0 {
+			recoverNativeStorageJobs(id, c, replacedNames)
+		}
 	}
 	if e == nil && authSessionID != "" {
 		native.ConsumeAuthSession(authSessionID)
@@ -754,6 +757,7 @@ func UpdateNativeStorage(ctx context.Context, in NativeRemoteEditInput) error {
 	}
 	refreshNativeStorageConcurrencyLimits(c)
 	RemoveEngineHealth(id)
+	recoverNativeStorageJobs(id, c, []string{liveName})
 	if authSessionID != "" {
 		native.ConsumeAuthSession(authSessionID)
 	}

@@ -46,8 +46,10 @@ import {
   formatMinutesShort,
   formatRelativeSyncTime,
   formatSecondsShort,
+  formatSyncNextAction,
   getContinuousSyncMeta,
   isSyncStatusError,
+  resolveSyncError,
   resolveEffectiveSyncStatus,
   syncStatusTone,
   SyncStatusTag,
@@ -1869,6 +1871,8 @@ export function SyncOverview({
           setDrawer(null);
           onClone?.(job);
         }}
+        onRepairConnection={onRepair}
+        onLocalFolders={onLocalFolders}
         onJobsChanged={onJobsChanged}
       />
     </div>
@@ -1941,19 +1945,38 @@ function SyncTaskRow({
       return resolveRemoteChain(seg, remotes).hasCrypt;
     });
 
-  const needsAuth =
-    groupRemote &&
-    /登录状态已失效|认证失败|令牌已过期/.test(status.error);
-  const localPermission =
-    /本地.*(?:无权限|未授权|权限不足|权限被拒绝)|未授权(?:的)?本地|无法读取本地授权目录/.test(
-      status.error,
+  const errorInfo = resolveSyncError(status);
+  const needsAuth = errorInfo.type === "auth";
+  const localPermission = errorInfo.type === "local_permission";
+  const recoveryRemote = (() => {
+    const candidates = remotes.filter((remote) =>
+      getJobMountNames(job).some(
+        (mount) => mount.toLowerCase() === remote.name.toLowerCase(),
+      ),
     );
+    if (errorInfo.endpoint) {
+      return (
+        candidates.find(
+          (remote) =>
+            remote.name.toLowerCase() === errorInfo.endpoint.toLowerCase(),
+        ) ?? null
+      );
+    }
+    return groupRemote ?? (candidates.length === 1 ? candidates[0] : null);
+  })();
   const lastSuccess = formatRelativeSyncTime(status.lastSuccess);
+  const nextAction = formatSyncNextAction(status);
   const waitingForRetry =
     status.state === "error" &&
     !needsAuth &&
     !localPermission &&
     (status.retryAt ?? 0) > Date.now() / 1000;
+  const failedRecords =
+    status.state === "error" &&
+    job.method !== 3 &&
+    (errorInfo.type === "transfer" ||
+      errorInfo.type === "connection" ||
+      errorInfo.type === "remote_permission");
   const mirrorNeedsReview = requiresFirstMirrorPreview(job);
   const failed =
     status.state === "error" ||
@@ -2219,13 +2242,26 @@ function SyncTaskRow({
             <div className="sync-overview-status-line">
               <SyncStatusTag status={status} />
               {waitingForRetry ? (
-                <span className="sync-overview-sub muted">等待自动重试</span>
+                <span className="sync-overview-sub muted">{nextAction || "等待自动重试"}</span>
               ) : status.failures > 1 ? (
                 <span className="sync-overview-error">
                   连续失败 {status.failures} 次
                 </span>
               ) : null}
             </div>
+            <div className="sync-overview-sub muted">
+              {lastSuccess ? `最近成功 ${lastSuccess}` : "尚未成功同步"}
+            </div>
+            {(status.pendingChanges !== 0 || nextAction) && (
+              <div className="sync-overview-sub muted">
+                {status.pendingChanges < 0
+                  ? "待完整核对"
+                  : status.pendingChanges > 0
+                    ? `${status.pendingChanges} 项待同步`
+                    : "没有待同步变更"}
+                {nextAction ? ` · ${nextAction}` : ""}
+              </div>
+            )}
             {status.error && (
               <div className="sync-overview-error" title={status.error}>
                 {status.error}
@@ -2276,6 +2312,7 @@ function SyncTaskRow({
                 (liveJob.lastTask.sumSize ?? 0) > 0)
                 ? ` · ${liveJob.lastTask.successNum ?? 0}/${liveJob.lastTask.allNum ?? 0} 项`
                 : ""}
+              {nextAction ? ` · ${nextAction}` : ""}
             </div>
             {status.state === "waiting_window" && job.windowEnable && (
               <div className="sync-overview-warn">
@@ -2299,12 +2336,12 @@ function SyncTaskRow({
         {!legacy && (
           <>
             {status.state === "error" &&
-              (needsAuth && groupRemote ? (
+              (needsAuth && recoveryRemote ? (
                 <Button
                   size="small"
                   type="warning"
                   theme="light"
-                  onClick={() => onRepair(groupRemote)}
+                  onClick={() => onRepair(recoveryRemote)}
                 >
                   重新授权
                 </Button>
@@ -2317,6 +2354,13 @@ function SyncTaskRow({
                 >
                   查看本地授权
                 </Button>
+              ) : failedRecords ? (
+                <Link
+                  className="sync-overview-cta-link is-warning"
+                  to={`/tasks?jobId=${job.id}&tab=records&hasError=1`}
+                >
+                  查看失败记录并重试
+                </Link>
               ) : null)}
             {Boolean(status.conflictCount) && (
               <Link

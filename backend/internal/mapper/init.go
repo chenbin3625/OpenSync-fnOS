@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const currentVersion = 261128
+const currentVersion = 261129
 
 // InitSQL initializes the database schema and runs migrations
 func InitSQL() {
@@ -481,6 +481,13 @@ func migrationStatements(fromVersion int64) []string {
 		stmts = append(stmts,
 			"ALTER TABLE job_task_item ADD COLUMN jobId integer DEFAULT 0",
 			backfillJobTaskItemJobIDSQL,
+		)
+	}
+	if fromVersion < 261129 {
+		stmts = append(stmts,
+			"ALTER TABLE sync_state ADD COLUMN errorType text NOT NULL DEFAULT ''",
+			"ALTER TABLE sync_state ADD COLUMN errorSide text NOT NULL DEFAULT ''",
+			"ALTER TABLE sync_state ADD COLUMN errorEndpoint text NOT NULL DEFAULT ''",
 		)
 	}
 	stmts = append(stmts, fmt.Sprintf("UPDATE schema_version SET version=%d", currentVersion))

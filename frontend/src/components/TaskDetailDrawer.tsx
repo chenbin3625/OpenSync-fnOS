@@ -16,8 +16,10 @@ import { BisyncConflictsModal } from "./BisyncConflictsModal";
 import { CheckModal } from "./CheckModal";
 import { DryRunModal } from "./DryRunModal";
 import { TaskOverviewPanel } from "./TaskOverviewPanel";
+import { resolveEffectiveSyncStatus, resolveSyncError } from "./SyncStatus";
 import { useAction, useMediaQuery, useResource } from "../lib/hooks";
 import {
+  getJobMountNames,
   isLegacyOpenListJob,
   jobHasCryptRemote,
   requiresFirstMirrorPreview,
@@ -40,6 +42,8 @@ interface TaskDetailDrawerProps {
   onClose: () => void;
   onEdit: (job: JobItem) => void;
   onClone: (job: JobItem) => void;
+  onRepairConnection?: (remote: NativeRemoteItem) => void;
+  onLocalFolders?: () => void;
   onJobsChanged: () => Promise<void>;
 }
 
@@ -51,6 +55,8 @@ export function TaskDetailDrawer({
   onClose,
   onEdit,
   onClone,
+  onRepairConnection,
+  onLocalFolders,
   onJobsChanged,
 }: TaskDetailDrawerProps) {
   const isMobile = useMediaQuery("(max-width: 720px)");
@@ -59,6 +65,7 @@ export function TaskDetailDrawer({
   const [checkOpen, setCheckOpen] = useState(false);
   const [conflictsOpen, setConflictsOpen] = useState(false);
   const [mirrorPreviewOpen, setMirrorPreviewOpen] = useState(false);
+  const [recordsHasError, setRecordsHasError] = useState(false);
   const actions = useAction();
 
   useEffect(() => {
@@ -66,6 +73,7 @@ export function TaskDetailDrawer({
     setCheckOpen(false);
     setConflictsOpen(false);
     setMirrorPreviewOpen(false);
+    setRecordsHasError(false);
   }, [job?.id, initialTab]);
 
   const currentTask = useResource(
@@ -95,6 +103,18 @@ export function TaskDetailDrawer({
       : null;
   const legacy = isLegacyOpenListJob(job, engines);
   const hasCryptRemote = jobHasCryptRemote(job, engines, remotes);
+  const syncError = resolveSyncError(resolveEffectiveSyncStatus(job));
+  const remoteForRecovery = (() => {
+    const endpoint = syncError.endpoint.trim().toLowerCase();
+    const mounts = getJobMountNames(job);
+    const candidates = remotes.filter((remote) =>
+      mounts.some((mount) => mount.toLowerCase() === remote.name.toLowerCase()),
+    );
+    if (endpoint) {
+      return candidates.find((remote) => remote.name.toLowerCase() === endpoint) ?? null;
+    }
+    return candidates.length === 1 ? candidates[0] : null;
+  })();
 
   const runAction = (operation: () => Promise<unknown>, message: string) =>
     void actions.run(async () => {
@@ -183,7 +203,20 @@ export function TaskDetailDrawer({
               onRun={() =>
                 runAction(() => api.jobAction({ id: String(job.id) }), "已触发立即同步")
               }
-              onOpenRecords={() => setTab("records")}
+              onOpenRecords={() => {
+                setRecordsHasError(false);
+                setTab("records");
+              }}
+              onOpenFailedRecords={() => {
+                setRecordsHasError(true);
+                setTab("records");
+              }}
+              onRepairConnection={
+                remoteForRecovery && onRepairConnection
+                  ? () => onRepairConnection(remoteForRecovery)
+                  : undefined
+              }
+              onLocalFolders={onLocalFolders}
               onCheck={() => setCheckOpen(true)}
               onOpenConflicts={() => setConflictsOpen(true)}
               onClone={() => {
@@ -243,6 +276,7 @@ export function TaskDetailDrawer({
                 key={job.id}
                 jobId={job.id}
                 refreshKey={recordsRefreshKey}
+                initialHasError={recordsHasError ? 1 : undefined}
                 disableRetry={legacy || job.method === 3}
                 onTaskEnded={() => {
                   void onJobsChanged();

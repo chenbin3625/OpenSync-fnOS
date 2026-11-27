@@ -271,7 +271,7 @@ func (w *jobWatcher) runSync(ctx context.Context, jc *JobClient, job map[string]
 					return
 				}
 				if err != nil {
-					_ = mapper.RecordSyncError(w.jobID, err.Error())
+					_ = recordSyncErrorForJob(w.jobID, job, err.Error())
 					w.resetPollBackoff(poll)
 					continue
 				}
@@ -586,6 +586,26 @@ func addSyncStatus(row map[string]interface{}, s mapper.SyncState, stateErr erro
 	if util.ToInt(row["enable"]) != 1 {
 		status = "paused"
 	}
+	errorInfo := mapper.SyncError{
+		Type:     s.ErrorType,
+		Side:     s.ErrorSide,
+		Endpoint: s.ErrorEndpoint,
+	}
+	if message != "" {
+		classified := syncErrorForJob(row, message)
+		if errorInfo.Type == "" {
+			errorInfo.Type = classified.Type
+		}
+		if errorInfo.Side == "" {
+			errorInfo.Side = classified.Side
+		}
+		if errorInfo.Endpoint == "" {
+			errorInfo.Endpoint = classified.Endpoint
+		}
+	}
+	if stateErr != nil {
+		errorInfo = mapper.SyncError{Type: mapper.SyncErrorState, Side: "system"}
+	}
 	pending := len(s.Paths)
 	if s.FullScan {
 		pending = -1
@@ -604,6 +624,9 @@ func addSyncStatus(row map[string]interface{}, s mapper.SyncState, stateErr erro
 		"error":               message,
 		"failures":            s.Failures,
 		"retryAt":             s.RetryAt,
+		"errorType":           errorInfo.Type,
+		"errorSide":           errorInfo.Side,
+		"errorEndpoint":       errorInfo.Endpoint,
 		"direction":           extra.SyncDirection,
 		"directionMode":       extra.SyncDirectionMode,
 		"pollIntervalSec":     int(poll / time.Second),

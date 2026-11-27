@@ -19,7 +19,8 @@ func syncSchemaStatements() []string {
 		 updatedAt INTEGER NOT NULL DEFAULT 0, lastSuccess INTEGER NOT NULL DEFAULT 0,
 		 lastPoll INTEGER NOT NULL DEFAULT 0, lastAudit INTEGER NOT NULL DEFAULT 0,
 		 failures INTEGER NOT NULL DEFAULT 0, retryAt INTEGER NOT NULL DEFAULT 0,
-		 error TEXT NOT NULL DEFAULT '')`,
+		 error TEXT NOT NULL DEFAULT '', errorType TEXT NOT NULL DEFAULT '',
+		 errorSide TEXT NOT NULL DEFAULT '', errorEndpoint TEXT NOT NULL DEFAULT '')`,
 		`CREATE TABLE IF NOT EXISTS sync_file_state (
 		 jobId INTEGER NOT NULL, root TEXT NOT NULL, path TEXT NOT NULL,
 		 size INTEGER NOT NULL, modTime INTEGER NOT NULL, hash TEXT NOT NULL,
@@ -28,11 +29,95 @@ func syncSchemaStatements() []string {
 	}
 }
 
+const (
+	SyncErrorAuth             = "auth"
+	SyncErrorLocalPermission  = "local_permission"
+	SyncErrorRateLimited      = "rate_limited"
+	SyncErrorRemotePermission = "remote_permission"
+	SyncErrorConnection       = "connection"
+	SyncErrorTransfer         = "transfer"
+	SyncErrorState            = "state"
+)
+
+// SyncError keeps recovery metadata separate from the human-readable error.
+// The string fields intentionally remain open-ended so new error types and
+// endpoints can be added without another database migration.
+type SyncError struct {
+	Type     string
+	Side     string
+	Endpoint string
+}
+
+// ClassifySyncError provides a compatibility fallback for state rows created
+// before structured recovery metadata existed. New callers may pass explicit
+// metadata to RecordSyncError or CompleteSyncRun, while old error strings stay
+// actionable after a database upgrade.
+func ClassifySyncError(message string) SyncError {
+	low := strings.ToLower(strings.TrimSpace(message))
+	if low == "" {
+		return SyncError{}
+	}
+	switch {
+	case strings.Contains(low, "登录状态已失效"),
+		strings.Contains(low, "认证失败"),
+		strings.Contains(low, "令牌已过期"),
+		strings.Contains(low, "cookie 过期"),
+		strings.Contains(low, "token expired"),
+		strings.Contains(low, "unauthorized"),
+		strings.Contains(low, "invalid_grant"):
+		return SyncError{Type: SyncErrorAuth, Side: "remote"}
+	case strings.Contains(low, "限流"),
+		strings.Contains(low, "too many requests"),
+		strings.Contains(low, "429"):
+		return SyncError{Type: SyncErrorRateLimited, Side: "remote"}
+	case strings.Contains(low, "本地授权目录"),
+		strings.Contains(low, "未授权本地"),
+		strings.Contains(low, "本地无权限"),
+		strings.Contains(low, "无法读取本地"),
+		strings.Contains(low, "本地权限"),
+		(strings.Contains(low, "本地") && (strings.Contains(low, "权限被拒绝") || strings.Contains(low, "权限不足") || strings.Contains(low, "不可访问"))):
+		return SyncError{Type: SyncErrorLocalPermission, Side: "local"}
+	case strings.Contains(low, "无目录访问权限"),
+		strings.Contains(low, "accessdenied"),
+		strings.Contains(low, "permission denied"),
+		strings.Contains(low, "forbidden"),
+		strings.Contains(low, "403"):
+		return SyncError{Type: SyncErrorRemotePermission, Side: "remote"}
+	case strings.Contains(low, "超时"),
+		strings.Contains(low, "连接"),
+		strings.Contains(low, "域名解析"),
+		strings.Contains(low, "no such host"),
+		strings.Contains(low, "i/o timeout"),
+		strings.Contains(low, "deadline exceeded"),
+		strings.Contains(low, "tls:"):
+		return SyncError{Type: SyncErrorConnection, Side: "remote"}
+	default:
+		return SyncError{Type: SyncErrorTransfer, Side: "unknown"}
+	}
+}
+
+func normalizeSyncError(message string, details []SyncError) SyncError {
+	info := ClassifySyncError(message)
+	if len(details) == 0 {
+		return info
+	}
+	if details[0].Type != "" {
+		info.Type = details[0].Type
+	}
+	if details[0].Side != "" {
+		info.Side = details[0].Side
+	}
+	if details[0].Endpoint != "" {
+		info.Endpoint = details[0].Endpoint
+	}
+	return info
+}
+
 // SyncState is a durable inbox. Generation prevents an older run from
 // acknowledging changes that arrived while that run was transferring files.
 type SyncState struct {
 	JobID, Generation, UpdatedAt, LastSuccess, LastPoll, LastAudit, RetryAt int64
-	Fingerprint, Error                                                      string
+	Fingerprint, Error, ErrorType, ErrorSide, ErrorEndpoint                 string
 	Pending, FullScan                                                       bool
 	Failures                                                                int
 	Paths                                                                   []string
@@ -43,7 +128,7 @@ func readSyncState(row interface{ Scan(...interface{}) error }) (SyncState, erro
 	var paths string
 	err := row.Scan(&s.JobID, &s.Fingerprint, &s.Generation, &s.Pending, &s.FullScan,
 		&paths, &s.UpdatedAt, &s.LastSuccess, &s.LastPoll, &s.LastAudit,
-		&s.Failures, &s.RetryAt, &s.Error)
+		&s.Failures, &s.RetryAt, &s.Error, &s.ErrorType, &s.ErrorSide, &s.ErrorEndpoint)
 	if err == nil {
 		err = json.Unmarshal([]byte(paths), &s.Paths)
 	}
@@ -52,13 +137,13 @@ func readSyncState(row interface{ Scan(...interface{}) error }) (SyncState, erro
 
 func GetSyncState(jobID int64) (SyncState, error) {
 	return readSyncState(GetDB().QueryRow(`SELECT jobId,fingerprint,generation,pending,fullScan,
-		paths,updatedAt,lastSuccess,lastPoll,lastAudit,failures,retryAt,error
+		paths,updatedAt,lastSuccess,lastPoll,lastAudit,failures,retryAt,error,errorType,errorSide,errorEndpoint
 		FROM sync_state WHERE jobId=?`, jobID))
 }
 
 func ListSyncStates(jobIDs ...int64) (map[int64]SyncState, error) {
 	query := `SELECT jobId,fingerprint,generation,pending,fullScan,
-		paths,updatedAt,lastSuccess,lastPoll,lastAudit,failures,retryAt,error
+		paths,updatedAt,lastSuccess,lastPoll,lastAudit,failures,retryAt,error,errorType,errorSide,errorEndpoint
 		FROM sync_state`
 	var args []interface{}
 	if len(jobIDs) > 0 {
@@ -100,6 +185,7 @@ func EnsureSyncState(jobID int64, fingerprint string) error {
 		}
 		_, err := tx.Exec(`UPDATE sync_state SET fingerprint=?, generation=generation+1,
 		 pending=1, fullScan=1, paths='[]', updatedAt=?, retryAt=0, failures=0, error='',
+		 errorType='', errorSide='', errorEndpoint='',
 		 lastSuccess=0, lastPoll=0, lastAudit=0 WHERE jobId=?`, fingerprint, time.Now().Unix(), jobID)
 		return err
 	})
@@ -107,7 +193,7 @@ func EnsureSyncState(jobID int64, fingerprint string) error {
 
 func enqueueSyncChanges(tx *sql.Tx, jobID int64, paths []string, full bool) error {
 	s, err := readSyncState(tx.QueryRow(`SELECT jobId,fingerprint,generation,pending,fullScan,
-		paths,updatedAt,lastSuccess,lastPoll,lastAudit,failures,retryAt,error
+		paths,updatedAt,lastSuccess,lastPoll,lastAudit,failures,retryAt,error,errorType,errorSide,errorEndpoint
 		FROM sync_state WHERE jobId=?`, jobID))
 	if err != nil {
 		return err
@@ -140,30 +226,37 @@ func EnqueueSyncChanges(jobID int64, paths []string, full bool) error {
 	return withTx(func(tx *sql.Tx) error { return enqueueSyncChanges(tx, jobID, paths, full) })
 }
 
-func CompleteSyncRun(jobID, generation int64, runErr string) error {
+func CompleteSyncRun(jobID, generation int64, runErr string, details ...SyncError) error {
 	if runErr != "" {
-		return RecordSyncError(jobID, runErr)
+		return RecordSyncError(jobID, runErr, details...)
 	}
 	err := ExecuteUpdate(`UPDATE sync_state SET
 	 pending=CASE WHEN generation=? THEN 0 ELSE pending END,
 	 fullScan=CASE WHEN generation=? THEN 0 ELSE fullScan END,
 	 paths=CASE WHEN generation=? THEN '[]' ELSE paths END,
-	 lastSuccess=?, failures=0, retryAt=0, error='' WHERE jobId=?`,
+	 lastSuccess=?, failures=0, retryAt=0, error='', errorType='', errorSide='', errorEndpoint='' WHERE jobId=?`,
 		generation, generation, generation, time.Now().Unix(), jobID)
 	return err
 }
 
-func RecordSyncError(jobID int64, message string) error {
+func RecordSyncError(jobID int64, message string, details ...SyncError) error {
+	info := normalizeSyncError(message, details)
 	return withTx(func(tx *sql.Tx) error {
 		var failures int
 		if err := tx.QueryRow("SELECT failures FROM sync_state WHERE jobId=?", jobID).Scan(&failures); err != nil {
 			return err
 		}
 		delay := min(3600, 10<<min(failures, 9))
-		_, err := tx.Exec(`UPDATE sync_state SET error=?, failures=failures+1, retryAt=? WHERE jobId=?`,
-			message, time.Now().Unix()+int64(delay), jobID)
+		_, err := tx.Exec(`UPDATE sync_state SET error=?, errorType=?, errorSide=?, errorEndpoint=?, failures=failures+1, retryAt=? WHERE jobId=?`,
+			message, info.Type, info.Side, info.Endpoint, time.Now().Unix()+int64(delay), jobID)
 		return err
 	})
+}
+
+// ClearSyncError releases a retry backoff after a connection or local
+// permission repair. Pending changes remain intact for the next run.
+func ClearSyncError(jobID int64) error {
+	return ExecuteUpdate(`UPDATE sync_state SET error='', errorType='', errorSide='', errorEndpoint='', failures=0, retryAt=0 WHERE jobId=?`, jobID)
 }
 
 func MarkSyncPoll(jobID int64) error {

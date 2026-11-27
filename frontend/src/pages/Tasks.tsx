@@ -31,11 +31,12 @@ import { CheckModal } from "../components/CheckModal";
 import { DryRunModal } from "../components/DryRunModal";
 import { TaskOverviewPanel } from "../components/TaskOverviewPanel";
 import { SyncOverview } from "./SyncOverview";
-import { jobStatusDotClass } from "../components/SyncStatus";
+import { jobStatusDotClass, resolveSyncError } from "../components/SyncStatus";
 import { useAction, useResource } from "../lib/hooks";
 import {
   buildTaskSearchParams,
   cloneJobToForm,
+  getJobMountNames,
   isLegacyOpenListJob,
   jobHasCryptRemote,
   requiresFirstMirrorPreview,
@@ -87,8 +88,9 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
   );
   const engines = useResource((signal) => api.engines(signal));
   const storage = useResource(
-    (signal) => overview ? api.nativeStorageState(signal) : Promise.resolve(null),
+    (signal) => api.nativeStorageState(signal),
     [overview],
+    overview,
   );
   const [repair, setRepair] = useState<
     | { mode: "local" | "form" | "browse"; remote?: NativeRemoteItem | null }
@@ -126,6 +128,22 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
     () => Boolean(selected && jobHasCryptRemote(selected, engines.data, storage.data?.remotes)),
     [selected, engines.data, storage.data?.remotes],
   );
+  const repairRemoteForSelected = useMemo(() => {
+    if (!selected || !storage.data?.remotes?.length) return null;
+    const info = resolveSyncError(selected.syncStatus);
+    const mounts = getJobMountNames(selected);
+    const candidates = storage.data.remotes.filter((remote) =>
+      mounts.some((mount) => mount.toLowerCase() === remote.name.toLowerCase()),
+    );
+    if (info.endpoint) {
+      return (
+        candidates.find(
+          (remote) => remote.name.toLowerCase() === info.endpoint.toLowerCase(),
+        ) ?? null
+      );
+    }
+    return candidates.length === 1 ? candidates[0] : null;
+  }, [selected, storage.data?.remotes]);
   const [snapshotState, setSnapshotState] = useState<{
     jobId: number;
     ok: boolean;
@@ -586,6 +604,13 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
                     runKey={String(currentTaskForSelected?.taskId ?? "idle")}
                     onRun={() => triggerSyncNow(selected.id)}
                     onOpenRecords={handleOpenRecords}
+                    onOpenFailedRecords={() => update({ tab: "records", hasError: 1 })}
+                    onRepairConnection={
+                      repairRemoteForSelected
+                        ? () => setRepair({ mode: "form", remote: repairRemoteForSelected })
+                        : undefined
+                    }
+                    onLocalFolders={() => setRepair({ mode: "local" })}
                     onCheck={() => setCheckJob(selected)}
                     onOpenConflicts={() => setConflictsOpen(true)}
                     onClone={() => handleCloneJob(selected)}
@@ -616,6 +641,7 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
                       key={selected.id}
                       jobId={selected.id}
                       refreshKey={recordsRefreshKey}
+                      initialHasError={params.get("hasError") === "1" ? 1 : undefined}
                       disableRetry={
                         isLegacyOpenListJob(selected, engines.data) ||
                         selected.method === 3
