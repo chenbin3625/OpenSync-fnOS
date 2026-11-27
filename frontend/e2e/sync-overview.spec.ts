@@ -281,7 +281,7 @@ test("renders redesigned /sync overview with live progress, quick actions, and s
   await expect(liveRow).toContainText("正在同步");
   await expect(liveRow).toContainText("24.60 MB/s");
   await expect(liveRow).toContainText("72%");
-  await expect(liveRow).toContainText("限速 20M");
+  await expect(liveRow).toContainText("限速 20 MB/s");
   await expect(liveRow).toContainText("回收站");
 
   await liveRow.getByRole("button", { name: "暂停传输" }).click();
@@ -309,9 +309,11 @@ test("renders redesigned /sync overview with live progress, quick actions, and s
   await page.getByRole("menuitem", { name: "复制任务" }).click();
   const dialog = page.getByRole("dialog");
   await expect(
-    dialog.getByRole("heading", { name: "新建持续同步任务", exact: true }),
+    dialog.getByRole("heading", { name: "复制同步任务", exact: true }),
   ).toBeVisible();
   await dialog.getByRole("button", { name: "取消", exact: true }).click();
+  await page.getByRole("button", { name: "放弃", exact: true }).click();
+  await expect(dialog).toBeHidden();
 
   // Status pill filtering & filter-empty recovery
   await pillGroup.getByRole("button", { name: /同步异常\s*1/ }).click();
