@@ -151,16 +151,20 @@ type NativeStorageTestResult struct {
 }
 
 type NativeRemoteItem struct {
-	Name              string            `json:"name"`
-	Type              string            `json:"type"`
-	Summary           string            `json:"summary"`
-	Options           map[string]string `json:"options"`
-	ConfiguredSecrets []string          `json:"configuredSecrets"`
-	UsedByJobs        []string          `json:"usedByJobs"`
-	UsedByCrypts      []string          `json:"usedByCrypts"`
-	MaxConcurrentJobs int               `json:"maxConcurrentJobs"`
-	ActiveJobs        int               `json:"activeJobs"`
-	QueuedJobs        int               `json:"queuedJobs"`
+	Name              string                `json:"name"`
+	Type              string                `json:"type"`
+	Summary           string                `json:"summary"`
+	Options           map[string]string     `json:"options"`
+	ConfiguredSecrets []string              `json:"configuredSecrets"`
+	UsedByJobs        []string              `json:"usedByJobs"`
+	UsedByCrypts      []string              `json:"usedByCrypts"`
+	MaxConcurrentJobs int                   `json:"maxConcurrentJobs"`
+	ActiveJobs        int                   `json:"activeJobs"`
+	QueuedJobs        int                   `json:"queuedJobs"`
+	PollIntervalSec   int                   `json:"pollIntervalSec"`
+	WeeklySchedule    *WeeklyScheduleConfig `json:"weeklySchedule,omitempty"`
+	BwLimit           string                `json:"bwLimit"`
+	Paused            bool                  `json:"paused"`
 }
 
 type NativeStorageState struct {
@@ -356,6 +360,10 @@ func GetNativeStorageState(ctx context.Context) (*NativeStorageState, error) {
 	jobsByRemote, cryptsByRemote := collectNativeRemoteReferences(id, c)
 	for _, name := range slices.Sorted(maps.Keys(c)) {
 		params := c[name]
+		policy, policyErr := parseConnectionPolicy(params)
+		if policyErr != nil {
+			policy = NativeConnectionPolicy{}
+		}
 		pub, secrets := native.RedactParams(params)
 		usedJobs := jobsByRemote[name]
 		if usedJobs == nil {
@@ -367,7 +375,7 @@ func GetNativeStorageState(ctx context.Context) (*NativeStorageState, error) {
 		}
 		activeJobs, queuedJobs := engineQueue.StorageStats(name)
 		remoteCap, _ := strconv.Atoi(strings.TrimSpace(params["max_concurrent_jobs"]))
-		state.Remotes = append(state.Remotes, NativeRemoteItem{
+		item := NativeRemoteItem{
 			Name:              name,
 			Type:              params["type"],
 			Summary:           native.RemoteSummary(params),
@@ -378,7 +386,9 @@ func GetNativeStorageState(ctx context.Context) (*NativeStorageState, error) {
 			MaxConcurrentJobs: remoteCap,
 			ActiveJobs:        activeJobs,
 			QueuedJobs:        queuedJobs,
-		})
+		}
+		connectionPolicyStatusForRemote(&item, policy)
+		state.Remotes = append(state.Remotes, item)
 	}
 	return state, nil
 }
@@ -529,6 +539,16 @@ func mergeEditRemoteParams(oldParams, incoming map[string]string, clearSecrets [
 		newHost, newPort := normalizeSFTPEndpoint(merged)
 		if oldHost == newHost && oldPort == newPort {
 			merged["known_hosts"] = oldParams["known_hosts"]
+		}
+	}
+	for _, key := range []string{
+		native.ConnectionPollIntervalKey,
+		native.ConnectionWeeklyScheduleKey,
+		native.ConnectionBwLimitKey,
+		native.ConnectionPausedKey,
+	} {
+		if _, provided := incoming[key]; !provided && oldParams[key] != "" {
+			merged[key] = oldParams[key]
 		}
 	}
 	return merged, skipObscure, nil
@@ -755,12 +775,70 @@ func UpdateNativeStorage(ctx context.Context, in NativeRemoteEditInput) error {
 	if err := mapper.UpdateAlist(id, remark, native.EngineURL, &secret); err != nil {
 		return err
 	}
+	if policy, policyErr := parseConnectionPolicy(c[liveName]); policyErr == nil {
+		updateConnectionBandwidthGroup(liveName, policy)
+	}
 	refreshNativeStorageConcurrencyLimits(c)
 	RemoveEngineHealth(id)
 	recoverNativeStorageJobs(id, c, []string{liveName})
 	if authSessionID != "" {
 		native.ConsumeAuthSession(authSessionID)
 	}
+	return nil
+}
+
+// UpdateNativeStoragePolicy updates only OpenSync-owned connection defaults
+// and pause state. Credential fields and rclone options are left untouched.
+func UpdateNativeStoragePolicy(ctx context.Context, in NativeConnectionPolicyInput) error {
+	name := strings.TrimSpace(in.Name)
+	if name == "" {
+		return publicError("请指定要编辑的存储名称")
+	}
+	policy := NativeConnectionPolicy{
+		PollIntervalSec: in.PollIntervalSec,
+		WeeklySchedule:  in.WeeklySchedule,
+		BwLimit:         strings.TrimSpace(in.BwLimit),
+		Paused:          in.Paused,
+	}
+	if err := validateConnectionPolicy(policy); err != nil {
+		return publicError(err.Error())
+	}
+
+	alistRefMu.Lock()
+	defer alistRefMu.Unlock()
+	alistMutationMu.Lock()
+	defer alistMutationMu.Unlock()
+
+	id, remark, _, c, err := loadExistingNativeRowFull()
+	if err != nil {
+		return err
+	}
+	if id == 0 {
+		return publicError("未找到内置存储引擎")
+	}
+	canonical, ok := c.FindKey(name)
+	if !ok {
+		return publicError(fmt.Sprintf("存储 %q 不存在", name))
+	}
+	prevPolicy, _ := parseConnectionPolicy(c[canonical])
+	if err := encodeConnectionPolicy(c[canonical], policy); err != nil {
+		return err
+	}
+	if err := c.Validate(); err != nil {
+		return publicError(err.Error())
+	}
+	data, err := json.Marshal(c)
+	if err != nil {
+		return err
+	}
+	secret := string(data)
+	if err := mapper.UpdateAlist(id, remark, native.EngineURL, &secret); err != nil {
+		return err
+	}
+	updateConnectionBandwidthGroup(canonical, policy)
+	refreshConnectionPolicyJobs(canonical, c, prevPolicy.Paused && !policy.Paused)
+	refreshNativeStorageConcurrencyLimits(c)
+	RemoveEngineHealth(id)
 	return nil
 }
 

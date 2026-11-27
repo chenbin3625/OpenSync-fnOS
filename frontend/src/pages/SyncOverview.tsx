@@ -1,4 +1,4 @@
-import { useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import Button from "@douyinfe/semi-ui/lib/es/button";
 import Checkbox from "@douyinfe/semi-ui/lib/es/checkbox";
@@ -41,6 +41,7 @@ import {
   errorToast,
   type MenuAction,
 } from "../components/common";
+import { WeeklyScheduleGrid } from "../components/WeeklyScheduleGrid";
 import {
   formatMinutesShort,
   formatRelativeSyncTime,
@@ -90,6 +91,7 @@ import type {
   NativeLocalRoot,
   NativeRemoteItem,
   NativeStorageTestResult,
+  WeeklyScheduleConfig,
 } from "../types";
 
 const statusOptions = [
@@ -368,6 +370,7 @@ export function SyncOverview({
   onLocalFolders,
   onNavigateEngines,
   onJobsChanged,
+  onStorageChanged,
 }: SyncOverviewProps) {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
@@ -385,6 +388,14 @@ export function SyncOverview({
   const [aboutResults, setAboutResults] = useState<
     Record<string, NativeAboutInfo>
   >({});
+  const [connectionPolicy, setConnectionPolicy] = useState<{
+    name: string;
+    pollIntervalSec: string;
+    weeklySchedule?: WeeklyScheduleConfig;
+    bwLimit: string;
+    paused: boolean;
+  } | null>(null);
+  const [savingConnectionPolicy, setSavingConnectionPolicy] = useState(false);
   const action = useAction();
 
   const storage = params.get("storage") || "all";
@@ -745,6 +756,20 @@ export function SyncOverview({
     [remotes, storage],
   );
 
+  useEffect(() => {
+    if (!selectedRemote) {
+      setConnectionPolicy(null);
+      return;
+    }
+    setConnectionPolicy({
+      name: selectedRemote.name,
+      pollIntervalSec: String(selectedRemote.pollIntervalSec || 0),
+      weeklySchedule: selectedRemote.weeklySchedule,
+      bwLimit: selectedRemote.bwLimit || "",
+      paused: Boolean(selectedRemote.paused),
+    });
+  }, [selectedRemote]);
+
   const handleTestRemote = async (name: string) => {
     setTestingName(name);
     try {
@@ -773,6 +798,32 @@ export function SyncOverview({
       errorToast(err);
     } finally {
       setAboutLoadingName(null);
+    }
+  };
+
+  const saveConnectionPolicy = async () => {
+    if (!selectedRemote || !connectionPolicy) return;
+    const poll = Number(connectionPolicy.pollIntervalSec || 0);
+    if (!Number.isInteger(poll) || poll < 0 || (poll !== 0 && (poll < 10 || poll > 86400))) {
+      Toast.warning("连接轮询周期请输入 0 或 10–86400 秒");
+      return;
+    }
+    setSavingConnectionPolicy(true);
+    try {
+      await api.updateNativeStoragePolicy({
+        name: selectedRemote.name,
+        pollIntervalSec: poll,
+        weeklySchedule: connectionPolicy.weeklySchedule,
+        bwLimit: connectionPolicy.bwLimit.trim(),
+        paused: connectionPolicy.paused,
+      });
+      Toast.success("连接策略已保存");
+      onStorageChanged?.();
+      await onJobsChanged();
+    } catch (err) {
+      errorToast(err);
+    } finally {
+      setSavingConnectionPolicy(false);
     }
   };
 
@@ -1650,6 +1701,99 @@ export function SyncOverview({
                     );
                   })()}
                 </div>
+                {connectionPolicy && (
+                  <div className="sync-connection-policy" data-testid="connection-policy-editor">
+                    <div className="sync-connection-policy__head">
+                      <div>
+                        <h3>连接默认策略</h3>
+                        <p className="muted">
+                          任务填写的轮询周期和周历优先；留空或关闭时才继承这里的默认值。
+                        </p>
+                      </div>
+                      <Button
+                        size="small"
+                        type={connectionPolicy.paused ? "primary" : "tertiary"}
+                        loading={savingConnectionPolicy}
+                        onClick={() =>
+                          setConnectionPolicy((prev) =>
+                            prev ? { ...prev, paused: !prev.paused } : prev,
+                          )
+                        }
+                      >
+                        {connectionPolicy.paused ? "恢复连接" : "暂停连接"}
+                      </Button>
+                    </div>
+                    <div className="sync-connection-policy__fields">
+                      <label>
+                        <span>默认远端轮询周期（秒）</span>
+                        <input
+                          type="number"
+                          min={0}
+                          max={86400}
+                          value={connectionPolicy.pollIntervalSec}
+                          onChange={(event) =>
+                            setConnectionPolicy((prev) =>
+                              prev
+                                ? { ...prev, pollIntervalSec: event.target.value }
+                                : prev,
+                            )
+                          }
+                        />
+                        <small className="muted">0 表示沿用系统默认值</small>
+                      </label>
+                      <label>
+                        <span>连接并行传输总限速</span>
+                        <input
+                          type="text"
+                          value={connectionPolicy.bwLimit}
+                          placeholder="留空表示不限速"
+                          onChange={(event) =>
+                            setConnectionPolicy((prev) =>
+                              prev ? { ...prev, bwLimit: event.target.value } : prev,
+                            )
+                          }
+                        />
+                        <small className="muted">同一连接的多任务共享这一上限</small>
+                      </label>
+                    </div>
+                    <div className="sync-connection-policy__schedule-head">
+                      <strong>连接周历默认值</strong>
+                      {connectionPolicy.weeklySchedule && (
+                        <Button
+                          size="small"
+                          theme="borderless"
+                          onClick={() =>
+                            setConnectionPolicy((prev) =>
+                              prev ? { ...prev, weeklySchedule: undefined } : prev,
+                            )
+                          }
+                        >
+                          清除默认周历
+                        </Button>
+                      )}
+                    </div>
+                    <WeeklyScheduleGrid
+                      value={connectionPolicy.weeklySchedule}
+                      onChange={(weeklySchedule) =>
+                        setConnectionPolicy((prev) =>
+                          prev ? { ...prev, weeklySchedule } : prev,
+                        )
+                      }
+                    />
+                    <div className="sync-connection-policy__hint muted">
+                      本地互备不继承远端策略；云对云和多端任务按实际引用的连接分别共享限速，Crypt 会沿底层远端链继承。连接恢复只解除连接层暂停，不会唤醒手动暂停或待镜像确认的任务。
+                    </div>
+                    <div className="sync-settings-actions">
+                      <Button
+                        type="primary"
+                        loading={savingConnectionPolicy}
+                        onClick={() => void saveConnectionPolicy()}
+                      >
+                        保存连接策略
+                      </Button>
+                    </div>
+                  </div>
+                )}
               </SectionCard>
             ) : storage === "__local__" || storage === "本地" ? (
               <SectionCard

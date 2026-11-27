@@ -38,6 +38,15 @@ func (jt *JobTask) releaseSlotNow() {
 // and the task context.
 func (jt *JobTask) cancelTaskRuntime() {
 	jt.cancelPersistFlush()
+	jt.connectionBwMu.Lock()
+	groupReleases := append([]func(){}, jt.connectionGroupReleases...)
+	jt.connectionGroupReleases = nil
+	jt.connectionBwMu.Unlock()
+	for _, release := range groupReleases {
+		if release != nil {
+			release()
+		}
+	}
 	jt.runtimeMu.Lock()
 	cancel := jt.cancel
 	releaseSlot := jt.releaseEngineSlot

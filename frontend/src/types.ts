@@ -76,6 +76,10 @@ export interface NativeRemoteItem {
   maxConcurrentJobs?: number;
   activeJobs?: number;
   queuedJobs?: number;
+  pollIntervalSec?: number;
+  weeklySchedule?: WeeklyScheduleConfig;
+  bwLimit?: string;
+  paused?: boolean;
 }
 
 export interface NativeStorageState {
@@ -333,6 +337,7 @@ export interface SyncStatus {
   schedulePaused?: boolean;
   weeklyLimitRate?: string;
   effectiveBwLimit?: string;
+  connectionPaused?: boolean;
 }
 
 export type SyncErrorType =

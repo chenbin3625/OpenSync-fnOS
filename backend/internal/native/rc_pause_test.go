@@ -63,6 +63,42 @@ func TestRCControllerWaitIfPausedAndResume(t *testing.T) {
 	}
 }
 
+func TestRCControllerSeparatesManualAndConnectionPause(t *testing.T) {
+	ctrl := NewRCController("")
+	defer ctrl.Close()
+
+	if err := ctrl.Pause(); err != nil {
+		t.Fatalf("manual Pause() failed: %v", err)
+	}
+	if err := ctrl.PauseForConnection("cloud-a"); err != nil {
+		t.Fatalf("PauseForConnection() failed: %v", err)
+	}
+	if err := ctrl.ResumeForConnection("cloud-a"); err != nil {
+		t.Fatalf("ResumeForConnection() failed: %v", err)
+	}
+	if !ctrl.IsPaused() {
+		t.Fatal("releasing a connection pause must not release a manual task pause")
+	}
+	if err := ctrl.Resume(); err != nil {
+		t.Fatalf("manual Resume() failed: %v", err)
+	}
+	if err := ctrl.PauseForConnection("cloud-a"); err != nil {
+		t.Fatalf("second PauseForConnection() failed: %v", err)
+	}
+	if err := ctrl.Resume(); err != nil {
+		t.Fatalf("manual Resume() while connection-paused failed: %v", err)
+	}
+	if !ctrl.IsPaused() {
+		t.Fatal("manual resume must not release a connection pause")
+	}
+	if err := ctrl.ResumeForConnection("cloud-a"); err != nil {
+		t.Fatalf("final ResumeForConnection() failed: %v", err)
+	}
+	if ctrl.IsPaused() {
+		t.Fatal("all pause layers should be released")
+	}
+}
+
 func TestRCControllerWaitIfPausedHonorsContextCancel(t *testing.T) {
 	ctrl := NewRCController("")
 	defer ctrl.Close()

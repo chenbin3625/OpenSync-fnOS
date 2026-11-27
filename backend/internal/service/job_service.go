@@ -120,6 +120,9 @@ func catchUpMissedScheduledJobs(clients []*JobClient) {
 		if job == nil {
 			continue
 		}
+		if connectionPolicyPausedForJob(job) {
+			continue
+		}
 		extra, _, extraErr := parseNativeExtraFlags(job["extraFlags"])
 		if extraErr != nil || !extra.MissedCatchUp {
 			continue
@@ -182,6 +185,9 @@ func resumeInterruptedTasksOnStartup(rows []map[string]interface{}) {
 		jc := jobClientList[jobID]
 		jobClientListMu.RUnlock()
 		if jc == nil || !jc.enabled() || jc.isClosing() {
+			continue
+		}
+		if connectionPolicyPausedForJob(jc.jobSnapshot()) {
 			continue
 		}
 		if util.ToInt(jc.jobSnapshot()["method"]) != 3 {
@@ -1614,6 +1620,7 @@ func ApplyGlobalDefaultBwLimitAsync(rate string) {
 	jobClientListMu.RUnlock()
 	go func() {
 		_ = native.SetGlobalBwLimit(rate)
+		applyConnectionGroupsSystemLimit(rate)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		for _, task := range tasks {
@@ -2077,6 +2084,7 @@ func GetJobItemList(req map[string]interface{}) (map[string]interface{}, error) 
 	}
 	return result, nil
 }
+
 // RemoveTask deletes a task
 func RemoveTask(taskID int64) error {
 	task, err := mapper.GetJobTaskByID(taskID)
