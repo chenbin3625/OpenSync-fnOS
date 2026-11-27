@@ -309,8 +309,8 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
     return () => window.clearInterval(interval);
   }, [hasOverviewRunning, dashboard.refresh, jobs.refresh]);
 
-  const refreshJobs = async (options?: { skipCurrentTask?: boolean }) => {
-    await jobs.refresh(true);
+  const refreshJobs = async (options?: { skipCurrentTask?: boolean; silent?: boolean }) => {
+    await jobs.refresh(options?.silent ?? true);
     window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
     if (overview) {
       await dashboard.refresh(true);
@@ -478,13 +478,19 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
       {overview ? (
         <>
           <Header
-            title="同步任务"
+            title="同步工作台"
             actions={
               <Button
                 type="primary"
                 theme="solid"
                 icon={<IconPlusStroked aria-hidden="true" />}
-                onClick={() => setEditor({ open: true, job: null })}
+                onClick={() => {
+                  const storageName = params.get("storage");
+                  const initialRemote = storage.data?.remotes.find(
+                    (remote) => remote.name.toLowerCase() === storageName?.toLowerCase(),
+                  )?.name;
+                  setEditor({ open: true, job: null, initialRemote });
+                }}
               >
                 新建同步任务
               </Button>
@@ -759,11 +765,18 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
               setEditor({ open: false, job: null });
               const createdId = result.createdId;
               const mirrorPreviewId = result.mirrorPreviewId;
-              if (overview && (createdId || mirrorPreviewId)) {
+              if (overview) {
                 const targetId = createdId ?? mirrorPreviewId;
-                window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
-                if (targetId) navigate(workbenchTaskHref(targetId, "overview", mirrorPreviewId ? "mirrorPreview" : undefined));
-                void jobs.refresh();
+                if (targetId) {
+                  navigate(
+                    workbenchTaskHref(
+                      targetId,
+                      "overview",
+                      mirrorPreviewId === targetId ? "mirrorPreview" : undefined,
+                    ),
+                  );
+                }
+                void refreshJobs({ skipCurrentTask: true, silent: false });
                 return;
               }
               if (createdId) {

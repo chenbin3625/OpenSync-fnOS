@@ -31,6 +31,7 @@ export function TaskDetailDrawer({
       visible
       placement="right"
       width={isMobile ? "100%" : 740}
+      zIndex={999 /* Semi modals use 1000 and can open alongside the drawer. */}
       className="task-detail-drawer"
       title={
         <div className="task-drawer-title">

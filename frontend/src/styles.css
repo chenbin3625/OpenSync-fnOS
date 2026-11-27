@@ -8008,8 +8008,7 @@ body[theme-mode="dark"] .bw-mode-btn.is-active {
   min-width: 0;
 }
 
-.wizard-pair-summary,
-.wizard-route-pill {
+.wizard-pair-summary {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -8029,6 +8028,34 @@ body[theme-mode="dark"] .bw-mode-btn.is-active {
 .wizard-pair-arrow {
   font-weight: 700;
   color: var(--semi-color-primary);
+}
+
+.wizard-impact {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: baseline;
+  gap: 6px 12px;
+  margin: 0;
+  padding: 10px 14px;
+  border: 1px solid var(--semi-color-border);
+  border-radius: var(--radius);
+  background: var(--surface-soft);
+  font-size: var(--font-size-small);
+}
+
+.wizard-impact dt {
+  font-weight: 600;
+}
+
+.wizard-impact dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.wizard-impact-route {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
 }
 
 /* Step 2: 3 Direction Cards + Delete Policy Radio Cards + Inline Crypt */

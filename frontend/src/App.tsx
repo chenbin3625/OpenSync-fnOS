@@ -57,14 +57,14 @@ const Notifications = lazy(() => import("./pages/Notifications"));
 const Settings = lazy(() => import("./pages/Settings"));
 const sections = [
   {
+    path: "/sync",
+    label: "同步工作台",
+    icon: <IconCloudStroked aria-hidden="true" />,
+  },
+  {
     path: "/dashboard",
     label: "总览看板",
     icon: <IconApps aria-hidden="true" />,
-  },
-  {
-    path: "/sync",
-    label: "同步任务",
-    icon: <IconCloudStroked aria-hidden="true" />,
   },
   {
     path: "/notifications",
@@ -95,7 +95,9 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
   const notifiedRelease = useRef<string | null>(null);
   const taskItems = taskMenu.data?.dataList || [];
   const hasTaskItems = taskItems.length > 0;
-  const rawJobId = new URLSearchParams(search).get("jobId");
+  const params = new URLSearchParams(search);
+  const rawJobId = params.get("jobId");
+  const showGlobalActions = pathname === "/sync" && (params.get("storage") || "all") === "all";
   const currentTaskId = rawJobId && /^\d+$/.test(rawJobId) ? rawJobId : null;
   // Tasks.selectJob() falls back to the first job when the URL has no jobId, so
   // the sidebar must highlight the same row instead of showing nothing selected.
@@ -222,6 +224,7 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
     }
   }, [latest.setData, version]);
   useEffect(() => () => checkInFlight.current?.abort(), []);
+  const [workbench, ...otherSections] = sections;
   return (
     <VersionContext
       value={{
@@ -235,24 +238,15 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
       <div className="app-shell">
         <aside className="app-sidebar" aria-label="主菜单">
           <nav aria-label="主导航">
-            <NavLink
-              to={sections[0].path}
-              className={({ isActive }) =>
-                `nav-link${isActive ? " selected" : ""}`
-              }
-            >
-              {sections[0].icon}
-              <span className="nav-label">{sections[0].label}</span>
-            </NavLink>
             <div className="task-nav">
               <NavLink
-                to="/sync"
+                to={workbench.path}
                 className={({ isActive }) =>
                   `nav-link${isActive || pathname === "/tasks" ? " selected" : ""}`
                 }
               >
-                {sections[1].icon}
-                <span className="nav-label">{sections[1].label}</span>
+                {workbench.icon}
+                <span className="nav-label">{workbench.label}</span>
               </NavLink>
               {hasTaskItems && (
                 <button
@@ -318,7 +312,7 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
                 })}
               </div>
             )}
-            {sections.slice(2, -1).map((section) => (
+            {otherSections.slice(0, -1).map((section) => (
               <NavLink
                 key={section.path}
                 to={section.path}
@@ -331,7 +325,9 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
               </NavLink>
             ))}
           </nav>
-          {!isMobile && <GlobalSyncBar jobs={taskItems} variant="sidebar" />}
+          {!isMobile && (
+            <GlobalSyncBar jobs={taskItems} variant="sidebar" showActions={showGlobalActions} />
+          )}
           <div className="sidebar-settings">
             <NavLink
               to="/settings"
@@ -348,7 +344,9 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
         <main className="app-workspace">
           <Suspense fallback={<LoadingPanel />}>{children}</Suspense>
         </main>
-        {isMobile && <GlobalSyncBar jobs={taskItems} variant="mobile" />}
+        {isMobile && (
+          <GlobalSyncBar jobs={taskItems} variant="mobile" showActions={showGlobalActions} />
+        )}
         <nav className="mobile-navigation" aria-label="主导航">
           {sections.map((s) => (
             <NavLink
@@ -424,7 +422,7 @@ function Workspace() {
           <Route path="/storages" element={<Engines />} />
           <Route path="/notifications" element={<Notifications />} />
           <Route path="/settings" element={<Settings />} />
-          <Route path="*" element={<Navigate to="/dashboard" replace />} />
+          <Route path="*" element={<Navigate to="/sync" replace />} />
         </Routes>
       </Shell>
     </SessionContext>

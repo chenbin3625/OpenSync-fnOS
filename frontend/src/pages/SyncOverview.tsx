@@ -108,7 +108,7 @@ const directionOptions = [
 ];
 
 type StatusKey = (typeof statusOptions)[number]["value"];
-type BatchAction = "run" | "stop" | "enable" | "disable" | "run_all" | "stop_all";
+type BatchAction = "run" | "stop" | "enable" | "disable";
 type WorkbenchTab = "tasks" | "history" | "settings";
 type HistoryFilter = "all" | "success" | "failed" | "delete";
 
@@ -615,33 +615,48 @@ export function SyncOverview({
   const selectedIds = selectedJobs.map((job) => job.id);
   const fullySelected =
     selectable.length > 0 && selectable.length === selectedIds.length;
-  const anyEnabled = jobs.some(
-    (job) => job.enable === 1 && !isLegacyOpenListJob(job, engines),
-  );
-  const anyActive = jobs.some((job) => job.running || job.queued);
+  const batchTargets: Record<BatchAction, number[]> = {
+    run: [],
+    stop: [],
+    enable: [],
+    disable: [],
+  };
+  for (const job of selectedIds.length ? selectedJobs : selectable) {
+    if (job.running || job.queued) batchTargets.stop.push(job.id);
+    else if (job.enable === 1) batchTargets.run.push(job.id);
+    if (job.enable === 1 && job.isCron !== 2) batchTargets.disable.push(job.id);
+    if (job.enable !== 1 && !requiresFirstMirrorPreview(job)) {
+      batchTargets.enable.push(job.id);
+    }
+  }
+  const allConnectionsBatch = !filtered && selectedIds.length === 0;
+  const batchLabel = allConnectionsBatch ? "全部" : "当前列表";
+  const connectionName = storageHistoryParam === "__local__"
+    ? "本地目录互备"
+    : storage === "__other__"
+      ? "其他 / 跨端"
+      : storage;
+  const batchScope = selectedIds.length
+    ? "已勾选任务"
+    : allConnectionsBatch
+      ? "全部连接"
+      : storage === "all"
+        ? "当前筛选结果"
+        : `「${connectionName}」的当前列表`;
 
   const runBatch = (operation: BatchAction, label: string) => {
-    if (
-      operation === "enable" &&
-      selectedJobs.some(requiresFirstMirrorPreview)
-    ) {
-      Toast.warning("所选任务包含待预览的镜像。请先逐个确认镜像影响。");
-      return;
-    }
+    const ids = batchTargets[operation];
+    if (allBusy || ids.length === 0) return;
     const execute = () =>
       action.run(async () => {
         try {
-          const ids =
-            operation === "run_all" || operation === "stop_all"
-              ? undefined
-              : selectedIds;
           const result = await api.batchJobAction(operation, ids);
           if (result.failed > 0) {
             Toast.warning(
-              `${label}完成：成功 ${result.succeeded} 个，失败 ${result.failed} 个`,
+              `${label}：已提交 ${result.succeeded} 个，失败 ${result.failed} 个`,
             );
           } else {
-            Toast.success(`${label}完成（共 ${result.succeeded} 个任务）`);
+            Toast.success(`已提交${label}（${result.succeeded} 个任务）`);
           }
           setSelected([]);
           await onJobsChanged();
@@ -649,17 +664,18 @@ export function SyncOverview({
           errorToast(err);
         }
       });
-    if (
-      operation === "stop" ||
-      operation === "stop_all" ||
-      operation === "disable"
-    ) {
+    const target = `${batchScope}中的 ${ids.length} 个任务`;
+    const confirmation = operation === "stop"
+      ? `将中止${target}正在运行或排队的批次。已完成的文件和任务启用状态会保留。`
+      : operation === "disable"
+        ? `将暂停${target}的自动同步，并中止它们正在运行或排队的批次。`
+        : operation === "run" && allConnectionsBatch
+          ? `将立即触发${target}。各任务按已配置的同步策略运行。`
+          : null;
+    if (confirmation) {
       confirmAction({
         title: `确认执行「${label}」？`,
-        content:
-          operation === "disable"
-            ? "暂停持续同步将停止监控并中止正在进行的传输，后续可随时恢复并自动补齐变更。"
-            : "将中止目标任务当前的传输批次，已完成的文件不会撤销，持续同步保持开启。",
+        content: confirmation,
         okText: "确认",
         onOk: execute,
       });
@@ -1048,20 +1064,20 @@ export function SyncOverview({
                         type="tertiary"
                         theme="light"
                         icon={<IconRefresh aria-hidden="true" />}
-                        disabled={allBusy || !anyEnabled}
-                        onClick={() => runBatch("run_all", "全部立即同步")}
+                        disabled={allBusy || !batchTargets.run.length}
+                        onClick={() => runBatch("run", `${batchLabel}立即同步`)}
                       >
-                        全部立即同步
+                        {batchLabel}立即同步（{batchTargets.run.length}）
                       </Button>
                       <Button
                         size="small"
                         type="danger"
                         theme="light"
                         icon={<IconStop aria-hidden="true" />}
-                        disabled={allBusy || !anyActive}
-                        onClick={() => runBatch("stop_all", "全部中止")}
+                        disabled={allBusy || !batchTargets.stop.length}
+                        onClick={() => runBatch("stop", `${batchLabel}中止`)}
                       >
-                        全部中止
+                        {batchLabel}中止（{batchTargets.stop.length}）
                       </Button>
                     </div>
                   )}
@@ -1132,35 +1148,35 @@ export function SyncOverview({
                       <Button
                         size="small"
                         theme="solid"
-                        disabled={allBusy}
+                        disabled={allBusy || !batchTargets.run.length}
                         onClick={() => runBatch("run", "批量立即同步")}
                       >
-                        批量立即同步
+                        批量立即同步（{batchTargets.run.length}）
                       </Button>
                       <Button
                         size="small"
                         type="danger"
                         theme="light"
-                        disabled={allBusy}
+                        disabled={allBusy || !batchTargets.stop.length}
                         onClick={() => runBatch("stop", "批量中止传输")}
                       >
-                        批量中止传输
+                        批量中止传输（{batchTargets.stop.length}）
                       </Button>
                       <Button
                         size="small"
                         type="tertiary"
-                        disabled={allBusy}
+                        disabled={allBusy || !batchTargets.enable.length}
                         onClick={() => runBatch("enable", "批量恢复同步")}
                       >
-                        批量恢复同步
+                        批量恢复同步（{batchTargets.enable.length}）
                       </Button>
                       <Button
                         size="small"
                         type="tertiary"
-                        disabled={allBusy}
+                        disabled={allBusy || !batchTargets.disable.length}
                         onClick={() => runBatch("disable", "批量暂停同步")}
                       >
-                        批量暂停同步
+                        批量暂停同步（{batchTargets.disable.length}）
                       </Button>
                       <Button
                         size="small"
@@ -1506,8 +1522,12 @@ export function SyncOverview({
                           <span className="muted">
                             {formatRelativeSyncTime(item.createTime)}
                           </span>
-                          {matchJob && (
+                          {matchJob ? (
                             <Link to={taskHref(matchJob.id, "records")}>查看任务</Link>
+                          ) : (
+                            <Link to={`/tasks?jobId=${item.jobId}&tab=records`}>
+                              查看任务
+                            </Link>
                           )}
                         </div>
                       </div>
@@ -2184,12 +2204,14 @@ function SyncTaskRow({
               </Link>
             )}
             {mirrorNeedsReview && (
-              <Link
+              <button
+                type="button"
                 className="sync-overview-cta-link is-primary"
-                to={taskHref("overview", "mirrorPreview")}
+                onClick={onToggle}
+                disabled={busy}
               >
                 预览并启动
-              </Link>
+              </button>
             )}
           </>
         )}
@@ -2283,7 +2305,7 @@ function SyncTaskRow({
                 disabled={busy}
                 onClick={onEdit}
               />
-              <ActionMenu size="small" actions={menuActions} disabled={busy} />
+              <ActionMenu size="small" actions={menuActions} disabled={busy} zIndex={999} />
             </>
           )}
         </div>

@@ -20,8 +20,11 @@ test.beforeEach(async ({ page }) => {
   );
 });
 
-test("opens dashboard by default at root path", async ({ page }) => {
+test("opens the sync workbench by default with the dashboard still reachable", async ({ page }) => {
   await page.goto("/app/opensync/");
+  await expect(page).toHaveURL(/\/app\/opensync\/sync$/);
+  await expect(page.getByRole("heading", { name: "同步工作台", exact: true })).toBeVisible();
+  await page.getByRole("link", { name: "总览看板", exact: true }).click();
   await expect(page).toHaveURL(/\/app\/opensync\/dashboard$/);
   await expect(page.getByRole("heading", { name: "总览看板", exact: true })).toBeVisible();
 });

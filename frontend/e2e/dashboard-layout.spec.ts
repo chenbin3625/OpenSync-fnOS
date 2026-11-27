@@ -343,11 +343,11 @@ test("dashboard monitors live activity and links to the filtered task list", asy
   await page.getByRole("button", { name: "重置筛选" }).click();
   await expect(rows).toHaveCount(5);
 
-  await rows.filter({ hasText: "家庭相册每日备份" }).locator(".semi-checkbox").click();
+  await rows.filter({ hasText: "工作文档异地容灾" }).locator(".semi-checkbox").click();
   await expect(page.locator(".batch-action-bar")).toContainText("已选中 1 个任务");
   const batch = page.waitForRequest((request) => request.url().endsWith("/job/batch"));
   await page.getByRole("button", { name: "批量立即同步" }).click();
-  expect((await batch).postDataJSON()).toEqual({ action: "run", ids: [1] });
+  expect((await batch).postDataJSON()).toEqual({ action: "run", ids: [4] });
   await expect(page.locator(".batch-action-bar")).toHaveCount(0);
 
   await page.goto("/app/opensync/dashboard?storage=AliyunDrive");
