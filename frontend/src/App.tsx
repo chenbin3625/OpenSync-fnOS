@@ -26,7 +26,6 @@ import {
   IconCloudStroked,
   IconFolderStroked,
   IconRefresh,
-  IconServerStroked,
   IconSettingStroked,
   IconTreeTriangleDown,
   IconTreeTriangleRight,
@@ -68,11 +67,6 @@ const sections = [
     icon: <IconCloudStroked aria-hidden="true" />,
   },
   {
-    path: "/engines",
-    label: "存储管理",
-    icon: <IconServerStroked aria-hidden="true" />,
-  },
-  {
     path: "/notifications",
     label: "通知配置",
     icon: <IconBellStroked aria-hidden="true" />,
@@ -111,12 +105,13 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
       ? String(taskItems[0].id)
       : null);
   const taskHref = (job: Pick<JobItem, "id" | "running">) => {
+    const fullPage = pathname === "/tasks";
     const next = buildTaskSearchParams(job, {
-      onTasksPage: pathname.startsWith("/tasks"),
+      onTasksPage: fullPage,
       currentSearch: search,
       activeJobId: activeTaskId,
     });
-    return `/tasks?${next.toString()}`;
+    return `${fullPage ? "/tasks" : "/sync"}?${next}`;
   };
   useEffect(() => {
     if (!hasTaskItems) {
@@ -328,7 +323,7 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
                 key={section.path}
                 to={section.path}
                 className={({ isActive }) =>
-                  `nav-link${isActive || (section.path === "/engines" && pathname.startsWith("/storages")) ? " selected" : ""}`
+                  `nav-link${isActive ? " selected" : ""}`
                 }
               >
                 {section.icon}
@@ -361,8 +356,7 @@ function Shell({ children, version }: { children: ReactNode; version: string }) 
               to={s.path}
               className={({ isActive }) =>
                 isActive ||
-                (s.path === "/sync" && pathname.startsWith("/tasks")) ||
-                (s.path === "/engines" && pathname.startsWith("/storages"))
+                (s.path === "/sync" && pathname.startsWith("/tasks"))
                   ? "active"
                   : ""
               }

@@ -29,6 +29,7 @@ import {
 import { BisyncConflictsModal } from "../components/BisyncConflictsModal";
 import { CheckModal } from "../components/CheckModal";
 import { DryRunModal } from "../components/DryRunModal";
+import { TaskDetailDrawer } from "../components/TaskDetailDrawer";
 import { TaskOverviewPanel } from "../components/TaskOverviewPanel";
 import { SyncOverview } from "./SyncOverview";
 import { jobStatusDotClass } from "../components/SyncStatus";
@@ -36,12 +37,14 @@ import { useAction, useResource } from "../lib/hooks";
 import {
   buildTaskSearchParams,
   cloneJobToForm,
+  getJobMountNames,
   isLegacyOpenListJob,
   jobHasCryptRemote,
   requiresFirstMirrorPreview,
   resolveJobSelection,
   resolveTaskTab,
   type JobForm,
+  type TaskTab,
 } from "../lib/taskForm";
 import type { TaskEditorSavedResult } from "./TaskEditor";
 import {
@@ -104,12 +107,12 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
     job: null,
   });
   const [checkJob, setCheckJob] = useState<JobItem | null>(null);
-  const [conflictsOpen, setConflictsOpen] = useState(false);
   const [recordsRefreshKey, setRecordsRefreshKey] = useState(0);
   const [pendingCreatedId, setPendingCreatedId] = useState<number | null>(null);
   const mobileJobButtons = useRef<Array<HTMLButtonElement | null>>([]);
   const actions = useAction();
   const list = jobs.data?.dataList || [];
+  const drawerJob = overview ? list.find((job) => job.id === selectedId) : undefined;
   const { job: selected, replaceWith } = resolveJobSelection(overview ? [] : list, selectedId, {
     pendingId: pendingCreatedId,
     refreshing: jobs.loading,
@@ -120,12 +123,9 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
     next.set("jobId", String(replaceWith));
     setParams(next, { replace: true });
   }, [replaceWith, params, setParams]);
-  const selectedJobId = selected?.id;
+  const detailJob = drawerJob ?? selected;
+  const selectedJobId = detailJob?.id;
   const deletedJobIdsRef = useRef<Set<number>>(new Set());
-  const hasCryptRemote = useMemo(
-    () => Boolean(selected && jobHasCryptRemote(selected, engines.data, storage.data?.remotes)),
-    [selected, engines.data, storage.data?.remotes],
-  );
   const [snapshotState, setSnapshotState] = useState<{
     jobId: number;
     ok: boolean;
@@ -229,6 +229,53 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
     },
     [setParams],
   );
+  const entryAction = overview ? params.get("action") : null;
+  const entryStorage = params.get("storage");
+  useEffect(() => {
+    if (!drawerJob || entryStorage || storage.loading) return;
+    const mounts = getJobMountNames(drawerJob);
+    const remoteMounts = mounts.filter((mount) => mount !== "本地");
+    const remote = remoteMounts.length === 1
+      ? storage.data?.remotes.find((item) => item.name.toLowerCase() === remoteMounts[0].toLowerCase())
+      : undefined;
+    const scope = remote?.name ?? (mounts.length && !remoteMounts.length ? "__local__" : "__other__");
+    update({ storage: scope }, { replace: true });
+  }, [drawerJob, entryStorage, storage.loading, storage.data, update]);
+
+  const workbenchTaskHref = (jobId: number, taskTab: TaskTab, intent?: "mirrorPreview" | "conflicts") => {
+    const next = new URLSearchParams(params);
+    next.set("jobId", String(jobId));
+    next.set("storage", entryStorage ?? "all");
+    next.set("tab", taskTab);
+    next.delete("mirrorPreview");
+    next.delete("conflicts");
+    if (intent) next.set(intent, "1");
+    return `/sync?${next}`;
+  };
+  const closeWorkbenchTask = () => update({
+    jobId: null,
+    tab: null,
+    mirrorPreview: null,
+    conflicts: null,
+  }, { replace: true });
+  const fullPageParams = new URLSearchParams(params);
+  fullPageParams.delete("mirrorPreview");
+  fullPageParams.delete("conflicts");
+
+  useEffect(() => {
+    if (!entryAction || engines.loading || storage.loading) return;
+    if (entryAction === "new-task") {
+      const initialRemote = storage.data?.remotes.find(
+        (remote) => remote.name.toLowerCase() === entryStorage?.toLowerCase(),
+      )?.name;
+      setEditor({ open: true, job: null, initialRemote });
+    } else if (entryAction === "add-connection") {
+      setRepair({ mode: "form" });
+    } else if (entryAction === "local-folders") {
+      setRepair({ mode: "local" });
+    }
+    update({ action: null }, { replace: true });
+  }, [entryAction, entryStorage, engines.loading, storage.loading, storage.data, update]);
   const selectMobileJob = useCallback(
     (job: JobItem) => {
       setParams((prev) =>
@@ -288,22 +335,13 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
       try {
         await operation();
         Toast.success(message);
-        await refreshJobs({ skipCurrentTask: overview });
+        await refreshJobs({ skipCurrentTask: !detailJob });
       } catch (err) {
         errorToast(err);
       }
     });
-  const triggerSyncNow = (jobId: number) => {
-    void actions.run(async () => {
-      try {
-        await api.jobAction({ id: String(jobId) });
-        Toast.success("已触发立即同步");
-        await refreshJobs({ skipCurrentTask: overview });
-      } catch (err) {
-        errorToast(err);
-      }
-    });
-  };
+  const triggerSyncNow = (jobId: number) =>
+    action(() => api.jobAction({ id: String(jobId) }), "已触发立即同步");
   const toggleSync = (job: JobItem, running = Boolean(job.running)) => {
     const pausing = job.enable === 1;
     const label = job.isCron === 3 ? "持续同步" : "任务";
@@ -317,7 +355,7 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
           try {
             await toggle();
             Toast.success(`${label}已暂停`);
-            await refreshJobs({ skipCurrentTask: overview });
+            await refreshJobs({ skipCurrentTask: !detailJob });
           } catch (err) {
             errorToast(err);
             throw err;
@@ -331,7 +369,7 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
   const handleToggleJob = (job: JobItem, running = Boolean(job.running)) => {
     if (requiresFirstMirrorPreview(job)) {
       if (overview) {
-        navigate(`/tasks?jobId=${job.id}&tab=overview&mirrorPreview=1`);
+        navigate(workbenchTaskHref(job.id, "overview", "mirrorPreview"));
       } else {
         update({ mirrorPreview: 1 });
       }
@@ -368,7 +406,7 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
               await api.batchJobAction("stop", [job.id]);
             }
             Toast.success("已提交中止本次同步");
-            await refreshJobs({ skipCurrentTask: overview });
+            await refreshJobs({ skipCurrentTask: !detailJob });
           } catch (err) {
             errorToast(err);
             throw err;
@@ -385,7 +423,9 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
           clearTimeout(followUp.current);
           await api.deleteJob(deletingId);
           deletedJobIdsRef.current.add(deletingId);
-          if (!overview && selected?.id === deletingId) {
+          if (drawerJob?.id === deletingId) {
+            closeWorkbenchTask();
+          } else if (!overview && selected?.id === deletingId) {
             update({ jobId: null });
           }
           await refreshJobs({ skipCurrentTask: true });
@@ -394,11 +434,50 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
     );
   };
   const mirrorPreview = Boolean(
-    selected && selected.method === 1 && selected.isCron === 3 &&
-    selected.enable !== 1 && params.get("mirrorPreview") === "1",
+    detailJob && detailJob.method === 1 && detailJob.isCron === 3 &&
+    detailJob.enable !== 1 && params.get("mirrorPreview") === "1",
   );
-  const conflictPreview = Boolean(selected?.method === 3 && params.get("conflicts") === "1");
+  const conflictPreview = Boolean(detailJob?.method === 3 && params.get("conflicts") === "1");
   const closeMirrorPreview = () => update({ mirrorPreview: null }, { replace: true });
+  const taskDetails = detailJob && (tab === "overview" ? (
+    <TaskOverviewPanel
+      job={detailJob}
+      engines={engines.data || []}
+      busy={actions.busy}
+      currentTask={currentTaskForSelected}
+      paused={Boolean(currentTaskForSelected?.paused ?? detailJob.paused)}
+      runKey={String(currentTaskForSelected?.taskId ?? "idle")}
+      onRun={() => triggerSyncNow(detailJob.id)}
+      onOpenRecords={handleOpenRecords}
+      onCheck={() => setCheckJob(detailJob)}
+      onOpenConflicts={() => update({ conflicts: 1 })}
+      onClone={() => {
+        if (overview) closeWorkbenchTask();
+        handleCloneJob(detailJob);
+      }}
+      onTogglePause={() => {
+        if (!currentTaskForSelected) return;
+        handleTogglePauseTransfer(currentTaskForSelected.taskId, Boolean(currentTaskForSelected.paused));
+      }}
+      onStop={() => handleStopJob(detailJob, currentTaskForSelected?.taskId)}
+      onToggle={() => handleToggleJob(detailJob, Boolean(currentTaskForSelected || detailJob.running))}
+      onEdit={() => {
+        if (overview) closeWorkbenchTask();
+        setEditor({ open: true, job: detailJob });
+      }}
+      onDelete={() => handleDeleteJob(detailJob)}
+    />
+  ) : (
+    <Suspense fallback={<LoadingPanel />}>
+      <SyncRecords
+        key={detailJob.id}
+        jobId={detailJob.id}
+        refreshKey={recordsRefreshKey}
+        disableRetry={isLegacyOpenListJob(detailJob, engines.data) || detailJob.method === 3}
+        onTaskEnded={handleTaskEnded}
+      />
+    </Suspense>
+  ));
   return (
     <div className="page task-page">
       {overview ? (
@@ -433,6 +512,7 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
               engines={engines.data || []}
               busy={actions.busy}
               onAdd={(initialRemote) => setEditor({ open: true, job: null, initialRemote })}
+              taskHref={workbenchTaskHref}
               onEdit={(job) => setEditor({ open: true, job })}
               onClone={handleCloneJob}
               onToggle={handleToggleJob}
@@ -485,7 +565,11 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
             theme="borderless"
             icon={<IconArrowLeft aria-hidden="true" />}
             aria-label="返回任务列表"
-            onClick={() => navigate("/sync")}
+                onClick={() => {
+                  const backParams = new URLSearchParams(params);
+                  for (const key of ["jobId", "tab", "mirrorPreview", "conflicts"]) backParams.delete(key);
+                  navigate({ pathname: "/sync", search: backParams.toString() });
+                }}
           />
         }
       />
@@ -573,58 +657,7 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
               empty={!list.length}
             />
             {selected && (jobs.data || !jobs.error) ? (
-              <div className="task-tab-content">
-                {tab === "overview" && (
-                  <TaskOverviewPanel
-                    job={selected}
-                    engines={engines.data || []}
-                    busy={actions.busy}
-                    currentTask={currentTaskForSelected}
-                    paused={Boolean(
-                      currentTaskForSelected?.paused ?? selected.paused,
-                    )}
-                    runKey={String(currentTaskForSelected?.taskId ?? "idle")}
-                    onRun={() => triggerSyncNow(selected.id)}
-                    onOpenRecords={handleOpenRecords}
-                    onCheck={() => setCheckJob(selected)}
-                    onOpenConflicts={() => setConflictsOpen(true)}
-                    onClone={() => handleCloneJob(selected)}
-                    onTogglePause={() => {
-                      if (!currentTaskForSelected) return;
-                      handleTogglePauseTransfer(
-                        currentTaskForSelected.taskId,
-                        Boolean(currentTaskForSelected.paused),
-                      );
-                    }}
-                    onStop={() => {
-                      if (!currentTaskForSelected) return;
-                      handleStopJob(selected, currentTaskForSelected.taskId);
-                    }}
-                    onToggle={() =>
-                      handleToggleJob(
-                        selected,
-                        Boolean(currentTaskForSelected || selected.running),
-                      )
-                    }
-                    onEdit={() => setEditor({ open: true, job: selected })}
-                    onDelete={() => handleDeleteJob(selected)}
-                  />
-                )}
-                {tab === "records" && (
-                  <Suspense fallback={<LoadingPanel />}>
-                    <SyncRecords
-                      key={selected.id}
-                      jobId={selected.id}
-                      refreshKey={recordsRefreshKey}
-                      disableRetry={
-                        isLegacyOpenListJob(selected, engines.data) ||
-                        selected.method === 3
-                      }
-                      onTaskEnded={handleTaskEnded}
-                    />
-                  </Suspense>
-                )}
-              </div>
+              <div className="task-tab-content">{taskDetails}</div>
             ) : jobs.loading || jobs.error || pendingCreatedId !== null ? null : (
               <div className="task-empty-detail">
                 <EmptyState />
@@ -634,13 +667,25 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
         )}
       </div>
       </>}
-      {mirrorPreview && selected && (
+      {drawerJob && (
+        <TaskDetailDrawer
+          key={drawerJob.id}
+          title={getJobName(drawerJob)}
+          tab={tab}
+          onTabChange={(taskTab) => update({ tab: taskTab }, { replace: true })}
+          fullPageHref={`/tasks?${fullPageParams}`}
+          onClose={closeWorkbenchTask}
+        >
+          {taskDetails}
+        </TaskDetailDrawer>
+      )}
+      {mirrorPreview && detailJob && (
         <DryRunModal
-          jobId={selected.id}
-          jobName={getJobName(selected)}
+          jobId={detailJob.id}
+          jobName={getJobName(detailJob)}
           onClose={closeMirrorPreview}
           onEnableMirror={async () => {
-            await api.jobAction({ id: String(selected.id), pause: false });
+            await api.jobAction({ id: String(detailJob.id), pause: false });
             closeMirrorPreview();
             Toast.success("镜像已启用");
             await refreshJobs();
@@ -651,27 +696,20 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
         <CheckModal
           jobId={checkJob.id}
           jobName={getJobName(checkJob)}
-          hasCryptRemote={
-            selected && checkJob.id === selected.id
-              ? hasCryptRemote
-              : jobHasCryptRemote(checkJob, engines.data)
-          }
+          hasCryptRemote={jobHasCryptRemote(checkJob, engines.data, storage.data?.remotes)}
           onClose={() => setCheckJob(null)}
           onRepairStarted={() => {
-            void refreshJobs({ skipCurrentTask: overview });
+            void refreshJobs({ skipCurrentTask: !detailJob });
           }}
         />
       )}
-      {(conflictsOpen || conflictPreview) && selected && (
+      {conflictPreview && detailJob && (
         <BisyncConflictsModal
-          jobId={selected.id}
-          jobName={getJobName(selected)}
-          leftPath={parseJobPathList(selected.srcPath)[0] ?? ""}
-          rightPath={parseJobPathList(selected.dstPath)[0] ?? ""}
-          onClose={() => {
-            setConflictsOpen(false);
-            if (conflictPreview) update({ conflicts: null }, { replace: true });
-          }}
+          jobId={detailJob.id}
+          jobName={getJobName(detailJob)}
+          leftPath={parseJobPathList(detailJob.srcPath)[0] ?? ""}
+          rightPath={parseJobPathList(detailJob.dstPath)[0] ?? ""}
+          onClose={() => update({ conflicts: null }, { replace: true })}
           onResolved={() => {
             void refreshJobs();
           }}
@@ -688,7 +726,14 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
               void storage.refresh(true);
               void engines.refresh(true);
             }}
-            onSaved={() => {
+            onSaved={(savedName) => {
+              if (overview && repair.mode === "form" && savedName) {
+                if (!repair.remote) {
+                  update({ storage: savedName, view: null, status: null, direction: null });
+                } else if (repair.remote.name.toLowerCase() === entryStorage?.toLowerCase()) {
+                  update({ storage: savedName }, { replace: true });
+                }
+              }
               setRepair(null);
               void storage.refresh(true);
               void refreshJobs({ skipCurrentTask: true });
@@ -722,7 +767,8 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
               if (overview && (createdId || mirrorPreviewId)) {
                 const targetId = createdId ?? mirrorPreviewId;
                 window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
-                navigate(`/tasks?jobId=${targetId}&tab=overview${mirrorPreviewId ? "&mirrorPreview=1" : ""}`);
+                if (targetId) navigate(workbenchTaskHref(targetId, "overview", mirrorPreviewId ? "mirrorPreview" : undefined));
+                void jobs.refresh();
                 return;
               }
               if (createdId) {

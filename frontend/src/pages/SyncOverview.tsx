@@ -41,7 +41,6 @@ import {
   errorToast,
   type MenuAction,
 } from "../components/common";
-import { TaskDetailDrawer } from "../components/TaskDetailDrawer";
 import {
   formatMinutesShort,
   formatRelativeSyncTime,
@@ -122,6 +121,7 @@ interface SyncOverviewProps {
   engines: AlistItem[];
   busy?: boolean;
   onAdd: (remote?: string) => void;
+  taskHref: (jobId: number, tab: TaskTab, intent?: "mirrorPreview" | "conflicts") => string;
   onEdit?: (job: JobItem) => void;
   onClone?: (job: JobItem) => void;
   onToggle?: (job: JobItem) => void;
@@ -350,6 +350,7 @@ export function SyncOverview({
   engines,
   busy = false,
   onAdd,
+  taskHref,
   onEdit,
   onClone,
   onToggle,
@@ -370,13 +371,9 @@ export function SyncOverview({
   const filterId = useId();
   const [keyword, setKeyword] = useState("");
   const [selected, setSelected] = useState<number[]>([]);
-  const [workbenchTab, setWorkbenchTab] = useState<WorkbenchTab>("tasks");
   const [historyFilter, setHistoryFilter] = useState<HistoryFilter>("all");
   const [historyKeyword, setHistoryKeyword] = useState("");
   const [historyPage, setHistoryPage] = useState(1);
-  const [drawer, setDrawer] = useState<{ jobId: number; tab: TaskTab } | null>(
-    null,
-  );
   const [testingName, setTestingName] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<
     Record<string, NativeStorageTestResult>
@@ -388,6 +385,10 @@ export function SyncOverview({
   const action = useAction();
 
   const storage = params.get("storage") || "all";
+  const rawView = params.get("view");
+  const workbenchTab: WorkbenchTab = rawView === "history" || rawView === "settings"
+    ? rawView
+    : "tasks";
   const status: StatusKey =
     statusOptions.find(({ value }) => value === params.get("status"))?.value ??
     "all";
@@ -406,15 +407,33 @@ export function SyncOverview({
     const next = new URLSearchParams(params);
     if (value === "all") next.delete(key);
     else next.set(key, value);
-    setParams(next, { replace: true });
-    if (key === "storage") setHistoryPage(1);
+    if (key === "storage") {
+      next.delete("status");
+      next.delete("direction");
+      next.delete("jobId");
+      next.delete("tab");
+      next.delete("mirrorPreview");
+      next.delete("conflicts");
+      setKeyword("");
+      setHistoryPage(1);
+    }
+    setParams(next, { replace: key !== "storage" });
   };
 
   const resetFilters = () => {
     setKeyword("");
     setSelected([]);
     setHistoryPage(1);
-    setParams({}, { replace: true });
+    const next = new URLSearchParams(params);
+    next.delete("status");
+    next.delete("direction");
+    setParams(next, { replace: true });
+  };
+  const selectView = (view: string) => {
+    const next = new URLSearchParams(params);
+    if (view === "tasks") next.delete("view");
+    else next.set("view", view);
+    setParams(next);
   };
 
   const liveJobMap = useMemo(() => {
@@ -436,9 +455,35 @@ export function SyncOverview({
     return map;
   }, [engines]);
 
-  const statusCounts = useMemo(() => {
+  const jobsWithMounts = useMemo(() => {
+    const remoteNames = new Set(remotes.map((remote) => remote.name.toLowerCase()));
+    return jobs.map((job) => {
+      const mounts = getJobMountNames(job).map((name) => name.toLowerCase());
+      const remoteMounts = mounts.filter((name) => name !== "本地");
+      let group = "__other__";
+      if (!isLegacyOpenListJob(job, engines) && mounts.length > 0) {
+        if (remoteMounts.length === 0) group = "__local__";
+        else if (remoteMounts.length === 1 && remoteNames.has(remoteMounts[0])) {
+          group = remoteMounts[0];
+        }
+      }
+      return { job, mounts, group };
+    });
+  }, [jobs, remotes, engines]);
+
+  const storageMatches = (name: string) =>
+    name.toLowerCase() === storage.toLowerCase();
+  const localScope = storage === "__local__" || storage === "本地";
+  const scopedJobs = jobsWithMounts.filter(({ mounts, group }) => {
+    if (storage === "all") return true;
+    if (localScope) return group === "__local__";
+    if (storage === "__other__") return group === "__other__";
+    return mounts.some(storageMatches);
+  });
+
+  const statusCounts = (() => {
     const counts = {
-      all: jobs.length,
+      all: scopedJobs.length,
       running: 0,
       synced: 0,
       queued: 0,
@@ -446,7 +491,7 @@ export function SyncOverview({
       failed: 0,
       disabled: 0,
     };
-    for (const job of jobs) {
+    for (const { job } of scopedJobs) {
       const cls = classifyJobStatus(job);
       if (cls.running) counts.running += 1;
       if (cls.synced) counts.synced += 1;
@@ -456,23 +501,27 @@ export function SyncOverview({
       if (cls.disabled) counts.disabled += 1;
     }
     return counts;
-  }, [jobs]);
+  })();
 
   const storageHistoryParam =
     storage === "all" || storage === "__other__"
       ? undefined
-      : storage === "__local__" || storage === "本地"
+      : localScope
         ? "__local__"
         : storage;
+  const historyJobIds = storage === "__other__"
+    ? scopedJobs.map(({ job }) => job.id)
+    : undefined;
 
   const recentHistory = useResource(
     (signal) =>
-      workbenchTab === "history"
+      workbenchTab === "history" && historyJobIds?.length !== 0
         ? api.recentTaskItems(
             {
               pageNum: historyPage,
               pageSize: 20,
               storage: storageHistoryParam,
+              jobIds: historyJobIds,
               status: historyFilter === "success" ? 2 : undefined,
               type: historyFilter === "delete" ? 1 : undefined,
               hasError: historyFilter === "failed" ? 1 : undefined,
@@ -485,39 +534,11 @@ export function SyncOverview({
       workbenchTab,
       historyPage,
       storageHistoryParam,
+      historyJobIds,
       historyFilter,
       historyKeyword,
     ],
   );
-
-  const jobsWithMounts = useMemo(
-    () => jobs.map((job) => ({ job, mounts: getJobMountNames(job) })),
-    [jobs],
-  );
-
-  const storageNames = useMemo(() => {
-    const names = new Set(["本地", ...remotes.map((remote) => remote.name)]);
-    for (const { mounts } of jobsWithMounts) {
-      for (const mount of mounts) names.add(mount);
-    }
-    if (storage !== "all" && storage !== "__local__" && storage !== "__other__") {
-      const exists = [...names].some(
-        (name) => name.toLowerCase() === storage.toLowerCase(),
-      );
-      if (!exists) names.add(storage);
-    }
-    return names;
-  }, [remotes, jobsWithMounts, storage]);
-
-  const storageMatches = (name: string) =>
-    name.toLowerCase() === storage.toLowerCase();
-
-  const isLocalOnlyJob = (job: JobItem, mounts: string[]) => {
-    const legacy = isLegacyOpenListJob(job, engines);
-    if (legacy) return false;
-    const remoteMounts = mounts.filter((m) => m !== "本地");
-    return remoteMounts.length === 0;
-  };
 
   // Counts across all jobs for the left connection rail
   const connectionStats = useMemo(() => {
@@ -536,7 +557,7 @@ export function SyncOverview({
     const localStats = { total: 0, running: 0, errors: 0, conflicts: 0 };
     const otherStats = { total: 0, running: 0, errors: 0, conflicts: 0 };
 
-    for (const { job, mounts } of jobsWithMounts) {
+    for (const { job, mounts, group } of jobsWithMounts) {
       const legacy = isLegacyOpenListJob(job, engines);
       const sync = resolveEffectiveSyncStatus(job);
       const hasErr =
@@ -546,15 +567,7 @@ export function SyncOverview({
       const isRun = Boolean(job.running && !job.paused);
       const conflicts = sync.conflictCount ?? 0;
 
-      const remoteMounts = Array.from(
-        new Set(
-          mounts
-            .map((m) => m.toLowerCase())
-            .filter((m) => m !== "本地" && byRemote.has(m)),
-        ),
-      );
-
-      if (!legacy && mounts.every((m) => m === "本地") && mounts.length > 0) {
+      if (group === "__local__") {
         localStats.total += 1;
         if (isRun) localStats.running += 1;
         if (hasErr) localStats.errors += 1;
@@ -562,8 +575,8 @@ export function SyncOverview({
         continue;
       }
 
-      if (!legacy && remoteMounts.length >= 1) {
-        for (const r of remoteMounts) {
+      if (!legacy) {
+        for (const r of mounts) {
           const entry = byRemote.get(r);
           if (!entry) continue;
           entry.total += 1;
@@ -571,37 +584,20 @@ export function SyncOverview({
           if (hasErr) entry.errors += 1;
           entry.conflicts += conflicts;
         }
-        continue;
       }
 
-      otherStats.total += 1;
-      if (isRun) otherStats.running += 1;
-      if (hasErr) otherStats.errors += 1;
-      otherStats.conflicts += conflicts;
+      if (group === "__other__") {
+        otherStats.total += 1;
+        if (isRun) otherStats.running += 1;
+        if (hasErr) otherStats.errors += 1;
+        otherStats.conflicts += conflicts;
+      }
     }
 
     return { byRemote, localStats, otherStats };
   }, [jobsWithMounts, remotes, engines]);
 
-  const visible = jobsWithMounts.filter(({ job, mounts }) => {
-    if (storage === "__local__" || storage === "本地") {
-      if (!isLocalOnlyJob(job, mounts)) return false;
-    } else if (storage === "__other__") {
-      const legacy = isLegacyOpenListJob(job, engines);
-      const remoteSet = new Set(remotes.map((r) => r.name.toLowerCase()));
-      const remoteMounts = mounts.filter(
-        (m) => m !== "本地" && remoteSet.has(m.toLowerCase()),
-      );
-      if (
-        !legacy &&
-        (mounts.every((m) => m === "本地") || remoteMounts.length === 1)
-      ) {
-        return false;
-      }
-    } else if (storage !== "all" && !mounts.some(storageMatches)) {
-      return false;
-    }
-
+  const visible = scopedJobs.filter(({ job }) => {
     const searchable = `${getJobName(job)} #${job.id} ${job.srcPath} ${job.dstPath}`;
     if (search && !searchable.toLowerCase().includes(search)) return false;
 
@@ -701,22 +697,11 @@ export function SyncOverview({
     ]),
   );
 
-  for (const { job, mounts: paths } of visible) {
-    const nonLocalMounts = new Set(
-      paths
-        .map((mount) => mount.toLowerCase())
-        .filter((mount) => mount !== "本地"),
-    );
-    const [mount] = nonLocalMounts;
-    const legacy = isLegacyOpenListJob(job, engines);
-    const targetRemoteGroup =
-      !legacy && nonLocalMounts.size === 1 && mount
-        ? remoteGroups.get(mount)
-        : undefined;
-    (
-      targetRemoteGroup ??
-      (!legacy && nonLocalMounts.size === 0 ? localGroup : customGroup)
-    ).jobs.push(job);
+  for (const { job, group } of visible) {
+    const targetGroup = group === "__local__"
+      ? localGroup
+      : remoteGroups.get(group) ?? customGroup;
+    targetGroup.jobs.push(job);
   }
 
   const visibleGroups = [
@@ -744,12 +729,6 @@ export function SyncOverview({
           null
         : null,
     [remotes, storage],
-  );
-
-  const drawerJob = useMemo(
-    () =>
-      drawer ? jobs.find((j) => j.id === drawer.jobId) ?? null : null,
-    [drawer, jobs],
   );
 
   const handleTestRemote = async (name: string) => {
@@ -782,13 +761,6 @@ export function SyncOverview({
       setAboutLoadingName(null);
     }
   };
-
-  const storageSelectValue =
-    storage === "__local__" || storage === "本地"
-      ? "__local__"
-      : storage === "__other__"
-        ? "__other__"
-        : [...storageNames].find(storageMatches) ?? "all";
 
   const statusPills: Array<{
     key: StatusKey;
@@ -861,6 +833,7 @@ export function SyncOverview({
             type="button"
             className={`sync-connection-item${storage === "all" ? " is-active" : ""}`}
             data-testid="connection-item-all"
+            aria-pressed={storage === "all"}
             onClick={() => setFilter("storage", "all")}
           >
             <div className="sync-connection-item__main">
@@ -884,6 +857,7 @@ export function SyncOverview({
                 type="button"
                 className={`sync-connection-item${active ? " is-active" : ""}`}
                 data-testid={`connection-item-${remote.name}`}
+                aria-pressed={active}
                 onClick={() => setFilter("storage", remote.name)}
               >
                 <div className="sync-connection-item__main">
@@ -925,6 +899,7 @@ export function SyncOverview({
               storage === "__local__" || storage === "本地" ? " is-active" : ""
             }`}
             data-testid="connection-item-local"
+            aria-pressed={localScope}
             onClick={() => setFilter("storage", "__local__")}
           >
             <div className="sync-connection-item__main">
@@ -957,6 +932,7 @@ export function SyncOverview({
                 storage === "__other__" ? " is-active" : ""
               }`}
               data-testid="connection-item-other"
+              aria-pressed={storage === "__other__"}
               onClick={() => setFilter("storage", "__other__")}
             >
               <div className="sync-connection-item__main">
@@ -1012,59 +988,13 @@ export function SyncOverview({
                   );
                 })()}
             </div>
-            <div className="sync-connection-banner__actions">
-              {selectedRemote ? (
-                <>
-                  <Button
-                    size="small"
-                    type="tertiary"
-                    loading={testingName === selectedRemote.name}
-                    onClick={() => void handleTestRemote(selectedRemote.name)}
-                  >
-                    测试连接
-                  </Button>
-                  {onBrowseRemote && (
-                    <Button
-                      size="small"
-                      type="tertiary"
-                      onClick={() => onBrowseRemote(selectedRemote)}
-                    >
-                      浏览与恢复
-                    </Button>
-                  )}
-                  <Button
-                    size="small"
-                    type="tertiary"
-                    onClick={() => onRepair(selectedRemote)}
-                  >
-                    编辑连接
-                  </Button>
-                  <Button
-                    size="small"
-                    type="primary"
-                    onClick={() => onAdd(selectedRemote.name)}
-                  >
-                    添加同步任务
-                  </Button>
-                </>
-              ) : (
-                <>
-                  <Button size="small" type="tertiary" onClick={onLocalFolders}>
-                    管理授权目录
-                  </Button>
-                  <Button size="small" type="primary" onClick={() => onAdd()}>
-                    添加同步任务
-                  </Button>
-                </>
-              )}
-            </div>
           </div>
         )}
 
         <Tabs
           className="sync-workbench-tabs"
           activeKey={workbenchTab}
-          onChange={(key) => setWorkbenchTab(key as WorkbenchTab)}
+          onChange={selectView}
           keepDOM={false}
         >
           <Tabs.TabPane tab="任务列表" itemKey="tasks" />
@@ -1169,21 +1099,6 @@ export function SyncOverview({
                     onSearch={setKeyword}
                   />
                   <Select
-                    aria-labelledby={`${filterId}-storage`}
-                    value={storageSelectValue}
-                    onChange={(value) => setFilter("storage", String(value))}
-                    optionList={[
-                      { label: "全部存储", value: "all" },
-                      { label: "本地目录互备", value: "__local__" },
-                      ...[...storageNames]
-                        .filter((name) => name !== "本地")
-                        .map((name) => ({ label: name, value: name })),
-                    ]}
-                  />
-                  <span className="sr-only" id={`${filterId}-storage`}>
-                    按存储筛选
-                  </span>
-                  <Select
                     aria-labelledby={`${filterId}-direction`}
                     value={direction}
                     onChange={(value) => setFilter("direction", String(value))}
@@ -1201,7 +1116,7 @@ export function SyncOverview({
                   <span className="sr-only" id={`${filterId}-status`}>
                     按运行状态筛选
                   </span>
-                  {filtered && (
+                  {otherFiltersActive && (
                     <Button
                       size="small"
                       theme="borderless"
@@ -1288,11 +1203,7 @@ export function SyncOverview({
                           <Button
                             type="primary"
                             theme="solid"
-                            onClick={() =>
-                              onNavigateEngines
-                                ? onNavigateEngines()
-                                : navigate("/engines")
-                            }
+                            onClick={() => selectView("settings")}
                           >
                             前往存储管理
                           </Button>
@@ -1388,7 +1299,7 @@ export function SyncOverview({
                   className="sync-connection-group"
                   bodyClassName="sync-connection-body"
                   extra={
-                    group.remote && (
+                    group.remote && storage === "all" && (
                       <Button
                         size="small"
                         type="tertiary"
@@ -1425,7 +1336,7 @@ export function SyncOverview({
                         )
                       }
                       onNavigate={(path) => navigate(path)}
-                      onOpenDrawer={(tab) => setDrawer({ jobId: job.id, tab })}
+                      taskHref={(tab, intent) => taskHref(job.id, tab, intent)}
                       onEdit={() => onEdit?.(job)}
                       onClone={() => onClone?.(job)}
                       onToggle={() => onToggle?.(job)}
@@ -1599,20 +1510,8 @@ export function SyncOverview({
                           <span className="muted">
                             {formatRelativeSyncTime(item.createTime)}
                           </span>
-                          {matchJob ? (
-                            <Button
-                              size="small"
-                              theme="borderless"
-                              onClick={() =>
-                                setDrawer({ jobId: matchJob.id, tab: "records" })
-                              }
-                            >
-                              查看任务
-                            </Button>
-                          ) : (
-                            <Link to={`/tasks?jobId=${item.jobId}&tab=records`}>
-                              查看任务
-                            </Link>
+                          {matchJob && (
+                            <Link to={taskHref(matchJob.id, "records")}>查看任务</Link>
                           )}
                         </div>
                       </div>
@@ -1676,7 +1575,7 @@ export function SyncOverview({
                       type="primary"
                       onClick={() => onRepair(selectedRemote)}
                     >
-                      编辑配置
+                      编辑连接
                     </Button>
                   </div>
                 }
@@ -1766,20 +1665,13 @@ export function SyncOverview({
                 title="全部存储连接"
                 extra={
                   <div className="sync-settings-actions">
-                    <Button
-                      size="small"
-                      type="tertiary"
-                      onClick={onLocalFolders}
-                    >
-                      本地授权目录
-                    </Button>
-                    {onAddConnection && (
+                    {onNavigateEngines && (
                       <Button
                         size="small"
-                        type="primary"
-                        onClick={onAddConnection}
+                        type="tertiary"
+                        onClick={onNavigateEngines}
                       >
-                        添加远程连接
+                        高级存储管理
                       </Button>
                     )}
                   </div>
@@ -1818,26 +1710,10 @@ export function SyncOverview({
                             <Button
                               size="small"
                               type="tertiary"
-                              loading={testingName === remote.name}
-                              onClick={() => void handleTestRemote(remote.name)}
+                              aria-label={`打开 ${remote.name} 的连接设置`}
+                              onClick={() => setFilter("storage", remote.name)}
                             >
-                              测试
-                            </Button>
-                            {onBrowseRemote && (
-                              <Button
-                                size="small"
-                                type="tertiary"
-                                onClick={() => onBrowseRemote(remote)}
-                              >
-                                浏览
-                              </Button>
-                            )}
-                            <Button
-                              size="small"
-                              type="tertiary"
-                              onClick={() => onRepair(remote)}
-                            >
-                              配置
+                              连接设置
                             </Button>
                           </div>
                         </div>
@@ -1846,7 +1722,7 @@ export function SyncOverview({
                   </div>
                 ) : (
                   <p className="muted">
-                    尚未添加远程存储连接，点击右上角「添加远程连接」开始配置。
+                    尚未添加远程存储连接。
                   </p>
                 )}
               </SectionCard>
@@ -1855,22 +1731,6 @@ export function SyncOverview({
         )}
       </div>
 
-      <TaskDetailDrawer
-        job={drawerJob}
-        initialTab={drawer?.tab ?? "overview"}
-        engines={engines}
-        remotes={remotes}
-        onClose={() => setDrawer(null)}
-        onEdit={(job) => {
-          setDrawer(null);
-          onEdit?.(job);
-        }}
-        onClone={(job) => {
-          setDrawer(null);
-          onClone?.(job);
-        }}
-        onJobsChanged={onJobsChanged}
-      />
     </div>
   );
 }
@@ -1885,7 +1745,7 @@ function SyncTaskRow({
   checked,
   onSelect,
   onNavigate,
-  onOpenDrawer,
+  taskHref,
   onEdit,
   onClone,
   onToggle,
@@ -1906,7 +1766,7 @@ function SyncTaskRow({
   checked: boolean;
   onSelect: (checked: boolean) => void;
   onNavigate: (path: string) => void;
-  onOpenDrawer: (tab: TaskTab) => void;
+  taskHref: (tab: TaskTab, intent?: "mirrorPreview" | "conflicts") => string;
   onEdit: () => void;
   onClone: () => void;
   onToggle: () => void;
@@ -1921,7 +1781,8 @@ function SyncTaskRow({
   const status = resolveEffectiveSyncStatus(job);
   const meta = getContinuousSyncMeta(job);
   const legacy = isLegacyOpenListJob(job, engines);
-  const details = `/tasks?jobId=${job.id}&tab=overview`;
+  const details = taskHref("overview");
+  const records = taskHref("records");
   const effectivePaused = Boolean(liveJob?.paused ?? job.paused);
   const effectiveRunning = Boolean(job.running || liveJob?.running);
   const liveMetrics =
@@ -1996,7 +1857,7 @@ function SyncTaskRow({
         {
           label: "同步记录",
           icon: <IconHistory aria-hidden="true" />,
-          onClick: () => onNavigate(`/tasks?jobId=${job.id}&tab=records`),
+          onClick: () => onNavigate(records),
         },
         {
           label: "数据一致性校验",
@@ -2011,7 +1872,7 @@ function SyncTaskRow({
                     ? `冲突处理 (${status.conflictCount})`
                     : "冲突处理",
                 icon: <IconAlertTriangle aria-hidden="true" />,
-                onClick: () => onNavigate(`${details}&conflicts=1`),
+                onClick: () => onNavigate(taskHref("overview", "conflicts")),
               },
             ]
           : []),
@@ -2202,7 +2063,7 @@ function SyncTaskRow({
             <div className="sync-overview-status-line">
               <SyncStatusTag status={status} />
               <Link
-                to={`/tasks?jobId=${job.id}&tab=records`}
+                to={records}
                 className="sync-overview-inline-link"
               >
                 查看实时进度
@@ -2321,7 +2182,7 @@ function SyncTaskRow({
             {Boolean(status.conflictCount) && (
               <Link
                 className="sync-overview-cta-link is-warning"
-                to={`${details}&conflicts=1`}
+                to={taskHref("overview", "conflicts")}
               >
                 查看冲突
               </Link>
@@ -2329,7 +2190,7 @@ function SyncTaskRow({
             {mirrorNeedsReview && (
               <Link
                 className="sync-overview-cta-link is-primary"
-                to={`${details}&mirrorPreview=1`}
+                to={taskHref("overview", "mirrorPreview")}
               >
                 预览并启动
               </Link>
@@ -2352,7 +2213,7 @@ function SyncTaskRow({
               <Button
                 size="small"
                 type="tertiary"
-                onClick={() => onOpenDrawer("overview")}
+                onClick={() => onNavigate(details)}
               >
                 详情
               </Button>
@@ -2392,9 +2253,7 @@ function SyncTaskRow({
                     size="small"
                     label="查看实时进度"
                     icon={<IconActivity aria-hidden="true" />}
-                    onClick={() =>
-                      onNavigate(`/tasks?jobId=${job.id}&tab=records`)
-                    }
+                    onClick={() => onNavigate(records)}
                   />
                 </>
               ) : (

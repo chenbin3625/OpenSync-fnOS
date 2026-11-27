@@ -367,6 +367,9 @@ test("dashboard shows cold-start 3-step onboarding when empty", async ({ page })
   await expect(guide.getByText("确认飞牛本地授权目录")).toBeVisible();
   await expect(guide.getByText("添加云盘或远程存储")).toBeVisible();
   await expect(guide.getByText("创建第一个同步任务")).toBeVisible();
+  await guide.getByRole("button", { name: "新建同步任务" }).click();
+  await expect(page).toHaveURL(/\/app\/opensync\/sync$/);
+  await expect(page.getByRole("dialog", { name: "新建持续同步任务" })).toBeVisible();
 });
 
 test("master-detail workbench, drawer watchDegraded banner, global sync bar & recent feed", async ({ page }) => {
@@ -413,6 +416,13 @@ test("master-detail workbench, drawer watchDegraded banner, global sync bar & re
   await page.getByRole("tab", { name: "同步历史" }).click();
   await expect(page.locator(".sync-history-card")).toBeVisible();
   await expect(page.getByText("draft.docx", { exact: true })).toBeVisible();
+  await expect(page.getByText("IMG_001.jpg", { exact: true })).toHaveCount(0);
+  await page.locator(".sync-history-card").getByRole("link", { name: "查看任务" }).click();
+  await expect(drawer.getByRole("tab", { name: "同步记录", selected: true })).toBeVisible();
+  expect(new URL(page.url()).searchParams.get("jobId")).toBe("3");
+  await drawer.getByRole("button", { name: "close" }).click();
+  await expect(drawer).toHaveCount(0);
+  await expect(page).toHaveURL(/storage=__local__&view=history$/);
 
   // Switch to Connection Settings on PhotoCloud and test connection
   await page.getByTestId("connection-item-PhotoCloud").click();
@@ -428,6 +438,9 @@ test("master-detail workbench, drawer watchDegraded banner, global sync bar & re
   await expect(feed.getByText("IMG_001.jpg", { exact: true })).toBeVisible();
   await feed.getByRole("button", { name: "异常" }).click();
   await expect(feed.getByText("draft.docx", { exact: true })).toBeVisible();
+  await feed.getByRole("link", { name: "draft.docx" }).click();
+  await expect(drawer.getByRole("tab", { name: "同步记录", selected: true })).toBeVisible();
+  await expect(page.getByTestId("connection-item-local")).toHaveAttribute("aria-pressed", "true");
 });
 
 test("mobile layout keeps header reachable and zero horizontal overflow", async ({ page }) => {
