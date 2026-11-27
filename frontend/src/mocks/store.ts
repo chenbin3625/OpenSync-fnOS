@@ -847,16 +847,58 @@ export class MockStore {
     );
   }
 
+  private remoteHasCrypt(name: string, visited = new Set<string>()): boolean {
+    const key = [...this.nativeRemotes.keys()].find(
+      (k) => k.toLowerCase() === name.trim().toLowerCase(),
+    );
+    if (!key) return false;
+    const lower = key.toLowerCase();
+    if (visited.has(lower)) return false;
+    visited.add(lower);
+    const params = this.nativeRemotes.get(key)!;
+    const typ = (params.type || "").trim().toLowerCase();
+    if (typ === "crypt") return true;
+    if (["alias", "chunker", "compress", "hasher"].includes(typ)) {
+      const target = (params.remote || "").trim();
+      const idx = target.indexOf(":");
+      if (idx > 0) {
+        return this.remoteHasCrypt(target.slice(0, idx), visited);
+      }
+    }
+    if (typ === "union" || typ === "combine") {
+      const tokens = (params.upstreams || "").trim().split(/\s+/).filter(Boolean);
+      for (const tok of tokens) {
+        let target = tok;
+        if (typ === "combine") {
+          const eqIdx = target.indexOf("=");
+          if (eqIdx <= 0) continue;
+          target = target.slice(eqIdx + 1).trim();
+        } else {
+          target = target.replace(/:(ro|nc)$/, "");
+        }
+        const idx = target.indexOf(":");
+        if (idx > 0 && this.remoteHasCrypt(target.slice(0, idx), new Set(visited))) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
   private syncNativeEngineMetadata(): AlistItem | undefined {
     const engine = this.findNativeEngine();
     if (!engine) return undefined;
     const remotes: Record<string, string> = {};
-    const remoteDetails: Record<string, { type: string; summary?: string }> = {};
+    const remoteDetails: Record<
+      string,
+      { type: string; summary?: string; hasCrypt?: string }
+    > = {};
     for (const [name, params] of this.nativeRemotes.entries()) {
       remotes[name] = params.type || "s3";
       remoteDetails[name] = {
         type: params.type || "s3",
         summary: mockNativeSummary(params),
+        ...(this.remoteHasCrypt(name) ? { hasCrypt: "true" } : {}),
       };
     }
     engine.kind = "rclone";

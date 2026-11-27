@@ -49,6 +49,7 @@ export function GlobalSyncBar({
         job.enable === 1 &&
         (job.isCron === 3 ||
           syncStatus.state === "monitoring" ||
+          syncStatus.state === "idle" ||
           syncStatus.state === "pending" ||
           syncStatus.state === "scanning" ||
           syncStatus.state === "syncing" ||

@@ -233,6 +233,7 @@ test("standard 3-step wizard hides /本地 & ~12hex, disambiguates duplicate loc
       password: "VaultPass#2026",
       password2: "Salt#2026",
       managed_by_job: "true",
+      managed_job_label: "2026 · aliyun",
     },
   });
 

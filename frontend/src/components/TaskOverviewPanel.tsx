@@ -34,6 +34,7 @@ import {
   formatRelativeSyncTime,
   formatSecondsShort,
   getContinuousSyncMeta,
+  parseJobExtraFlagsObject,
   resolveEffectiveSyncStatus,
   syncStatusLabels,
   syncStatusTone,
@@ -41,6 +42,7 @@ import {
 import { useResource } from "../lib/hooks";
 import { describeBwLimit } from "../lib/bwLimit";
 import { formatSpeed } from "../lib/dashboardMetrics";
+import { formatWeeklyScheduleSummary } from "../lib/weeklySchedule";
 import {
   buildSyncPathPreview,
   formatDisplayPath,
@@ -118,6 +120,15 @@ export function TaskOverviewPanel({
   const enabled = !legacy && job.enable === 1;
   const running = Boolean(currentTask);
   const meta = useMemo(() => getContinuousSyncMeta(job), [job]);
+  const extraFlags = useMemo(
+    () => parseJobExtraFlagsObject(job.extraFlags),
+    [job.extraFlags],
+  );
+  const oneWayTrackedDelete =
+    meta.directionKey !== "bidirectional" &&
+    job.method !== 1 &&
+    extraFlags.oneWayDeleteMode === "tracked";
+  const weeklyEnabled = Boolean(extraFlags.weeklySchedule?.enabled);
   const effectiveStatus = useMemo(
     () =>
       resolveEffectiveSyncStatus({
@@ -355,6 +366,8 @@ export function TaskOverviewPanel({
         return "正在检测目录变更";
       case "waiting_window":
         return "等待进入运行窗口";
+      case "idle":
+        return "按周计划待命中";
       case "paused":
         return "持续同步已暂停";
       case "error":
@@ -383,9 +396,14 @@ export function TaskOverviewPanel({
       case "scanning":
         return "正在比对本地与远端目录快照";
       case "waiting_window":
+        if (effectiveStatus.schedulePaused || weeklyEnabled) {
+          return "当前处于每周定时计划暂停时段（暂停触发，进入运行/限速时段后自动恢复）";
+        }
         return job.windowEnable
           ? `当前不在允许窗口（${job.windowStart || "00:00"}–${job.windowEnd || "06:00"}），窗口恢复后自动补齐`
           : "当前处于窗口外，窗口恢复后自动补齐";
+      case "idle":
+        return formatWeeklyScheduleSummary(extraFlags.weeklySchedule);
       case "paused":
         return "恢复同步后将自动对账并补齐暂停期间产生的变更";
       case "error":
@@ -757,6 +775,9 @@ export function TaskOverviewPanel({
                   }
                 >
                   每 {formatSecondsShort(meta.pollIntervalSec)}
+                  {(effectiveStatus.pollBackoffStreak || 0) > 0 &&
+                    (effectiveStatus.effectivePollSec || 0) > meta.pollIntervalSec &&
+                    `（退避每 ${formatSecondsShort(effectiveStatus.effectivePollSec || meta.pollIntervalSec)}）`}
                 </strong>
               </div>
               <div className="continuous-metric">
@@ -778,12 +799,31 @@ export function TaskOverviewPanel({
                 <span>{meta.directionLabel}</span>
                 {meta.directionKey !== "bidirectional" && (
                   <span className="muted">
-                    {meta.syncDelete ? "同步删除目标端多余文件" : "不删除目标端文件"}
+                    {oneWayTrackedDelete
+                      ? "基线追踪删除（仅清理本任务同步过的文件）"
+                      : meta.syncDelete
+                        ? "同步删除目标端多余文件"
+                        : "不删除目标端文件"}
                   </span>
                 )}
               </span>
             </Info>
             <Info label="监控节奏">{formatContinuousSyncPlan(meta)}</Info>
+            {weeklyEnabled && (
+              <Info label="每周计划">
+                <span>{formatWeeklyScheduleSummary(extraFlags.weeklySchedule)}</span>
+                {effectiveStatus.scheduleLimited && (
+                  <Tag size="small" type="light" color="orange" style={{ marginLeft: 8 }}>
+                    当前时段限速 {effectiveStatus.effectiveBwLimit || effectiveStatus.weeklyLimitRate || extraFlags.weeklySchedule?.limitRate || ""}
+                  </Tag>
+                )}
+                {effectiveStatus.schedulePaused && (
+                  <Tag size="small" type="light" color="grey" style={{ marginLeft: 8 }}>
+                    当前时段暂停
+                  </Tag>
+                )}
+              </Info>
+            )}
             {Boolean(job.windowEnable) && (
               <Info label="运行窗口">
                 每日 {job.windowStart || "00:00"} – {job.windowEnd || "06:00"}

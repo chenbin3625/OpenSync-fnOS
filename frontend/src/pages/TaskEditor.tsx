@@ -787,7 +787,7 @@ export default function TaskEditor({
       setStep(0);
       setActiveTab("basic");
     }
-    if (isNew && !seedForm.extraFlags.syncDirectionMode) {
+    if (form.extraFlags.syncDirectionMode || form.extraFlags.oneWayDeleteMode) {
       change("extraFlags", {
         ...form.extraFlags,
         syncDirectionMode: "",
@@ -860,7 +860,10 @@ export default function TaskEditor({
                       subPath: targetInfo.subPath,
                     },
                     inlineCryptDraft.values,
-                    { managedByJob: true },
+                    {
+                      managedByJob: true,
+                      managedJobLabel: finalForm.remark.trim() || undefined,
+                    },
                   );
                   await api.saveNativeStorage({
                     name: cryptName,
@@ -953,14 +956,25 @@ export default function TaskEditor({
 
   const handleDirectionSelect = (direction: SyncDirectionKey) => {
     if (direction === activeFreeDirection) return;
+    const clearedFlags =
+      form.extraFlags.syncDirectionMode || form.extraFlags.oneWayDeleteMode
+        ? {
+            extraFlags: {
+              ...form.extraFlags,
+              syncDirectionMode: "" as const,
+              oneWayDeleteMode: "" as const,
+            },
+          }
+        : {};
     if (direction === "bidirectional") {
       patch({
         method: 3,
         conflictPolicy: form.conflictPolicy === 0 ? 2 : form.conflictPolicy,
+        ...clearedFlags,
       });
       return;
     }
-    change("method", 0);
+    patch({ method: 0, ...clearedFlags });
   };
 
   const handleSrcPathChange = (nextPaths: string[]) => {
@@ -2289,6 +2303,8 @@ export default function TaskEditor({
                     remotes={nativeStorage.data?.remotes}
                     showErrors={validatedSteps.has(1)}
                     createdCryptName={createdInlineCryptName}
+                    onExportRecovery={(name) => setCryptRecoveryRemote(name)}
+                    onRestoreFromCrypt={(name) => setCryptRestorePath(`/${name}`)}
                   />
 
                   <div className="wizard-safety-card">
@@ -2600,7 +2616,17 @@ export default function TaskEditor({
                         <Switch
                           aria-label="镜像对齐"
                           checked={form.method === 1}
-                          onChange={(v) => change("method", v ? 1 : 0)}
+                          onChange={(v) =>
+                            form.extraFlags.oneWayDeleteMode
+                              ? patch({
+                                  method: v ? 1 : 0,
+                                  extraFlags: {
+                                    ...form.extraFlags,
+                                    oneWayDeleteMode: "",
+                                  },
+                                })
+                              : change("method", v ? 1 : 0)
+                          }
                         />
                       </SettingRow>
                     )}
@@ -2824,7 +2850,9 @@ export default function TaskEditor({
                   {dstEncryption.encryptable.length === 0 &&
                     dstEncryption.encrypted.length > 0 && (() => {
                       const primaryEncryptedName =
-                        dstEncryption.encrypted[0]?.remoteName || "";
+                        dstEncryption.encrypted[0]?.cryptRemoteName ||
+                        dstEncryption.encrypted[0]?.remoteName ||
+                        "";
                       const encryptedNames = Array.from(
                         new Set(
                           dstEncryption.encrypted.map((item) => item.remoteName),

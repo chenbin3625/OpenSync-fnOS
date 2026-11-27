@@ -668,3 +668,60 @@ func TestBatchEnableDisableAllAndRecentTaskItems(t *testing.T) {
 		t.Fatalf("__local__ recent count = %v, want 1", localRecent["count"])
 	}
 }
+
+func TestValidateJobInputEnforcesSyncDirectionMode(t *testing.T) {
+	run := func(job map[string]interface{}) error {
+		if err := CleanJobInput(job); err != nil {
+			return err
+		}
+		return ValidateJobInput(job)
+	}
+
+	validUpload := map[string]interface{}{
+		"alistId":    1,
+		"srcPath":    []string{"/本地/Photos"},
+		"dstPath":    []string{"/Aliyun/Photos"},
+		"method":     0,
+		"isCron":     3,
+		"extraFlags": `{"syncDirectionMode":"upload","oneWayDeleteMode":"tracked"}`,
+	}
+	if err := run(validUpload); err != nil {
+		t.Fatalf("expected valid upload syncDirectionMode to succeed, got: %v", err)
+	}
+
+	reversedUpload := map[string]interface{}{
+		"alistId":    1,
+		"srcPath":    []string{"/Aliyun/Photos"},
+		"dstPath":    []string{"/本地/Photos"},
+		"method":     0,
+		"isCron":     3,
+		"extraFlags": `{"syncDirectionMode":"upload"}`,
+	}
+	if err := run(reversedUpload); err == nil {
+		t.Fatalf("expected upload syncDirectionMode with remote source to fail")
+	}
+
+	validDownload := map[string]interface{}{
+		"alistId":    1,
+		"srcPath":    []string{"/Aliyun/Photos"},
+		"dstPath":    []string{"/本地/Photos"},
+		"method":     0,
+		"isCron":     3,
+		"extraFlags": `{"syncDirectionMode":"download"}`,
+	}
+	if err := run(validDownload); err != nil {
+		t.Fatalf("expected valid download syncDirectionMode to succeed, got: %v", err)
+	}
+
+	reversedDownload := map[string]interface{}{
+		"alistId":    1,
+		"srcPath":    []string{"/本地/Photos"},
+		"dstPath":    []string{"/Aliyun/Photos"},
+		"method":     0,
+		"isCron":     3,
+		"extraFlags": `{"syncDirectionMode":"download"}`,
+	}
+	if err := run(reversedDownload); err == nil {
+		t.Fatalf("expected download syncDirectionMode with remote destination to fail")
+	}
+}

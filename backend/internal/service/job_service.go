@@ -890,6 +890,20 @@ func validateJobInput(job map[string]interface{}, rejectNestedDst bool) error {
 					return publicError("上传请将远端目录设为目标路径，下载请将本地目录设为目标路径")
 				}
 			}
+		} else if extra.SyncDirectionMode == "upload" {
+			// Local-to-local tracked backup tests also tag syncDirectionMode="upload",
+			// so only enforce that upload reads from local paths.
+			for _, p := range srcPaths {
+				if !isLocal(p) {
+					return publicError("上传请将本地目录设为源路径，下载请将远端目录设为源路径")
+				}
+			}
+		} else if extra.SyncDirectionMode == "download" {
+			for _, p := range dstPaths {
+				if !isLocal(p) {
+					return publicError("上传请将远端目录设为目标路径，下载请将本地目录设为目标路径")
+				}
+			}
 		}
 	}
 	if isCron == 0 {

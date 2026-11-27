@@ -298,7 +298,16 @@ export interface BisyncConflict {
 }
 
 export interface SyncStatus {
-  state: "monitoring" | "pending" | "scanning" | "syncing" | "synced" | "waiting_window" | "paused" | "error";
+  state:
+    | "monitoring"
+    | "idle"
+    | "pending"
+    | "scanning"
+    | "syncing"
+    | "synced"
+    | "waiting_window"
+    | "paused"
+    | "error";
   pendingChanges: number;
   conflictCount?: number;
   lastSuccess: number;
@@ -308,11 +317,19 @@ export interface SyncStatus {
   failures: number;
   retryAt?: number;
   direction?: string;
+  directionMode?: string;
   watchDegraded?: boolean;
   watchDegradedReason?: string;
   pollIntervalSec?: number;
+  effectivePollSec?: number;
+  pollBackoffStreak?: number;
   auditIntervalMin?: number;
   debounceSec?: number;
+  scheduleState?: string;
+  scheduleLimited?: boolean;
+  schedulePaused?: boolean;
+  weeklyLimitRate?: string;
+  effectiveBwLimit?: string;
 }
 
 export interface JobCheckResult {

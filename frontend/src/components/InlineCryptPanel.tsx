@@ -1,3 +1,4 @@
+import Button from "@douyinfe/semi-ui/lib/es/button";
 import Input from "@douyinfe/semi-ui/lib/es/input";
 import Select from "@douyinfe/semi-ui/lib/es/select";
 import Switch from "@douyinfe/semi-ui/lib/es/switch";
@@ -96,6 +97,7 @@ export interface InlineCryptTargetAnalysis {
   subPath: string;
   remoteItem?: NativeRemoteItem;
   alreadyEncrypted: boolean;
+  cryptRemoteName?: string;
   readOnly: boolean;
   supported: boolean;
   requiresSubDir: boolean;
@@ -127,6 +129,9 @@ export function analyzeInlineCryptTarget(
   }
   const chain = resolveRemoteChain(remoteName, list, new Set(), subPath);
   const alreadyEncrypted = chain.hasCrypt;
+  const cryptRemoteName =
+    chain.cryptRemoteName ||
+    (remoteItem.type === "crypt" ? remoteItem.name : "");
   const readOnly = chain.readOnly;
   const supported =
     !alreadyEncrypted &&
@@ -141,6 +146,7 @@ export function analyzeInlineCryptTarget(
     subPath,
     remoteItem,
     alreadyEncrypted,
+    ...(cryptRemoteName ? { cryptRemoteName } : {}),
     readOnly,
     supported,
     requiresSubDir,
@@ -180,6 +186,8 @@ export function InlineCryptPanel({
   remotes,
   showErrors,
   createdCryptName,
+  onExportRecovery,
+  onRestoreFromCrypt,
 }: {
   draft: InlineCryptDraft;
   onChange: (next: InlineCryptDraft) => void;
@@ -188,31 +196,78 @@ export function InlineCryptPanel({
   remotes?: readonly NativeRemoteItem[];
   showErrors: boolean;
   createdCryptName?: string;
+  onExportRecovery?: (cryptRemoteName: string) => void;
+  onRestoreFromCrypt?: (cryptRemoteName: string) => void;
 }) {
   const target = analyzeInlineCryptTarget(remotePath, remotes);
   const errors = showErrors
     ? validateInlineCryptDraft(draft, remotePath, direction, remotes)
     : {};
+  const recoveryTarget = createdCryptName || target.cryptRemoteName || "";
 
   if (createdCryptName && target.alreadyEncrypted) {
     return (
-      <div className="sync-method-banner is-success" role="status">
+      <div className="sync-method-banner is-success quick-crypt-banner" role="status">
         <IconLockStroked aria-hidden="true" size="small" />
         <span>
           已为本任务创建并启用端到端加密存储「<strong>{createdCryptName}</strong>
           」，目标目录为 <code>{remotePath}</code>。
         </span>
+        {recoveryTarget && (onExportRecovery || onRestoreFromCrypt) && (
+          <div className="quick-crypt-banner-actions">
+            {onExportRecovery && (
+              <Button
+                size="small"
+                type="tertiary"
+                onClick={() => onExportRecovery(recoveryTarget)}
+              >
+                导出密钥恢复包
+              </Button>
+            )}
+            {onRestoreFromCrypt && (
+              <Button
+                size="small"
+                type="tertiary"
+                onClick={() => onRestoreFromCrypt(recoveryTarget)}
+              >
+                从加密存储一键还原到本地
+              </Button>
+            )}
+          </div>
+        )}
       </div>
     );
   }
 
   if (target.alreadyEncrypted) {
     return (
-      <div className="sync-method-banner is-success" role="status">
+      <div className="sync-method-banner is-success quick-crypt-banner" role="status">
         <IconLockStroked aria-hidden="true" size="small" />
         <span>
           所选云端目录（<code>{remotePath}</code>）已位于 Crypt 加密存储中，文件在传输前于本地自动加解密。
         </span>
+        {recoveryTarget && (onExportRecovery || onRestoreFromCrypt) && (
+          <div className="quick-crypt-banner-actions">
+            {onExportRecovery && (
+              <Button
+                size="small"
+                type="tertiary"
+                onClick={() => onExportRecovery(recoveryTarget)}
+              >
+                导出密钥恢复包
+              </Button>
+            )}
+            {onRestoreFromCrypt && (
+              <Button
+                size="small"
+                type="tertiary"
+                onClick={() => onRestoreFromCrypt(recoveryTarget)}
+              >
+                从加密存储一键还原到本地
+              </Button>
+            )}
+          </div>
+        )}
       </div>
     );
   }

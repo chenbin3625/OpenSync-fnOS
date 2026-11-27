@@ -1,6 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, apiBase } from "../src/api/client";
-import { getJobMountNames, jobHasCryptRemote } from "../src/lib/taskForm";
+import {
+  syncStatusLabels,
+  syncStatusTone,
+} from "../src/lib/continuousSync";
+import { analyzeDstEncryption } from "../src/lib/quickCrypt";
+import {
+  getJobMountNames,
+  jobHasCryptRemote,
+  resolveRemoteChain,
+} from "../src/lib/taskForm";
+import { createMockStore } from "../src/mocks/store";
 import type { AlistItem, JobItem, NativeRemoteItem } from "../src/types";
 
 afterEach(() => {
@@ -140,5 +150,71 @@ describe("Module 4 workbench helpers and API client", () => {
 
     const unused: Pick<JobItem, "id"> = { id: 1 };
     expect(unused.id).toBe(1);
+  });
+
+  it("aligns idle weekly status, wrapper crypt resolution and MockStore hasCrypt metadata", () => {
+    expect(syncStatusLabels.idle).toBe("按周历待命");
+    expect(syncStatusTone("idle")).toBe("muted");
+
+    const remotes: NativeRemoteItem[] = [
+      {
+        name: "rawS3",
+        type: "s3",
+        summary: "s3",
+        options: {},
+        configuredSecrets: [],
+        usedByJobs: [],
+        usedByCrypts: ["vaultCrypt"],
+      },
+      {
+        name: "vaultCrypt",
+        type: "crypt",
+        summary: "crypt",
+        options: { remote: "rawS3:bucket" },
+        configuredSecrets: ["password"],
+        usedByJobs: [],
+        usedByCrypts: [],
+      },
+      {
+        name: "vaultAlias",
+        type: "alias",
+        summary: "alias",
+        options: { remote: "vaultCrypt:photos" },
+        configuredSecrets: [],
+        usedByJobs: [],
+        usedByCrypts: [],
+      },
+    ];
+    const chain = resolveRemoteChain("vaultAlias", remotes);
+    expect(chain.hasCrypt).toBe(true);
+    expect(chain.cryptRemoteName).toBe("vaultCrypt");
+    const enc = analyzeDstEncryption(["/vaultAlias/2026"], remotes, 0);
+    expect(enc.encrypted[0]?.cryptRemoteName).toBe("vaultCrypt");
+
+    const store = createMockStore({
+      engines: [{ id: 1, kind: "rclone", remark: "内置存储", url: "rclone://native" }],
+    });
+    expect(
+      store.saveNativeRemote({
+        name: "aliyun",
+        options: { type: "webdav", url: "https://dav.example.com" },
+      }),
+    ).toBeNull();
+    expect(
+      store.saveNativeRemote({
+        name: "aliyun-crypt",
+        options: { type: "crypt", remote: "aliyun:Enc", password: "secret" },
+      }),
+    ).toBeNull();
+    expect(
+      store.saveNativeRemote({
+        name: "aliyun-alias",
+        options: { type: "alias", remote: "aliyun-crypt:sub" },
+      }),
+    ).toBeNull();
+    const engines = store.listEngines();
+    expect(engines[0]?.remoteDetails?.["aliyun-crypt"]?.hasCrypt).toBe("true");
+    expect(engines[0]?.remoteDetails?.["aliyun-alias"]?.hasCrypt).toBe("true");
+    expect(engines[0]?.remoteDetails?.aliyun?.hasCrypt).toBeUndefined();
   });
 });

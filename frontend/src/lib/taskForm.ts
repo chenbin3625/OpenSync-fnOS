@@ -739,6 +739,7 @@ export interface ResolvedRemoteChain {
   leafBackend: string;
   leafVendor: string;
   hasCrypt: boolean;
+  cryptRemoteName?: string;
   readOnly: boolean;
   accumulatedPrefix: string;
   isStandardWebDAV: boolean;
@@ -772,6 +773,7 @@ export function resolveRemoteChain(
 
   let cur: NativeRemoteItem | undefined = start;
   let hasCrypt = false;
+  let cryptRemoteName = "";
   let readOnly = false;
   let accumulatedPrefix = "";
   let restPath = subPath.replace(/^\/+|\/+$/g, "");
@@ -786,7 +788,10 @@ export function resolveRemoteChain(
     visited.add(lower);
 
     leafBackend = cur.type;
-    if (cur.type === "crypt") hasCrypt = true;
+    if (cur.type === "crypt") {
+      hasCrypt = true;
+      if (!cryptRemoteName) cryptRemoteName = cur.name;
+    }
     if (cur.type === "quark") hasQuark = true;
     if (cur.type === "archive" || cur.type === "http") readOnly = true;
 
@@ -844,7 +849,12 @@ export function resolveRemoteChain(
         }
         const childSub = [upPrefix, mountSub].filter(Boolean).join("/");
         const child = resolveRemoteChain(ref, remotes, new Set(visited), childSub);
-        if (child.hasCrypt) hasCrypt = true;
+        if (child.hasCrypt) {
+          hasCrypt = true;
+          if (!cryptRemoteName && child.cryptRemoteName) {
+            cryptRemoteName = child.cryptRemoteName;
+          }
+        }
         if (child.isStandardWebDAV) isStandardWebDAV = true;
         if (child.hasQuark) hasQuark = true;
         if (cur.type === "combine" && child.readOnly) readOnly = true;
@@ -862,6 +872,7 @@ export function resolveRemoteChain(
     leafBackend,
     leafVendor,
     hasCrypt,
+    ...(cryptRemoteName ? { cryptRemoteName } : {}),
     readOnly,
     accumulatedPrefix,
     isStandardWebDAV,

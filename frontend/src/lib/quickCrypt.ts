@@ -34,6 +34,7 @@ export interface DstEncryptionAnalysis {
   encrypted: Array<{
     syncPath: string;
     remoteName: string;
+    cryptRemoteName?: string;
   }>;
 }
 
@@ -298,6 +299,9 @@ export function analyzeDstEncryption(
         encrypted.push({
           syncPath: normalizedPath,
           remoteName: chain.canonicalName,
+          ...(chain.cryptRemoteName && chain.cryptRemoteName !== chain.canonicalName
+            ? { cryptRemoteName: chain.cryptRemoteName }
+            : {}),
         });
       }
       continue;

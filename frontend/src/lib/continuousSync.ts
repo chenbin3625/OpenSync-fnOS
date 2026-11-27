@@ -15,6 +15,7 @@ export interface ContinuousSyncMeta {
 
 export const syncStatusLabels: Record<SyncStatus["state"], string> = {
   monitoring: "监控中",
+  idle: "按周历待命",
   pending: "待同步",
   scanning: "扫描中",
   syncing: "同步中",
@@ -39,6 +40,7 @@ export function syncStatusTone(state?: SyncStatus["state"]): SyncStatusTone {
       return "warning";
     case "error":
       return "danger";
+    case "idle":
     case "paused":
     default:
       return "muted";
