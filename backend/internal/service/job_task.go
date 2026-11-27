@@ -83,7 +83,9 @@ func newJobTask(taskID int64, jc *JobClient) (*JobTask, error) {
 	job := jc.jobSnapshot()
 	limits := taskRuntimeLimitsForJob(job)
 	var rcCtrl *native.RCController
-	if jobBw := strings.TrimSpace(util.StringValue(job["bwLimit"])); jobBw != "" {
+	if ws := EvaluateWeeklySchedule(job, time.Now()); ws.Enabled {
+		rcCtrl = native.NewRCController(effectiveJobBwLimitAt(job, time.Now()))
+	} else if jobBw := strings.TrimSpace(util.StringValue(job["bwLimit"])); jobBw != "" {
 		rcCtrl = native.NewRCController(jobBw)
 	} else {
 		globalBw := globalDefaultBwLimit()
@@ -296,7 +298,7 @@ func (jt *JobTask) ApplyGlobalBwLimit(ctx context.Context, rate string) error {
 	if jt == nil || jt.rcController == nil || jt.bwLimitUserOverridden.Load() {
 		return nil
 	}
-	if jt.Job != nil && strings.TrimSpace(util.StringValue(jt.Job["bwLimit"])) != "" {
+	if !jobTaskInheritsGlobalBwLimit(jt.Job) {
 		return nil
 	}
 	if jt.rcController.InheritsGlobal() {

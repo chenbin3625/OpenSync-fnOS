@@ -26,41 +26,86 @@ const nativePairMaxConcurrency = 4
 // nativeExtraFlags holds the strictly allowlisted rclone tuning and bisync
 // flags persisted as JSON in job.extraFlags.
 type nativeExtraFlags struct {
-	NoUpdateModtime      bool   `json:"noUpdateModtime,omitempty"`
-	Inplace              bool   `json:"inplace,omitempty"`
-	CheckFirst           bool   `json:"checkFirst,omitempty"`
-	S3NoHead             bool   `json:"s3NoHead,omitempty"`
-	IgnoreSize           bool   `json:"ignoreSize,omitempty"`
-	TrackRenames         bool   `json:"trackRenames,omitempty"`
-	UseMmap              bool   `json:"useMmap,omitempty"`
-	MaxTransfer          string `json:"maxTransfer,omitempty"`
-	CutoffMode           string `json:"cutoffMode,omitempty"`
-	MaxDuration          string `json:"maxDuration,omitempty"`
-	OrderBy              string `json:"orderBy,omitempty"`
-	MaxBacklog           int    `json:"maxBacklog,omitempty"`
-	BufferSize           string `json:"bufferSize,omitempty"`
-	MultiThreadCutoff    string `json:"multiThreadCutoff,omitempty"`
-	MultiThreadChunkSize string `json:"multiThreadChunkSize,omitempty"`
-	UserAgent            string `json:"userAgent,omitempty"`
-	IOTimeout            string `json:"ioTimeout,omitempty"`
-	ConTimeout           string `json:"conTimeout,omitempty"`
-	LowLevelRetries      int    `json:"lowLevelRetries,omitempty"`
-	RetriesSleep         string `json:"retriesSleep,omitempty"`
-	ResumeEnable         bool   `json:"resumeEnable,omitempty"`
-	ResumeMinSizeMB      int    `json:"resumeMinSizeMB,omitempty"`
-	WatchEnable          bool   `json:"watchEnable,omitempty"`
-	WatchDebounceSec     int    `json:"watchDebounceSec,omitempty"`
-	SyncPollIntervalSec  int    `json:"syncPollIntervalSec,omitempty"`
-	SyncAuditIntervalMin int    `json:"syncAuditIntervalMin,omitempty"`
-	SyncDirection        string `json:"syncDirection,omitempty"`
-	AutoRetryMax         int    `json:"autoRetryMax,omitempty"`
-	AutoRetryDelayMin    int    `json:"autoRetryDelayMin,omitempty"`
-	PostSyncJobID        int64  `json:"postSyncJobId,omitempty"`
-	CheckSchedule        string `json:"checkSchedule,omitempty"`
-	MissedCatchUp        bool   `json:"missedCatchUp,omitempty"`
-	DirectStream         bool   `json:"directStream,omitempty"`
-	BisyncMaxDelete      int    `json:"bisyncMaxDelete,omitempty"`
-	BisyncForce          bool   `json:"bisyncForce,omitempty"`
+	NoUpdateModtime      bool                  `json:"noUpdateModtime,omitempty"`
+	Inplace              bool                  `json:"inplace,omitempty"`
+	CheckFirst           bool                  `json:"checkFirst,omitempty"`
+	S3NoHead             bool                  `json:"s3NoHead,omitempty"`
+	IgnoreSize           bool                  `json:"ignoreSize,omitempty"`
+	TrackRenames         bool                  `json:"trackRenames,omitempty"`
+	UseMmap              bool                  `json:"useMmap,omitempty"`
+	MaxTransfer          string                `json:"maxTransfer,omitempty"`
+	CutoffMode           string                `json:"cutoffMode,omitempty"`
+	MaxDuration          string                `json:"maxDuration,omitempty"`
+	OrderBy              string                `json:"orderBy,omitempty"`
+	MaxBacklog           int                   `json:"maxBacklog,omitempty"`
+	BufferSize           string                `json:"bufferSize,omitempty"`
+	MultiThreadCutoff    string                `json:"multiThreadCutoff,omitempty"`
+	MultiThreadChunkSize string                `json:"multiThreadChunkSize,omitempty"`
+	UserAgent            string                `json:"userAgent,omitempty"`
+	IOTimeout            string                `json:"ioTimeout,omitempty"`
+	ConTimeout           string                `json:"conTimeout,omitempty"`
+	LowLevelRetries      int                   `json:"lowLevelRetries,omitempty"`
+	RetriesSleep         string                `json:"retriesSleep,omitempty"`
+	ResumeEnable         bool                  `json:"resumeEnable,omitempty"`
+	ResumeMinSizeMB      int                   `json:"resumeMinSizeMB,omitempty"`
+	WatchEnable          bool                  `json:"watchEnable,omitempty"`
+	WatchDebounceSec     int                   `json:"watchDebounceSec,omitempty"`
+	SyncPollIntervalSec  int                   `json:"syncPollIntervalSec,omitempty"`
+	SyncAuditIntervalMin int                   `json:"syncAuditIntervalMin,omitempty"`
+	SyncDirection        string                `json:"syncDirection,omitempty"`
+	AutoRetryMax         int                   `json:"autoRetryMax,omitempty"`
+	AutoRetryDelayMin    int                   `json:"autoRetryDelayMin,omitempty"`
+	PostSyncJobID        int64                 `json:"postSyncJobId,omitempty"`
+	CheckSchedule        string                `json:"checkSchedule,omitempty"`
+	MissedCatchUp        bool                  `json:"missedCatchUp,omitempty"`
+	DirectStream         bool                  `json:"directStream,omitempty"`
+	BisyncMaxDelete      int                   `json:"bisyncMaxDelete,omitempty"`
+	BisyncForce          bool                  `json:"bisyncForce,omitempty"`
+	OneWayDeleteMode     string                `json:"oneWayDeleteMode,omitempty"`
+	SyncDirectionMode    string                `json:"syncDirectionMode,omitempty"`
+	WeeklySchedule       *WeeklyScheduleConfig `json:"weeklySchedule,omitempty"`
+}
+
+func (f nativeExtraFlags) isZero() bool {
+	return f.WeeklySchedule == nil && (nativeExtraFlags{
+		NoUpdateModtime:      f.NoUpdateModtime,
+		Inplace:              f.Inplace,
+		CheckFirst:           f.CheckFirst,
+		S3NoHead:             f.S3NoHead,
+		IgnoreSize:           f.IgnoreSize,
+		TrackRenames:         f.TrackRenames,
+		UseMmap:              f.UseMmap,
+		MaxTransfer:          f.MaxTransfer,
+		CutoffMode:           f.CutoffMode,
+		MaxDuration:          f.MaxDuration,
+		OrderBy:              f.OrderBy,
+		MaxBacklog:           f.MaxBacklog,
+		BufferSize:           f.BufferSize,
+		MultiThreadCutoff:    f.MultiThreadCutoff,
+		MultiThreadChunkSize: f.MultiThreadChunkSize,
+		UserAgent:            f.UserAgent,
+		IOTimeout:            f.IOTimeout,
+		ConTimeout:           f.ConTimeout,
+		LowLevelRetries:      f.LowLevelRetries,
+		RetriesSleep:         f.RetriesSleep,
+		ResumeEnable:         f.ResumeEnable,
+		ResumeMinSizeMB:      f.ResumeMinSizeMB,
+		WatchEnable:          f.WatchEnable,
+		WatchDebounceSec:     f.WatchDebounceSec,
+		SyncPollIntervalSec:  f.SyncPollIntervalSec,
+		SyncAuditIntervalMin: f.SyncAuditIntervalMin,
+		SyncDirection:        f.SyncDirection,
+		AutoRetryMax:         f.AutoRetryMax,
+		AutoRetryDelayMin:    f.AutoRetryDelayMin,
+		PostSyncJobID:        f.PostSyncJobID,
+		CheckSchedule:        f.CheckSchedule,
+		MissedCatchUp:        f.MissedCatchUp,
+		DirectStream:         f.DirectStream,
+		BisyncMaxDelete:      f.BisyncMaxDelete,
+		BisyncForce:          f.BisyncForce,
+		OneWayDeleteMode:     f.OneWayDeleteMode,
+		SyncDirectionMode:    f.SyncDirectionMode,
+	}) == (nativeExtraFlags{})
 }
 
 func extraFlagBool(val interface{}) (bool, bool) {
@@ -322,11 +367,41 @@ func parseNativeExtraFlags(raw interface{}) (nativeExtraFlags, string, error) {
 				return nativeExtraFlags{}, "", publicError("双向删除保护百分比（--max-delete）需为 0–100 的整数（0 表示使用 rclone 默认 50%）")
 			}
 			out.BisyncMaxDelete = n
+		case "oneWayDeleteMode":
+			s, ok := extraFlagString(val)
+			if !ok {
+				return nativeExtraFlags{}, "", publicError("单向删除模式格式无效")
+			}
+			mode := strings.ToLower(s)
+			switch mode {
+			case "", "none", "tracked", "mirror":
+				out.OneWayDeleteMode = mode
+			default:
+				return nativeExtraFlags{}, "", publicError("单向删除模式仅支持 none、tracked 或 mirror")
+			}
+		case "syncDirectionMode":
+			s, ok := extraFlagString(val)
+			if !ok {
+				return nativeExtraFlags{}, "", publicError("同步方向模式格式无效")
+			}
+			dir := strings.ToLower(s)
+			switch dir {
+			case "", "upload", "download", "bidirectional":
+				out.SyncDirectionMode = dir
+			default:
+				return nativeExtraFlags{}, "", publicError("同步方向模式仅支持 upload、download 或 bidirectional")
+			}
+		case "weeklySchedule":
+			ws, err := parseWeeklySchedule(val)
+			if err != nil {
+				return nativeExtraFlags{}, "", err
+			}
+			out.WeeklySchedule = ws
 		default:
 			return nativeExtraFlags{}, "", publicError(msg.T(msg.ExtraFlagsInvalid))
 		}
 	}
-	if out == (nativeExtraFlags{}) {
+	if out.isZero() {
 		return out, "", nil
 	}
 	canonical, err := json.Marshal(out)
@@ -344,13 +419,26 @@ func globalDefaultBwLimit() string {
 	return strings.TrimSpace(config.GetSystemSettings().DefaultBwLimit)
 }
 
-func effectiveJobBwLimit(job map[string]interface{}) string {
+func legacyEffectiveJobBwLimit(job map[string]interface{}) string {
 	if job != nil {
 		if bw := strings.TrimSpace(util.StringValue(job["bwLimit"])); bw != "" {
 			return bw
 		}
 	}
 	return globalDefaultBwLimit()
+}
+
+func effectiveJobBwLimitAt(job map[string]interface{}, now time.Time) string {
+	if ws := EvaluateWeeklySchedule(job, now); ws.Enabled {
+		if ws.LimitRate != "" {
+			return ws.LimitRate
+		}
+	}
+	return legacyEffectiveJobBwLimit(job)
+}
+
+func effectiveJobBwLimit(job map[string]interface{}) string {
+	return effectiveJobBwLimitAt(job, time.Now())
 }
 
 func jobFloat64(val interface{}) float64 {
@@ -1841,6 +1929,13 @@ func (jt *JobTask) populateNativeWaiting(src, dst string, files []native.Pending
 // runNativeDryRunSession executes read-only dry-run previews for all 4 native sync modes.
 func runNativeDryRunSession(ctx context.Context, sess *dryRunSession, cfg native.Config, job map[string]interface{}) {
 	method := util.ToInt(job["method"])
+	extra, _, _ := parseNativeExtraFlags(job["extraFlags"])
+	oneWayMode := effectiveOneWayDeleteMode(job, extra)
+	if (method == 0 || method == 1) && oneWayMode == "mirror" {
+		method = 1
+	} else if method == 1 && oneWayMode != "mirror" {
+		method = 0
+	}
 	switch method {
 	case 0:
 		var prevDirs, pairDirs int64
@@ -1886,6 +1981,16 @@ func runNativeDryRunSession(ctx context.Context, sess *dryRunSession, cfg native
 				sess.finish("failed", outcome.err.Error())
 			}
 			return
+		}
+		if oneWayMode == "tracked" {
+			if err := dryRunTrackedOneWayDeletes(ctx, sess, cfg, job); err != nil {
+				if ctx.Err() != nil {
+					sess.finish("cancelled", "")
+				} else {
+					sess.finish("failed", err.Error())
+				}
+				return
+			}
 		}
 		sess.finish("completed", "")
 

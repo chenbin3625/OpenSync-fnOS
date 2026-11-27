@@ -375,7 +375,7 @@ func DeleteJob(jobID int64) error {
 		if _, err := tx.Exec("DELETE FROM job_task WHERE jobId=?", jobID); err != nil {
 			return err
 		}
-		for _, table := range []string{"sync_file_state", "sync_state", "bisync_entry", "bisync_root_meta", "bisync_conflict"} {
+		for _, table := range []string{"sync_file_state", "sync_state", "bisync_entry", "bisync_root_meta", "bisync_conflict", "oneway_baseline"} {
 			if exists, err := txTableExists(tx, table); err != nil {
 				return err
 			} else if exists {

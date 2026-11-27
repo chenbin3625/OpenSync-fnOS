@@ -702,8 +702,8 @@ func (jc *JobClient) runMarkedJobWithOptions(opts markedJobRunOptions) {
 		jc.markDone()
 		return
 	}
-	if !manual && util.ToInt(task.Job["windowEnable"]) == 1 && util.ToInt(task.Job["windowStopOutside"]) == 1 {
-		go watchTaskTimeWindow(task)
+	if (!manual && JobShouldStopOutsideWindow(task.Job)) || EvaluateWeeklySchedule(task.Job, time.Now()).Enabled {
+		go watchTaskTimeWindow(task, manual)
 	}
 	started = true
 	task.Start()
@@ -748,10 +748,15 @@ func extractJobStorageNamesWithDeps(job map[string]interface{}, cfg interface {
 	return out
 }
 
-func watchTaskTimeWindow(task *JobTask) {
+func watchTaskTimeWindow(task *JobTask, manual bool) {
 	ctx := task.context()
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
+	lastBwLimit := ""
+	if ws := EvaluateWeeklySchedule(task.Job, time.Now()); ws.Enabled {
+		lastBwLimit = effectiveJobBwLimitAt(task.Job, time.Now())
+	}
+	stopOutside := !manual && JobShouldStopOutsideWindow(task.Job)
 	for {
 		select {
 		case <-ctx.Done():
@@ -760,10 +765,21 @@ func watchTaskTimeWindow(task *JobTask) {
 			if task.isBreak() {
 				return
 			}
-			if !JobInTimeWindow(task.Job, time.Now()) {
+			now := time.Now()
+			if stopOutside && !JobInTimeWindow(task.Job, now) {
 				log.Printf("Task %d (job %d) left configured run window; stopping task", task.TaskID, task.jobIDSnapshot())
 				task.requestBreak()
 				return
+			}
+			if ws := EvaluateWeeklySchedule(task.Job, now); ws.Enabled && !task.bwLimitUserOverridden.Load() {
+				nextRate := effectiveJobBwLimitAt(task.Job, now)
+				if nextRate != lastBwLimit {
+					lastBwLimit = nextRate
+					if task.rcController != nil {
+						_ = task.rcController.SetBwLimit(ctx, nextRate)
+						task.notifyProgressNow()
+					}
+				}
 			}
 		}
 	}
@@ -806,6 +822,7 @@ func (jc *JobClient) DoManual() error {
 		return publicError(msg.T(msg.JobNotFound))
 	}
 	jc.resetAutoRetry()
+	jobFSWatchers.ResetPollBackoff(jc.idSnapshot())
 	if !jc.tryMarkDoing() {
 		return publicError(msg.T(msg.JobRunning))
 	}
@@ -830,6 +847,7 @@ func (jc *JobClient) DoRepairFiles(relPaths []string) error {
 		return publicError(msg.T(msg.DisabledJobCannotRun))
 	}
 	jc.resetAutoRetry()
+	jobFSWatchers.ResetPollBackoff(jc.idSnapshot())
 	if !jc.tryMarkDoing() {
 		return publicError(msg.T(msg.JobRunning))
 	}

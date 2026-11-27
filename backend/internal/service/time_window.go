@@ -79,9 +79,15 @@ func InTimeWindow(now time.Time, start, end string) bool {
 }
 
 // JobInTimeWindow reports whether a job is currently permitted to run under its
-// configured time window.
+// configured weekly schedule (when enabled) or legacy daily time window.
 func JobInTimeWindow(job map[string]interface{}, now time.Time) bool {
-	if job == nil || util.ToInt(job["windowEnable"]) != 1 {
+	if job == nil {
+		return true
+	}
+	if ws := EvaluateWeeklySchedule(job, now); ws.Enabled {
+		return ws.Mode != WeeklySlotPause
+	}
+	if util.ToInt(job["windowEnable"]) != 1 {
 		return true
 	}
 	start := util.StringValue(job["windowStart"])

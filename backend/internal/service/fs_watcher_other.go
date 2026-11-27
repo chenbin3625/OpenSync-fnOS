@@ -4,5 +4,5 @@ package service
 
 import "context"
 
-func watchLocalRootsPlatform(context.Context, []watchLocalRoot, func([]string, bool), func(bool)) {
+func watchLocalRootsPlatform(context.Context, []watchLocalRoot, func([]string, bool), localWatchOptions) {
 }

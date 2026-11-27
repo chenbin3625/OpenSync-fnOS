@@ -132,6 +132,7 @@ func (w *jobWatcher) enqueue(paths []string, full bool) {
 		w.persistenceError = ""
 		w.failedPaths = nil
 		w.failedFullScan = false
+		w.resetPollBackoffLocked(0)
 	}
 	w.mu.Unlock()
 	select {
@@ -143,6 +144,7 @@ func (w *jobWatcher) enqueue(paths []string, full bool) {
 func (w *jobWatcher) runSync(ctx context.Context, jc *JobClient, job map[string]interface{}, extra nativeExtraFlags, continuous bool) {
 	defer close(w.done)
 	poll, audit, debounce := syncIntervals(extra)
+	w.initPollBackoff(poll)
 	// Stable-age rules must leave queued files pending until they can be copied.
 	settle := max(debounce, time.Duration(util.ToInt(job["minFileAgeMinutes"]))*time.Minute)
 	method := util.ToInt(job["method"])
@@ -192,17 +194,23 @@ func (w *jobWatcher) runSync(ctx context.Context, jc *JobClient, job map[string]
 				}
 			}
 			installed := false
-			watchLocalRootsPlatform(ctx, []watchLocalRoot{root}, onEvents, func(coversChanges bool) {
-				installed = true
-				covered.Store(coversChanges)
-				ready.Done()
+			watchLocalRootsPlatform(ctx, []watchLocalRoot{root}, onEvents, localWatchOptions{
+				exclude: exclude,
+				onReady: func(coversChanges bool) {
+					installed = true
+					covered.Store(coversChanges)
+					ready.Done()
+				},
+				onDegraded: func(reason string) {
+					w.setWatchDegraded(true, reason)
+				},
 			})
 			covered.Store(false)
 			if !installed {
 				ready.Done()
 			}
 			if !continuous && ctx.Err() == nil {
-				watchLocalRootsPolling(ctx, []watchLocalRoot{root}, onEvents)
+				watchLocalRootsPolling(ctx, []watchLocalRoot{root}, exclude, onEvents)
 			}
 		}()
 	}
@@ -245,7 +253,8 @@ func (w *jobWatcher) runSync(ctx context.Context, jc *JobClient, job map[string]
 		if !JobInTimeWindow(job, now) || jc.isBusy() || now.Unix() < state.RetryAt {
 			continue
 		}
-		if continuous && (state.LastPoll == 0 || now.Sub(time.Unix(state.LastPoll, 0)) >= poll) {
+		effectivePoll, _ := w.pollStatus(poll)
+		if continuous && (state.LastPoll == 0 || now.Sub(time.Unix(state.LastPoll, 0)) >= effectivePoll) {
 			var roots []string
 			for _, root := range pollRoots {
 				covered := watchCoverage[root]
@@ -255,13 +264,15 @@ func (w *jobWatcher) runSync(ctx context.Context, jc *JobClient, job map[string]
 			}
 			if len(roots) > 0 {
 				w.scanning.Store(true)
-				err = w.scanSyncRoots(ctx, job, roots, partial)
+				changed, scanErr := w.scanSyncRootsWithResult(ctx, job, roots, partial)
+				err = scanErr
 				w.scanning.Store(false)
 				if ctx.Err() != nil {
 					return
 				}
 				if err != nil {
 					_ = mapper.RecordSyncError(w.jobID, err.Error())
+					w.resetPollBackoff(poll)
 					continue
 				}
 				if err = mapper.MarkSyncPoll(w.jobID); err != nil {
@@ -270,6 +281,11 @@ func (w *jobWatcher) runSync(ctx context.Context, jc *JobClient, job map[string]
 				state, err = mapper.GetSyncState(w.jobID)
 				if err != nil {
 					continue
+				}
+				if changed || state.Pending {
+					w.resetPollBackoff(poll)
+				} else {
+					w.advancePollBackoff(poll)
 				}
 			}
 		}
@@ -293,12 +309,17 @@ func (w *jobWatcher) runSync(ctx context.Context, jc *JobClient, job map[string]
 }
 
 func (w *jobWatcher) scanSyncRoots(ctx context.Context, job map[string]interface{}, roots []string, partial bool) error {
+	_, err := w.scanSyncRootsWithResult(ctx, job, roots, partial)
+	return err
+}
+
+func (w *jobWatcher) scanSyncRootsWithResult(ctx context.Context, job map[string]interface{}, roots []string, partial bool) (bool, error) {
 	cfg, err := loadNative(util.ToInt64(job["alistId"]))
 	if err != nil {
-		return err
+		return false, err
 	}
 	if err := mapper.EnsureSyncState(w.jobID, syncFingerprint(job, cfg)); err != nil {
-		return err
+		return false, err
 	}
 	jobWantsHash := util.ToInt(job["compareMode"]) == 2
 	if !jobWantsHash && util.ToInt(job["compareMode"]) == 0 {
@@ -322,48 +343,166 @@ func (w *jobWatcher) scanSyncRoots(ctx context.Context, job map[string]interface
 			}
 		}
 	}
+	anyChanged := false
 	for _, root := range roots {
-		ep, err := cfg.Resolve(root)
+		changed, err := w.scanSyncRoot(ctx, cfg, job, root, partial, jobWantsHash)
 		if err != nil {
-			return err
+			return false, err
 		}
-		// Avoid hashing entire local disks during fallback polling.
-		includeHash := jobWantsHash && ep.SupportsNativeMD5() && !ep.IsLocal
-		scanTimeout := 5 * time.Minute
-		if ep.IsLocal {
-			scanTimeout = 15 * time.Minute
-		}
-		scanCtx, cancel := context.WithTimeout(ctx, scanTimeout)
-		entries, exists, err := cfg.ListTree(scanCtx, root, native.TreeOptions{
-			FastList: util.ToInt(job["fastList"]) == 1, FollowSymlinks: util.ToInt(job["followSymlinks"]) == 1,
-			IncludeHash: includeHash, ProxyURL: globalNativeProxyURL(),
-		})
-		cancel()
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if err != nil {
-			return fmt.Errorf("检测目录 %s 失败：%w", root, err)
-		}
-		if !exists {
-			return fmt.Errorf("检测目录 %s 不存在或不可访问；已保留待同步记录", root)
-		}
-		files := make([]mapper.SyncFile, 0, len(entries))
-		exclude, include := buildJobExcludeMatcher(job), buildJobIncludeMatcher(job)
-		for _, e := range entries {
-			if exclude != nil && exclude.matchesListed(e.RelPath, e.IsDir) {
-				continue
-			}
-			if !e.IsDir && (include != nil && !include.matchesListed(e.RelPath)) {
-				continue
-			}
-			files = append(files, mapper.SyncFile{Path: e.RelPath, Size: e.Size, ModTime: e.ModTime, Hash: e.MD5, IsDir: e.IsDir})
-		}
-		if err := mapper.ObserveSyncTree(w.jobID, root, files, partial); err != nil {
-			return err
+		if changed {
+			anyChanged = true
 		}
 	}
-	return nil
+	return anyChanged, nil
+}
+
+func (w *jobWatcher) scanSyncRoot(ctx context.Context, cfg native.Config, job map[string]interface{}, root string, partial, jobWantsHash bool) (bool, error) {
+	ep, err := cfg.Resolve(root)
+	if err != nil {
+		return false, err
+	}
+	// Avoid hashing entire local disks during fallback polling.
+	includeHash := jobWantsHash && ep.SupportsNativeMD5() && !ep.IsLocal
+	scanTimeout := 5 * time.Minute
+	if ep.IsLocal {
+		scanTimeout = 15 * time.Minute
+	}
+	fastList := util.ToInt(job["fastList"]) == 1
+	followSymlinks := util.ToInt(job["followSymlinks"]) == 1
+	proxyURL := globalNativeProxyURL()
+	exclude, include := buildJobExcludeMatcher(job), buildJobIncludeMatcher(job)
+
+	// Incremental change probe (ChangeNotify / cursor / targeted dir refresh)
+	probeCtx, probeCancel := context.WithTimeout(ctx, scanTimeout)
+	delta, deltaErr := cfg.PollRemoteChanges(probeCtx, root, native.RemoteDeltaOptions{
+		FastList:       fastList,
+		FollowSymlinks: followSymlinks,
+		IncludeHash:    includeHash,
+		ProxyURL:       proxyURL,
+		Cursor:         w.remoteCursor(root),
+	})
+	probeCancel()
+	if ctx.Err() != nil {
+		return false, ctx.Err()
+	}
+	if deltaErr == nil && delta.Supported {
+		if delta.NextCursor != "" {
+			w.setRemoteCursor(root, delta.NextCursor)
+		}
+		if !delta.HasChanges && !delta.FullRescan {
+			return false, nil
+		}
+		if delta.HasChanges && !delta.FullRescan {
+			dirs := delta.NormalizedChangedDirs()
+			if len(dirs) > 0 {
+				handled, dirChanged, err := w.scanDeltaDirs(ctx, cfg, root, dirs, partial, includeHash, scanTimeout, proxyURL, exclude, include)
+				if err != nil {
+					return false, err
+				}
+				if handled {
+					return dirChanged, nil
+				}
+			}
+		}
+	}
+
+	scanCtx, cancel := context.WithTimeout(ctx, scanTimeout)
+	entries, exists, err := cfg.ListTree(scanCtx, root, native.TreeOptions{
+		FastList: fastList, FollowSymlinks: followSymlinks,
+		IncludeHash: includeHash, ProxyURL: proxyURL,
+	})
+	cancel()
+	if ctx.Err() != nil {
+		return false, ctx.Err()
+	}
+	if err != nil {
+		return false, fmt.Errorf("检测目录 %s 失败：%w", root, err)
+	}
+	if !exists {
+		return false, fmt.Errorf("检测目录 %s 不存在或不可访问；已保留待同步记录", root)
+	}
+	files := filterObservedTreeEntries(entries, exclude, include)
+	return mapper.ObserveSyncTreeResult(w.jobID, root, files, partial)
+}
+
+func (w *jobWatcher) scanDeltaDirs(
+	ctx context.Context,
+	cfg native.Config,
+	root string,
+	dirs []string,
+	partial bool,
+	includeHash bool,
+	scanTimeout time.Duration,
+	proxyURL string,
+	exclude *excludeMatcher,
+	include *includeMatcher,
+) (handled bool, anyChanged bool, err error) {
+	sessOpts := native.SessionOptions{ProxyURL: proxyURL}
+	rootTrim := strings.TrimRight(root, "/")
+	for _, relDir := range dirs {
+		if exclude != nil && relDir != "" && exclude.matchesListed(relDir+"/", true) {
+			continue
+		}
+		dirVirtual := rootTrim
+		if relDir != "" {
+			dirVirtual = rootTrim + "/" + relDir
+		}
+		scanCtx, cancel := context.WithTimeout(ctx, scanTimeout)
+		entries, exists, listErr := cfg.ListDirEntriesWithHash(scanCtx, dirVirtual, includeHash, sessOpts)
+		cancel()
+		if ctx.Err() != nil {
+			return false, false, ctx.Err()
+		}
+		if listErr != nil {
+			return false, false, nil
+		}
+		if !exists {
+			if relDir == "" {
+				return false, false, fmt.Errorf("检测目录 %s 不存在或不可访问；已保留待同步记录", root)
+			}
+			// A changed subdirectory may have been deleted; trigger full tree reconcile.
+			return false, false, nil
+		}
+		files := make([]mapper.SyncFile, 0, len(entries))
+		for _, e := range entries {
+			relPath := e.Name
+			if relDir != "" {
+				relPath = path.Join(relDir, e.Name)
+			}
+			if exclude != nil && exclude.matchesListed(relPath, e.IsDir) {
+				continue
+			}
+			if !e.IsDir && (include != nil && !include.matchesListed(relPath)) {
+				continue
+			}
+			files = append(files, mapper.SyncFile{Path: relPath, Size: e.Size, ModTime: e.ModTime, Hash: e.MD5, IsDir: e.IsDir})
+		}
+		changed, needFull, obsErr := mapper.ObserveSyncDir(w.jobID, root, relDir, files, partial)
+		if obsErr != nil {
+			return false, false, obsErr
+		}
+		if needFull {
+			return false, false, nil
+		}
+		if changed {
+			anyChanged = true
+		}
+	}
+	return true, anyChanged, nil
+}
+
+func filterObservedTreeEntries(entries []native.TreeEntry, exclude *excludeMatcher, include *includeMatcher) []mapper.SyncFile {
+	files := make([]mapper.SyncFile, 0, len(entries))
+	for _, e := range entries {
+		if exclude != nil && exclude.matchesListed(e.RelPath, e.IsDir) {
+			continue
+		}
+		if !e.IsDir && (include != nil && !include.matchesListed(e.RelPath)) {
+			continue
+		}
+		files = append(files, mapper.SyncFile{Path: e.RelPath, Size: e.Size, ModTime: e.ModTime, Hash: e.MD5, IsDir: e.IsDir})
+	}
+	return files
 }
 
 // addSyncStatus exposes durable progress separately from an individual run.
@@ -371,7 +510,10 @@ func addSyncStatus(row map[string]interface{}, s mapper.SyncState, stateErr erro
 	jobID := util.ToInt64(row["id"])
 	continuous := util.ToInt(row["isCron"]) == 3
 	extra, _, _ := parseNativeExtraFlags(row["extraFlags"])
-	if !continuous && !extra.WatchEnable {
+	now := time.Now()
+	ws := EvaluateWeeklySchedule(row, now)
+	effBwLimit := effectiveJobBwLimitAt(row, now)
+	if !continuous && !extra.WatchEnable && !ws.Enabled {
 		return
 	}
 	status := "monitoring"
@@ -386,7 +528,7 @@ func addSyncStatus(row map[string]interface{}, s mapper.SyncState, stateErr erro
 	if s.Pending {
 		status = "pending"
 	}
-	if !JobInTimeWindow(row, time.Now()) {
+	if !JobInTimeWindow(row, now) {
 		status = "waiting_window"
 	}
 	if message != "" {
@@ -395,24 +537,40 @@ func addSyncStatus(row map[string]interface{}, s mapper.SyncState, stateErr erro
 	if util.ToInt(row["method"]) != 3 || jobID <= 0 {
 		conflictCount = 0
 	}
-	m := jobFSWatchers
-	m.mu.Lock()
-	w := m.watchers[jobID]
-	m.mu.Unlock()
-	if w != nil {
-		w.mu.Lock()
-		persistErr := w.persistenceError
-		w.mu.Unlock()
-		if persistErr != "" {
+	var watchDegraded bool
+	var watchDegradedReason string
+	var effectivePoll time.Duration
+	var backoffStreak int
+	poll, audit, debounce := syncIntervals(extra)
+	effectivePoll = poll
+	if continuous || extra.WatchEnable {
+		m := jobFSWatchers
+		m.mu.Lock()
+		w := m.watchers[jobID]
+		m.mu.Unlock()
+		if w != nil {
+			w.mu.Lock()
+			persistErr := w.persistenceError
+			w.mu.Unlock()
+			watchDegraded, watchDegradedReason = w.watchDegradation()
+			effectivePoll, backoffStreak = w.pollStatus(poll)
+			if persistErr != "" {
+				status = "error"
+				message = persistErr
+			}
+			if w.scanning.Load() {
+				status = "scanning"
+			}
+		} else if util.ToInt(row["enable"]) == 1 && stateErr == nil {
 			status = "error"
-			message = persistErr
+			message = "同步监控未启动，请检查存储与数据库后重新启用任务"
 		}
-		if w.scanning.Load() {
-			status = "scanning"
+	} else {
+		// Non-continuous scheduled job with weeklySchedule enabled.
+		status = "idle"
+		if ws.Mode == WeeklySlotPause {
+			status = "waiting_window"
 		}
-	} else if util.ToInt(row["enable"]) == 1 && stateErr == nil {
-		status = "error"
-		message = "同步监控未启动，请检查存储与数据库后重新启用任务"
 	}
 	if client != nil && client.isBusy() {
 		status = "syncing"
@@ -432,20 +590,33 @@ func addSyncStatus(row map[string]interface{}, s mapper.SyncState, stateErr erro
 	if s.FullScan {
 		pending = -1
 	}
-	poll, audit, debounce := syncIntervals(extra)
+	weeklyLimitRate := ""
+	if ws.Enabled && ws.Mode == WeeklySlotLimited {
+		weeklyLimitRate = ws.LimitRate
+	}
 	row["syncStatus"] = map[string]interface{}{
-		"state":            status,
-		"pendingChanges":   pending,
-		"conflictCount":    conflictCount,
-		"lastSuccess":      s.LastSuccess,
-		"lastPoll":         s.LastPoll,
-		"nextPoll":         s.LastPoll + int64(poll/time.Second),
-		"error":            message,
-		"failures":         s.Failures,
-		"retryAt":          s.RetryAt,
-		"direction":        extra.SyncDirection,
-		"pollIntervalSec":  int(poll / time.Second),
-		"auditIntervalMin": int(audit / time.Minute),
-		"debounceSec":      int(debounce / time.Second),
+		"state":               status,
+		"pendingChanges":      pending,
+		"conflictCount":       conflictCount,
+		"lastSuccess":         s.LastSuccess,
+		"lastPoll":            s.LastPoll,
+		"nextPoll":            s.LastPoll + int64(effectivePoll/time.Second),
+		"error":               message,
+		"failures":            s.Failures,
+		"retryAt":             s.RetryAt,
+		"direction":           extra.SyncDirection,
+		"directionMode":       extra.SyncDirectionMode,
+		"pollIntervalSec":     int(poll / time.Second),
+		"effectivePollSec":    int(effectivePoll / time.Second),
+		"pollBackoffStreak":   backoffStreak,
+		"auditIntervalMin":    int(audit / time.Minute),
+		"debounceSec":         int(debounce / time.Second),
+		"watchDegraded":       watchDegraded,
+		"watchDegradedReason": watchDegradedReason,
+		"scheduleState":       ws.Mode,
+		"scheduleLimited":     ws.Enabled && ws.Mode == WeeklySlotLimited,
+		"schedulePaused":      ws.Enabled && ws.Mode == WeeklySlotPause,
+		"weeklyLimitRate":     weeklyLimitRate,
+		"effectiveBwLimit":    effBwLimit,
 	}
 }

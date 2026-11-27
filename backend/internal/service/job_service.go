@@ -1300,6 +1300,7 @@ func EditJobClient(job map[string]interface{}) error {
 	}
 	if jobConfigInvalidatesBisyncState(prevConfig, job) {
 		clearBisyncRuntimeAndState(jobID)
+		_ = mapper.ClearOnewayBaseline(jobID)
 	}
 	jobFSWatchers.SyncJob(client)
 	return nil

@@ -1490,7 +1490,7 @@ func runNativePairsWithCallbacks(ctx context.Context, jt *JobTask, c native.Conf
 				eventMu.Unlock()
 			}
 			if runErr != nil && ctx.Err() == nil {
-				if jt != nil && jt.SyncPartial && !jt.SyncFullScan && util.ToInt(job["method"]) == 1 {
+				if jt != nil && jt.SyncPartial && !jt.SyncFullScan && effectiveOneWayDeleteModeForJob(job) != "none" {
 					if err := mapper.EnqueueSyncChanges(util.ToInt64(job["id"]), nil, true); err != nil {
 						runErr = errors.Join(runErr, err)
 					}
@@ -1730,6 +1730,13 @@ func (jt *JobTask) runNative() {
 	}
 
 	method := util.ToInt(jt.Job["method"])
+	extraFlags, _, _ := parseNativeExtraFlags(jt.Job["extraFlags"])
+	oneWayMode := effectiveOneWayDeleteMode(jt.Job, extraFlags)
+	if (method == 0 || method == 1) && oneWayMode == "mirror" {
+		method = 1
+	} else if method == 1 && oneWayMode != "mirror" {
+		method = 0
+	}
 	if jt.SyncFullScan && method == 0 && len(jt.SyncChangedFiles) > 0 {
 		jt.SyncPartial = true
 		err := jt.copyContinuousChanges()
@@ -1818,7 +1825,12 @@ func (jt *JobTask) runNative() {
 		src, dst     string
 	}
 	totalPairs := len(parsePathList(jt.Job["srcPath"])) * len(parsePathList(jt.Job["dstPath"]))
-	extraFlags, _, _ := parseNativeExtraFlags(jt.Job["extraFlags"])
+	var baselineRec *trackedBaselineRecorder
+	if oneWayMode == "tracked" {
+		baselineRec = newTrackedBaselineRecorder(util.ToInt64(jt.Job["id"]))
+	}
+	var pairErrsMu sync.Mutex
+	pairErrs := make(map[[2]string]error)
 	pairState := map[nativeItemKey]*pairProgress{}
 	getPair := func(src, dst string) *pairProgress {
 		k := nativeItemKey{src, dst}
@@ -1937,9 +1949,14 @@ func (jt *JobTask) runNative() {
 			}
 			itemErr = &text
 			status = taskStatusFailed
+		} else if !v.Skipped && !v.IsDir && baselineRec != nil {
+			baselineRec.record(src, dst, rel, v.Size)
 		}
 		jt.appendFinish(NewCopyJobTaskItem(jt.TaskID, srcDir, dstDir, base, v.Size, "", status, itemErr, taskItemFile, taskItemTypeCopy, time.Now().Unix()))
 	}, func(src, dst string, pairErr error) {
+		pairErrsMu.Lock()
+		pairErrs[[2]string{normalizeDirPath(src), normalizeDirPath(dst)}] = pairErr
+		pairErrsMu.Unlock()
 		ps := getPair(src, dst)
 		ps.done = true
 		ps.scanDone = true
@@ -1958,6 +1975,14 @@ func (jt *JobTask) runNative() {
 		}
 		publishAggregateStats(src, dst)
 	})
+	var baselineFlushErr error
+	if baselineRec != nil {
+		baselineFlushErr = baselineRec.flush()
+	}
+	var trackedDeleteErr error
+	if jt.context().Err() == nil && oneWayMode == "tracked" && !jt.SyncPartial && selected == nil && len(jt.OnlyFiles) == 0 && baselineFlushErr == nil {
+		trackedDeleteErr = runTrackedOneWayDeletes(jt.context(), jt, jt.nativeConfig, jt.Job, pairErrs)
+	}
 	if jt.context().Err() == nil {
 		cleanupNativeExpiredTrash(jt.context(), jt.nativeConfig, jt.TaskID, jt.Job)
 	} else {
@@ -1980,6 +2005,14 @@ func (jt *JobTask) runNative() {
 		jt.finishFailedTask(outcome.err.Error())
 		return
 	}
+	if baselineFlushErr != nil && !jt.hasAnyFailedItem() && jt.context().Err() == nil {
+		jt.finishFailedTask(baselineFlushErr.Error())
+		return
+	}
+	if trackedDeleteErr != nil && !jt.hasAnyFailedItem() && jt.context().Err() == nil {
+		jt.finishFailedTask(trackedDeleteErr.Error())
+		return
+	}
 	jt.finishSubmittedTask(persist)
 }
 
@@ -1987,6 +2020,10 @@ func (jt *JobTask) runNative() {
 // event or audit also requires a complete mirror plan. In particular, size-only
 // WebDAV comparison must not discard a file known to have changed locally.
 func (jt *JobTask) copyContinuousChanges() error {
+	var baselineRec *trackedBaselineRecorder
+	if effectiveOneWayDeleteModeForJob(jt.Job) == "tracked" {
+		baselineRec = newTrackedBaselineRecorder(util.ToInt64(jt.Job["id"]))
+	}
 	out := runNativePairsWithTask(jt.context(), jt, jt.nativeConfig, jt.Job, false, nil, func(src, dst string, v native.Event) {
 		if v.Stats != nil {
 			stats := *v.Stats
@@ -2004,10 +2041,17 @@ func (jt *JobTask) copyContinuousChanges() error {
 			status = taskStatusFailed
 			message := v.Error
 			itemErr = &message
+		} else if !v.IsDir && baselineRec != nil {
+			baselineRec.record(src, dst, v.File, v.Size)
 		}
 		jt.appendFinish(NewCopyJobTaskItem(jt.TaskID, path.Join(src, path.Dir(v.File)), path.Join(dst, path.Dir(v.File)), path.Base(v.File), v.Size, "", status, itemErr, taskItemFile, taskItemTypeCopy, time.Now().Unix()))
 	})
 	jt.nativeStats.Store(nil)
+	if baselineRec != nil {
+		if err := baselineRec.flush(); err != nil && out.err == nil {
+			out.err = err
+		}
+	}
 	if out.err != nil {
 		return out.err
 	}

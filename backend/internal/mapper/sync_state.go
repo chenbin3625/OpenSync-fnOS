@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -244,10 +245,41 @@ func compareSyncTree(tx *sql.Tx, jobID int64, root string, files []SyncFile, par
 	return changes, nil
 }
 
+func applySyncTreeChanges(tx *sql.Tx, jobID int64, root string, changes syncTreeChanges) error {
+	now := time.Now().Unix()
+	if len(changes.upserts) > 0 {
+		stmt, err := tx.Prepare(`INSERT INTO sync_file_state(jobId,root,path,size,modTime,hash,isDir,deleted,observedAt)
+		 VALUES(?,?,?,?,?,?,?,0,?) ON CONFLICT(jobId,root,path) DO UPDATE SET
+		 size=excluded.size,modTime=excluded.modTime,hash=excluded.hash,isDir=excluded.isDir,deleted=0,observedAt=excluded.observedAt`)
+		if err != nil {
+			return err
+		}
+		defer stmt.Close()
+		for _, f := range changes.upserts {
+			if _, err := stmt.Exec(jobID, root, f.Path, f.Size, f.ModTime, f.Hash, f.IsDir, now); err != nil {
+				return err
+			}
+		}
+	}
+	for p := range changes.deleted {
+		if _, err := tx.Exec(`UPDATE sync_file_state SET deleted=1,observedAt=? WHERE jobId=? AND root=? AND path=?`, now, jobID, root, p); err != nil {
+			return err
+		}
+	}
+	return enqueueSyncChanges(tx, jobID, changes.paths, changes.full)
+}
+
 // ObserveSyncTree commits the observed index and its inbox changes atomically.
 // The index describes observations, not successful transfers; only CompleteSyncRun
 // advances the successful-sync checkpoint. Deleted entries remain as tombstones.
 func ObserveSyncTree(jobID int64, root string, files []SyncFile, partial bool) error {
+	_, err := ObserveSyncTreeResult(jobID, root, files, partial)
+	return err
+}
+
+// ObserveSyncTreeResult commits an observed full-tree index and reports whether
+// any new, updated, or deleted entries were queued.
+func ObserveSyncTreeResult(jobID int64, root string, files []SyncFile, partial bool) (bool, error) {
 	const versionSQL = "SELECT generation,fingerprint FROM sync_state WHERE jobId=?"
 	var generation int64
 	var fingerprint string
@@ -260,12 +292,12 @@ func ObserveSyncTree(jobID int64, root string, files []SyncFile, partial bool) e
 		changes, err = compareSyncTree(tx, jobID, root, files, partial)
 		return err
 	}); err != nil {
-		return err
+		return false, err
 	}
 	if !changes.full && len(changes.paths) == 0 {
-		return nil
+		return false, nil
 	}
-	return withTx(func(tx *sql.Tx) error {
+	err := withTx(func(tx *sql.Tx) error {
 		var currentGeneration int64
 		var currentFingerprint string
 		if err := tx.QueryRow(versionSQL, jobID).Scan(&currentGeneration, &currentFingerprint); err != nil {
@@ -286,26 +318,140 @@ func ObserveSyncTree(jobID int64, root string, files []SyncFile, partial bool) e
 				return nil
 			}
 		}
-		now := time.Now().Unix()
-		if len(changes.upserts) > 0 {
-			stmt, err := tx.Prepare(`INSERT INTO sync_file_state(jobId,root,path,size,modTime,hash,isDir,deleted,observedAt)
-			 VALUES(?,?,?,?,?,?,?,0,?) ON CONFLICT(jobId,root,path) DO UPDATE SET
-			 size=excluded.size,modTime=excluded.modTime,hash=excluded.hash,isDir=excluded.isDir,deleted=0,observedAt=excluded.observedAt`)
-			if err != nil {
-				return err
-			}
-			defer stmt.Close()
-			for _, f := range changes.upserts {
-				if _, err := stmt.Exec(jobID, root, f.Path, f.Size, f.ModTime, f.Hash, f.IsDir, now); err != nil {
-					return err
-				}
-			}
-		}
-		for p := range changes.deleted {
-			if _, err := tx.Exec(`UPDATE sync_file_state SET deleted=1,observedAt=? WHERE jobId=? AND root=? AND path=?`, now, jobID, root, p); err != nil {
-				return err
-			}
-		}
-		return enqueueSyncChanges(tx, jobID, changes.paths, changes.full)
+		return applySyncTreeChanges(tx, jobID, root, changes)
 	})
+	if err != nil {
+		return false, err
+	}
+	return changes.full || len(changes.paths) > 0, nil
+}
+
+func compareSyncDir(tx *sql.Tx, jobID int64, root, relDir string, entries []SyncFile, partial bool) (changes syncTreeChanges, needFullRescan bool, err error) {
+	var initFlag int
+	initErr := tx.QueryRow(`SELECT 1 FROM sync_file_state WHERE jobId=? AND root=? AND path='' AND deleted=0`, jobID, root).Scan(&initFlag)
+	if initErr == sql.ErrNoRows {
+		return changes, true, nil
+	}
+	if initErr != nil {
+		return changes, false, initErr
+	}
+
+	cleanDir := strings.Trim(path.Clean("/"+strings.TrimSpace(relDir)), "/")
+	if cleanDir == "." {
+		cleanDir = ""
+	}
+	var rows *sql.Rows
+	if cleanDir == "" {
+		rows, err = tx.Query(
+			`SELECT path,size,modTime,hash,isDir FROM sync_file_state
+			 WHERE jobId=? AND root=? AND deleted=0 AND path!='' AND instr(path, '/')=0`,
+			jobID, root,
+		)
+	} else {
+		prefix := cleanDir + "/"
+		prefixLen := len(prefix)
+		rows, err = tx.Query(
+			`SELECT path,size,modTime,hash,isDir FROM sync_file_state
+			 WHERE jobId=? AND root=? AND deleted=0 AND length(path)>? AND substr(path,1,?)=? AND instr(substr(path,?),'/')=0`,
+			jobID, root, prefixLen, prefixLen, prefix, prefixLen+1,
+		)
+	}
+	if err != nil {
+		return changes, false, err
+	}
+	defer rows.Close()
+
+	old := make(map[string]SyncFile)
+	for rows.Next() {
+		var f SyncFile
+		if scanErr := rows.Scan(&f.Path, &f.Size, &f.ModTime, &f.Hash, &f.IsDir); scanErr != nil {
+			return changes, false, scanErr
+		}
+		old[f.Path] = f
+	}
+	if err := rows.Err(); err != nil {
+		return changes, false, err
+	}
+
+	for _, f := range entries {
+		if f.Path == "" {
+			continue
+		}
+		previous, ok := old[f.Path]
+		delete(old, f.Path)
+		if ok && previous == f {
+			continue
+		}
+		if f.IsDir || previous.IsDir {
+			// Directory creations/removals inside the directory may affect nested
+			// descendants; escalate to a full tree scan cleanly.
+			return syncTreeChanges{}, true, nil
+		}
+		changes.paths = append(changes.paths, path.Join(root, f.Path))
+		changes.full = changes.full || !partial
+		changes.upserts = append(changes.upserts, f)
+	}
+	for _, prev := range old {
+		if prev.IsDir {
+			return syncTreeChanges{}, true, nil
+		}
+	}
+	changes.deleted = old
+	changes.full = changes.full || len(old) > 0
+	return changes, false, nil
+}
+
+// ObserveSyncDir performs an incremental comparison for immediate entries of a single
+// directory relDir against sync_file_state, avoiding full-tree scans on delta hits.
+// If directory membership itself changed or the baseline is uninitialized, it returns
+// needFullRescan=true without mutating the inbox.
+func ObserveSyncDir(jobID int64, root, relDir string, entries []SyncFile, partial bool) (changed bool, needFullRescan bool, err error) {
+	const versionSQL = "SELECT generation,fingerprint FROM sync_state WHERE jobId=?"
+	var generation int64
+	var fingerprint string
+	var changes syncTreeChanges
+	if err = withReadTx(func(tx *sql.Tx) error {
+		if scanErr := tx.QueryRow(versionSQL, jobID).Scan(&generation, &fingerprint); scanErr != nil {
+			return scanErr
+		}
+		var cmpErr error
+		changes, needFullRescan, cmpErr = compareSyncDir(tx, jobID, root, relDir, entries, partial)
+		return cmpErr
+	}); err != nil {
+		return false, false, err
+	}
+	if needFullRescan {
+		return false, true, nil
+	}
+	if !changes.full && len(changes.paths) == 0 {
+		return false, false, nil
+	}
+	err = withTx(func(tx *sql.Tx) error {
+		var currentGeneration int64
+		var currentFingerprint string
+		if scanErr := tx.QueryRow(versionSQL, jobID).Scan(&currentGeneration, &currentFingerprint); scanErr != nil {
+			return scanErr
+		}
+		if currentFingerprint != fingerprint {
+			return errors.New("同步配置已变更，请重新扫描")
+		}
+		if currentGeneration != generation {
+			var cmpErr error
+			changes, needFullRescan, cmpErr = compareSyncDir(tx, jobID, root, relDir, entries, partial)
+			if cmpErr != nil {
+				return cmpErr
+			}
+			if needFullRescan || (!changes.full && len(changes.paths) == 0) {
+				return nil
+			}
+		}
+		return applySyncTreeChanges(tx, jobID, root, changes)
+	})
+	if err != nil {
+		return false, false, err
+	}
+	if needFullRescan {
+		return false, true, nil
+	}
+	return changes.full || len(changes.paths) > 0, false, nil
 }

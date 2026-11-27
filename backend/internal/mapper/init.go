@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const currentVersion = 261127
+const currentVersion = 261128
 
 // InitSQL initializes the database schema and runs migrations
 func InitSQL() {
@@ -127,6 +127,7 @@ func InitSQL() {
 
 		stmts = append(stmts, syncSchemaStatements()...)
 		stmts = append(stmts, bisyncSchemaStatements()...)
+		stmts = append(stmts, onewayBaselineSchemaStatements()...)
 		stmts = append(stmts,
 
 			`CREATE TABLE notify(
@@ -453,6 +454,9 @@ func migrationStatements(fromVersion int64) []string {
 	}
 	if fromVersion < 261127 {
 		stmts = append(stmts, bisyncSchemaStatements()...)
+	}
+	if fromVersion < 261128 {
+		stmts = append(stmts, onewayBaselineSchemaStatements()...)
 	}
 	stmts = append(stmts, fmt.Sprintf("UPDATE schema_version SET version=%d", currentVersion))
 	return stmts
