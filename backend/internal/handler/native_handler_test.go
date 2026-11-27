@@ -23,6 +23,8 @@ func TestNativeStorageHandlersRejectMalformedOrUnknownFields(t *testing.T) {
 		{"TestNativeStorage unknown field", http.MethodPost, "/svr/native/storage/test", TestNativeStorage, `{"name":"a","foo":1}`},
 		{"RenameNativeStorage unknown field", http.MethodPost, "/svr/native/storage/rename", RenameNativeStorage, `{"oldName":"a","newName":"b","extra":1}`},
 		{"ExportNativeConfig unknown field", http.MethodPost, "/svr/native/storage/export", ExportNativeConfig, `{"names":["a"],"bogus":true}`},
+		{"DiscoverOpenList unknown field", http.MethodPost, "/svr/native/storage/discover-openlist", DiscoverOpenList, `{"ports":[5244],"bogus":true}`},
+		{"CryptRecovery unknown field", http.MethodPost, "/svr/native/storage/crypt-recovery", CryptRecovery, `{"name":"c","bogus":true}`},
 		{"AboutNativeStorage unknown field", http.MethodPost, "/svr/native/storage/about", AboutNativeStorage, `{"name":"a","bogus":true}`},
 		{"BrowseNativeStorage unknown field", http.MethodPost, "/svr/native/storage/browse", BrowseNativeStorage, `{"path":"/a","bogus":true}`},
 		{"StartAsyncRestoreNativeFile unknown field", http.MethodPost, "/svr/native/storage/transfers/restore", StartAsyncRestoreNativeFile, `{"srcPath":"/a","dstLocalDir":"/b","bogus":true}`},

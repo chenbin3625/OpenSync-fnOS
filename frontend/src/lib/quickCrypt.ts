@@ -408,6 +408,10 @@ export function validateQuickCryptForm(
 export function buildQuickCryptOptions(
   target: Pick<EncryptableDstTarget, "remoteName" | "subPath">,
   values: QuickCryptFormValues,
+  meta?: {
+    managedByJob?: boolean;
+    managedJobLabel?: string;
+  },
 ): Record<string, string> {
   const subCheck = normalizeRelativeSubDir(values.subDir);
   const options: Record<string, string> = {
@@ -433,6 +437,13 @@ export function buildQuickCryptOptions(
   }
   if (values.noDataEncryption) {
     options.no_data_encryption = "true";
+  }
+  if (meta?.managedByJob) {
+    options.managed_by_job = "true";
+    const label = meta.managedJobLabel?.trim();
+    if (label) {
+      options.managed_job_label = label;
+    }
   }
   return options;
 }

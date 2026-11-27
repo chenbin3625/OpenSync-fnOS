@@ -6810,3 +6810,284 @@ body[theme-mode="dark"] .bw-mode-btn.is-active {
     padding: 18px;
   }
 }
+
+/* Module 2: Storage categorization, OpenList discovery, job-managed crypt & key recovery */
+.native-storage-catalog {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--semi-color-border);
+  background: var(--surface-soft);
+}
+
+.native-catalog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.native-catalog-title {
+  font-size: var(--font-size-small);
+  font-weight: 600;
+  color: var(--semi-color-text-0);
+}
+
+.native-secondary-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.native-hot-cards {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.native-hot-card {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--semi-color-border);
+  background: var(--surface);
+  color: var(--semi-color-text-0);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.native-hot-card:hover {
+  border-color: var(--semi-color-primary);
+}
+
+.native-hot-card.is-selected {
+  border-color: var(--semi-color-primary);
+  box-shadow: 0 0 0 1px var(--semi-color-primary);
+}
+
+.native-hot-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.native-hot-card-title {
+  font-size: var(--font-size-small);
+  font-weight: 600;
+  color: var(--semi-color-text-0);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.native-hot-card-desc {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--semi-color-text-2);
+}
+
+.native-domestic-hints {
+  display: grid;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--semi-color-border);
+}
+
+.native-domestic-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.native-domestic-chips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.native-quick-chip.is-selected {
+  border-color: var(--semi-color-primary);
+  color: var(--semi-color-primary);
+}
+
+.native-openlist-discover-box {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--semi-color-border);
+  background: var(--surface-soft);
+}
+
+.native-openlist-discover-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.native-openlist-port-input {
+  width: 110px;
+}
+
+.native-openlist-discover-result {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-top: 6px;
+  border-top: 1px solid var(--semi-color-border);
+  font-size: var(--font-size-small);
+}
+
+.managed-job-crypt-section {
+  display: grid;
+  gap: 8px;
+  margin-top: 4px;
+  border: 1px solid var(--semi-color-border);
+  border-radius: var(--radius);
+  background: var(--surface-soft);
+  padding: 8px 10px;
+}
+
+.managed-job-crypt-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 4px;
+  border: none;
+  background: transparent;
+  color: var(--semi-color-text-0);
+  cursor: pointer;
+  font-size: var(--font-size-body);
+  font-weight: 500;
+}
+
+.managed-job-crypt-toggle-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.managed-job-crypt-chevron {
+  transition: transform 0.15s ease;
+}
+
+.managed-job-crypt-chevron.is-open {
+  transform: rotate(90deg);
+}
+
+.managed-job-crypt-list {
+  display: grid;
+  gap: 8px;
+}
+
+.crypt-card-guidance-actions,
+.quick-crypt-banner-actions,
+.quick-crypt-guidance-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.crypt-recovery-body {
+  display: grid;
+  gap: 14px;
+}
+
+.crypt-recovery-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--semi-color-border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+}
+
+.crypt-recovery-kv {
+  display: grid;
+  gap: 3px;
+  font-size: var(--font-size-small);
+}
+
+.crypt-recovery-val {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.crypt-recovery-verify-box,
+.crypt-recovery-snippet-box {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--semi-color-border);
+  border-radius: var(--radius-sm);
+}
+
+.crypt-recovery-section-title {
+  font-size: var(--font-size-small);
+  font-weight: 600;
+  color: var(--semi-color-text-0);
+}
+
+.crypt-recovery-verify-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.crypt-recovery-verify-ok {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--font-size-small);
+  color: var(--semi-color-success);
+}
+
+.crypt-recovery-pre {
+  margin: 0;
+  padding: 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--semi-color-border);
+  background: var(--surface-soft);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.crypt-recovery-cmd {
+  font-size: var(--font-size-small);
+  word-break: break-all;
+}
+
+@media (max-width: 720px) {
+  .native-hot-cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .crypt-recovery-meta-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

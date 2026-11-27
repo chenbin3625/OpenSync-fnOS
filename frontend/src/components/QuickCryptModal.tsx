@@ -9,11 +9,15 @@ import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import {
   IconAlertTriangle,
   IconChevronRight,
+  IconFolderStroked,
   IconInfoCircle,
+  IconKey,
   IconLockStroked,
 } from "@douyinfe/semi-icons";
 import { api } from "../api/client";
 import { Field, errorToast } from "./common";
+import { CryptRecoveryModal } from "./CryptRecoveryModal";
+import { NativeStorageEditor } from "./NativeStorageEditor";
 import {
   buildQuickCryptOptions,
   composeCryptUnderlyingRemote,
@@ -51,8 +55,11 @@ export function QuickCryptModal({
   requireSubDir = false,
   remoteTypeLabel,
   subDirPlaceholder,
+  managedByJob,
+  managedJobLabel,
   onClose,
   onReuseExisting,
+  onOpenRestore,
   onCreated,
 }: {
   targets: readonly EncryptableDstTarget[];
@@ -62,12 +69,15 @@ export function QuickCryptModal({
   requireSubDir?: boolean;
   remoteTypeLabel?: string;
   subDirPlaceholder?: string;
+  managedByJob?: boolean;
+  managedJobLabel?: string;
   onClose: () => void;
   onReuseExisting?: (result: {
     targetSyncPath: string;
     encryptedSyncPath: string;
     cryptName: string;
   }) => void;
+  onOpenRestore?: (cryptName: string) => void;
   onCreated: (result: {
     targetSyncPath: string;
     encryptedSyncPath: string;
@@ -75,6 +85,8 @@ export function QuickCryptModal({
   }) => Promise<void> | void;
 }) {
   const isStorageMode = mode === "storage";
+  const effectiveManagedByJob =
+    managedByJob !== undefined ? managedByJob : !isStorageMode;
   const [selectedPath, setSelectedPath] = useState<string>(
     () => targets[0]?.syncPath ?? "",
   );
@@ -102,6 +114,12 @@ export function QuickCryptModal({
   const [errors, setErrors] = useState<QuickCryptValidationErrors>({});
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [recoveryRemoteName, setRecoveryRemoteName] = useState<string | null>(
+    null,
+  );
+  const [browseRestorePath, setBrowseRestorePath] = useState<string | null>(
+    null,
+  );
 
   useEffect(() => {
     if (!activeTarget) return;
@@ -176,7 +194,10 @@ export function QuickCryptModal({
     }
 
     const trimmedName = values.name.trim();
-    const options = buildQuickCryptOptions(activeTarget, values);
+    const options = buildQuickCryptOptions(activeTarget, values, {
+      managedByJob: effectiveManagedByJob,
+      managedJobLabel,
+    });
     setSaving(true);
     try {
       await api.saveNativeStorage({
@@ -205,6 +226,17 @@ export function QuickCryptModal({
         ]),
       )
     : [];
+  const primaryExistingCrypt =
+    activeTarget.reusableCrypts[0]?.cryptName || existingCryptNamesOnStorage[0] || "";
+  const triggerOpenRestore = (cryptName?: string) => {
+    const targetPath = cryptName ? `/${cryptName}` : "/";
+    if (onOpenRestore && cryptName) {
+      onClose();
+      onOpenRestore(cryptName);
+      return;
+    }
+    setBrowseRestorePath(targetPath);
+  };
 
   return (
     <Modal
@@ -534,11 +566,56 @@ export function QuickCryptModal({
           <IconAlertTriangle aria-hidden="true" size="small" />
           <span>
             {isStorageMode
-              ? "请妥善保管加密密码与盐，丢失后将无法解密云端文件。创建后可在「存储管理」中导出 rclone 配置备份，并在同步任务中选作源或目标路径。"
-              : "请妥善保管加密密码与盐，丢失后将无法解密云端文件。创建后可在「存储管理」中导出 rclone 配置备份，或将该加密存储作为源路径执行反向解密恢复。"}
+              ? "请妥善保管加密密码与盐，丢失后将无法解密云端文件。创建后可在「存储管理」中导出密钥恢复包，并在同步任务中选作源或目标路径。"
+              : "请妥善保管加密密码与盐，丢失后将无法解密云端文件。创建后可在「存储管理」或「任务专属加密通道」中导出密钥恢复包，或直接从加密存储一键还原到本地。"}
           </span>
         </div>
+
+        <div className="quick-crypt-guidance-bar" role="region" aria-label="密钥恢复与解密还原引导">
+          <Button
+            size="small"
+            type="tertiary"
+            icon={<IconKey aria-hidden="true" />}
+            disabled={saving}
+            onClick={() => {
+              if (primaryExistingCrypt) {
+                setRecoveryRemoteName(primaryExistingCrypt);
+              } else {
+                Toast.info(
+                  "请先点击下方按钮完成加密存储创建，随后即可导出完整的密钥恢复包（包含加密参数与异机还原命令）",
+                );
+              }
+            }}
+          >
+            导出密钥恢复包
+          </Button>
+          <Button
+            size="small"
+            type="tertiary"
+            icon={<IconFolderStroked aria-hidden="true" />}
+            disabled={saving}
+            onClick={() => triggerOpenRestore(primaryExistingCrypt || undefined)}
+          >
+            从加密存储一键还原到本地
+          </Button>
+        </div>
       </div>
+
+      {recoveryRemoteName && (
+        <CryptRecoveryModal
+          remoteName={recoveryRemoteName}
+          onClose={() => setRecoveryRemoteName(null)}
+          onOpenRestore={(name) => triggerOpenRestore(name)}
+        />
+      )}
+
+      {browseRestorePath !== null && (
+        <NativeStorageEditor
+          mode="browse"
+          initialBrowsePath={browseRestorePath}
+          onClose={() => setBrowseRestorePath(null)}
+        />
+      )}
     </Modal>
   );
 }

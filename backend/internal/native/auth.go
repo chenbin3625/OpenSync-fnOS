@@ -1119,44 +1119,100 @@ func resolveExternalAuthURL(localAuthURL string) (authURL, redirectURI string, e
 	return loc, redirectURI, nil
 }
 
+func extractCallbackQueryFromFragment(fragment string) string {
+	frag := strings.TrimSpace(fragment)
+	frag = strings.TrimPrefix(frag, "#")
+	frag = strings.TrimSpace(frag)
+	if frag == "" {
+		return ""
+	}
+	if _, afterQ, hasQ := strings.Cut(frag, "?"); hasQ {
+		frag = afterQ
+	}
+	frag = strings.TrimLeft(frag, "/?&")
+	if strings.Contains(frag, "=") {
+		return frag
+	}
+	return ""
+}
+
+func extractCallbackRawQuery(trimmed string) (string, error) {
+	switch {
+	case strings.Contains(trimmed, "://"):
+		u, err := url.Parse(trimmed)
+		if err != nil {
+			return "", errors.New("回调网址格式无效，请粘贴完整回调网址（http://localhost:53682/?code=...）、?code=... 查询串或包含 code= 的 URL 片段")
+		}
+		if strings.TrimSpace(u.RawQuery) != "" {
+			return u.RawQuery, nil
+		}
+		if fragQuery := extractCallbackQueryFromFragment(u.Fragment); fragQuery != "" {
+			return fragQuery, nil
+		}
+		return "", nil
+	case strings.Contains(trimmed, "?"):
+		beforeQ, afterQ, _ := strings.Cut(trimmed, "?")
+		// Support hash-routed callback snippets such as "#/oauth/callback?code=...&state=...".
+		if strings.Contains(beforeQ, "#") {
+			return strings.TrimLeft(afterQ, "?&"), nil
+		}
+		if idx := strings.IndexByte(afterQ, '#'); idx >= 0 {
+			beforeHash := strings.TrimLeft(afterQ[:idx], "?&")
+			if strings.Contains(beforeHash, "=") {
+				return beforeHash, nil
+			}
+			if fragQuery := extractCallbackQueryFromFragment(afterQ[idx+1:]); fragQuery != "" {
+				return fragQuery, nil
+			}
+			return beforeHash, nil
+		}
+		return strings.TrimLeft(afterQ, "?&"), nil
+	case strings.Contains(trimmed, "#"):
+		beforeHash, afterHash, _ := strings.Cut(trimmed, "#")
+		if fragQuery := extractCallbackQueryFromFragment(afterHash); fragQuery != "" {
+			return fragQuery, nil
+		}
+		candidate := strings.TrimLeft(strings.TrimSpace(beforeHash), "/?&")
+		if strings.Contains(candidate, "=") {
+			return candidate, nil
+		}
+		return "", errors.New("回调 URL 片段中未找到 code 或 error 参数，请粘贴完整回调网址或 ?code=...&state=... 参数")
+	case strings.Contains(trimmed, "="):
+		rawQuery := strings.TrimLeft(trimmed, "?&/")
+		if idx := strings.IndexByte(rawQuery, '#'); idx >= 0 {
+			beforeHash := strings.TrimSpace(rawQuery[:idx])
+			if strings.Contains(beforeHash, "=") {
+				return beforeHash, nil
+			}
+			return extractCallbackQueryFromFragment(rawQuery[idx+1:]), nil
+		}
+		return rawQuery, nil
+	default:
+		return "", errors.New("未能识别回调参数。支持粘贴完整回调网址（如 http://localhost:53682/?code=...）、纯查询串（?code=...&state=...）或 URL 片段（#code=...）")
+	}
+}
+
 // ParseAuthCallbackQuery extracts OAuth callback query parameters from a user-
-// pasted callback URL or query string without ever trusting or dialing its host.
+// pasted callback URL, query string, or URL fragment without ever dialing its host.
 func ParseAuthCallbackQuery(rawInput, expectedState string) (url.Values, error) {
 	trimmed := strings.TrimSpace(rawInput)
-	trimmed = strings.Trim(trimmed, `"'<>`)
+	trimmed = strings.Trim(trimmed, "\"'<>`")
 	trimmed = strings.TrimSpace(trimmed)
 	if trimmed == "" {
-		return nil, errors.New("请粘贴授权完成后浏览器地址栏中的回调网址")
+		return nil, errors.New("请粘贴授权完成后浏览器地址栏中的回调网址、?code=... 查询串或 URL 片段")
 	}
 	if len(trimmed) > 8192 || strings.IndexFunc(trimmed, unicode.IsControl) >= 0 {
 		return nil, errors.New("回调网址格式无效或长度超限")
 	}
 
-	var rawQuery string
-	switch {
-	case strings.Contains(trimmed, "://"):
-		u, err := url.Parse(trimmed)
-		if err != nil {
-			return nil, errors.New("回调网址格式无效，请完整复制浏览器地址栏中的 http://localhost:53682/?code=... 地址")
-		}
-		rawQuery = u.RawQuery
-	case strings.Contains(trimmed, "?"):
-		_, rawQuery, _ = strings.Cut(trimmed, "?")
-		if idx := strings.IndexByte(rawQuery, '#'); idx >= 0 {
-			rawQuery = rawQuery[:idx]
-		}
-	case strings.Contains(trimmed, "="):
-		rawQuery = trimmed
-		if idx := strings.IndexByte(rawQuery, '#'); idx >= 0 {
-			rawQuery = rawQuery[:idx]
-		}
-	default:
-		return nil, errors.New("请粘贴授权完成后浏览器地址栏中的完整回调网址（包含 ?code=... 参数）")
+	rawQuery, err := extractCallbackRawQuery(trimmed)
+	if err != nil {
+		return nil, err
 	}
 
 	query, err := url.ParseQuery(rawQuery)
 	if err != nil {
-		return nil, errors.New("回调网址参数解析失败，请重新完整复制地址栏链接")
+		return nil, errors.New("回调网址参数解析失败，请重新完整复制地址栏链接或 ?code=... 参数")
 	}
 	if errCode := strings.TrimSpace(query.Get("error")); errCode != "" {
 		desc := strings.TrimSpace(query.Get("error_description"))

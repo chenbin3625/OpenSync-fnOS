@@ -268,5 +268,13 @@ describe("quickCrypt helpers", () => {
         { requireSubDir: true },
       ),
     ).toEqual({});
+
+    const withMeta = buildQuickCryptOptions(
+      { remoteName: "od", subPath: "" },
+      { ...emptySubDirValues, subDir: "vault" },
+      { managedByJob: true, managedJobLabel: "相册同步" },
+    );
+    expect(withMeta.managed_by_job).toBe("true");
+    expect(withMeta.managed_job_label).toBe("相册同步");
   });
 });

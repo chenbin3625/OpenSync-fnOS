@@ -27,6 +27,26 @@ func TestParseAuthCallbackQuery(t *testing.T) {
 		t.Fatalf("unexpected query2: %v", q2)
 	}
 
+	// Host without scheme + query tolerated.
+	qHost, err := ParseAuthCallbackQuery("localhost:53682/?code=no_scheme&state=st2", "st2")
+	if err != nil || qHost.Get("code") != "no_scheme" {
+		t.Fatalf("expected host-without-scheme tolerance, got %v / %v", qHost, err)
+	}
+
+	// Fragment-encoded callback params (#code=... and #/?code=...) tolerated.
+	qFrag1, err := ParseAuthCallbackQuery("http://127.0.0.1:53682/#/?code=frag_code&state=st3", "st3")
+	if err != nil || qFrag1.Get("code") != "frag_code" {
+		t.Fatalf("expected hash-route callback tolerance, got %v / %v", qFrag1, err)
+	}
+	qFrag2, err := ParseAuthCallbackQuery(`"#code=frag_only&state=st4"`, "st4")
+	if err != nil || qFrag2.Get("code") != "frag_only" {
+		t.Fatalf("expected fragment-only callback tolerance, got %v / %v", qFrag2, err)
+	}
+	qAmp, err := ParseAuthCallbackQuery("&code=amp_code&state=st5", "st5")
+	if err != nil || qAmp.Get("code") != "amp_code" {
+		t.Fatalf("expected leading ampersand query tolerance, got %v / %v", qAmp, err)
+	}
+
 	// Arbitrary external host in pasted URL is ignored (only query is extracted).
 	q3, err := ParseAuthCallbackQuery("https://evil.example.invalid/steal?code=ok&state=st2", "st2")
 	if err != nil || q3.Get("code") != "ok" {

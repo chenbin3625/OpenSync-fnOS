@@ -12,11 +12,13 @@ import type {
   NativeAboutInfo,
   NativeAuthStepSnapshot,
   NativeBrowseResult,
+  NativeCryptRecoveryResult,
   NativeExportResult,
   NativeImportCandidate,
   NativeImportPreview,
   NativeImportResult,
   NativeLocalRoot,
+  NativeOpenListDiscoverResult,
   NativeRemoteItem,
   NativeRenameResult,
   NativeSizeInfo,
@@ -854,12 +856,15 @@ export class MockStore {
       "folder_password",
       "access_token",
       "cookie",
+      "web_password",
+      "direct_link_key",
     ]);
     const supportedTypes = [
       "local",
       "s3",
       "webdav",
       "quark",
+      "pan123",
       "sftp",
       "smb",
       "ftp",
@@ -1309,10 +1314,43 @@ export class MockStore {
     if (!sess) return "授权会话不存在或已过期，请重新发起授权";
     if (sess.snapshot.status !== "oauth") return sess.snapshot;
 
-    const trimmed = callbackUrl.trim();
-    const queryStr = trimmed.includes("?")
-      ? trimmed.slice(trimmed.indexOf("?") + 1).split("#")[0]
-      : trimmed;
+    const trimmed = callbackUrl.trim().replace(/^["'<>`]+|["'<>`]+$/g, "").trim();
+    if (!trimmed) {
+      return "请粘贴授权完成后浏览器地址栏中的回调网址、?code=... 查询串或 URL 片段";
+    }
+    let queryStr = "";
+    if (trimmed.includes("://")) {
+      try {
+        const u = new URL(trimmed);
+        queryStr = u.search ? u.search.slice(1) : "";
+        if (!queryStr && u.hash) {
+          const frag = u.hash.replace(/^#/, "");
+          const qIdx = frag.indexOf("?");
+          queryStr = qIdx >= 0 ? frag.slice(qIdx + 1) : frag.replace(/^[/?&]+/, "");
+        }
+      } catch {
+        return "回调网址格式无效";
+      }
+    } else if (trimmed.includes("?")) {
+      const idx = trimmed.indexOf("?");
+      const afterQ = trimmed.slice(idx + 1);
+      const beforeQ = trimmed.slice(0, idx);
+      if (beforeQ.includes("#")) {
+        queryStr = afterQ.replace(/^[?&]+/, "");
+      } else {
+        const hashIdx = afterQ.indexOf("#");
+        queryStr =
+          hashIdx >= 0 ? afterQ.slice(0, hashIdx) : afterQ;
+      }
+    } else if (trimmed.includes("#")) {
+      const [, afterHash = ""] = trimmed.split("#", 2);
+      const cleanedFrag = afterHash.replace(/^[/?&]+/, "");
+      queryStr = cleanedFrag.includes("=") ? cleanedFrag : "";
+    } else if (trimmed.includes("=")) {
+      queryStr = trimmed.replace(/^[?&/]+/, "").split("#")[0];
+    } else {
+      return "未能识别回调参数。支持粘贴完整回调网址、纯查询串（?code=...&state=...）或 URL 片段（#code=...）";
+    }
     const params = new URLSearchParams(queryStr);
     if (params.get("error")) {
       return `网盘拒绝了授权（${params.get("error")}）`;
@@ -1879,8 +1917,17 @@ export class MockStore {
         skippedBuiltIn.push(actual);
         continue;
       }
+      const openSyncMetaFields = new Set([
+        "insecure_skip_verify",
+        "proxy_url",
+        "allow_hashcheck",
+        "max_concurrent_jobs",
+        "managed_by_job",
+        "managed_job_label",
+      ]);
       const lines = [`[${actual}]`];
       for (const [k, v] of Object.entries(params)) {
+        if (openSyncMetaFields.has(k)) continue;
         lines.push(`${k} = ${v}`);
       }
       blocks.push(lines.join("\n"));
@@ -1900,6 +1947,193 @@ export class MockStore {
         : `${header}${blocks.join("\n\n")}\n`,
       encrypted: Boolean(password),
       filename: "rclone-export.conf",
+    };
+  }
+
+  discoverOpenList(input?: {
+    ports?: number[];
+    endpoints?: string[];
+  }): NativeOpenListDiscoverResult | string {
+    for (const raw of input?.endpoints || []) {
+      try {
+        const u = new URL(raw);
+        const h = u.hostname.toLowerCase();
+        if (
+          (u.protocol !== "http:" && u.protocol !== "https:") ||
+          (h !== "127.0.0.1" && h !== "localhost" && h !== "::1" && h !== "[::1]")
+        ) {
+          return "出于安全限制，仅允许探测本机回环地址（127.0.0.1、localhost 或 [::1]）";
+        }
+      } catch {
+        return "本机探测地址格式无效";
+      }
+    }
+    const endpoint =
+      input?.endpoints?.[0] ||
+      (input?.ports?.[0]
+        ? `http://127.0.0.1:${input.ports[0]}/dav`
+        : "http://127.0.0.1:5244/dav");
+    const baseUrl = endpoint.replace(/\/dav\/?$/, "");
+    return {
+      found: true,
+      message: `检测到本机 WebDAV 服务：${endpoint}（响应 6ms），WebDAV 已启用鉴权，填充后请填写 OpenList / AList 用户名与密码。`,
+      suggestedConfig: {
+        name: "openlist",
+        type: "webdav",
+        vendor: "other",
+        url: endpoint,
+        compareMode: 1,
+        compareModeLabel: "仅按文件大小比对",
+        recommendationNote:
+          "建议保持 WebDAV 类型为「标准 WebDAV / OpenList / AList（other）」；创建以它为目标的同步任务时建议配合「仅按文件大小」比对，避免网盘文件触发逐文件下载校验。",
+      },
+      candidates: [
+        {
+          endpoint,
+          baseUrl,
+          reachable: true,
+          statusCode: 401,
+          authRequired: true,
+          latencyMs: 6,
+          serverType: "OpenList",
+        },
+      ],
+      checkedAt: now(),
+    };
+  }
+
+  getCryptRecovery(input: {
+    name: string;
+    verifyPassword?: string;
+    verifyPassword2?: string;
+  }): NativeCryptRecoveryResult | string {
+    const trimmed = input.name.trim();
+    if (!trimmed) return "请指定要导出密钥恢复包的加密存储名称";
+    const actual = [...this.nativeRemotes.keys()].find(
+      (k) => k.toLowerCase() === trimmed.toLowerCase(),
+    );
+    if (!actual) return `未找到远程存储「${trimmed}」`;
+    const p = this.nativeRemotes.get(actual)!;
+    if (p.type !== "crypt") {
+      return `「${actual}」不是加密存储（crypt），无法生成密钥恢复包`;
+    }
+    const remote = p.remote || "";
+    const colonIdx = remote.indexOf(":");
+    const underlyingRemote = colonIdx >= 0 ? remote.slice(0, colonIdx) : remote;
+    const underlyingSubPath = colonIdx >= 0 ? remote.slice(colonIdx + 1) : "";
+    const fnEnc = p.filename_encryption || "standard";
+    const fnEncoding = p.filename_encoding || "base32";
+    const dirEnc = p.directory_name_encryption || "true";
+    const noDataEnc = p.no_data_encryption === "true";
+    const suffix = p.suffix || "";
+    const hasPassword = Boolean(p.password);
+    const hasPassword2 = Boolean(p.password2);
+    const managedByJob = p.managed_by_job === "true";
+    const managedJobLabel = p.managed_job_label || "";
+
+    let passwordChecked = false;
+    let passwordVerified: boolean | undefined;
+    let password2Checked = false;
+    let password2Verified: boolean | undefined;
+    const verifyParts: string[] = [];
+
+    if (input.verifyPassword) {
+      passwordChecked = true;
+      passwordVerified = Boolean(p.password) && p.password === input.verifyPassword;
+      verifyParts.push(
+        passwordVerified
+          ? "主加密密码验证通过"
+          : "主加密密码与当前配置不一致",
+      );
+    }
+    if (input.verifyPassword2) {
+      password2Checked = true;
+      if (!hasPassword2) {
+        password2Verified = false;
+        verifyParts.push("当前存储未设置加密盐（password2）");
+      } else {
+        password2Verified = p.password2 === input.verifyPassword2;
+        verifyParts.push(
+          password2Verified
+            ? "加密盐（password2）验证通过"
+            : "加密盐（password2）与当前配置不一致",
+        );
+      }
+    }
+
+    const rcloneSnippetTemplate = [
+      `[${actual}]`,
+      "type = crypt",
+      `remote = ${remote}`,
+      `filename_encryption = ${fnEnc}`,
+      `filename_encoding = ${fnEncoding}`,
+      `directory_name_encryption = ${dirEnc}`,
+      ...(noDataEnc ? ["no_data_encryption = true"] : []),
+      ...(suffix ? [`suffix = ${suffix}`] : []),
+      "# password = <请填入你的主加密密码，或通过 `rclone obscure -` 生成的混淆值>",
+      ...(hasPassword2
+        ? [
+            "# password2 = <请填入你的加密盐（password2），或通过 `rclone obscure -` 生成的混淆值>",
+          ]
+        : []),
+      "",
+    ].join("\n");
+
+    const rcloneCommand = `rclone copy ${actual}: ./restored-${actual}`;
+    const recoverySteps = [
+      `在 OpenSync 恢复：进入「存储管理」找到「${actual}」并点击「浏览与恢复」，或在新建同步任务时将源路径选为「/${actual}」、目标路径选为本地目录即可解密还原。`,
+      `异机或离线恢复：在任意安装 rclone 的设备上先配置同名底层存储（${underlyingRemote}），再按本恢复包中的 rclone.conf 段落重建 crypt 配置并填入主密码（与加密盐）。`,
+      `命令行还原示例：${rcloneCommand}（将先解密文件名与文件内容后下载到本地目录）。`,
+    ];
+    const warning =
+      "安全提醒：主加密密码与加密盐是解密云端文件的唯一凭证，一旦丢失任何人都无法还原文件。若在导出的备份中包含明文密码，请务必存放在密码管理器或离线安全介质中，切勿直接保存在同一云盘目录下。";
+    const generatedAt = now();
+    const bundle = {
+      version: 1,
+      generatedAt,
+      remoteName: actual,
+      underlyingRemote,
+      ...(underlyingSubPath ? { underlyingSubPath } : {}),
+      remote,
+      filenameEncryption: fnEnc,
+      filenameEncoding: fnEncoding,
+      directoryNameEncryption: dirEnc,
+      noDataEncryption: noDataEnc,
+      ...(suffix ? { suffix } : {}),
+      hasPassword,
+      hasPassword2,
+      managedByJob,
+      ...(managedJobLabel ? { managedJobLabel } : {}),
+      rcloneSnippetTemplate,
+      rcloneCommand,
+      recoverySteps,
+      warning,
+    };
+    const recoveryText = [
+      `=== OpenSync 加密存储密钥恢复包：${actual} ===`,
+      `底层路径：${remote}`,
+      `文件名加密方式：${fnEnc}`,
+      `文件名编码：${fnEncoding}`,
+      `目录名加密：${dirEnc}`,
+      `是否设置加密盐（password2）：${hasPassword2}`,
+      "",
+      "--- rclone.conf 配置模板 ---",
+      rcloneSnippetTemplate,
+      "--- 解密恢复步骤 ---",
+      ...recoverySteps.map((s, idx) => `${idx + 1}. ${s}`),
+      "",
+      warning,
+    ].join("\n");
+
+    return {
+      name: actual,
+      passwordChecked,
+      ...(passwordChecked ? { passwordVerified } : {}),
+      password2Checked,
+      ...(password2Checked ? { password2Verified } : {}),
+      ...(verifyParts.length > 0 ? { verifyMessage: verifyParts.join("；") } : {}),
+      bundle,
+      recoveryText,
     };
   }
 
