@@ -37,7 +37,7 @@ import { useAction, useResource } from "../lib/hooks";
 import {
   buildTaskSearchParams,
   cloneJobToForm,
-  getJobMountNames,
+  getJobConnectionScope,
   isLegacyOpenListJob,
   jobHasCryptRemote,
   requiresFirstMirrorPreview,
@@ -233,14 +233,9 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
   const entryStorage = params.get("storage");
   useEffect(() => {
     if (!drawerJob || entryStorage || storage.loading) return;
-    const mounts = getJobMountNames(drawerJob);
-    const remoteMounts = mounts.filter((mount) => mount !== "本地");
-    const remote = remoteMounts.length === 1
-      ? storage.data?.remotes.find((item) => item.name.toLowerCase() === remoteMounts[0].toLowerCase())
-      : undefined;
-    const scope = remote?.name ?? (mounts.length && !remoteMounts.length ? "__local__" : "__other__");
+    const scope = getJobConnectionScope(drawerJob, storage.data?.remotes ?? [], engines.data);
     update({ storage: scope }, { replace: true });
-  }, [drawerJob, entryStorage, storage.loading, storage.data, update]);
+  }, [drawerJob, entryStorage, storage.loading, storage.data, engines.data, update]);
 
   const workbenchTaskHref = (jobId: number, taskTab: TaskTab, intent?: "mirrorPreview" | "conflicts") => {
     const next = new URLSearchParams(params);

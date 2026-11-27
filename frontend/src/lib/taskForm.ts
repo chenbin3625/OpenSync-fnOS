@@ -2104,6 +2104,23 @@ export function getJobMountNames(
   return mounts;
 }
 
+export function getJobConnectionScope(
+  job: Pick<JobItem, "srcPath" | "dstPath" | "alistId" | "legacyOpenList">,
+  remotes: readonly Pick<NativeRemoteItem, "name">[],
+  engines?: readonly AlistItem[] | null,
+  mounts = getJobMountNames(job),
+): string {
+  if (!mounts.length || isLegacyOpenListJob(job, engines)) return "__other__";
+  const remoteMounts = mounts.filter((name) => name !== "本地");
+  if (!remoteMounts.length) return "__local__";
+  if (remoteMounts.length === 1) {
+    const key = remoteMounts[0].toLowerCase();
+    const remote = remotes.find(({ name }) => name.toLowerCase() === key);
+    if (remote) return remote.name;
+  }
+  return "__other__";
+}
+
 /** Checks whether any path on a job traverses an encrypted (crypt) remote. */
 export function jobHasCryptRemote(
   job: Pick<JobItem, "alistId" | "srcPath" | "dstPath">,

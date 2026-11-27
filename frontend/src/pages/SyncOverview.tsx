@@ -60,6 +60,7 @@ import {
   formatDisplayPathList,
 } from "../lib/syncPathPreview";
 import {
+  getJobConnectionScope,
   getJobMountNames,
   isLegacyOpenListJob,
   jobHasCryptRemote,
@@ -456,18 +457,13 @@ export function SyncOverview({
   }, [engines]);
 
   const jobsWithMounts = useMemo(() => {
-    const remoteNames = new Set(remotes.map((remote) => remote.name.toLowerCase()));
     return jobs.map((job) => {
-      const mounts = getJobMountNames(job).map((name) => name.toLowerCase());
-      const remoteMounts = mounts.filter((name) => name !== "本地");
-      let group = "__other__";
-      if (!isLegacyOpenListJob(job, engines) && mounts.length > 0) {
-        if (remoteMounts.length === 0) group = "__local__";
-        else if (remoteMounts.length === 1 && remoteNames.has(remoteMounts[0])) {
-          group = remoteMounts[0];
-        }
-      }
-      return { job, mounts, group };
+      const mounts = getJobMountNames(job);
+      return {
+        job,
+        mounts: mounts.map((name) => name.toLowerCase()),
+        group: getJobConnectionScope(job, remotes, engines, mounts).toLowerCase(),
+      };
     });
   }, [jobs, remotes, engines]);
 
