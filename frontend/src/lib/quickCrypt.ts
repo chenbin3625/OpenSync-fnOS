@@ -408,6 +408,7 @@ export function validateQuickCryptForm(
 export function buildQuickCryptOptions(
   target: Pick<EncryptableDstTarget, "remoteName" | "subPath">,
   values: QuickCryptFormValues,
+  buildOptions?: { managedByJob?: boolean },
 ): Record<string, string> {
   const subCheck = normalizeRelativeSubDir(values.subDir);
   const options: Record<string, string> = {
@@ -433,6 +434,9 @@ export function buildQuickCryptOptions(
   }
   if (values.noDataEncryption) {
     options.no_data_encryption = "true";
+  }
+  if (buildOptions?.managedByJob) {
+    options.managed_by_job = "true";
   }
   return options;
 }

@@ -20,6 +20,7 @@ import TextArea from "@douyinfe/semi-ui/lib/es/input/textarea";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import {
   IconAlertTriangle,
+  IconArrowLeft,
   IconArrowRight,
   IconChevronRight,
   IconInfoCircle,
@@ -38,9 +39,17 @@ import {
   errorToast,
 } from "../components/common";
 import { NativeStorageEditor } from "../components/NativeStorageEditor";
-import { BwLimitEditor } from "../components/BwLimitEditor";
 import { ExcludeTree } from "../components/ExcludeTree";
+import { ExpertTuningDrawer } from "../components/ExpertTuningDrawer";
 import { FileTypeFilter } from "../components/FileTypeFilter";
+import {
+  analyzeInlineCryptTarget,
+  createInitialInlineCryptDraft,
+  InlineCryptPanel,
+  syncInlineCryptTarget,
+  validateInlineCryptDraft,
+  type InlineCryptDraft,
+} from "../components/InlineCryptPanel";
 import { QuickCryptModal } from "../components/QuickCryptModal";
 import { RemotePaths } from "../components/RemotePaths";
 import { SyncPathPreview } from "../components/SyncPathPreview";
@@ -48,10 +57,16 @@ import {
   formatContinuousSyncPlan,
   type SyncDirectionKey,
 } from "../components/SyncStatus";
+import { WeeklyScheduleGrid } from "../components/WeeklyScheduleGrid";
+import {
+  CloudRemoteFolderPicker,
+  NasLocalFolderPicker,
+} from "../components/WizardFolderPickers";
 import { useAction, useEditorForm, useResource } from "../lib/hooks";
 import { channelNames, getNotifyEndpointSummary } from "../lib/notifyForm";
 import {
   analyzeDstEncryption,
+  buildQuickCryptOptions,
   replaceDstPathWithEncrypted,
 } from "../lib/quickCrypt";
 import {
@@ -60,7 +75,10 @@ import {
   type RemoteDirCache,
 } from "../lib/remoteDirCache";
 import {
-  applyTaskScenarioPreset,
+  buildSyncPathPreview,
+  formatDisplayPath,
+} from "../lib/syncPathPreview";
+import {
   buildJobPayload,
   defaultJobForm,
   findQuarkRemotesForPaths,
@@ -71,7 +89,6 @@ import {
   resolveAutoCompareModeForDst,
   shouldClearExcludeFoldersOnSrcChange,
   systemDirFilterGroups,
-  taskScenarioPresets,
   updateExcludeFolders,
   updateExcludePatterns,
   validateJobFormFields,
@@ -80,7 +97,16 @@ import {
   type JobFieldErrorKey,
   type JobForm,
 } from "../lib/taskForm";
-import { formatDisplayPath } from "../lib/syncPathPreview";
+import {
+  applyWizardEndpoints,
+  canSwitchBackToWizard,
+  extractRemoteRootAndSubPath,
+  extractWizardPaths,
+  formatNasDisplayPath,
+  inferOneWayDeleteMode,
+  inferWizardDirection,
+  isWizardCompatibleExistingJob,
+} from "../lib/taskWizard";
 import {
   compareModeOptions,
   conflictPolicyOptions,
@@ -101,7 +127,10 @@ import type {
   AlistItem,
   FilterTestResult,
   JobItem,
+  NativeExtraFlags,
   NativeRemoteItem,
+  OneWayDeleteMode,
+  SyncDirectionMode,
 } from "../types";
 
 export { parseIntervalInput };
@@ -112,7 +141,13 @@ export interface TaskEditorSavedResult {
   mirrorPreviewId?: number;
 }
 
-const taskEditorTabs = [
+const wizardEditorTabs = [
+  { key: "folders", label: "选择同步文件夹", optional: false },
+  { key: "safety", label: "同步方向与安全", optional: false },
+  { key: "plan", label: "过滤规则与同步计划", optional: true },
+] as const;
+
+const freeEditorTabs = [
   { key: "basic", label: "基础与路径", optional: false },
   { key: "schedule", label: "同步设置", optional: false },
   { key: "filter", label: "过滤规则", optional: true },
@@ -145,7 +180,7 @@ const fileSizeFilterDefaults = {
   }
 >;
 
-const directionCards = [
+const freeDirectionCards = [
   {
     key: "oneway",
     title: "单向同步",
@@ -161,6 +196,62 @@ const directionCards = [
     icon: IconRefresh,
   },
 ] as const;
+
+const wizardDirectionCards: Array<{
+  key: SyncDirectionMode;
+  title: string;
+  route: string;
+  desc: string;
+  icon: typeof IconArrowRight;
+}> = [
+  {
+    key: "bidirectional",
+    title: "双向同步",
+    route: "NAS ⇄ 云端",
+    desc: "本地与云端任意一侧新增、修改或删除文件，均会自动保持双端一致",
+    icon: IconRefresh,
+  },
+  {
+    key: "upload",
+    title: "仅上传本地更改",
+    route: "NAS → 云端",
+    desc: "将 NAS 本地目录持续备份到云端存储，云端手动整理不反向影响 NAS",
+    icon: IconArrowRight,
+  },
+  {
+    key: "download",
+    title: "仅下载云端更改",
+    route: "云端 → NAS",
+    desc: "将云端存储变更持续同步回 NAS 本地目录，不会修改或删除云端原文件",
+    icon: IconArrowLeft,
+  },
+];
+
+const oneWayDeleteModeCards: Array<{
+  key: OneWayDeleteMode;
+  title: string;
+  badge?: string;
+  desc: string;
+  danger?: boolean;
+}> = [
+  {
+    key: "none",
+    title: "不删除目标端文件",
+    badge: "默认推荐",
+    desc: "增量备份模式：只追加与更新文件，永远保留目标端已有文件，误删风险最低",
+  },
+  {
+    key: "tracked",
+    title: "仅同步本任务产生的删除",
+    desc: "基线追踪删除：仅清理曾由本任务同步过去且在源端被删的文件，不影响目标端原有其他内容",
+  },
+  {
+    key: "mirror",
+    title: "完全镜像清理目标多余文件",
+    desc: "镜像同步模式：严格保证目标端与源端完全一致，清理目标端所有多余文件（首次启用先预览影响）",
+    danger: true,
+  },
+];
 
 function parsePositiveIntDraft(raw: string): number {
   const trimmed = raw.trim();
@@ -197,7 +288,8 @@ export default function TaskEditor({
   onSaved,
 }: TaskEditorProps) {
   const nativeStorage = useResource((signal) => api.nativeStorageState(signal));
-  const defaultEngineId = engines[0]?.id || nativeStorage.data?.engineId || undefined;
+  const defaultEngineId =
+    engines[0]?.id || nativeStorage.data?.engineId || undefined;
   const seedForm = useMemo(
     () =>
       initialDraft
@@ -213,6 +305,14 @@ export default function TaskEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
   );
+
+  // Determine initial mode: brand new tasks & 1:1 NAS<->Cloud tasks open in
+  // Standard 3-Step Wizard; cloud-to-cloud, multi-src/dst, local-to-local,
+  // move mode, or legacy non-continuous jobs automatically enter Free Mode.
+  const [isFreeMode, setIsFreeMode] = useState<boolean>(() =>
+    Boolean((job || initialDraft) && !isWizardCompatibleExistingJob(seedForm)),
+  );
+
   const { form, dirty, change, patch, setForm, setDirty } =
     useEditorForm<JobForm>(() => seedForm);
   useEffect(() => {
@@ -222,6 +322,34 @@ export default function TaskEditor({
       );
     }
   }, [defaultEngineId, form.alistId, setForm]);
+
+  const initialPaths = useMemo(
+    () => extractWizardPaths(seedForm),
+    [seedForm],
+  );
+  const [wizardNasPath, setWizardNasPath] = useState<string>(
+    initialPaths.nasPath,
+  );
+  const [wizardRemotePath, setWizardRemotePath] = useState<string>(
+    initialPaths.remotePath,
+  );
+  const [wizardDirection, setWizardDirection] = useState<SyncDirectionMode>(
+    () =>
+      job || initialDraft ? inferWizardDirection(seedForm) : "upload",
+  );
+  const [wizardDeleteMode, setWizardDeleteMode] = useState<OneWayDeleteMode>(
+    () => inferOneWayDeleteMode(seedForm),
+  );
+  const [inlineCryptDraft, setInlineCryptDraft] = useState<InlineCryptDraft>(
+    () =>
+      createInitialInlineCryptDraft(
+        initialPaths.remotePath,
+        nativeStorage.data?.remotes,
+      ),
+  );
+  const [createdInlineCryptName, setCreatedInlineCryptName] = useState("");
+  const inlineCryptDirtyNameRef = useRef(false);
+
   const [addingStorage, setAddingStorage] = useState(false);
   const [preferredRemote, setPreferredRemote] = useState(initialRemote);
   const [nativeTarget, setNativeTarget] = useState("");
@@ -242,7 +370,7 @@ export default function TaskEditor({
     }),
   );
 
-  // Draft strings for continuous sync numeric inputs so users can clear & retype cleanly
+  // Draft strings for continuous sync numeric inputs
   const [pollDraft, setPollDraft] = useState<string>(() =>
     String(seedForm.extraFlags?.syncPollIntervalSec || 60),
   );
@@ -256,58 +384,27 @@ export default function TaskEditor({
   const effectiveDirty =
     dirty ||
     Boolean(initialDraft) ||
+    (!isFreeMode && inlineCryptDraft.enabled) ||
     hasPendingFileSizeDraftChange(form, fileSizeDrafts);
 
   const [policyOpen, setPolicyOpen] = useState<boolean>(() =>
     Boolean(
-      seedForm.compareMode ||
-        seedForm.conflictPolicy ||
-        seedForm.trashEnable,
+      seedForm.compareMode || seedForm.conflictPolicy || seedForm.trashEnable,
     ),
   );
   const [compareModeSource, setCompareModeSource] = useState<CompareModeSource>(
     () => (seedForm.compareMode === 0 ? "default" : "manual"),
   );
-  const [advancedOpen, setAdvancedOpen] = useState<boolean>(() =>
+  // Keep rclone expert options collapsed by default to eliminate visual noise.
+  const [advancedOpen, setAdvancedOpen] = useState<boolean>(false);
+  const [filterTesterOpen, setFilterTesterOpen] = useState<boolean>(false);
+  const [scheduleCadenceOpen, setScheduleCadenceOpen] = useState<boolean>(() =>
     Boolean(
-      seedForm.copyConcurrency ||
-        seedForm.scanConcurrency ||
-        seedForm.maxRetries >= 0 ||
-        seedForm.bwLimit ||
-        seedForm.tpsLimit ||
-        seedForm.tpsLimitBurst ||
-        seedForm.modifyWindow ||
-        seedForm.fastList ||
-        seedForm.multiThreadStreams ||
-        seedForm.createEmptySrcDirs ||
-        seedForm.followSymlinks ||
-        seedForm.extraFlags?.noUpdateModtime ||
-        seedForm.extraFlags?.inplace ||
-        seedForm.extraFlags?.checkFirst ||
-        seedForm.extraFlags?.s3NoHead ||
-        seedForm.extraFlags?.ignoreSize ||
-        seedForm.extraFlags?.trackRenames ||
-        seedForm.extraFlags?.useMmap ||
-        seedForm.extraFlags?.maxTransfer ||
-        seedForm.extraFlags?.cutoffMode ||
-        seedForm.extraFlags?.maxDuration ||
-        seedForm.extraFlags?.orderBy ||
-        Number(seedForm.extraFlags?.maxBacklog || 0) > 0 ||
-        seedForm.extraFlags?.bufferSize ||
-        seedForm.extraFlags?.multiThreadCutoff ||
-        seedForm.extraFlags?.multiThreadChunkSize ||
-        seedForm.extraFlags?.userAgent ||
-        seedForm.extraFlags?.ioTimeout ||
-        seedForm.extraFlags?.conTimeout ||
-        Number(seedForm.extraFlags?.lowLevelRetries || 0) > 0 ||
-        seedForm.extraFlags?.retriesSleep ||
-        seedForm.extraFlags?.resumeEnable ||
-        Number(seedForm.extraFlags?.autoRetryMax || 0) > 0 ||
-        Number(seedForm.extraFlags?.postSyncJobId || 0) > 0 ||
-        seedForm.extraFlags?.checkSchedule ||
-        seedForm.extraFlags?.directStream ||
-        Number(seedForm.extraFlags?.bisyncMaxDelete || 0) > 0 ||
-        seedForm.extraFlags?.bisyncForce,
+      seedForm.extraFlags?.syncPollIntervalSec ||
+        seedForm.extraFlags?.syncAuditIntervalMin ||
+        seedForm.extraFlags?.watchDebounceSec ||
+        seedForm.windowEnable ||
+        seedForm.notifyMode === 1,
     ),
   );
 
@@ -320,13 +417,16 @@ export default function TaskEditor({
   const [testResult, setTestResult] = useState<FilterTestResult | null>(null);
 
   const isNew = !job;
+  const currentTabs = isFreeMode ? freeEditorTabs : wizardEditorTabs;
   const [step, setStep] = useState(0);
-  const [activeTab, setActiveTab] = useState<string>("basic");
+  const [activeTab, setActiveTab] = useState<string>(() =>
+    isFreeMode ? "basic" : "folders",
+  );
   const [validatedSteps, setValidatedSteps] = useState<Set<number>>(
     () => new Set(),
   );
   const action = useAction();
-  const activePanel = isNew ? taskEditorTabs[step].key : activeTab;
+  const activePanel = isNew ? currentTabs[step].key : activeTab;
 
   // Panels stay mounted once visited so switching tabs keeps directory trees & expansion state.
   const [visitedPanels, setVisitedPanels] = useState<string[]>([activePanel]);
@@ -343,36 +443,160 @@ export default function TaskEditor({
   const scrollRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = 0;
-  }, [activePanel]);
+  }, [activePanel, isFreeMode]);
+
+  // Keep inline crypt suggested names / reuse candidates synced with remotes & selected cloud folder
+  useEffect(() => {
+    setInlineCryptDraft((prev) => {
+      const synced = syncInlineCryptTarget(
+        prev,
+        wizardRemotePath,
+        nativeStorage.data?.remotes,
+      );
+      if (inlineCryptDirtyNameRef.current) {
+        return {
+          ...synced,
+          values: { ...synced.values, name: prev.values.name },
+        };
+      }
+      return synced;
+    });
+  }, [wizardRemotePath, nativeStorage.data?.remotes]);
 
   const source = form.srcPath[0];
   const target = form.dstPath[0];
   const [sourceRoot, targetRoot] = [source, target].map(
     (path) => path?.split("/").filter(Boolean)[0],
   );
-  const localPath = sourceRoot === "本地" ? source : targetRoot === "本地" ? target : undefined;
+  const localPath =
+    sourceRoot === "本地" ? source : targetRoot === "本地" ? target : undefined;
   const remoteRoot = sourceRoot === "本地" ? targetRoot : sourceRoot;
-  const generatedName =
-    isNew && !initialDraft && source && target && localPath && remoteRoot && remoteRoot !== "本地"
-      ? `${formatDisplayPath(localPath).split("/").filter(Boolean).at(-1)} · ${remoteRoot}`
-      : "";
-  const mergedForm = useMemo(() => {
+
+  const generatedName = useMemo(() => {
+    if (!isNew || initialDraft) return "";
+    if (!isFreeMode) {
+      if (!wizardNasPath || !wizardRemotePath) return "";
+      const cleanNas = formatNasDisplayPath(
+        wizardNasPath,
+        nativeStorage.data?.localRoots,
+      );
+      const nasLeaf = cleanNas.split("/").filter(Boolean).at(-1) || cleanNas;
+      const { remoteName } = extractRemoteRootAndSubPath(wizardRemotePath);
+      return nasLeaf && remoteName ? `${nasLeaf} · ${remoteName}` : "";
+    }
+    if (source && target && localPath && remoteRoot && remoteRoot !== "本地") {
+      return `${formatDisplayPath(localPath).split("/").filter(Boolean).at(-1)} · ${remoteRoot}`;
+    }
+    return "";
+  }, [
+    isNew,
+    initialDraft,
+    isFreeMode,
+    wizardNasPath,
+    wizardRemotePath,
+    nativeStorage.data?.localRoots,
+    source,
+    target,
+    localPath,
+    remoteRoot,
+  ]);
+
+  const mergedForm = useMemo<JobForm>(() => {
     const merged = mergeFileSizeDrafts(form, fileSizeDrafts);
-    return generatedName && !merged.remark.trim() ? { ...merged, remark: generatedName } : merged;
-  }, [form, fileSizeDrafts, generatedName]);
+    const effective: JobForm = !isFreeMode
+      ? {
+          ...merged,
+          extraFlags: {
+            ...merged.extraFlags,
+            syncDirectionMode: wizardDirection,
+            oneWayDeleteMode:
+              wizardDirection === "bidirectional"
+                ? ""
+                : wizardDeleteMode,
+          },
+        }
+      : merged;
+    return generatedName && !effective.remark.trim()
+      ? { ...effective, remark: generatedName }
+      : effective;
+  }, [
+    form,
+    fileSizeDrafts,
+    isFreeMode,
+    wizardDirection,
+    wizardDeleteMode,
+    generatedName,
+  ]);
+
   const validationOptions = useMemo(
     () => ({
       storedDstMap: job?.dstMap,
       existingJobs,
       sizeEnabled,
       remotes: nativeStorage.data?.remotes,
+      mode: (isFreeMode ? "free" : "wizard") as "free" | "wizard",
     }),
-    [job?.dstMap, existingJobs, sizeEnabled, nativeStorage.data?.remotes],
+    [
+      job?.dstMap,
+      existingJobs,
+      sizeEnabled,
+      nativeStorage.data?.remotes,
+      isFreeMode,
+    ],
   );
   const validation = useMemo(
     () => validateJobFormFields(mergedForm, validationOptions),
     [mergedForm, validationOptions],
   );
+
+  const inlineCryptErrors = useMemo(
+    () =>
+      isFreeMode
+        ? {}
+        : validateInlineCryptDraft(
+            inlineCryptDraft,
+            wizardRemotePath,
+            wizardDirection,
+            nativeStorage.data?.remotes,
+          ),
+    [
+      isFreeMode,
+      inlineCryptDraft,
+      wizardRemotePath,
+      wizardDirection,
+      nativeStorage.data?.remotes,
+    ],
+  );
+
+  const inlineCryptStepError = useMemo(() => {
+    const errs = Object.values(inlineCryptErrors).filter(Boolean);
+    return errs[0] ?? "";
+  }, [inlineCryptErrors]);
+
+  const effectiveStepErrors = useMemo<[string, string, string]>(() => {
+    if (isFreeMode) {
+      return [
+        validation.stepErrors[0],
+        validation.stepErrors[1] || bwLimitError || "",
+        validation.stepErrors[2],
+      ];
+    }
+    const step0 = !wizardNasPath
+      ? "请在左侧选择 NAS 本地文件夹"
+      : !wizardRemotePath
+        ? "请在右侧选择云端存储文件夹"
+        : validation.stepErrors[0];
+    const step1 = validation.stepErrors[1] || inlineCryptStepError || "";
+    const step2 = validation.stepErrors[2] || bwLimitError || "";
+    return [step0, step1, step2];
+  }, [
+    isFreeMode,
+    validation.stepErrors,
+    bwLimitError,
+    wizardNasPath,
+    wizardRemotePath,
+    inlineCryptStepError,
+  ]);
 
   const markStepValidated = (stepIndex: number) => {
     setValidatedSteps((prev) => {
@@ -385,10 +609,10 @@ export default function TaskEditor({
 
   const scrollToFirstError = () => {
     window.requestAnimationFrame(() => {
-      const target = scrollRef.current?.querySelector<HTMLElement>(
-        ".field.has-error, .field-error",
+      const el = scrollRef.current?.querySelector<HTMLElement>(
+        ".field.has-error, .field-error, .wizard-picker-card.has-error",
       );
-      target?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
     });
   };
 
@@ -412,10 +636,10 @@ export default function TaskEditor({
       return;
     }
     for (let i = 0; i < targetStep; i++) {
-      const err =
-        validation.stepErrors[i] || (i === 1 && bwLimitError ? bwLimitError : "");
+      const err = effectiveStepErrors[i];
       if (err) {
-        if (i === 1 && (validation.fields.bwLimit || bwLimitError)) {
+        const bwStepIdx = isFreeMode ? 1 : 2;
+        if (i === bwStepIdx && (validation.fields.bwLimit || bwLimitError)) {
           setAdvancedOpen(true);
         }
         markStepValidated(i);
@@ -429,11 +653,10 @@ export default function TaskEditor({
   };
 
   const nextStep = () => {
-    const err =
-      validation.stepErrors[step] ||
-      (step === 1 && bwLimitError ? bwLimitError : "");
+    const err = effectiveStepErrors[step];
     if (err) {
-      if (step === 1 && (validation.fields.bwLimit || bwLimitError)) {
+      const bwStepIdx = isFreeMode ? 1 : 2;
+      if (step === bwStepIdx && (validation.fields.bwLimit || bwLimitError)) {
         setAdvancedOpen(true);
       }
       markStepValidated(step);
@@ -441,62 +664,276 @@ export default function TaskEditor({
       scrollToFirstError();
       return;
     }
-    setStep((s) => Math.min(s + 1, taskEditorTabs.length - 1));
+    setStep((s) => Math.min(s + 1, currentTabs.length - 1));
   };
 
   const previousStep = () => setStep((s) => Math.max(s - 1, 0));
 
+  const applyWizardStateToForm = (
+    nextDir: SyncDirectionMode,
+    nextDelMode: OneWayDeleteMode,
+    nextNas: string,
+    nextRemote: string,
+    extraPatch?: Partial<JobForm>,
+  ) => {
+    const endpoints = applyWizardEndpoints(
+      nextDir,
+      nextDelMode,
+      nextNas,
+      nextRemote,
+    );
+    const excludeReset = shouldClearExcludeFoldersOnSrcChange(
+      form.srcPath,
+      endpoints.srcPath,
+      form.exclude,
+    );
+    const remotes = nativeStorage.data?.remotes;
+    const prevMatched = findStandardWebDAVRemotesForPaths(form.dstPath, remotes);
+    const shouldAutoCompare =
+      (isNew && !initialDraft) ||
+      compareModeSource === "auto" ||
+      (compareModeSource === "default" && prevMatched.length === 0);
+    let nextCompareMode = form.compareMode;
+    if (shouldAutoCompare) {
+      const resolved = resolveAutoCompareModeForDst({
+        dstPaths: endpoints.dstPath,
+        remotes,
+        currentCompareMode: form.compareMode,
+        source: compareModeSource,
+      });
+      if (resolved.source !== compareModeSource) {
+        setCompareModeSource(resolved.source);
+      }
+      nextCompareMode = resolved.compareMode;
+    }
+
+    const nextConflictPolicy =
+      nextDir === "bidirectional" && form.conflictPolicy === 0
+        ? 2
+        : form.conflictPolicy;
+
+    patch({
+      ...endpoints,
+      conflictPolicy: nextConflictPolicy,
+      compareMode: nextCompareMode,
+      ...(excludeReset ? { exclude: updateExcludeFolders(form.exclude, []) } : {}),
+      extraFlags: {
+        ...form.extraFlags,
+        syncDirectionMode: nextDir,
+        oneWayDeleteMode: nextDir === "bidirectional" ? "" : nextDelMode,
+      },
+      ...extraPatch,
+    });
+    if (excludeReset) {
+      Toast.info("源目录已更换，已自动清空原有文件夹过滤规则");
+    }
+  };
+
+  const handleWizardNasSelect = (nextNas: string) => {
+    setWizardNasPath(nextNas);
+    applyWizardStateToForm(
+      wizardDirection,
+      wizardDeleteMode,
+      nextNas,
+      wizardRemotePath,
+    );
+  };
+
+  const handleWizardRemoteSelect = (nextRemote: string) => {
+    setWizardRemotePath(nextRemote);
+    if (createdInlineCryptName) setCreatedInlineCryptName("");
+    applyWizardStateToForm(
+      wizardDirection,
+      wizardDeleteMode,
+      wizardNasPath,
+      nextRemote,
+    );
+  };
+
+  const handleWizardDirectionChange = (nextDir: SyncDirectionMode) => {
+    setWizardDirection(nextDir);
+    if (nextDir === "download" && inlineCryptDraft.enabled) {
+      setInlineCryptDraft((prev) => ({ ...prev, enabled: false }));
+    }
+    applyWizardStateToForm(
+      nextDir,
+      wizardDeleteMode,
+      wizardNasPath,
+      wizardRemotePath,
+    );
+  };
+
+  const handleWizardDeleteModeChange = (nextDelMode: OneWayDeleteMode) => {
+    setWizardDeleteMode(nextDelMode);
+    applyWizardStateToForm(
+      wizardDirection,
+      nextDelMode,
+      wizardNasPath,
+      wizardRemotePath,
+    );
+  };
+
+  const switchToFreeMode = () => {
+    setIsFreeMode(true);
+    if (step === 2 || activeTab === "plan") {
+      setStep(1);
+      setActiveTab("schedule");
+    } else {
+      setStep(0);
+      setActiveTab("basic");
+    }
+    if (isNew && !seedForm.extraFlags.syncDirectionMode) {
+      change("extraFlags", {
+        ...form.extraFlags,
+        syncDirectionMode: "",
+        oneWayDeleteMode: "",
+      });
+    }
+  };
+
+  const switchToWizardMode = () => {
+    if (!canSwitchBackToWizard(form)) {
+      Toast.warning(
+        "标准向导仅支持单个「NAS 本地 ↔ 云端存储」目录组合，请先将路径调整为 1 对 1 后再切换",
+      );
+      return;
+    }
+    const { nasPath, remotePath } = extractWizardPaths(form);
+    const dir = inferWizardDirection(form);
+    const del = inferOneWayDeleteMode(form);
+    setWizardNasPath(nasPath);
+    setWizardRemotePath(remotePath);
+    setWizardDirection(dir);
+    setWizardDeleteMode(del);
+    setIsFreeMode(false);
+    setStep(0);
+    setActiveTab("folders");
+    if (nasPath || remotePath) {
+      applyWizardStateToForm(dir, del, nasPath, remotePath);
+    }
+  };
+
   const save = () => {
-    const stepErrorsWithBw = [
-      validation.stepErrors[0],
-      validation.stepErrors[1] || bwLimitError || "",
-      validation.stepErrors[2],
-    ];
-    const invalidStep = stepErrorsWithBw.findIndex(Boolean);
+    const invalidStep = effectiveStepErrors.findIndex(Boolean);
     if (invalidStep >= 0) {
-      if (invalidStep === 1 && (validation.fields.bwLimit || bwLimitError)) {
+      const bwStepIdx = isFreeMode ? 1 : 2;
+      if (invalidStep === bwStepIdx && (validation.fields.bwLimit || bwLimitError)) {
         setAdvancedOpen(true);
       }
       setValidatedSteps(new Set([0, 1, 2]));
-      Toast.warning(stepErrorsWithBw[invalidStep]);
+      Toast.warning(effectiveStepErrors[invalidStep]);
       if (isNew) setStep(invalidStep);
-      else setActiveTab(taskEditorTabs[invalidStep].key);
+      else setActiveTab(currentTabs[invalidStep].key);
       scrollToFirstError();
       return;
     }
+
+    const persist = () =>
+      action.run(async () => {
+        try {
+          let finalForm = mergedForm;
+          let createdCryptNow = false;
+
+          if (!isFreeMode && inlineCryptDraft.enabled && wizardDirection !== "download") {
+            let finalRemote = wizardRemotePath;
+            const targetInfo = analyzeInlineCryptTarget(
+              wizardRemotePath,
+              nativeStorage.data?.remotes,
+            );
+            if (!targetInfo.alreadyEncrypted && targetInfo.supported) {
+              if (
+                inlineCryptDraft.mode === "reuse" &&
+                inlineCryptDraft.reuseEncryptedPath
+              ) {
+                finalRemote = inlineCryptDraft.reuseEncryptedPath;
+              } else {
+                const cryptName = inlineCryptDraft.values.name.trim();
+                if (createdInlineCryptName !== cryptName) {
+                  const options = buildQuickCryptOptions(
+                    {
+                      remoteName: targetInfo.remoteName,
+                      subPath: targetInfo.subPath,
+                    },
+                    inlineCryptDraft.values,
+                    { managedByJob: true },
+                  );
+                  await api.saveNativeStorage({
+                    name: cryptName,
+                    options,
+                  });
+                  setCreatedInlineCryptName(cryptName);
+                  createdCryptNow = true;
+                  dirCacheRef.current?.invalidateEngine(finalForm.alistId);
+                  try {
+                    const fresh = await api.nativeStorageState();
+                    nativeStorage.setData(fresh);
+                  } catch {
+                    void nativeStorage.refresh(true);
+                  }
+                }
+                finalRemote = `/${cryptName}`;
+              }
+
+              const updatedEndpoints = applyWizardEndpoints(
+                wizardDirection,
+                wizardDeleteMode,
+                wizardNasPath,
+                finalRemote,
+              );
+              finalForm = {
+                ...finalForm,
+                ...updatedEndpoints,
+              };
+            }
+          }
+
+          const pathsChanged =
+            finalForm.alistId !== seedForm.alistId ||
+            JSON.stringify(finalForm.srcPath) !==
+              JSON.stringify(seedForm.srcPath) ||
+            JSON.stringify(finalForm.dstPath) !==
+              JSON.stringify(seedForm.dstPath);
+          const reviewMirror =
+            finalForm.isCron === 3 &&
+            finalForm.method === 1 &&
+            (!job || job.method !== 1 || pathsChanged);
+
+          const payload = buildJobPayload(
+            reviewMirror ? { ...finalForm, enable: false } : finalForm,
+          );
+          const result = await api.saveJob(payload);
+          if (createdCryptNow) {
+            onStorageChanged?.();
+          }
+          setFileSizeDrafts({});
+          setDirty(false);
+          const createdId =
+            isNew && result && typeof result.id === "number" && result.id > 0
+              ? result.id
+              : undefined;
+          Toast.success(
+            reviewMirror
+              ? "镜像任务已保存，请先预览影响"
+              : job
+                ? "任务设置已保存"
+                : finalForm.enable
+                  ? "持续同步任务已创建并开始监控"
+                  : "持续同步任务已创建（当前暂停）",
+          );
+          onSaved({
+            createdId,
+            mirrorPreviewId: reviewMirror ? createdId ?? job?.id : undefined,
+          });
+        } catch (err) {
+          errorToast(err);
+        }
+      });
+
     const pathsChanged =
       mergedForm.alistId !== seedForm.alistId ||
       JSON.stringify(mergedForm.srcPath) !== JSON.stringify(seedForm.srcPath) ||
       JSON.stringify(mergedForm.dstPath) !== JSON.stringify(seedForm.dstPath);
-    const reviewMirror = mergedForm.isCron === 3 && mergedForm.method === 1 &&
-      (!job || job.method !== 1 || pathsChanged);
-    const payload = buildJobPayload(reviewMirror ? { ...mergedForm, enable: false } : mergedForm);
-    const persist = () => action.run(async () => {
-      try {
-        const result = await api.saveJob(payload);
-        setFileSizeDrafts({});
-        setDirty(false);
-        const createdId =
-          isNew && result && typeof result.id === "number" && result.id > 0
-            ? result.id
-            : undefined;
-        Toast.success(
-          reviewMirror
-            ? "镜像任务已保存，请先预览影响"
-            : job
-              ? "任务设置已保存"
-              : mergedForm.enable
-                ? "持续同步任务已创建并开始监控"
-                : "持续同步任务已创建（当前暂停）",
-        );
-        onSaved({
-          createdId,
-          mirrorPreviewId: reviewMirror ? createdId ?? job?.id : undefined,
-        });
-      } catch (err) {
-        errorToast(err);
-      }
-    });
+
     if (job?.method === 3 && mergedForm.method === 3 && pathsChanged) {
       confirmAction({
         title: "保存新的双向同步目录？",
@@ -510,7 +947,7 @@ export default function TaskEditor({
   };
 
   const handleDirectionSelect = (direction: SyncDirectionKey) => {
-    if (direction === activeDirection) return;
+    if (direction === activeFreeDirection) return;
     if (direction === "bidirectional") {
       patch({
         method: 3,
@@ -522,7 +959,13 @@ export default function TaskEditor({
   };
 
   const handleSrcPathChange = (nextPaths: string[]) => {
-    if (shouldClearExcludeFoldersOnSrcChange(form.srcPath, nextPaths, form.exclude)) {
+    if (
+      shouldClearExcludeFoldersOnSrcChange(
+        form.srcPath,
+        nextPaths,
+        form.exclude,
+      )
+    ) {
       patch({
         srcPath: nextPaths,
         exclude: updateExcludeFolders(form.exclude, []),
@@ -680,7 +1123,37 @@ export default function TaskEditor({
     [nativeStorage.data?.remotes, form.srcPath, form.dstPath],
   );
 
-  const activeDirection = form.method === 3 ? "bidirectional" : "oneway";
+  const wizardPathConflict = useMemo(() => {
+    if (isFreeMode || !wizardNasPath || !wizardRemotePath) return "";
+    const endpoints = applyWizardEndpoints(
+      wizardDirection,
+      wizardDeleteMode,
+      wizardNasPath,
+      wizardRemotePath,
+    );
+    const preview = buildSyncPathPreview({
+      srcPaths: endpoints.srcPath,
+      dstPaths: endpoints.dstPath,
+      storedDstMap: job?.dstMap,
+      method: endpoints.method,
+      existingJobs,
+      currentJobId: job?.id,
+      engineId: form.alistId,
+    });
+    return preview.conflicts[0] || "";
+  }, [
+    isFreeMode,
+    wizardNasPath,
+    wizardRemotePath,
+    wizardDirection,
+    wizardDeleteMode,
+    job?.dstMap,
+    job?.id,
+    existingJobs,
+    form.alistId,
+  ]);
+
+  const activeFreeDirection = form.method === 3 ? "bidirectional" : "oneway";
   const preferredRoot = preferredRemote ? `/${preferredRemote}` : undefined;
   const refreshFolders = () => {
     dirCacheRef.current?.invalidateEngine(form.alistId);
@@ -689,66 +1162,27 @@ export default function TaskEditor({
   };
   const legacySchedule = Boolean(job && form.isCron !== 3);
   const srcMultiple = form.method !== 3 || form.srcPath.length > 1;
-  const dstMultiple = (form.method !== 3 && form.method !== 2) || form.dstPath.length > 1;
+  const dstMultiple =
+    (form.method !== 3 && form.method !== 2) || form.dstPath.length > 1;
   const isDestructiveDirection = form.method !== 0;
 
   const srcFieldLabel =
-    activeDirection === "bidirectional" ? "左侧同步目录（单选）" : "源目录";
+    activeFreeDirection === "bidirectional" ? "左侧同步目录（单选）" : "源目录";
   const dstFieldLabel =
-    activeDirection === "bidirectional" ? "右侧同步目录（单选）" : "目标目录";
+    activeFreeDirection === "bidirectional" ? "右侧同步目录（单选）" : "目标目录";
 
   const directionSummaryText =
-    activeDirection === "bidirectional"
+    activeFreeDirection === "bidirectional"
       ? "双端文件的新增、修改和删除会互相同步；首次运行时将自动建立双向基线，建议保留「保留双方冲突副本」与双端回收站。"
       : form.method === 2
         ? "此任务会在文件移动到目标目录后删除源文件。"
         : form.method === 1
-        ? "镜像会清理目标端独有的文件，包括任务创建前已存在的文件。首次开启镜像时先查看镜像影响预览，再确认启动。"
-        : "单向持续增量：源端新增与修改的文件会持续同步至目标端，不会删除目标端已有文件，适合安全备份。";
+          ? "镜像会清理目标端独有的文件，包括任务创建前已存在的文件。首次开启镜像时先查看镜像影响预览，再确认启动。"
+          : "单向持续增量：源端新增与修改的文件会持续同步至目标端，不会删除目标端已有文件，适合安全备份。";
 
   const effectivePollSec = form.extraFlags?.syncPollIntervalSec || 60;
   const effectiveAuditMin = form.extraFlags?.syncAuditIntervalMin || 1440;
   const effectiveDebounceSec = form.extraFlags?.watchDebounceSec || 30;
-
-  const activeAdvancedCount =
-    (form.bwLimit.trim() ? 1 : 0) +
-    (Number(form.tpsLimit || 0) > 0 ? 1 : 0) +
-    (Number(form.tpsLimitBurst || 0) > 0 ? 1 : 0) +
-    (form.modifyWindow.trim() ? 1 : 0) +
-    (form.fastList ? 1 : 0) +
-    (Number(form.multiThreadStreams || 0) > 0 ? 1 : 0) +
-    (form.createEmptySrcDirs ? 1 : 0) +
-    (form.followSymlinks ? 1 : 0) +
-    (form.extraFlags?.noUpdateModtime ? 1 : 0) +
-    (form.extraFlags?.inplace ? 1 : 0) +
-    (form.extraFlags?.checkFirst ? 1 : 0) +
-    (form.extraFlags?.s3NoHead ? 1 : 0) +
-    (form.extraFlags?.ignoreSize ? 1 : 0) +
-    (form.extraFlags?.trackRenames ? 1 : 0) +
-    (form.extraFlags?.useMmap ? 1 : 0) +
-    (form.extraFlags?.maxTransfer?.trim() ? 1 : 0) +
-    (form.extraFlags?.cutoffMode?.trim() ? 1 : 0) +
-    (form.extraFlags?.maxDuration?.trim() ? 1 : 0) +
-    (form.extraFlags?.orderBy?.trim() ? 1 : 0) +
-    (Number(form.extraFlags?.maxBacklog || 0) > 0 ? 1 : 0) +
-    (form.extraFlags?.bufferSize?.trim() ? 1 : 0) +
-    (form.extraFlags?.multiThreadCutoff?.trim() ? 1 : 0) +
-    (form.extraFlags?.multiThreadChunkSize?.trim() ? 1 : 0) +
-    (form.extraFlags?.userAgent?.trim() ? 1 : 0) +
-    (form.extraFlags?.ioTimeout?.trim() ? 1 : 0) +
-    (form.extraFlags?.conTimeout?.trim() ? 1 : 0) +
-    (Number(form.extraFlags?.lowLevelRetries || 0) > 0 ? 1 : 0) +
-    (form.extraFlags?.retriesSleep?.trim() ? 1 : 0) +
-    (form.extraFlags?.resumeEnable ? 1 : 0) +
-    (Number(form.extraFlags?.autoRetryMax || 0) > 0 ? 1 : 0) +
-    (Number(form.extraFlags?.postSyncJobId || 0) > 0 ? 1 : 0) +
-    (form.extraFlags?.checkSchedule?.trim() ? 1 : 0) +
-    (form.extraFlags?.directStream ? 1 : 0) +
-    (Number(form.extraFlags?.bisyncMaxDelete || 0) > 0 ? 1 : 0) +
-    (form.extraFlags?.bisyncForce ? 1 : 0) +
-    (Number(form.copyConcurrency || 0) > 0 ? 1 : 0) +
-    (Number(form.scanConcurrency || 0) > 0 ? 1 : 0) +
-    (Number(form.maxRetries) >= 0 ? 1 : 0);
 
   const activePolicyCount =
     (form.compareMode !== 0 ? 1 : 0) +
@@ -804,17 +1238,697 @@ export default function TaskEditor({
     showStepError(2, "maxFileSize");
 
   const primaryActionIsNext = isNew && step === 0;
+  const step2OptionalBtnLabel = isFreeMode ? "过滤规则" : "同步计划与过滤";
+
+  const nasDisplaySummary = wizardNasPath
+    ? formatNasDisplayPath(wizardNasPath, nativeStorage.data?.localRoots)
+    : "";
+
+  const wizardDirectionArrow =
+    wizardDirection === "bidirectional"
+      ? "⇄"
+      : wizardDirection === "download"
+        ? "←"
+        : "→";
+
+  const renderContinuousCadenceControls = (stepIndex: number) => (
+    <>
+      <div className="continuous-sync-panel">
+        {matchedQuarkNames.length > 0 && effectivePollSec < 300 && (
+          <div className="sync-method-banner is-warning" role="note">
+            <IconAlertTriangle aria-hidden="true" size="small" />
+            <span>
+              当前任务包含夸克网盘（{matchedQuarkNames.join("、")}
+              ），建议将「远端检测间隔」设为 300 秒（5 分钟）及以上，降低触发接口限流（429）的概率。
+            </span>
+          </div>
+        )}
+        <Field
+          label="远端检测间隔（秒）"
+          hint="默认 60 秒（10–86400），用于周期发现远端变更及重启后补齐"
+          error={showStepError(stepIndex, "interval")}
+        >
+          <div className="field-group">
+            <Input
+              aria-label="远端检测间隔（秒）"
+              inputMode="numeric"
+              value={pollDraft}
+              placeholder="60"
+              onChange={(v) => {
+                setPollDraft(v);
+                const parsed = parsePositiveIntDraft(v);
+                change("extraFlags", {
+                  ...form.extraFlags,
+                  syncPollIntervalSec: parsed,
+                });
+              }}
+              onBlur={() => {
+                if (!pollDraft.trim()) {
+                  setPollDraft("60");
+                  change("extraFlags", {
+                    ...form.extraFlags,
+                    syncPollIntervalSec: 0,
+                  });
+                }
+              }}
+            />
+            <div
+              className="schedule-chips"
+              role="group"
+              aria-label="常用远端检测间隔"
+            >
+              {pollIntervalPresets.map((preset) => {
+                const active = effectivePollSec === preset.value;
+                return (
+                  <button
+                    key={preset.value}
+                    type="button"
+                    className={`schedule-chip${active ? " is-active" : ""}`}
+                    onClick={() => {
+                      setPollDraft(String(preset.value));
+                      change("extraFlags", {
+                        ...form.extraFlags,
+                        syncPollIntervalSec: preset.value,
+                      });
+                    }}
+                  >
+                    每 {preset.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </Field>
+
+        <div className="form-grid form-grid--two">
+          <Field label="完整核对间隔（分钟）" hint="默认 1440 分钟（1–10080）">
+            <div className="field-group">
+              <Input
+                aria-label="完整核对间隔（分钟）"
+                inputMode="numeric"
+                value={auditDraft}
+                placeholder="1440"
+                onChange={(v) => {
+                  setAuditDraft(v);
+                  const parsed = parsePositiveIntDraft(v);
+                  change("extraFlags", {
+                    ...form.extraFlags,
+                    syncAuditIntervalMin: parsed,
+                  });
+                }}
+                onBlur={() => {
+                  if (!auditDraft.trim()) {
+                    setAuditDraft("1440");
+                    change("extraFlags", {
+                      ...form.extraFlags,
+                      syncAuditIntervalMin: 0,
+                    });
+                  }
+                }}
+              />
+              <div
+                className="schedule-chips"
+                role="group"
+                aria-label="常用完整核对间隔"
+              >
+                {auditIntervalPresets.map((preset) => {
+                  const active = effectiveAuditMin === preset.value;
+                  return (
+                    <button
+                      key={preset.value}
+                      type="button"
+                      className={`schedule-chip${active ? " is-active" : ""}`}
+                      onClick={() => {
+                        setAuditDraft(String(preset.value));
+                        change("extraFlags", {
+                          ...form.extraFlags,
+                          syncAuditIntervalMin: preset.value,
+                        });
+                      }}
+                    >
+                      {preset.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </Field>
+          <Field
+            label="本地变动防抖（秒）"
+            hint="连续写入后静默 2–3600 秒再合并触发，默认 30 秒"
+          >
+            <Input
+              aria-label="本地变动防抖（秒）"
+              inputMode="numeric"
+              value={debounceDraft}
+              placeholder="30"
+              onChange={(v) => {
+                setDebounceDraft(v);
+                const parsed = parsePositiveIntDraft(v);
+                change("extraFlags", {
+                  ...form.extraFlags,
+                  watchDebounceSec: parsed,
+                });
+              }}
+              onBlur={() => {
+                if (!debounceDraft.trim()) {
+                  setDebounceDraft("30");
+                  change("extraFlags", {
+                    ...form.extraFlags,
+                    watchDebounceSec: 0,
+                  });
+                }
+              }}
+            />
+          </Field>
+        </div>
+
+        <div className="schedule-preview-card" role="status">
+          <div className="schedule-preview-plan">
+            {formatContinuousSyncPlan({
+              pollIntervalSec: effectivePollSec,
+              auditIntervalMin: effectiveAuditMin,
+              debounceSec: effectiveDebounceSec,
+            })}
+          </div>
+          <div className="muted">
+            本地授权目录变更通过实时监听自动捕获；服务重启或离开/恢复运行窗口后会自动对账补齐。
+          </div>
+        </div>
+      </div>
+    </>
+  );
+
+  const renderWindowAndNotifyControls = (stepIndex: number) => (
+    <>
+      {!form.extraFlags?.weeklySchedule?.enabled && (
+        <>
+          <SettingRow
+            label="限制允许运行时间窗口"
+            variant="bordered"
+            tip="开启后，持续同步仅在指定时段内传输（支持跨午夜，如 23:00 至 06:00）；窗口外产生的变更会暂挂，进入窗口后自动补齐。"
+          >
+            <Switch
+              aria-label="限制允许运行时间窗口"
+              checked={form.windowEnable}
+              onChange={(value) => change("windowEnable", value)}
+            />
+          </SettingRow>
+
+          {form.windowEnable && (
+            <div className="form-section">
+              <div className="form-grid form-grid--two">
+                <Field
+                  label="开始时间 (HH:MM)"
+                  error={showStepError(stepIndex, "window")}
+                >
+                  <Input
+                    value={form.windowStart}
+                    placeholder="23:00"
+                    onChange={(v) => change("windowStart", v)}
+                  />
+                </Field>
+                <Field label="结束时间 (HH:MM)">
+                  <Input
+                    value={form.windowEnd}
+                    placeholder="06:00"
+                    onChange={(v) => change("windowEnd", v)}
+                  />
+                </Field>
+              </div>
+              <SettingRow
+                label="超出时间窗口时自动中止运行中的传输"
+                variant="bordered"
+                tip="关闭则允许已在窗口内启动的批次传输完毕；开启则在离开窗口后自动中止，待下次窗口恢复续传"
+              >
+                <Switch
+                  aria-label="超出时间窗口时自动中止运行中的传输"
+                  checked={form.windowStopOutside}
+                  onChange={(v) => change("windowStopOutside", v)}
+                />
+              </SettingRow>
+            </div>
+          )}
+        </>
+      )}
+
+      <Field label="任务通知绑定">
+        <Select
+          value={form.notifyMode}
+          optionList={notifyModeOptions.map((o) => ({
+            label: o.label,
+            value: o.value,
+          }))}
+          onChange={(v) => change("notifyMode", Number(v))}
+        />
+      </Field>
+
+      {form.notifyMode === 1 && (
+        <Field
+          label="选择通知渠道"
+          error={showStepError(stepIndex, "notifyIds")}
+          hint="该任务的异常与完成通知仅发送到所选渠道"
+        >
+          <Select
+            multiple
+            value={form.notifyIds}
+            placeholder={
+              notifications.data?.length
+                ? "请选择一个或多个通知渠道"
+                : "暂无可用通知渠道，请先在通知配置页面添加"
+            }
+            optionList={(notifications.data || []).map((n) => ({
+              value: n.id,
+              label: `#${n.id} ${channelNames[n.method] || "未知渠道"} · ${getNotifyEndpointSummary(n)}`,
+            }))}
+            onChange={(vals) =>
+              change(
+                "notifyIds",
+                Array.isArray(vals)
+                  ? vals.map(Number).filter(Number.isFinite)
+                  : [],
+              )
+            }
+          />
+        </Field>
+      )}
+    </>
+  );
+
+  const renderFilterCoreFields = (collapseTester: boolean) => (
+    <>
+      <Field
+        label="过滤模式"
+        hint="排除模式会同步除黑名单外的所有文件；白名单模式仅同步命中包含规则且未被排除的文件"
+      >
+        <Select
+          value={form.filterMode}
+          optionList={filterModeOptions.map((o) => ({
+            label: o.label,
+            value: o.value,
+          }))}
+          onChange={(v) => change("filterMode", Number(v))}
+        />
+      </Field>
+
+      {form.filterMode === 1 && (
+        <Field
+          label="白名单包含规则"
+          required
+          error={showStepError(2, "include")}
+          hint="每行一条文件名或后缀规则（如 *.jpg、*.mp4、README.md）；目录过滤与系统目录排除依然生效"
+        >
+          <TextArea
+            autosize={{ minRows: 3, maxRows: 8 }}
+            value={form.include}
+            placeholder={"*.jpg\n*.png\n*.mp4"}
+            onChange={(v) => change("include", v)}
+          />
+        </Field>
+      )}
+
+      <div className="filter-section-block">
+        <div className="filter-section-title">文件大小过滤</div>
+        <div
+          className="file-size-filters"
+          role="group"
+          aria-label="文件大小过滤"
+        >
+          {(["min", "max"] as const).map((kind) => (
+            <FileSizeFilterRow
+              key={kind}
+              kind={kind}
+              enabled={sizeEnabled[kind]}
+              onToggle={(checked) => {
+                const config = fileSizeFilterDefaults[kind];
+                const valueKey = `${kind}FileSize` as const;
+                const unitKey = `${kind}FileSizeUnit` as const;
+                const currentVal = parseFileSizeInput(form[valueKey]) ?? 0;
+                setSizeEnabled((prev) => ({
+                  ...prev,
+                  [kind]: checked,
+                }));
+                setFileSizeDrafts((prev) => {
+                  if (prev[valueKey] === undefined) return prev;
+                  const next = { ...prev };
+                  delete next[valueKey];
+                  return next;
+                });
+                patch({
+                  [valueKey]: checked
+                    ? currentVal > 0
+                      ? currentVal
+                      : config.value
+                    : 0,
+                  [unitKey]: checked
+                    ? form[unitKey] || config.unit
+                    : config.unit,
+                });
+              }}
+              form={form}
+              change={change}
+              drafts={fileSizeDrafts}
+              setDrafts={setFileSizeDrafts}
+            />
+          ))}
+        </div>
+        {sizeGroupError && (
+          <div className="field-error" role="alert">
+            {sizeGroupError}
+          </div>
+        )}
+      </div>
+
+      {!collapseTester && (
+        <div className="filter-section-block">
+          <div className="filter-section-title">文件时间过滤</div>
+          <div className="form-grid form-grid--three">
+            <Field
+              label="最小稳定时间（分钟）"
+              hint="跳过刚修改的文件，避免同步未写完的大文件（0 关闭）"
+            >
+              <Input
+                inputMode="numeric"
+                value={String(form.minFileAgeMinutes)}
+                onChange={(v) =>
+                  change(
+                    "minFileAgeMinutes",
+                    Math.max(0, Math.trunc(Number(v) || 0)),
+                  )
+                }
+              />
+            </Field>
+            <Field
+              label="仅同步早于（天）"
+              hint="冷数据归档：只同步 N 天前修改的文件（0 不限）"
+            >
+              <Input
+                inputMode="numeric"
+                value={String(form.olderThanDays)}
+                onChange={(v) =>
+                  change(
+                    "olderThanDays",
+                    Math.max(0, Math.trunc(Number(v) || 0)),
+                  )
+                }
+              />
+            </Field>
+            <Field
+              label="仅同步最近（天）"
+              hint="只同步最近 N 天内修改的文件（0 不限）"
+            >
+              <Input
+                inputMode="numeric"
+                value={String(form.newerThanDays)}
+                onChange={(v) =>
+                  change(
+                    "newerThanDays",
+                    Math.max(0, Math.trunc(Number(v) || 0)),
+                  )
+                }
+              />
+            </Field>
+          </div>
+        </div>
+      )}
+
+      <Field
+        label="文件过滤"
+        hint="仅支持文件名和文件后缀；目录请在下方「文件夹过滤」中配置"
+      >
+        <FileTypeFilter
+          value={form.exclude}
+          onChange={(value) => change("exclude", value)}
+        />
+      </Field>
+
+      <Field
+        label="文件夹过滤"
+        hint="仅针对源目录，勾选要忽略的子文件夹；单层目录名（如 cache/）会匹配所有源目录下的同名目录"
+      >
+        <div className="field-group" role="group">
+          <ExcludeTree
+            engineId={form.alistId}
+            srcPaths={form.srcPath}
+            excludedPaths={excludedFolders}
+            onChange={(folders) =>
+              change("exclude", updateExcludeFolders(form.exclude, folders))
+            }
+          />
+        </div>
+      </Field>
+
+      <Field label="系统目录过滤" hint="忽略操作系统和 NAS 的系统目录">
+        <div className="system-dir-groups" role="group">
+          {systemDirFilterGroups.map((group) => {
+            const selected = group.patterns.filter((p) =>
+              isExcludePatternEnabled(form.exclude, p),
+            );
+            const allSelected = selected.length === group.patterns.length;
+            return (
+              <div className="system-dir-group" key={group.key}>
+                <Checkbox
+                  checked={allSelected}
+                  indeterminate={selected.length > 0 && !allSelected}
+                  onChange={(event) =>
+                    change(
+                      "exclude",
+                      updateExcludePatterns(
+                        form.exclude,
+                        group.patterns,
+                        Boolean(event.target.checked),
+                      ),
+                    )
+                  }
+                >
+                  {group.label}
+                </Checkbox>
+                <span className="system-dir-patterns">
+                  {group.patterns.join(" · ")}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </Field>
+
+      {collapseTester ? (
+        <div className="advanced-options">
+          <button
+            type="button"
+            className={`advanced-options-toggle${filterTesterOpen ? " is-open" : ""}`}
+            aria-expanded={filterTesterOpen}
+            onClick={() => setFilterTesterOpen((o) => !o)}
+          >
+            <IconChevronRight
+              className="advanced-options-chevron"
+              aria-hidden="true"
+            />
+            <span>规则实时测试器与文件时间过滤</span>
+          </button>
+          {filterTesterOpen && (
+            <div className="advanced-options-body">
+              <div className="filter-section-block">
+                <div className="filter-section-title">文件时间过滤</div>
+                <div className="form-grid form-grid--three">
+                  <Field
+                    label="最小稳定时间（分钟）"
+                    hint="跳过刚修改的文件，避免同步未写完的大文件（0 关闭）"
+                  >
+                    <Input
+                      inputMode="numeric"
+                      value={String(form.minFileAgeMinutes)}
+                      onChange={(v) =>
+                        change(
+                          "minFileAgeMinutes",
+                          Math.max(0, Math.trunc(Number(v) || 0)),
+                        )
+                      }
+                    />
+                  </Field>
+                  <Field
+                    label="仅同步早于（天）"
+                    hint="冷数据归档：只同步 N 天前修改的文件（0 不限）"
+                  >
+                    <Input
+                      inputMode="numeric"
+                      value={String(form.olderThanDays)}
+                      onChange={(v) =>
+                        change(
+                          "olderThanDays",
+                          Math.max(0, Math.trunc(Number(v) || 0)),
+                        )
+                      }
+                    />
+                  </Field>
+                  <Field
+                    label="仅同步最近（天）"
+                    hint="只同步最近 N 天内修改的文件（0 不限）"
+                  >
+                    <Input
+                      inputMode="numeric"
+                      value={String(form.newerThanDays)}
+                      onChange={(v) =>
+                        change(
+                          "newerThanDays",
+                          Math.max(0, Math.trunc(Number(v) || 0)),
+                        )
+                      }
+                    />
+                  </Field>
+                </div>
+              </div>
+
+              <div className="filter-tester">
+                <div className="filter-tester-head">
+                  <strong>规则实时测试器</strong>
+                  <span className="muted">
+                    输入示例相对路径和属性，立即验证是否会被当前过滤规则同步
+                  </span>
+                </div>
+                <div className="filter-tester-grid">
+                  <Input
+                    aria-label="示例相对路径"
+                    placeholder="如 2026/photo.jpg 或 cache/tmp.log"
+                    value={testPath}
+                    onChange={setTestPath}
+                  />
+                  <Input
+                    aria-label="示例文件大小 MB"
+                    inputMode="decimal"
+                    suffix="MB"
+                    value={testSizeMB}
+                    onChange={setTestSizeMB}
+                  />
+                  <Input
+                    aria-label="距上次修改分钟数"
+                    inputMode="numeric"
+                    suffix="分钟前"
+                    value={testAgeMinutes}
+                    onChange={setTestAgeMinutes}
+                  />
+                  <Button
+                    type="primary"
+                    theme="light"
+                    loading={testingFilter}
+                    onClick={() => void runFilterTest()}
+                  >
+                    测试匹配
+                  </Button>
+                </div>
+                <div className="filter-tester-foot">
+                  <Checkbox
+                    checked={testIsDir}
+                    onChange={(e) => setTestIsDir(Boolean(e.target.checked))}
+                  >
+                    作为目录测试
+                  </Checkbox>
+                  {testResult && (
+                    <div
+                      className={`filter-tester-result${testResult.willSync ? " is-sync" : " is-skip"}`}
+                      role="status"
+                    >
+                      {testResult.willSync ? (
+                        <IconTickCircle aria-hidden="true" size="small" />
+                      ) : (
+                        <IconAlertTriangle aria-hidden="true" size="small" />
+                      )}
+                      <span>
+                        {testResult.willSync ? "将会同步" : "不会同步"}：
+                        {testResult.reason}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="filter-tester">
+          <div className="filter-tester-head">
+            <strong>规则实时测试器</strong>
+            <span className="muted">
+              输入示例相对路径和属性，立即验证是否会被当前过滤规则同步
+            </span>
+          </div>
+          <div className="filter-tester-grid">
+            <Input
+              aria-label="示例相对路径"
+              placeholder="如 2026/photo.jpg 或 cache/tmp.log"
+              value={testPath}
+              onChange={setTestPath}
+            />
+            <Input
+              aria-label="示例文件大小 MB"
+              inputMode="decimal"
+              suffix="MB"
+              value={testSizeMB}
+              onChange={setTestSizeMB}
+            />
+            <Input
+              aria-label="距上次修改分钟数"
+              inputMode="numeric"
+              suffix="分钟前"
+              value={testAgeMinutes}
+              onChange={setTestAgeMinutes}
+            />
+            <Button
+              type="primary"
+              theme="light"
+              loading={testingFilter}
+              onClick={() => void runFilterTest()}
+            >
+              测试匹配
+            </Button>
+          </div>
+          <div className="filter-tester-foot">
+            <Checkbox
+              checked={testIsDir}
+              onChange={(e) => setTestIsDir(Boolean(e.target.checked))}
+            >
+              作为目录测试
+            </Checkbox>
+            {testResult && (
+              <div
+                className={`filter-tester-result${testResult.willSync ? " is-sync" : " is-skip"}`}
+                role="status"
+              >
+                {testResult.willSync ? (
+                  <IconTickCircle aria-hidden="true" size="small" />
+                ) : (
+                  <IconAlertTriangle aria-hidden="true" size="small" />
+                )}
+                <span>
+                  {testResult.willSync ? "将会同步" : "不会同步"}：
+                  {testResult.reason}
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </>
+  );
 
   return (
     <RemoteDirCacheProvider cache={dirCacheRef.current}>
       <Editor
-        title={job ? legacySchedule ? "编辑同步任务" : "编辑持续同步任务" : initialDraft ? "复制同步任务" : "新建持续同步任务"}
+        title={
+          job
+            ? legacySchedule
+              ? "编辑同步任务"
+              : "编辑持续同步任务"
+            : initialDraft
+              ? "复制同步任务"
+              : "新建持续同步任务"
+        }
         visible={!addingStorage}
         busy={action.busy}
         onClose={onClose}
         onSave={save}
         dirty={effectiveDirty}
-        width={620}
+        width={isFreeMode ? 620 : 760}
         className="task-editor-modal"
         footer={({ close }) => (
           <div className="editor-actions">
@@ -838,7 +1952,7 @@ export default function TaskEditor({
                 onClick={nextStep}
                 disabled={action.busy}
               >
-                过滤规则
+                {step2OptionalBtnLabel}
               </Button>
             )}
             <Button
@@ -860,19 +1974,19 @@ export default function TaskEditor({
             {isNew ? (
               <div className="task-editor-nav task-editor-nav--steps">
                 <div className="task-editor-stepbar">
-                  <h3>{taskEditorTabs[step].label}</h3>
+                  <h3>{currentTabs[step].label}</h3>
                   <div className="task-editor-count" aria-label="当前步骤">
-                    步骤 <strong>{step + 1}</strong> / {taskEditorTabs.length}
+                    步骤 <strong>{step + 1}</strong> / {currentTabs.length}
                   </div>
                 </div>
                 <nav
                   className="task-editor-stepper"
                   aria-label="任务配置步骤"
                 >
-                  {taskEditorTabs.map((tab, index) => {
+                  {currentTabs.map((tab, index) => {
                     const isCurrent = index === step;
                     const isDone =
-                      index < step && !validation.stepErrors[index];
+                      index < step && !effectiveStepErrors[index];
                     return (
                       <button
                         key={tab.key}
@@ -895,7 +2009,7 @@ export default function TaskEditor({
                 <div className="task-editor-progress" aria-hidden="true">
                   <span
                     style={{
-                      width: `${((step + 1) / taskEditorTabs.length) * 100}%`,
+                      width: `${((step + 1) / currentTabs.length) * 100}%`,
                     }}
                   />
                 </div>
@@ -907,7 +2021,7 @@ export default function TaskEditor({
                   activeKey={activeTab}
                   onChange={(key) => setActiveTab(key)}
                 >
-                  {taskEditorTabs.map((tab) => (
+                  {currentTabs.map((tab) => (
                     <Tabs.TabPane
                       tab={tab.label}
                       itemKey={tab.key}
@@ -919,8 +2033,119 @@ export default function TaskEditor({
             )}
 
             <div className="task-editor-step" ref={scrollRef}>
-              {panelMounted("basic") && (
-                <div className="form-section" style={panelStyle("basic")}>
+              {/* ==================== STANDARD WIZARD MODE ==================== */}
+              {!isFreeMode && panelMounted("folders") && (
+                <div className="form-section" style={panelStyle("folders")}>
+                  <div className="wizard-mode-bar">
+                    <span className="muted">
+                      标准向导 · 面向最常见的「NAS 本地文件夹 ↔ 远程网盘文件夹」1 对 1 同步
+                    </span>
+                    <Button
+                      size="small"
+                      type="tertiary"
+                      onClick={switchToFreeMode}
+                    >
+                      切换为自由多对多 / 云对云模式
+                    </Button>
+                  </div>
+
+                  {enginesError && (
+                    <InlineNotice
+                      role="alert"
+                      message={`存储配置加载失败：${enginesError}`}
+                      onRetry={onRetryEngines}
+                    />
+                  )}
+
+                  {!enginesError && !form.alistId && (
+                    <div className="engine-empty-guide" role="status">
+                      <IconInfoCircle aria-hidden="true" size="small" />
+                      <span>
+                        内置存储尚未就绪，请先前往存储管理检查本地目录或远程存储配置。
+                      </span>
+                      {onNavigateEngines && (
+                        <Button
+                          size="small"
+                          type="primary"
+                          theme="light"
+                          onClick={onNavigateEngines}
+                        >
+                          前往存储管理
+                        </Button>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="wizard-folder-split">
+                    <NasLocalFolderPicker
+                      engineId={form.alistId}
+                      localRoots={nativeStorage.data?.localRoots}
+                      value={wizardNasPath}
+                      onChange={handleWizardNasSelect}
+                      onRefresh={refreshFolders}
+                      error={
+                        validatedSteps.has(0) && !wizardNasPath
+                          ? "请选择 NAS 本地文件夹"
+                          : wizardDirection !== "download"
+                            ? showStepError(0, "srcPath")
+                            : showStepError(0, "dstPath")
+                      }
+                      epoch={remoteTreeEpoch}
+                    />
+
+                    <CloudRemoteFolderPicker
+                      engineId={form.alistId}
+                      remotes={nativeStorage.data?.remotes}
+                      preferredRemote={preferredRemote}
+                      value={wizardRemotePath}
+                      onChange={handleWizardRemoteSelect}
+                      onAddStorage={() => setAddingStorage(true)}
+                      onRefresh={refreshFolders}
+                      error={
+                        validatedSteps.has(0) && !wizardRemotePath
+                          ? "请选择云端存储文件夹"
+                          : wizardDirection === "download"
+                            ? showStepError(0, "srcPath")
+                            : showStepError(0, "dstPath")
+                      }
+                      epoch={remoteTreeEpoch}
+                    />
+                  </div>
+
+                  {(nasDisplaySummary || wizardRemotePath) && (
+                    <div className="wizard-pair-summary" role="status">
+                      <span className="wizard-pair-endpoint">
+                        <strong>NAS</strong> {nasDisplaySummary || "未选择"}
+                      </span>
+                      <span className="wizard-pair-arrow" aria-hidden="true">
+                        {wizardDirectionArrow}
+                      </span>
+                      <span className="wizard-pair-endpoint">
+                        <strong>云端</strong> {wizardRemotePath || "未选择"}
+                      </span>
+                    </div>
+                  )}
+
+                  {wizardPathConflict && (
+                    <div className="sync-method-banner is-warning" role="alert">
+                      <IconAlertTriangle aria-hidden="true" size="small" />
+                      <span>{wizardPathConflict}</span>
+                    </div>
+                  )}
+
+                  {matchedStandardWebDAVNames.length > 0 && (
+                    <div
+                      className="sync-method-banner webdav-compare-tip"
+                      role="status"
+                    >
+                      <IconInfoCircle aria-hidden="true" size="small" />
+                      <span>
+                        已选择标准 WebDAV（{matchedStandardWebDAVNames.join("、")}
+                        ），已默认启用「仅按文件大小」比对，避免大流量远端哈希校验。
+                      </span>
+                    </div>
+                  )}
+
                   <Field
                     label="任务名称"
                     required
@@ -930,7 +2155,328 @@ export default function TaskEditor({
                     <Input
                       value={form.remark}
                       onChange={(value) => change("remark", value)}
-                      placeholder={generatedName || "例如：相册持续同步到夸克网盘"}
+                      placeholder={
+                        generatedName || "例如：Photos · PhotoCloud"
+                      }
+                    />
+                  </Field>
+                </div>
+              )}
+
+              {!isFreeMode && panelMounted("safety") && (
+                <div className="form-section" style={panelStyle("safety")}>
+                  <div className="wizard-route-pill" role="status">
+                    <span>NAS {nasDisplaySummary || "未选择"}</span>
+                    <span className="wizard-pair-arrow" aria-hidden="true">
+                      {wizardDirectionArrow}
+                    </span>
+                    <span>云端 {wizardRemotePath || "未选择"}</span>
+                  </div>
+
+                  <Field label="同步方向" ariaLabel="同步方向">
+                    <div
+                      className="wizard-direction-grid"
+                      role="radiogroup"
+                      aria-label="同步方向"
+                    >
+                      {wizardDirectionCards.map((card) => {
+                        const selected = wizardDirection === card.key;
+                        return (
+                          <button
+                            key={card.key}
+                            type="button"
+                            role="radio"
+                            aria-checked={selected}
+                            className={`sync-direction-card${selected ? " is-selected" : ""}`}
+                            onClick={() =>
+                              handleWizardDirectionChange(card.key)
+                            }
+                          >
+                            <div className="sync-direction-card-head">
+                              <span className="sync-direction-card-icon">
+                                <card.icon aria-hidden="true" />
+                              </span>
+                              <span className="sync-direction-card-title">
+                                {card.title}
+                              </span>
+                              <span className="sync-direction-card-route">
+                                {card.route}
+                              </span>
+                            </div>
+                            <div className="sync-direction-card-desc">
+                              {card.desc}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </Field>
+
+                  {wizardDirection !== "bidirectional" && (
+                    <Field label="目标端删除策略" ariaLabel="单向删除策略">
+                      <div className="field-group">
+                        <div
+                          className="delete-policy-list"
+                          role="radiogroup"
+                          aria-label="单向删除策略"
+                        >
+                          {oneWayDeleteModeCards.map((opt) => {
+                            const selected = wizardDeleteMode === opt.key;
+                            return (
+                              <button
+                                key={opt.key}
+                                type="button"
+                                role="radio"
+                                aria-checked={selected}
+                                className={`delete-policy-card${selected ? " is-selected" : ""}${opt.danger ? " is-danger" : ""}`}
+                                onClick={() =>
+                                  handleWizardDeleteModeChange(opt.key)
+                                }
+                              >
+                                <div className="delete-policy-head">
+                                  <span
+                                    className={`delete-policy-radio${selected ? " is-checked" : ""}`}
+                                    aria-hidden="true"
+                                  />
+                                  <span className="delete-policy-title">
+                                    {opt.title}
+                                  </span>
+                                  {opt.badge && (
+                                    <Tag size="small" color="green" type="light">
+                                      {opt.badge}
+                                    </Tag>
+                                  )}
+                                </div>
+                                <div className="delete-policy-desc">
+                                  {opt.desc}
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                        {wizardDeleteMode === "mirror" && (
+                          <div
+                            className="sync-method-banner is-warning"
+                            role="status"
+                          >
+                            <IconAlertTriangle aria-hidden="true" size="small" />
+                            <span>
+                              镜像模式会清理目标端多余的已有文件。首次保存或修改路径后将处于待确认状态，先通过模拟运行预览清理清单再启动。
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    </Field>
+                  )}
+
+                  <InlineCryptPanel
+                    draft={inlineCryptDraft}
+                    onChange={(nextDraft) => {
+                      if (
+                        nextDraft.values.name !== inlineCryptDraft.values.name
+                      ) {
+                        inlineCryptDirtyNameRef.current = true;
+                      }
+                      setInlineCryptDraft(nextDraft);
+                    }}
+                    remotePath={wizardRemotePath}
+                    direction={wizardDirection}
+                    remotes={nativeStorage.data?.remotes}
+                    showErrors={validatedSteps.has(1)}
+                    createdCryptName={createdInlineCryptName}
+                  />
+
+                  <div className="wizard-safety-card">
+                    <SettingRow
+                      label="启用删除回收站保护"
+                      variant="bordered"
+                      tip="开启后，删除或覆盖目标文件前先移至独立回收站子目录，防止误删或勒索同步覆盖后无法恢复"
+                    >
+                      <Switch
+                        aria-label="启用删除回收站保护"
+                        checked={form.trashEnable}
+                        onChange={(v) => change("trashEnable", v)}
+                      />
+                    </SettingRow>
+                    {form.trashEnable && (
+                      <div className="form-grid form-grid--two wizard-trash-fields">
+                        <Field
+                          label="回收站目录名"
+                          error={showStepError(1, "trashDir")}
+                          hint="自动从同步扫描中排除"
+                        >
+                          <Input
+                            value={form.trashDir}
+                            placeholder=".opensync-trash"
+                            onChange={(v) => change("trashDir", v)}
+                          />
+                        </Field>
+                        <Field
+                          label="回收站保留天数"
+                          hint="0 表示永久保留，不自动清理"
+                        >
+                          <Input
+                            inputMode="numeric"
+                            value={String(form.trashRetentionDays)}
+                            placeholder="30"
+                            onChange={(v) =>
+                              change(
+                                "trashRetentionDays",
+                                Math.max(0, Math.trunc(Number(v) || 0)),
+                              )
+                            }
+                          />
+                        </Field>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="form-grid form-grid--two">
+                    <Field label="文件比对方式">
+                      <Select
+                        value={form.compareMode}
+                        optionList={compareModeOptions.map((o) => ({
+                          label: o.label,
+                          value: o.value,
+                        }))}
+                        onChange={(v) => {
+                          setCompareModeSource("manual");
+                          change("compareMode", Number(v));
+                        }}
+                      />
+                    </Field>
+                    <Field label="同名冲突处理">
+                      <Select
+                        value={form.conflictPolicy}
+                        optionList={conflictPolicyOptions.map((o) => ({
+                          label:
+                            wizardDirection === "bidirectional"
+                              ? [
+                                  "保留较新版本（另一版本删除）",
+                                  "保留源端版本（目标版本删除）",
+                                  "保留双方冲突副本（推荐）",
+                                ][o.value]
+                              : o.label,
+                          value: o.value,
+                        }))}
+                        onChange={(v) => change("conflictPolicy", Number(v))}
+                      />
+                    </Field>
+                  </div>
+                </div>
+              )}
+
+              {!isFreeMode && panelMounted("plan") && (
+                <div className="form-section" style={panelStyle("plan")}>
+                  <SettingRow
+                    label="启用持续同步"
+                    variant="bordered"
+                    tip="开启后按下方实时或周历计划运行；关闭则创建后先保持暂停状态。"
+                  >
+                    <Switch
+                      aria-label="启用持续同步"
+                      checked={form.enable}
+                      onChange={(value) => change("enable", value)}
+                    />
+                  </SettingRow>
+
+                  <Field
+                    label="同步运行计划（7×24 周历调度）"
+                    error={showStepError(2, "weeklySchedule")}
+                  >
+                    <WeeklyScheduleGrid
+                      value={form.extraFlags?.weeklySchedule}
+                      onChange={(ws) =>
+                        change("extraFlags", {
+                          ...form.extraFlags,
+                          weeklySchedule: ws,
+                        })
+                      }
+                      error={showStepError(2, "weeklySchedule")}
+                    />
+                  </Field>
+
+                  <div className="advanced-options">
+                    <button
+                      type="button"
+                      className={`advanced-options-toggle${scheduleCadenceOpen ? " is-open" : ""}`}
+                      aria-expanded={scheduleCadenceOpen}
+                      onClick={() => setScheduleCadenceOpen((o) => !o)}
+                    >
+                      <IconChevronRight
+                        className="advanced-options-chevron"
+                        aria-hidden="true"
+                      />
+                      <span>轮询频率、防抖与任务通知绑定</span>
+                      {(form.notifyMode === 1 ||
+                        form.extraFlags?.syncPollIntervalSec ||
+                        form.extraFlags?.syncAuditIntervalMin) && (
+                        <Tag size="small" color="blue" type="light">
+                          已自定义
+                        </Tag>
+                      )}
+                    </button>
+                    {scheduleCadenceOpen && (
+                      <div className="advanced-options-body">
+                        {renderContinuousCadenceControls(2)}
+                        {renderWindowAndNotifyControls(2)}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="wizard-filter-section">
+                    <h4 className="wizard-section-heading">过滤规则（可选）</h4>
+                    {renderFilterCoreFields(true)}
+                  </div>
+
+                  <ExpertTuningDrawer
+                    form={form}
+                    open={advancedOpen}
+                    onToggleOpen={() => setAdvancedOpen((o) => !o)}
+                    change={change}
+                    setForm={setForm}
+                    setDirty={setDirty}
+                    setCompareModeSource={setCompareModeSource}
+                    bwLimitError={bwLimitError}
+                    setBwLimitError={setBwLimitError}
+                    bwLimitFieldError={showStepError(2, "bwLimit")}
+                    systemDefaultBwLimit={
+                      systemSettings.data?.defaultBwLimit || ""
+                    }
+                    existingJobs={existingJobs}
+                    showPresetsOutside
+                  />
+                </div>
+              )}
+
+              {/* ==================== FREE / MULTI-PATH MODE ==================== */}
+              {isFreeMode && panelMounted("basic") && (
+                <div className="form-section" style={panelStyle("basic")}>
+                  <div className="wizard-mode-bar">
+                    <span className="muted">
+                      高级自由模式 · 支持多源多目标、云对云及本地对本地路径自由组合
+                    </span>
+                    <Button
+                      size="small"
+                      type="tertiary"
+                      onClick={switchToWizardMode}
+                    >
+                      返回标准向导模式
+                    </Button>
+                  </div>
+
+                  <Field
+                    label="任务名称"
+                    required
+                    error={showStepError(0, "remark")}
+                    fieldId="remark"
+                  >
+                    <Input
+                      value={form.remark}
+                      onChange={(value) => change("remark", value)}
+                      placeholder={
+                        generatedName || "例如：相册持续同步到夸克网盘"
+                      }
                     />
                   </Field>
 
@@ -970,14 +2516,21 @@ export default function TaskEditor({
                       >
                         添加网盘连接
                       </Button>
-                      {preferredRemote && <span className="muted">优先浏览 {preferredRemote}</span>}
-                      {nativeStorage.data && !nativeStorage.data.localRoots?.length && (
-                        <InlineNotice
-                          role="status"
-                          message="需要同步 NAS 目录时，请在飞牛「应用设置 → 文件夹访问权限」中授权后刷新目录。"
-                          action={<Button size="small" onClick={refreshFolders}>刷新目录</Button>}
-                        />
+                      {preferredRemote && (
+                        <span className="muted">优先浏览 {preferredRemote}</span>
                       )}
+                      {nativeStorage.data &&
+                        !nativeStorage.data.localRoots?.length && (
+                          <InlineNotice
+                            role="status"
+                            message="需要同步 NAS 目录时，请在飞牛「应用设置 → 文件夹访问权限」中授权后刷新目录。"
+                            action={
+                              <Button size="small" onClick={refreshFolders}>
+                                刷新目录
+                              </Button>
+                            }
+                          />
+                        )}
                     </div>
                   )}
 
@@ -988,8 +2541,8 @@ export default function TaskEditor({
                         role="radiogroup"
                         aria-label="同步方向"
                       >
-                        {directionCards.map((card) => {
-                          const selected = activeDirection === card.key;
+                        {freeDirectionCards.map((card) => {
+                          const selected = activeFreeDirection === card.key;
                           return (
                             <button
                               key={card.key}
@@ -1031,19 +2584,21 @@ export default function TaskEditor({
                     </div>
                   </Field>
 
-                  {activeDirection !== "bidirectional" && form.method !== 2 && !legacySchedule && (
-                    <SettingRow
-                      label="镜像对齐"
-                      variant="bordered"
-                      tip="开启后，目标端独有的文件会被清理，沿用删除保护与回收站。关闭时保留这些文件。"
-                    >
-                      <Switch
-                        aria-label="镜像对齐"
-                        checked={form.method === 1}
-                        onChange={(v) => change("method", v ? 1 : 0)}
-                      />
-                    </SettingRow>
-                  )}
+                  {activeFreeDirection !== "bidirectional" &&
+                    form.method !== 2 &&
+                    !legacySchedule && (
+                      <SettingRow
+                        label="镜像对齐"
+                        variant="bordered"
+                        tip="开启后，目标端独有的文件会被清理，沿用删除保护与回收站。关闭时保留这些文件。"
+                      >
+                        <Switch
+                          aria-label="镜像对齐"
+                          checked={form.method === 1}
+                          onChange={(v) => change("method", v ? 1 : 0)}
+                        />
+                      </SettingRow>
+                    )}
 
                   <div className="form-grid">
                     <Field
@@ -1058,7 +2613,11 @@ export default function TaskEditor({
                         value={form.srcPath}
                         onChange={handleSrcPathChange}
                         multiple={srcMultiple}
-                        initialExpandedRoot={nativeStorage.data?.localRoots?.length ? "/本地" : undefined}
+                        initialExpandedRoot={
+                          nativeStorage.data?.localRoots?.length
+                            ? "/本地"
+                            : undefined
+                        }
                         remotes={nativeStorage.data?.remotes}
                         ariaLabel="选择源目录"
                       />
@@ -1109,7 +2668,12 @@ export default function TaskEditor({
                             handleSrcPathChange(
                               form.method === 3
                                 ? [check.normalized]
-                                : Array.from(new Set([...form.srcPath, check.normalized])),
+                                : Array.from(
+                                    new Set([
+                                      ...form.srcPath,
+                                      check.normalized,
+                                    ]),
+                                  ),
                             );
                             setNativeTarget("");
                           }}
@@ -1131,7 +2695,12 @@ export default function TaskEditor({
                             handleDstPathChange(
                               form.method === 3
                                 ? [check.normalized]
-                                : Array.from(new Set([...form.dstPath, check.normalized])),
+                                : Array.from(
+                                    new Set([
+                                      ...form.dstPath,
+                                      check.normalized,
+                                    ]),
+                                  ),
                             );
                             setNativeTarget("");
                           }}
@@ -1142,63 +2711,91 @@ export default function TaskEditor({
                     </div>
                   </Field>
 
-                  {matchedDstStandardWebDAVNames.length > 0 && form.compareMode === 1 && (
-                    <div className="sync-method-banner webdav-compare-tip" role="status">
-                      <IconInfoCircle aria-hidden="true" size="small" />
-                      <span>
-                        目标存储为标准 WebDAV（{matchedDstStandardWebDAVNames.join("、")}，如 OpenList / AList），已默认使用「<strong>仅按文件大小</strong>」比对，避免拉取大量远端资源到本地校验。
-                      </span>
-                    </div>
-                  )}
-                  {matchedStandardWebDAVNames.length > 0 && form.compareMode === 2 && (
-                    <div className="sync-method-banner is-warning webdav-compare-tip" role="status">
-                      <IconAlertTriangle aria-hidden="true" size="small" />
-                      <span>
-                        已选择标准 WebDAV 存储（{matchedStandardWebDAVNames.join("、")}，如 OpenList / AList）。当前「大小 + MD5」比对方式会拉取远端文件到本地校验并消耗大量流量，建议切换为 <strong>仅按文件大小</strong>。
-                      </span>
-                      <Button
-                        size="small"
-                        type="primary"
-                        theme="light"
-                        onClick={() => {
-                          setCompareModeSource("manual");
-                          change("compareMode", 1);
-                          setPolicyOpen(true);
-                          Toast.success("已将文件比对方式设为「仅大小」");
-                        }}
+                  {matchedDstStandardWebDAVNames.length > 0 &&
+                    form.compareMode === 1 && (
+                      <div
+                        className="sync-method-banner webdav-compare-tip"
+                        role="status"
                       >
-                        设为仅大小
-                      </Button>
-                    </div>
-                  )}
-                  {matchedStandardWebDAVNames.length > 0 && form.compareMode === 0 && (
-                    <div className="sync-method-banner webdav-compare-tip" role="status">
-                      <IconInfoCircle aria-hidden="true" size="small" />
-                      <span>
-                        已选择标准 WebDAV 存储（{matchedStandardWebDAVNames.join("、")}，如 OpenList / AList）。执行时默认比对会自动按 <strong>仅大小</strong> 比对以避免拉取远端资源到本地，也可显式设为 <strong>仅按文件大小</strong>。
-                      </span>
-                      <Button
-                        size="small"
-                        type="primary"
-                        theme="light"
-                        onClick={() => {
-                          setCompareModeSource("manual");
-                          change("compareMode", 1);
-                          setPolicyOpen(true);
-                          Toast.success("已将文件比对方式设为「仅大小」");
-                        }}
+                        <IconInfoCircle aria-hidden="true" size="small" />
+                        <span>
+                          目标存储为标准 WebDAV（
+                          {matchedDstStandardWebDAVNames.join("、")}
+                          ，如 OpenList / AList），已默认使用「
+                          <strong>仅按文件大小</strong>
+                          」比对，避免拉取大量远端资源到本地校验。
+                        </span>
+                      </div>
+                    )}
+                  {matchedStandardWebDAVNames.length > 0 &&
+                    form.compareMode === 2 && (
+                      <div
+                        className="sync-method-banner is-warning webdav-compare-tip"
+                        role="status"
                       >
-                        设为仅大小
-                      </Button>
-                    </div>
-                  )}
+                        <IconAlertTriangle aria-hidden="true" size="small" />
+                        <span>
+                          已选择标准 WebDAV 存储（
+                          {matchedStandardWebDAVNames.join("、")}
+                          ，如 OpenList / AList）。当前「大小 + MD5」比对方式会拉取远端文件到本地校验并消耗大量流量，建议切换为{" "}
+                          <strong>仅按文件大小</strong>。
+                        </span>
+                        <Button
+                          size="small"
+                          type="primary"
+                          theme="light"
+                          onClick={() => {
+                            setCompareModeSource("manual");
+                            change("compareMode", 1);
+                            setPolicyOpen(true);
+                            Toast.success("已将文件比对方式设为「仅大小」");
+                          }}
+                        >
+                          设为仅大小
+                        </Button>
+                      </div>
+                    )}
+                  {matchedStandardWebDAVNames.length > 0 &&
+                    form.compareMode === 0 && (
+                      <div
+                        className="sync-method-banner webdav-compare-tip"
+                        role="status"
+                      >
+                        <IconInfoCircle aria-hidden="true" size="small" />
+                        <span>
+                          已选择标准 WebDAV 存储（
+                          {matchedStandardWebDAVNames.join("、")}
+                          ，如 OpenList / AList）。执行时默认比对会自动按{" "}
+                          <strong>仅大小</strong>{" "}
+                          比对以避免拉取远端资源到本地，也可显式设为{" "}
+                          <strong>仅按文件大小</strong>。
+                        </span>
+                        <Button
+                          size="small"
+                          type="primary"
+                          theme="light"
+                          onClick={() => {
+                            setCompareModeSource("manual");
+                            change("compareMode", 1);
+                            setPolicyOpen(true);
+                            Toast.success("已将文件比对方式设为「仅大小」");
+                          }}
+                        >
+                          设为仅大小
+                        </Button>
+                      </div>
+                    )}
                   {dstEncryption.encryptable.length > 0 && (
-                    <div className="sync-method-banner quick-crypt-banner" role="status">
+                    <div
+                      className="sync-method-banner quick-crypt-banner"
+                      role="status"
+                    >
                       <IconLockStroked aria-hidden="true" size="small" />
                       <span>
                         {dstEncryption.encryptable.length === 1 ? (
                           <>
-                            目标目录 <code>{dstEncryption.encryptable[0].syncPath}</code>{" "}
+                            目标目录{" "}
+                            <code>{dstEncryption.encryptable[0].syncPath}</code>{" "}
                             当前以明文存储在远端。可快捷创建独立 Crypt 加密存储并自动切换为加密目标。
                           </>
                         ) : (
@@ -1231,7 +2828,9 @@ export default function TaskEditor({
                           <strong>
                             {Array.from(
                               new Set(
-                                dstEncryption.encrypted.map((item) => item.remoteName),
+                                dstEncryption.encrypted.map(
+                                  (item) => item.remoteName,
+                                ),
                               ),
                             ).join("、")}
                           </strong>
@@ -1365,1262 +2964,79 @@ export default function TaskEditor({
                 </div>
               )}
 
-              {panelMounted("schedule") && (
+              {isFreeMode && panelMounted("schedule") && (
                 <div className="form-section" style={panelStyle("schedule")}>
-                  {form.isCron !== 2 && <SettingRow
-                    label={legacySchedule ? "启用任务" : "启用持续同步"}
-                    variant="bordered"
-                    tip={legacySchedule ? "按现有执行计划运行。" : "保存后开始监听并检查两端目录。"}
-                  >
-                    <Switch
-                      aria-label={legacySchedule ? "启用任务" : "启用持续同步"}
-                      checked={form.enable}
-                      onChange={(value) => change("enable", value)}
-                    />
-                  </SettingRow>}
+                  {form.isCron !== 2 && (
+                    <SettingRow
+                      label={legacySchedule ? "启用任务" : "启用持续同步"}
+                      variant="bordered"
+                      tip={
+                        legacySchedule
+                          ? "按现有执行计划运行。"
+                          : "保存后开始监听并检查两端目录。"
+                      }
+                    >
+                      <Switch
+                        aria-label={legacySchedule ? "启用任务" : "启用持续同步"}
+                        checked={form.enable}
+                        onChange={(value) => change("enable", value)}
+                      />
+                    </SettingRow>
+                  )}
 
                   {legacySchedule ? (
-                    <InlineNotice message={form.isCron === 2 ? "此任务按原配置手动执行。" : "此任务按原配置定时执行。"} />
-                  ) : <><div className="continuous-sync-panel">
-                    {matchedQuarkNames.length > 0 && effectivePollSec < 300 && (
-                      <div className="sync-method-banner is-warning" role="note">
-                        <IconAlertTriangle aria-hidden="true" size="small" />
-                        <span>
-                          当前任务包含夸克网盘（{matchedQuarkNames.join("、")}），建议将「远端检测间隔」设为 300 秒（5 分钟）及以上，降低触发接口限流（429）的概率。
-                        </span>
-                      </div>
-                    )}
-                    <Field
-                      label="远端检测间隔（秒）"
-                      hint="默认 60 秒（10–86400），用于周期发现远端变更及重启后补齐"
-                      error={showStepError(1, "interval")}
-                    >
-                      <div className="field-group">
-                        <Input
-                          aria-label="远端检测间隔（秒）"
-                          inputMode="numeric"
-                          value={pollDraft}
-                          placeholder="60"
-                          onChange={(v) => {
-                            setPollDraft(v);
-                            const parsed = parsePositiveIntDraft(v);
+                    <InlineNotice
+                      message={
+                        form.isCron === 2
+                          ? "此任务按原配置手动执行。"
+                          : "此任务按原配置定时执行。"
+                      }
+                    />
+                  ) : (
+                    <>
+                      {renderContinuousCadenceControls(1)}
+                      <Field
+                        label="周历时段限速 / 暂停调度（可选）"
+                        error={showStepError(1, "weeklySchedule")}
+                      >
+                        <WeeklyScheduleGrid
+                          value={form.extraFlags?.weeklySchedule}
+                          onChange={(ws) =>
                             change("extraFlags", {
                               ...form.extraFlags,
-                              syncPollIntervalSec: parsed,
-                            });
-                          }}
-                          onBlur={() => {
-                            if (!pollDraft.trim()) {
-                              setPollDraft("60");
-                              change("extraFlags", {
-                                ...form.extraFlags,
-                                syncPollIntervalSec: 0,
-                              });
-                            }
-                          }}
-                        />
-                        <div
-                          className="schedule-chips"
-                          role="group"
-                          aria-label="常用远端检测间隔"
-                        >
-                          {pollIntervalPresets.map((preset) => {
-                            const active = effectivePollSec === preset.value;
-                            return (
-                              <button
-                                key={preset.value}
-                                type="button"
-                                className={`schedule-chip${active ? " is-active" : ""}`}
-                                onClick={() => {
-                                  setPollDraft(String(preset.value));
-                                  change("extraFlags", {
-                                    ...form.extraFlags,
-                                    syncPollIntervalSec: preset.value,
-                                  });
-                                }}
-                              >
-                                每 {preset.label}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    </Field>
-
-                    <div className="form-grid form-grid--two">
-                      <Field
-                        label="完整核对间隔（分钟）"
-                        hint="默认 1440 分钟（每天一次），全面核对双端一致性"
-                      >
-                        <div className="field-group">
-                          <Input
-                            aria-label="完整核对间隔（分钟）"
-                            inputMode="numeric"
-                            value={auditDraft}
-                            placeholder="1440"
-                            onChange={(v) => {
-                              setAuditDraft(v);
-                              const parsed = parsePositiveIntDraft(v);
-                              change("extraFlags", {
-                                ...form.extraFlags,
-                                syncAuditIntervalMin: parsed,
-                              });
-                            }}
-                            onBlur={() => {
-                              if (!auditDraft.trim()) {
-                                setAuditDraft("1440");
-                                change("extraFlags", {
-                                  ...form.extraFlags,
-                                  syncAuditIntervalMin: 0,
-                                });
-                              }
-                            }}
-                          />
-                          <div
-                            className="schedule-chips"
-                            role="group"
-                            aria-label="常用完整核对间隔"
-                          >
-                            {auditIntervalPresets.map((preset) => {
-                              const active = effectiveAuditMin === preset.value;
-                              return (
-                                <button
-                                  key={preset.value}
-                                  type="button"
-                                  className={`schedule-chip${active ? " is-active" : ""}`}
-                                  onClick={() => {
-                                    setAuditDraft(String(preset.value));
-                                    change("extraFlags", {
-                                      ...form.extraFlags,
-                                      syncAuditIntervalMin: preset.value,
-                                    });
-                                  }}
-                                >
-                                  {preset.label}
-                                </button>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      </Field>
-                      <Field
-                        label="变动合并等待（秒）"
-                        hint="默认 30 秒（2–3600），连续写入停止后再触发同步"
-                      >
-                        <Input
-                          aria-label="变动合并等待（秒）"
-                          inputMode="numeric"
-                          value={debounceDraft}
-                          placeholder="30"
-                          onChange={(v) => {
-                            setDebounceDraft(v);
-                            const parsed = parsePositiveIntDraft(v);
-                            change("extraFlags", {
-                              ...form.extraFlags,
-                              watchDebounceSec: parsed,
-                            });
-                          }}
-                          onBlur={() => {
-                            if (!debounceDraft.trim()) {
-                              setDebounceDraft("30");
-                              change("extraFlags", {
-                                ...form.extraFlags,
-                                watchDebounceSec: 0,
-                              });
-                            }
-                          }}
+                              weeklySchedule: ws,
+                            })
+                          }
+                          error={showStepError(1, "weeklySchedule")}
                         />
                       </Field>
-                    </div>
-                  </div>
-
-                  <div
-                    className={`schedule-preview-card${validation.fields.interval ? " is-invalid" : ""}`}
-                    aria-live="polite"
-                  >
-                    {validation.fields.interval ? (
-                      <div className="schedule-preview-error" role="alert">
-                        <IconAlertTriangle aria-hidden="true" size="small" />
-                        <span>{validation.fields.interval}</span>
-                      </div>
-                    ) : (
-                      <>
-                        <div className="schedule-preview-plan">
-                          {formatContinuousSyncPlan({
-                            pollIntervalSec: effectivePollSec,
-                            auditIntervalMin: effectiveAuditMin,
-                            debounceSec: effectiveDebounceSec,
-                          })}
-                        </div>
-                        <div className="muted">
-                          本地授权目录变更通过实时监听自动捕获；服务重启或离开/恢复运行窗口后会自动对账补齐。
-                        </div>
-                      </>
-                    )}
-                  </div>
-
-                  </>}
-                  <SettingRow
-                    label="限制允许运行时间窗口"
-                    variant="bordered"
-                    tip="开启后，持续同步仅在指定时段内传输（支持跨午夜，如 23:00 至 06:00）；窗口外产生的变更会暂挂，进入窗口后自动补齐。"
-                  >
-                    <Switch
-                      aria-label="限制允许运行时间窗口"
-                      checked={form.windowEnable}
-                      onChange={(value) => change("windowEnable", value)}
-                    />
-                  </SettingRow>
-
-                  {form.windowEnable && (
-                    <div className="form-section">
-                      <div className="form-grid form-grid--two">
-                        <Field
-                          label="开始时间 (HH:MM)"
-                          error={showStepError(1, "window")}
-                        >
-                          <Input
-                            value={form.windowStart}
-                            placeholder="23:00"
-                            onChange={(v) => change("windowStart", v)}
-                          />
-                        </Field>
-                        <Field label="结束时间 (HH:MM)">
-                          <Input
-                            value={form.windowEnd}
-                            placeholder="06:00"
-                            onChange={(v) => change("windowEnd", v)}
-                          />
-                        </Field>
-                      </div>
-                      <SettingRow
-                        label="超出时间窗口时自动中止运行中的传输"
-                        variant="bordered"
-                        tip="关闭则允许已在窗口内启动的批次传输完毕；开启则在离开窗口后自动中止，待下次窗口恢复续传"
-                      >
-                        <Switch
-                          aria-label="超出时间窗口时自动中止运行中的传输"
-                          checked={form.windowStopOutside}
-                          onChange={(v) => change("windowStopOutside", v)}
-                        />
-                      </SettingRow>
-                    </div>
+                    </>
                   )}
 
-                  <Field label="任务通知绑定">
-                    <Select
-                      value={form.notifyMode}
-                      optionList={notifyModeOptions.map((o) => ({
-                        label: o.label,
-                        value: o.value,
-                      }))}
-                      onChange={(v) => change("notifyMode", Number(v))}
-                    />
-                  </Field>
+                  {renderWindowAndNotifyControls(1)}
 
-                  {form.notifyMode === 1 && (
-                    <Field
-                      label="选择通知渠道"
-                      error={showStepError(1, "notifyIds")}
-                      hint="该任务的异常与完成通知仅发送到所选渠道"
-                    >
-                      <Select
-                        multiple
-                        value={form.notifyIds}
-                        placeholder={
-                          notifications.data?.length
-                            ? "请选择一个或多个通知渠道"
-                            : "暂无可用通知渠道，请先在通知配置页面添加"
-                        }
-                        optionList={(notifications.data || []).map((n) => ({
-                          value: n.id,
-                          label: `#${n.id} ${channelNames[n.method] || "未知渠道"} · ${getNotifyEndpointSummary(n)}`,
-                        }))}
-                        onChange={(vals) =>
-                          change(
-                            "notifyIds",
-                            Array.isArray(vals)
-                              ? vals.map(Number).filter(Number.isFinite)
-                              : [],
-                          )
-                        }
-                      />
-                    </Field>
-                  )}
-
-                  <div className="advanced-options">
-                    <button
-                      type="button"
-                      className={`advanced-options-toggle${advancedOpen ? " is-open" : ""}`}
-                      aria-expanded={advancedOpen}
-                      onClick={() => setAdvancedOpen((open) => !open)}
-                    >
-                      <IconChevronRight
-                        className="advanced-options-chevron"
-                        aria-hidden="true"
-                      />
-                      <span>高级选项（并发、限速、流控与 rclone 调优）</span>
-                      {activeAdvancedCount > 0 && (
-                        <Tag size="small" color="blue" type="light">
-                          已配置 {activeAdvancedCount} 项
-                        </Tag>
-                      )}
-                    </button>
-                    {advancedOpen && (
-                      <div className="advanced-options-body">
-                        <div className="advanced-option-group">
-                          <div className="advanced-option-group-title">场景预设与传输增强</div>
-                          <Field
-                            label="一键场景预设"
-                            hint="点击自动填入推荐的断点续传、并发与重试参数，应用后仍可按需微调"
-                          >
-                            <div className="schedule-chips">
-                              {taskScenarioPresets.map((preset) => (
-                                <button
-                                  key={preset.key}
-                                  type="button"
-                                  className="schedule-chip"
-                                  title={preset.desc}
-                                  onClick={() => {
-                                    if (preset.key === "cold_archive") {
-                                      setCompareModeSource("manual");
-                                    }
-                                    setForm((prev) =>
-                                      applyTaskScenarioPreset(prev, preset.key),
-                                    );
-                                    setDirty(true);
-                                    Toast.success(`已应用「${preset.label}」推荐配置`);
-                                  }}
-                                >
-                                  {preset.label}
-                                </button>
-                              ))}
-                            </div>
-                          </Field>
-                          <SettingRow
-                            label="开启大文件断点续传"
-                            variant="bordered"
-                            tip="支持远端到本地下载（分片续传）与本地到 S3 分片上传续传；中断后再次运行或重试将从已传字节/分片继续"
-                          >
-                            <Switch
-                              aria-label="开启大文件断点续传"
-                              checked={Boolean(form.extraFlags?.resumeEnable)}
-                              onChange={(v) =>
-                                change("extraFlags", {
-                                  ...form.extraFlags,
-                                  resumeEnable: v,
-                                })
-                              }
-                            />
-                          </SettingRow>
-                          {form.extraFlags?.resumeEnable && (
-                            <Field
-                              label="断点续传最小文件阈值（MB）"
-                              hint="0 表示默认 50 MB；仅超过该大小的文件走断点续传通道，小文件继续高速并发传输"
-                            >
-                              <Input
-                                inputMode="numeric"
-                                value={String(form.extraFlags?.resumeMinSizeMB || 0)}
-                                onChange={(v) =>
-                                  change("extraFlags", {
-                                    ...form.extraFlags,
-                                    resumeMinSizeMB: Math.max(
-                                      0,
-                                      Math.min(10240, Math.trunc(Number(v) || 0)),
-                                    ),
-                                  })
-                                }
-                              />
-                            </Field>
-                          )}
-                        </div>
-
-                        <div className="advanced-option-group">
-                          <div className="advanced-option-group-title">容错重试与联动策略</div>
-                          <div className="form-grid form-grid--three">
-                            <Field
-                              label="弱网底层重试（--low-level-retries）"
-                              hint="0 默认 10 次（0–50）"
-                            >
-                              <Input
-                                inputMode="numeric"
-                                value={String(form.extraFlags?.lowLevelRetries || 0)}
-                                onChange={(v) =>
-                                  change("extraFlags", {
-                                    ...form.extraFlags,
-                                    lowLevelRetries: Math.max(
-                                      0,
-                                      Math.min(50, Math.trunc(Number(v) || 0)),
-                                    ),
-                                  })
-                                }
-                              />
-                            </Field>
-                            <Field
-                              label="重试间隔（--retries-sleep）"
-                              hint="如 5s / 30s / 1m（留空默认）"
-                            >
-                              <Input
-                                value={form.extraFlags?.retriesSleep || ""}
-                                placeholder="如 10s / 30s"
-                                showClear
-                                onChange={(v) =>
-                                  change("extraFlags", {
-                                    ...form.extraFlags,
-                                    retriesSleep: v,
-                                  })
-                                }
-                              />
-                            </Field>
-                            <Field
-                              label="定时一致性校验"
-                              hint="周期后台校验并在发现差异时告警"
-                            >
-                              <Select
-                                value={form.extraFlags?.checkSchedule || ""}
-                                optionList={[
-                                  { label: "关闭", value: "" },
-                                  { label: "每日自动校验", value: "daily" },
-                                  { label: "每周自动校验", value: "weekly" },
-                                  { label: "每月自动校验", value: "monthly" },
-                                ]}
-                                onChange={(v) =>
-                                  change("extraFlags", {
-                                    ...form.extraFlags,
-                                    checkSchedule: String(v || ""),
-                                  })
-                                }
-                              />
-                            </Field>
-                          </div>
-                          <div className="form-grid form-grid--three">
-                            <Field
-                              label="失败自动重试次数"
-                              hint="0 关闭；1–10 次，仅重跑失败项"
-                            >
-                              <Input
-                                inputMode="numeric"
-                                value={String(form.extraFlags?.autoRetryMax || 0)}
-                                onChange={(v) =>
-                                  change("extraFlags", {
-                                    ...form.extraFlags,
-                                    autoRetryMax: Math.max(
-                                      0,
-                                      Math.min(10, Math.trunc(Number(v) || 0)),
-                                    ),
-                                  })
-                                }
-                              />
-                            </Field>
-                            <Field
-                              label="自动重试延迟（分钟）"
-                              hint="默认 5 分钟（1–1440）"
-                            >
-                              <Input
-                                inputMode="numeric"
-                                value={String(form.extraFlags?.autoRetryDelayMin || 0)}
-                                onChange={(v) =>
-                                  change("extraFlags", {
-                                    ...form.extraFlags,
-                                    autoRetryDelayMin: Math.max(
-                                      0,
-                                      Math.min(1440, Math.trunc(Number(v) || 0)),
-                                    ),
-                                  })
-                                }
-                              />
-                            </Field>
-                            <Field
-                              label="成功后串联触发任务"
-                              hint="同步批次完成后自动触发另一个任务"
-                            >
-                              <Select
-                                value={Number(form.extraFlags?.postSyncJobId || 0)}
-                                optionList={[
-                                  { label: "不串联", value: 0 },
-                                  ...(existingJobs || [])
-                                    .filter((j) => j.id !== form.id)
-                                    .map((j) => ({
-                                      label: j.remark?.trim() || `任务 #${j.id}`,
-                                      value: j.id,
-                                    })),
-                                ]}
-                                onChange={(v) =>
-                                  change("extraFlags", {
-                                    ...form.extraFlags,
-                                    postSyncJobId: Math.max(
-                                      0,
-                                      Math.trunc(Number(v) || 0),
-                                    ),
-                                  })
-                                }
-                              />
-                            </Field>
-                          </div>
-                          <div className="native-checkbox-group">
-                            <Checkbox
-                              checked={Boolean(form.extraFlags?.directStream)}
-                              onChange={(e) =>
-                                change("extraFlags", {
-                                  ...form.extraFlags,
-                                  directStream: Boolean(e.target.checked),
-                                })
-                              }
-                            >
-                              海量文件直接流式同步（跳过前端预扫描与待传清单，大幅降低内存与扫描耗时）
-                            </Checkbox>
-                          </div>
-                        </div>
-
-                        <div className="advanced-option-group">
-                          <div className="advanced-option-group-title">并发与带宽流控</div>
-                          <div className="form-grid form-grid--three">
-                            <Field label="操作并发覆盖" hint="0 = 跟随全局设置 (1–100)">
-                              <Input
-                                inputMode="numeric"
-                                value={String(form.copyConcurrency)}
-                                onChange={(v) =>
-                                  change(
-                                    "copyConcurrency",
-                                    Math.max(
-                                      0,
-                                      Math.min(100, Math.trunc(Number(v) || 0)),
-                                    ),
-                                  )
-                                }
-                              />
-                            </Field>
-                            <Field label="扫描并发覆盖" hint="0 = 跟随全局设置 (1–50)">
-                              <Input
-                                inputMode="numeric"
-                                value={String(form.scanConcurrency)}
-                                onChange={(v) =>
-                                  change(
-                                    "scanConcurrency",
-                                    Math.max(
-                                      0,
-                                      Math.min(50, Math.trunc(Number(v) || 0)),
-                                    ),
-                                  )
-                                }
-                              />
-                            </Field>
-                            <Field label="失败重试覆盖" hint="-1 = 跟随全局 (0–10)">
-                              <Input
-                                inputMode="numeric"
-                                value={String(form.maxRetries)}
-                                onChange={(v) => {
-                                  const trimmed = v.trim();
-                                  if (trimmed === "-" || trimmed === "") {
-                                    change("maxRetries", -1);
-                                    return;
-                                  }
-                                  const n = Math.trunc(Number(trimmed));
-                                  if (Number.isFinite(n)) {
-                                    change(
-                                      "maxRetries",
-                                      Math.max(-1, Math.min(10, n)),
-                                    );
-                                  }
-                                }}
-                              />
-                            </Field>
-                          </div>
-                          <Field
-                            label="带宽限制"
-                            fieldId="bwLimit"
-                            error={bwLimitError || showStepError(1, "bwLimit")}
-                            hint="留空跟随系统全局默认；支持单任务固定限速、定时分时段限速或强制不限速"
-                          >
-                            <BwLimitEditor
-                              allowInherit
-                              compact
-                              globalDefault={systemSettings.data?.defaultBwLimit || ""}
-                              value={form.bwLimit}
-                              onChange={(v) => change("bwLimit", v)}
-                              onValidityChange={setBwLimitError}
-                            />
-                          </Field>
-                          <div className="form-grid form-grid--two">
-                            <Field
-                              label="API 限流（--tpslimit）"
-                              hint="每秒请求上限（0–1000），0 表示不限（防云盘 429）"
-                            >
-                              <Input
-                                inputMode="decimal"
-                                value={String(form.tpsLimit)}
-                                onChange={(v) => {
-                                  const n = Number(v);
-                                  change(
-                                    "tpsLimit",
-                                    Number.isFinite(n) && n >= 0
-                                      ? Math.min(1000, n)
-                                      : 0,
-                                  );
-                                }}
-                              />
-                            </Field>
-                            <Field
-                              label="API 突发上限（--tpslimit-burst）"
-                              hint="0–1000，0 表示使用 rclone 默认值"
-                            >
-                              <Input
-                                inputMode="numeric"
-                                value={String(form.tpsLimitBurst)}
-                                onChange={(v) =>
-                                  change(
-                                    "tpsLimitBurst",
-                                    Math.max(
-                                      0,
-                                      Math.min(1000, Math.trunc(Number(v) || 0)),
-                                    ),
-                                  )
-                                }
-                              />
-                            </Field>
-                          </div>
-                          <div className="form-grid form-grid--two">
-                            <Field
-                              label="时间精度容差（--modify-window）"
-                              hint="留空默认；FAT32/SMB/部分网盘可填 1s 或 2s"
-                            >
-                              <Input
-                                value={form.modifyWindow}
-                                placeholder="如 1s / 2s / 1m"
-                                showClear
-                                onChange={(v) => change("modifyWindow", v)}
-                              />
-                            </Field>
-                            <Field
-                              label="单文件多线程流数（--multi-thread-streams）"
-                              hint="0 使用默认（4）；1–64，加速单一大文件传输"
-                            >
-                              <Input
-                                inputMode="numeric"
-                                value={String(form.multiThreadStreams)}
-                                onChange={(v) =>
-                                  change(
-                                    "multiThreadStreams",
-                                    Math.max(
-                                      0,
-                                      Math.min(64, Math.trunc(Number(v) || 0)),
-                                    ),
-                                  )
-                                }
-                              />
-                            </Field>
-                          </div>
-                        </div>
-
-                        <div className="advanced-option-group">
-                          <div className="advanced-option-group-title">rclone 底层行为与性能调优</div>
-                          <SettingRow
-                            label="快速列表（--fast-list）"
-                            variant="bordered"
-                            tip="在支持的远端（S3 / B2 / GCS / Azure 等）批量递归列目录，大幅减少 API 事务次数，略微增加内存占用"
-                          >
-                            <Switch
-                              aria-label="快速列表"
-                              checked={form.fastList}
-                              onChange={(v) => change("fastList", v)}
-                            />
-                          </SettingRow>
-                          <SettingRow
-                            label="同步空子目录（--create-empty-src-dirs）"
-                            variant="bordered"
-                            tip="在目标端保留源目录中不含任何文件的空目录结构"
-                          >
-                            <Switch
-                              aria-label="同步空子目录"
-                              checked={form.createEmptySrcDirs}
-                              onChange={(v) => change("createEmptySrcDirs", v)}
-                            />
-                          </SettingRow>
-                          <SettingRow
-                            label="跟随本地符号链接"
-                            variant="bordered"
-                            tip="开启后跟随源端本地授权目录内指向同授权目录内部的符号链接（跨出授权目录的链接仍会被安全忽略）"
-                          >
-                            <Switch
-                              aria-label="跟随本地符号链接"
-                              checked={form.followSymlinks}
-                              onChange={(v) => change("followSymlinks", v)}
-                            />
-                          </SettingRow>
-                          <div className="native-checkbox-group">
-                            <Checkbox
-                              checked={Boolean(form.extraFlags?.noUpdateModtime)}
-                              onChange={(e) =>
-                                change("extraFlags", {
-                                  ...form.extraFlags,
-                                  noUpdateModtime: Boolean(e.target.checked),
-                                })
-                              }
-                            >
-                              跳过仅修改时间变更的元数据更新（--no-update-modtime）
-                            </Checkbox>
-                            <Checkbox
-                              checked={Boolean(form.extraFlags?.inplace)}
-                              onChange={(e) =>
-                                change("extraFlags", {
-                                  ...form.extraFlags,
-                                  inplace: Boolean(e.target.checked),
-                                })
-                              }
-                            >
-                              原地覆盖目标文件，不创建临时文件（--inplace）
-                            </Checkbox>
-                            <Checkbox
-                              checked={Boolean(form.extraFlags?.checkFirst)}
-                              onChange={(e) =>
-                                change("extraFlags", {
-                                  ...form.extraFlags,
-                                  checkFirst: Boolean(e.target.checked),
-                                })
-                              }
-                            >
-                              先完成全部差异比对再传输（--check-first）
-                            </Checkbox>
-                            <Checkbox
-                              checked={Boolean(form.extraFlags?.s3NoHead)}
-                              onChange={(e) =>
-                                change("extraFlags", {
-                                  ...form.extraFlags,
-                                  s3NoHead: Boolean(e.target.checked),
-                                })
-                              }
-                            >
-                              跳过 S3 上传后 HEAD 校验以减少 API 调用（--s3-no-head）
-                            </Checkbox>
-                            <Checkbox
-                              checked={Boolean(form.extraFlags?.ignoreSize)}
-                              onChange={(e) =>
-                                change("extraFlags", {
-                                  ...form.extraFlags,
-                                  ignoreSize: Boolean(e.target.checked),
-                                })
-                              }
-                            >
-                              仅按修改时间比对，忽略文件大小变化（--ignore-size）
-                            </Checkbox>
-                            <Checkbox
-                              checked={Boolean(form.extraFlags?.trackRenames)}
-                              disabled={form.method !== 1 && form.method !== 3}
-                              onChange={(e) =>
-                                change("extraFlags", {
-                                  ...form.extraFlags,
-                                  trackRenames: Boolean(e.target.checked),
-                                })
-                              }
-                            >
-                              启用重命名追踪，避免重命名后重传（--track-renames，开启同步删除或双向同步时生效）
-                            </Checkbox>
-                            <Checkbox
-                              checked={Boolean(form.extraFlags?.useMmap)}
-                              onChange={(e) =>
-                                change("extraFlags", {
-                                  ...form.extraFlags,
-                                  useMmap: Boolean(e.target.checked),
-                                })
-                              }
-                            >
-                              使用 mmap 零拷贝传输缓冲（--use-mmap）
-                            </Checkbox>
-                          </div>
-                          <div className="form-grid form-grid--three">
-                            <Field
-                              label="单次传输总量上限（--max-transfer）"
-                              hint="留空不限，支持如 50G / 500M"
-                            >
-                              <Input
-                                value={form.extraFlags?.maxTransfer || ""}
-                                placeholder="如 100G / 500M"
-                                showClear
-                                onChange={(v) =>
-                                  change("extraFlags", {
-                                    ...form.extraFlags,
-                                    maxTransfer: v,
-                                  })
-                                }
-                              />
-                            </Field>
-                            <Field label="达限截断模式（--cutoff-mode）">
-                              <Select
-                                value={form.extraFlags?.cutoffMode || ""}
-                                optionList={[
-                                  { label: "默认 (hard)", value: "" },
-                                  { label: "hard（立即停止）", value: "hard" },
-                                  { label: "soft（传完当前队列）", value: "soft" },
-                                  { label: "cautious（不再发起新传输）", value: "cautious" },
-                                ]}
-                                onChange={(v) =>
-                                  change("extraFlags", {
-                                    ...form.extraFlags,
-                                    cutoffMode: String(v || ""),
-                                  })
-                                }
-                              />
-                            </Field>
-                            <Field
-                              label="最大运行时长（--max-duration）"
-                              hint="超时后平滑收尾退出，如 2h"
-                            >
-                              <Input
-                                value={form.extraFlags?.maxDuration || ""}
-                                placeholder="如 2h / 30m"
-                                showClear
-                                onChange={(v) =>
-                                  change("extraFlags", {
-                                    ...form.extraFlags,
-                                    maxDuration: v,
-                                  })
-                                }
-                              />
-                            </Field>
-                          </div>
-                          <div className="form-grid form-grid--three">
-                            <Field label="传输优先级排序（--order-by）">
-                              <Select
-                                value={form.extraFlags?.orderBy || ""}
-                                optionList={[
-                                  { label: "默认顺序", value: "" },
-                                  { label: "小文件优先 (size,ascending)", value: "size,ascending" },
-                                  { label: "大文件优先 (size,descending)", value: "size,descending" },
-                                  { label: "最旧修改优先 (modtime,ascending)", value: "modtime,ascending" },
-                                  { label: "最新修改优先 (modtime,descending)", value: "modtime,descending" },
-                                  { label: "文件名升序 (name,ascending)", value: "name,ascending" },
-                                  { label: "文件名降序 (name,descending)", value: "name,descending" },
-                                ]}
-                                onChange={(v) =>
-                                  change("extraFlags", {
-                                    ...form.extraFlags,
-                                    orderBy: String(v || ""),
-                                  })
-                                }
-                              />
-                            </Field>
-                            <Field
-                              label="预扫描队列上限（--max-backlog）"
-                              hint="0 使用默认；控制内存排队数"
-                            >
-                              <Input
-                                inputMode="numeric"
-                                value={String(form.extraFlags?.maxBacklog || 0)}
-                                onChange={(v) =>
-                                  change("extraFlags", {
-                                    ...form.extraFlags,
-                                    maxBacklog: Math.max(
-                                      0,
-                                      Math.trunc(Number(v) || 0),
-                                    ),
-                                  })
-                                }
-                              />
-                            </Field>
-                            <Field
-                              label="读写缓冲区（--buffer-size）"
-                              hint="留空默认 16M，设为 0 禁用"
-                            >
-                              <Input
-                                value={form.extraFlags?.bufferSize || ""}
-                                placeholder="如 16M / 32M / 0"
-                                showClear
-                                onChange={(v) =>
-                                  change("extraFlags", {
-                                    ...form.extraFlags,
-                                    bufferSize: v,
-                                  })
-                                }
-                              />
-                            </Field>
-                          </div>
-                          <div className="form-grid form-grid--three">
-                            <Field
-                              label="多线程分流阈值（--multi-thread-cutoff）"
-                              hint="默认 250M"
-                            >
-                              <Input
-                                value={form.extraFlags?.multiThreadCutoff || ""}
-                                placeholder="如 250M / 100M"
-                                showClear
-                                onChange={(v) =>
-                                  change("extraFlags", {
-                                    ...form.extraFlags,
-                                    multiThreadCutoff: v,
-                                  })
-                                }
-                              />
-                            </Field>
-                            <Field
-                              label="多线程分块（--multi-thread-chunk-size）"
-                              hint="默认 64M"
-                            >
-                              <Input
-                                value={form.extraFlags?.multiThreadChunkSize || ""}
-                                placeholder="如 64M / 32M"
-                                showClear
-                                onChange={(v) =>
-                                  change("extraFlags", {
-                                    ...form.extraFlags,
-                                    multiThreadChunkSize: v,
-                                  })
-                                }
-                              />
-                            </Field>
-                            <Field label="User-Agent（--user-agent）">
-                              <Input
-                                value={form.extraFlags?.userAgent || ""}
-                                placeholder="可选 HTTP User-Agent"
-                                showClear
-                                onChange={(v) =>
-                                  change("extraFlags", {
-                                    ...form.extraFlags,
-                                    userAgent: v,
-                                  })
-                                }
-                              />
-                            </Field>
-                          </div>
-                          <div className="form-grid form-grid--two">
-                            <Field label="I/O 空闲超时（--timeout）" hint="默认 5m">
-                              <Input
-                                value={form.extraFlags?.ioTimeout || ""}
-                                placeholder="如 5m / 30s"
-                                showClear
-                                onChange={(v) =>
-                                  change("extraFlags", {
-                                    ...form.extraFlags,
-                                    ioTimeout: v,
-                                  })
-                                }
-                              />
-                            </Field>
-                            <Field label="连接超时（--contimeout）" hint="默认 1m">
-                              <Input
-                                value={form.extraFlags?.conTimeout || ""}
-                                placeholder="如 1m / 15s"
-                                showClear
-                                onChange={(v) =>
-                                  change("extraFlags", {
-                                    ...form.extraFlags,
-                                    conTimeout: v,
-                                  })
-                                }
-                              />
-                            </Field>
-                          </div>
-                        </div>
-
-                        {form.method === 3 && (
-                          <div className="advanced-option-group">
-                            <div className="advanced-option-group-title">双向同步保护策略</div>
-                            <div className="form-grid form-grid--two">
-                              <Field
-                                label="单次删除比例上限（%）"
-                                hint="0 表示使用默认值（50%），1–100 按单端删除占比触发安全保护，防止误删全盘"
-                              >
-                                <Input
-                                  inputMode="numeric"
-                                  value={String(form.extraFlags?.bisyncMaxDelete || 0)}
-                                  onChange={(v) =>
-                                    change("extraFlags", {
-                                      ...form.extraFlags,
-                                      bisyncMaxDelete: Math.max(
-                                        0,
-                                        Math.min(100, Math.trunc(Number(v) || 0)),
-                                      ),
-                                    })
-                                  }
-                                />
-                              </Field>
-                            </div>
-                            <div className="native-checkbox-group">
-                              <Checkbox
-                                checked={Boolean(form.extraFlags?.bisyncForce)}
-                                onChange={(e) =>
-                                  change("extraFlags", {
-                                    ...form.extraFlags,
-                                    bisyncForce: Boolean(e.target.checked),
-                                  })
-                                }
-                              >
-                                超限删除仍强制执行（谨慎启用）
-                              </Checkbox>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
+                  <ExpertTuningDrawer
+                    form={form}
+                    open={advancedOpen}
+                    onToggleOpen={() => setAdvancedOpen((o) => !o)}
+                    change={change}
+                    setForm={setForm}
+                    setDirty={setDirty}
+                    setCompareModeSource={setCompareModeSource}
+                    bwLimitError={bwLimitError}
+                    setBwLimitError={setBwLimitError}
+                    bwLimitFieldError={showStepError(1, "bwLimit")}
+                    systemDefaultBwLimit={
+                      systemSettings.data?.defaultBwLimit || ""
+                    }
+                    existingJobs={existingJobs}
+                  />
                 </div>
               )}
 
-              {panelMounted("filter") && (
+              {isFreeMode && panelMounted("filter") && (
                 <div className="form-section" style={panelStyle("filter")}>
-                  <Field
-                    label="过滤模式"
-                    hint="排除模式会同步除黑名单外的所有文件；白名单模式仅同步命中包含规则且未被排除的文件"
-                  >
-                    <Select
-                      value={form.filterMode}
-                      optionList={filterModeOptions.map((o) => ({
-                        label: o.label,
-                        value: o.value,
-                      }))}
-                      onChange={(v) => change("filterMode", Number(v))}
-                    />
-                  </Field>
-
-                  {form.filterMode === 1 && (
-                    <Field
-                      label="白名单包含规则"
-                      required
-                      error={showStepError(2, "include")}
-                      hint="每行一条文件名或后缀规则（如 *.jpg、*.mp4、README.md）；目录过滤与系统目录排除依然生效"
-                    >
-                      <TextArea
-                        autosize={{ minRows: 3, maxRows: 8 }}
-                        value={form.include}
-                        placeholder={"*.jpg\n*.png\n*.mp4"}
-                        onChange={(v) => change("include", v)}
-                      />
-                    </Field>
-                  )}
-
-                  <div className="filter-section-block">
-                    <div className="filter-section-title">文件大小过滤</div>
-                    <div
-                      className="file-size-filters"
-                      role="group"
-                      aria-label="文件大小过滤"
-                    >
-                      {(["min", "max"] as const).map((kind) => (
-                        <FileSizeFilterRow
-                          key={kind}
-                          kind={kind}
-                          enabled={sizeEnabled[kind]}
-                          onToggle={(checked) => {
-                            const config = fileSizeFilterDefaults[kind];
-                            const valueKey = `${kind}FileSize` as const;
-                            const unitKey = `${kind}FileSizeUnit` as const;
-                            const currentVal =
-                              parseFileSizeInput(form[valueKey]) ?? 0;
-                            setSizeEnabled((prev) => ({
-                              ...prev,
-                              [kind]: checked,
-                            }));
-                            setFileSizeDrafts((prev) => {
-                              if (prev[valueKey] === undefined) return prev;
-                              const next = { ...prev };
-                              delete next[valueKey];
-                              return next;
-                            });
-                            patch({
-                              [valueKey]: checked
-                                ? currentVal > 0
-                                  ? currentVal
-                                  : config.value
-                                : 0,
-                              [unitKey]: checked
-                                ? form[unitKey] || config.unit
-                                : config.unit,
-                            });
-                          }}
-                          form={form}
-                          change={change}
-                          drafts={fileSizeDrafts}
-                          setDrafts={setFileSizeDrafts}
-                        />
-                      ))}
-                    </div>
-                    {sizeGroupError && (
-                      <div className="field-error" role="alert">
-                        {sizeGroupError}
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="filter-section-block">
-                    <div className="filter-section-title">文件时间过滤</div>
-                    <div className="form-grid form-grid--three">
-                      <Field
-                        label="最小稳定时间（分钟）"
-                        hint="跳过刚修改的文件，避免同步未写完的大文件（0 关闭）"
-                      >
-                        <Input
-                          inputMode="numeric"
-                          value={String(form.minFileAgeMinutes)}
-                          onChange={(v) =>
-                            change(
-                              "minFileAgeMinutes",
-                              Math.max(0, Math.trunc(Number(v) || 0)),
-                            )
-                          }
-                        />
-                      </Field>
-                      <Field
-                        label="仅同步早于（天）"
-                        hint="冷数据归档：只同步 N 天前修改的文件（0 不限）"
-                      >
-                        <Input
-                          inputMode="numeric"
-                          value={String(form.olderThanDays)}
-                          onChange={(v) =>
-                            change(
-                              "olderThanDays",
-                              Math.max(0, Math.trunc(Number(v) || 0)),
-                            )
-                          }
-                        />
-                      </Field>
-                      <Field
-                        label="仅同步最近（天）"
-                        hint="只同步最近 N 天内修改的文件（0 不限）"
-                      >
-                        <Input
-                          inputMode="numeric"
-                          value={String(form.newerThanDays)}
-                          onChange={(v) =>
-                            change(
-                              "newerThanDays",
-                              Math.max(0, Math.trunc(Number(v) || 0)),
-                            )
-                          }
-                        />
-                      </Field>
-                    </div>
-                  </div>
-
-                  <Field
-                    label="文件过滤"
-                    hint="仅支持文件名和文件后缀；目录请在下方「文件夹过滤」中配置"
-                  >
-                    <FileTypeFilter
-                      value={form.exclude}
-                      onChange={(value) => change("exclude", value)}
-                    />
-                  </Field>
-
-                  <Field
-                    label="文件夹过滤"
-                    hint="仅针对源目录，勾选要忽略的子文件夹；单层目录名（如 cache/）会匹配所有源目录下的同名目录"
-                  >
-                    <div className="field-group" role="group">
-                      <ExcludeTree
-                        engineId={form.alistId}
-                        srcPaths={form.srcPath}
-                        excludedPaths={excludedFolders}
-                        onChange={(folders) =>
-                          change(
-                            "exclude",
-                            updateExcludeFolders(form.exclude, folders),
-                          )
-                        }
-                      />
-                    </div>
-                  </Field>
-
-                  <Field
-                    label="系统目录过滤"
-                    hint="忽略操作系统和 NAS 的系统目录"
-                  >
-                    <div className="system-dir-groups" role="group">
-                      {systemDirFilterGroups.map((group) => {
-                        const selected = group.patterns.filter((p) =>
-                          isExcludePatternEnabled(form.exclude, p),
-                        );
-                        const allSelected =
-                          selected.length === group.patterns.length;
-                        return (
-                          <div className="system-dir-group" key={group.key}>
-                            <Checkbox
-                              checked={allSelected}
-                              indeterminate={
-                                selected.length > 0 && !allSelected
-                              }
-                              onChange={(event) =>
-                                change(
-                                  "exclude",
-                                  updateExcludePatterns(
-                                    form.exclude,
-                                    group.patterns,
-                                    Boolean(event.target.checked),
-                                  ),
-                                )
-                              }
-                            >
-                              {group.label}
-                            </Checkbox>
-                            <span className="system-dir-patterns">
-                              {group.patterns.join(" · ")}
-                            </span>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </Field>
-                  <div className="filter-tester">
-                    <div className="filter-tester-head">
-                      <strong>规则实时测试器</strong>
-                      <span className="muted">
-                        输入示例相对路径和属性，立即验证是否会被当前过滤规则同步
-                      </span>
-                    </div>
-                    <div className="filter-tester-grid">
-                      <Input
-                        aria-label="示例相对路径"
-                        placeholder="如 2026/photo.jpg 或 cache/tmp.log"
-                        value={testPath}
-                        onChange={setTestPath}
-                      />
-                      <Input
-                        aria-label="示例文件大小 MB"
-                        inputMode="decimal"
-                        suffix="MB"
-                        value={testSizeMB}
-                        onChange={setTestSizeMB}
-                      />
-                      <Input
-                        aria-label="距上次修改分钟数"
-                        inputMode="numeric"
-                        suffix="分钟前"
-                        value={testAgeMinutes}
-                        onChange={setTestAgeMinutes}
-                      />
-                      <Button
-                        type="primary"
-                        theme="light"
-                        loading={testingFilter}
-                        onClick={() => void runFilterTest()}
-                      >
-                        测试匹配
-                      </Button>
-                    </div>
-                    <div className="filter-tester-foot">
-                      <Checkbox
-                        checked={testIsDir}
-                        onChange={(e) => setTestIsDir(Boolean(e.target.checked))}
-                      >
-                        作为目录测试
-                      </Checkbox>
-                      {testResult && (
-                        <div
-                          className={`filter-tester-result${testResult.willSync ? " is-sync" : " is-skip"}`}
-                          role="status"
-                        >
-                          {testResult.willSync ? (
-                            <IconTickCircle aria-hidden="true" size="small" />
-                          ) : (
-                            <IconAlertTriangle aria-hidden="true" size="small" />
-                          )}
-                          <span>
-                            {testResult.willSync ? "将会同步" : "不会同步"}：
-                            {testResult.reason}
-                          </span>
-                        </div>
-                      )}
-                    </div>
-                  </div>
+                  {renderFilterCoreFields(false)}
                 </div>
               )}
             </div>

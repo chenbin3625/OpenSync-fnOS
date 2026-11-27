@@ -165,6 +165,20 @@ export interface NativeSizeInfo {
   sizeless: number;
 }
 
+export type SyncDirectionMode = "bidirectional" | "upload" | "download";
+
+export type OneWayDeleteMode = "none" | "tracked" | "mirror";
+
+export type WeeklySlotMode = "full" | "limited" | "pause";
+
+export interface WeeklyScheduleConfig {
+  enabled: boolean;
+  limitRate: string;
+  stopOutside: boolean;
+  /** Indexed by day of week (0 = 周日 .. 6 = 周六) x 24 hours (0..23). */
+  days: WeeklySlotMode[][];
+}
+
 export interface NativeExtraFlags {
   noUpdateModtime?: boolean;
   inplace?: boolean;
@@ -200,6 +214,9 @@ export interface NativeExtraFlags {
   directStream?: boolean;
   bisyncMaxDelete?: number;
   bisyncForce?: boolean;
+  syncDirectionMode?: SyncDirectionMode | "";
+  oneWayDeleteMode?: OneWayDeleteMode | "";
+  weeklySchedule?: WeeklyScheduleConfig;
 }
 
 export interface BisyncConflict {

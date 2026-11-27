@@ -191,6 +191,28 @@ describe("quickCrypt helpers", () => {
       remote: "aliyun:backup",
       password: "secret-password",
     });
+
+    // Inline wizard crypts attach managed_by_job = "true".
+    expect(
+      buildQuickCryptOptions(
+        { remoteName: "aliyun", subPath: "backup" },
+        {
+          ...valid,
+          subDir: "",
+          password2: "",
+          filenameEncryption: "standard",
+          filenameEncoding: "base32",
+          directoryNameEncryption: "true",
+          noDataEncryption: false,
+        },
+        { managedByJob: true },
+      ),
+    ).toEqual({
+      type: "crypt",
+      remote: "aliyun:backup",
+      password: "secret-password",
+      managed_by_job: "true",
+    });
   });
 
   it("replaces only the targeted destination path while preserving other targets", () => {
