@@ -667,7 +667,7 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
         )}
       </div>
       </>}
-      {drawerJob && (
+      {drawerJob && !mirrorPreview && !conflictPreview && !checkJob && (
         <TaskDetailDrawer
           key={drawerJob.id}
           title={getJobName(drawerJob)}
