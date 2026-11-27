@@ -73,7 +73,7 @@ test("connects a first WebDAV account inline and reuses it from the sync home", 
   await expect(impact).toContainText("保留目标端独有文件");
   await expect(impact).toContainText("比对判定有差异时覆盖目标端同名文件");
   await dialog.getByRole("button", { name: "保存", exact: true }).click();
-  await expect(page).toHaveURL(/\/sync$/);
+  await expect(page).toHaveURL(/\/sync\?.*jobId=1.*tab=overview/);
   const drawer = page.locator(".task-detail-drawer");
   await expect(drawer).toContainText("Photos · PhotoCloud");
   expect(savedJobs[0]).toMatchObject({
@@ -81,7 +81,7 @@ test("connects a first WebDAV account inline and reuses it from the sync home", 
   });
 
   await drawer.getByRole("link", { name: "完整页面打开" }).click();
-  await expect(page).toHaveURL(/\/tasks\?jobId=1&tab=overview$/);
+  await expect(page).toHaveURL(/\/tasks\?.*jobId=1.*tab=overview/);
   const group = page.locator(".sync-connection-group").filter({ hasText: "PhotoCloud" });
   const detail = page.locator(".overview-card .overview-head-actions");
   await detail.getByRole("button", { name: "暂停同步", exact: true }).click();
@@ -158,11 +158,10 @@ test("creates a mirror in the current connection and enables it only after read-
   await editor.getByRole("button", { name: "保存并预览", exact: true }).click();
 
   await expect(editor).toBeHidden();
-  await expect(page).toHaveURL(/\/sync\?storage=CloudA$/);
+  await expect(page).toHaveURL(/\/sync\?storage=CloudA&jobId=7&tab=overview&mirrorPreview=1$/);
   const drawer = page.locator(".task-detail-drawer");
   const preview = page.getByRole("dialog", { name: /^镜像影响预览/ });
   const confirm = preview.getByRole("button", { name: "确认并启动镜像", exact: true });
-  await expect(drawer).toContainText("Photos · CloudA");
   await expect(preview).toBeVisible();
   await expect(preview.getByRole("button", { name: "中止预览", exact: true })).toBeVisible();
   await expect(confirm).toHaveCount(0);
@@ -175,9 +174,10 @@ test("creates a mirror in the current connection and enables it only after read-
   expect(writes).toHaveLength(2);
   await confirm.click();
   await expect(preview).toBeHidden();
+  await expect(drawer).toContainText("Photos · CloudA");
   await expect(drawer.getByRole("button", { name: "暂停同步", exact: true })).toBeVisible();
   expect(writes.at(-1)).toEqual({ action: "enable", body: { id: "7", pause: false } });
-  await expect(page).toHaveURL(/\/sync\?storage=CloudA$/);
+  await expect(page).toHaveURL(/\/sync\?storage=CloudA&jobId=7&tab=overview$/);
 });
 
 test("edits a legacy upload as one-way sync and updates deletion policy and polling", async ({ page }) => {

@@ -384,6 +384,9 @@ export function TaskOverviewPanel({
       case "idle":
         return "按周计划待命中";
       case "paused":
+        if (effectiveStatus.connectionPaused) {
+          return enabled ? "所属连接已暂停" : "任务与所属连接均已暂停";
+        }
         return "持续同步已暂停";
       case "error":
         return effectiveStatus.failures > 1
@@ -420,6 +423,11 @@ export function TaskOverviewPanel({
       case "idle":
         return formatWeeklyScheduleSummary(extraFlags.weeklySchedule);
       case "paused":
+        if (effectiveStatus.connectionPaused) {
+          return enabled
+            ? "所属连接已暂停，在连接设置中恢复后将继续自动同步"
+            : "所属连接与当前任务均已暂停；恢复连接时不会自动唤醒手动暂停的任务";
+        }
         return "恢复同步后将自动对账并补齐暂停期间产生的变更";
       case "error":
         if (syncError.type === "auth") {

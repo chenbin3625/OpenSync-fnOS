@@ -255,14 +255,20 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
     update({ storage: scope }, { replace: true });
   }, [drawerJob, entryStorage, storage.loading, storage.data, engines.data, update]);
 
-  const workbenchTaskHref = (jobId: number, taskTab: TaskTab, intent?: "mirrorPreview" | "conflicts") => {
+  const workbenchTaskHref = (
+    jobId: number,
+    taskTab: TaskTab,
+    intent?: "mirrorPreview" | "conflicts" | "failed",
+  ) => {
     const next = new URLSearchParams(params);
     next.set("jobId", String(jobId));
     next.set("storage", entryStorage ?? "all");
     next.set("tab", taskTab);
     next.delete("mirrorPreview");
     next.delete("conflicts");
-    if (intent) next.set(intent, "1");
+    next.delete("hasError");
+    if (intent === "failed") next.set("hasError", "1");
+    else if (intent) next.set(intent, "1");
     return `/sync?${next}`;
   };
   const closeWorkbenchTask = () => update({
@@ -270,6 +276,7 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
     tab: null,
     mirrorPreview: null,
     conflicts: null,
+    hasError: null,
   }, { replace: true });
   const fullPageParams = new URLSearchParams(params);
   fullPageParams.delete("mirrorPreview");
@@ -353,8 +360,14 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
         errorToast(err);
       }
     });
-  const triggerSyncNow = (jobId: number) =>
+  const triggerSyncNow = (jobId: number) => {
+    const target = list.find((item) => item.id === jobId);
+    if (target?.syncStatus?.connectionPaused) {
+      Toast.warning("所属连接已暂停，请先恢复该连接后再同步");
+      return;
+    }
     action(() => api.jobAction({ id: String(jobId) }), "已触发立即同步");
+  };
   const toggleSync = (job: JobItem, running = Boolean(job.running)) => {
     const pausing = job.enable === 1;
     const label = job.isCron === 3 ? "持续同步" : "任务";
@@ -699,7 +712,12 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
           key={drawerJob.id}
           title={getJobName(drawerJob)}
           tab={tab}
-          onTabChange={(taskTab) => update({ tab: taskTab }, { replace: true })}
+          onTabChange={(taskTab) =>
+            update(
+              { tab: taskTab, hasError: taskTab === "records" ? params.get("hasError") : null },
+              { replace: true },
+            )
+          }
           fullPageHref={`/tasks?${fullPageParams}`}
           onClose={closeWorkbenchTask}
         >

@@ -84,6 +84,7 @@ import {
   defaultJobForm,
   findQuarkRemotesForPaths,
   findStandardWebDAVRemotesForPaths,
+  getJobMountNames,
   isExcludePatternEnabled,
   jobToForm,
   parseExcludeFolders,
@@ -357,24 +358,47 @@ export default function TaskEditor({
   const [inheritedPollSec, setInheritedPollSec] = useState(0);
   const [inheritedWeeklySchedule, setInheritedWeeklySchedule] =
     useState<WeeklyScheduleConfig>();
+  const activePolicyRemoteName = useMemo(() => {
+    const candidates = [preferredRemote, initialRemote].filter(Boolean) as string[];
+    const remotes = nativeStorage.data?.remotes || [];
+    for (const candidate of candidates) {
+      const matched = remotes.find(
+        (item) => item.name.toLowerCase() === candidate.toLowerCase(),
+      );
+      if (matched) return matched.name;
+    }
+    if (job) {
+      for (const seg of getJobMountNames(job)) {
+        const matched = remotes.find(
+          (item) => item.name.toLowerCase() === seg.toLowerCase(),
+        );
+        if (matched) return matched.name;
+      }
+    }
+    return "";
+  }, [preferredRemote, initialRemote, job, nativeStorage.data?.remotes]);
   useEffect(() => {
-    if (job || initialDraft || !initialRemote || !nativeStorage.data?.remotes) {
+    if (!activePolicyRemoteName || !nativeStorage.data?.remotes) {
+      setInheritedPollSec(0);
+      setInheritedWeeklySchedule(undefined);
       return;
     }
     const remote = nativeStorage.data.remotes.find(
-      (item) => item.name.toLowerCase() === initialRemote.toLowerCase(),
+      (item) => item.name.toLowerCase() === activePolicyRemoteName.toLowerCase(),
     );
-    if (!remote) return;
+    if (!remote) {
+      setInheritedPollSec(0);
+      setInheritedWeeklySchedule(undefined);
+      return;
+    }
     setInheritedPollSec(remote.pollIntervalSec || 0);
     setInheritedWeeklySchedule(remote.weeklySchedule);
     if (!form.extraFlags?.syncPollIntervalSec && remote.pollIntervalSec) {
       setPollDraft(String(remote.pollIntervalSec));
     }
   }, [
+    activePolicyRemoteName,
     form.extraFlags?.syncPollIntervalSec,
-    initialDraft,
-    initialRemote,
-    job,
     nativeStorage.data?.remotes,
   ]);
   const dirCacheRef = useRef<RemoteDirCache | null>(null);
@@ -1372,7 +1396,7 @@ export default function TaskEditor({
               }}
               onBlur={() => {
                 if (!pollDraft.trim()) {
-                  setPollDraft("60");
+                  setPollDraft(String(inheritedPollSec || 60));
                   change("extraFlags", {
                     ...form.extraFlags,
                     syncPollIntervalSec: 0,
@@ -2455,8 +2479,28 @@ export default function TaskEditor({
 
                   <Field
                     label="同步运行计划（7×24 周历调度）"
+                    hint={
+                      inheritedWeeklySchedule && !form.extraFlags?.weeklySchedule
+                        ? "当前继承所属连接的默认周历；编辑下方网格将保存为本任务专属周历"
+                        : undefined
+                    }
                     error={showStepError(2, "weeklySchedule")}
                   >
+                    {inheritedWeeklySchedule && form.extraFlags?.weeklySchedule && (
+                      <div className="field-inline-action">
+                        <Button
+                          size="small"
+                          theme="borderless"
+                          onClick={() => {
+                            const nextFlags = { ...form.extraFlags };
+                            delete nextFlags.weeklySchedule;
+                            change("extraFlags", nextFlags);
+                          }}
+                        >
+                          恢复继承连接默认周历
+                        </Button>
+                      </div>
+                    )}
                     <WeeklyScheduleGrid
                       value={form.extraFlags?.weeklySchedule || inheritedWeeklySchedule}
                       onChange={(ws) =>
@@ -3035,8 +3079,28 @@ export default function TaskEditor({
                       {renderContinuousCadenceControls(1)}
                       <Field
                         label="周历时段限速 / 暂停调度（可选）"
+                        hint={
+                          inheritedWeeklySchedule && !form.extraFlags?.weeklySchedule
+                            ? "当前继承所属连接的默认周历；编辑下方网格将保存为本任务专属周历"
+                            : undefined
+                        }
                         error={showStepError(1, "weeklySchedule")}
                       >
+                        {inheritedWeeklySchedule && form.extraFlags?.weeklySchedule && (
+                          <div className="field-inline-action">
+                            <Button
+                              size="small"
+                              theme="borderless"
+                              onClick={() => {
+                                const nextFlags = { ...form.extraFlags };
+                                delete nextFlags.weeklySchedule;
+                                change("extraFlags", nextFlags);
+                              }}
+                            >
+                              恢复继承连接默认周历
+                            </Button>
+                          </div>
+                        )}
                         <WeeklyScheduleGrid
                           value={form.extraFlags?.weeklySchedule || inheritedWeeklySchedule}
                           onChange={(ws) =>

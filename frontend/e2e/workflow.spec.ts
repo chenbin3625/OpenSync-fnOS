@@ -196,11 +196,14 @@ test("creates a WebDAV storage and continuous task, then edits without changing 
     expect(job.enable).toBe(1);
     expect(job.srcPath).toContain("/Photos");
     expect(job.dstPath).toContain("/Backup");
-    await expect(page).toHaveURL(workbenchPath);
+    await expect(page).toHaveURL(
+      `${workbenchPath}&jobId=${jobId}&tab=overview`,
+    );
     const drawer = page.locator(".task-detail-drawer");
     await expect(drawer).toContainText(name);
     await expect(drawer.getByRole("link", { name: "完整页面打开" })).toHaveAttribute(
-      "href", `/app/opensync/tasks?jobId=${jobId}&tab=overview`,
+      "href",
+      `/app/opensync/tasks?${new URLSearchParams({ storage: name, jobId: String(jobId), tab: "overview" })}`,
     );
     const forceMobileClick = testInfo.project.name.includes("mobile");
     await drawer

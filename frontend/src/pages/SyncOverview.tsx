@@ -126,7 +126,11 @@ interface SyncOverviewProps {
   engines: AlistItem[];
   busy?: boolean;
   onAdd: (remote?: string) => void;
-  taskHref: (jobId: number, tab: TaskTab, intent?: "mirrorPreview" | "conflicts") => string;
+  taskHref: (
+    jobId: number,
+    tab: TaskTab,
+    intent?: "mirrorPreview" | "conflicts" | "failed",
+  ) => string;
   onEdit?: (job: JobItem) => void;
   onClone?: (job: JobItem) => void;
   onToggle?: (job: JobItem) => void;
@@ -164,6 +168,7 @@ function classifyJobStatus(job: JobItem): JobClassification {
   const synced =
     !job.running &&
     job.enable === 1 &&
+    !sync.connectionPaused &&
     !failed &&
     (sync.state === "synced" || sync.state === "monitoring");
   return {
@@ -172,7 +177,7 @@ function classifyJobStatus(job: JobItem): JobClassification {
     queued: Boolean(job.queued),
     conflict: (sync.conflictCount ?? 0) > 0,
     failed,
-    disabled: job.enable !== 1,
+    disabled: job.enable !== 1 || Boolean(sync.connectionPaused),
   };
 }
 
@@ -636,7 +641,9 @@ export function SyncOverview({
   };
   for (const job of selectedIds.length ? selectedJobs : selectable) {
     if (job.running || job.queued) batchTargets.stop.push(job.id);
-    else if (job.enable === 1) batchTargets.run.push(job.id);
+    else if (job.enable === 1 && !job.syncStatus?.connectionPaused) {
+      batchTargets.run.push(job.id);
+    }
     if (job.enable === 1 && job.isCron !== 2) batchTargets.disable.push(job.id);
     if (job.enable !== 1 && !requiresFirstMirrorPreview(job)) {
       batchTargets.enable.push(job.id);
@@ -801,13 +808,15 @@ export function SyncOverview({
     }
   };
 
-  const saveConnectionPolicy = async () => {
+  const saveConnectionPolicy = async (pausedOverride?: boolean) => {
     if (!selectedRemote || !connectionPolicy) return;
     const poll = Number(connectionPolicy.pollIntervalSec || 0);
     if (!Number.isInteger(poll) || poll < 0 || (poll !== 0 && (poll < 10 || poll > 86400))) {
       Toast.warning("连接轮询周期请输入 0 或 10–86400 秒");
       return;
     }
+    const nextPaused =
+      pausedOverride !== undefined ? pausedOverride : connectionPolicy.paused;
     setSavingConnectionPolicy(true);
     try {
       await api.updateNativeStoragePolicy({
@@ -815,9 +824,18 @@ export function SyncOverview({
         pollIntervalSec: poll,
         weeklySchedule: connectionPolicy.weeklySchedule,
         bwLimit: connectionPolicy.bwLimit.trim(),
-        paused: connectionPolicy.paused,
+        paused: nextPaused,
       });
-      Toast.success("连接策略已保存");
+      setConnectionPolicy((prev) =>
+        prev ? { ...prev, paused: nextPaused } : prev,
+      );
+      Toast.success(
+        pausedOverride !== undefined
+          ? nextPaused
+            ? `已暂停连接「${selectedRemote.name}」`
+            : `已恢复连接「${selectedRemote.name}」`
+          : "连接策略已保存",
+      );
       onStorageChanged?.();
       await onJobsChanged();
     } catch (err) {
@@ -941,6 +959,7 @@ export function SyncOverview({
                     <span className="sync-connection-item__sub muted">
                       {remoteTypeLabels[remote.type] || remote.type}
                       {remote.type === "crypt" ? " · 加密" : ""}
+                      {remote.paused ? " · 已暂停" : ""}
                     </span>
                   </div>
                 </div>
@@ -1052,7 +1071,37 @@ export function SyncOverview({
                     </Tag>
                   );
                 })()}
+              {selectedRemote?.paused && (
+                <Tag size="small" type="light" color="amber">
+                  连接已暂停
+                </Tag>
+              )}
+              {selectedRemote?.bwLimit && (
+                <Tag size="small" type="light" color="grey">
+                  共享限速 {selectedRemote.bwLimit}
+                </Tag>
+              )}
             </div>
+            {selectedRemote && connectionPolicy && (
+              <div className="sync-connection-banner__actions">
+                <Button
+                  size="small"
+                  type={selectedRemote.paused ? "primary" : "tertiary"}
+                  theme={selectedRemote.paused ? "solid" : "light"}
+                  icon={
+                    selectedRemote.paused ? (
+                      <IconPlay aria-hidden="true" />
+                    ) : (
+                      <IconPause aria-hidden="true" />
+                    )
+                  }
+                  loading={savingConnectionPolicy}
+                  onClick={() => void saveConnectionPolicy(!selectedRemote.paused)}
+                >
+                  {selectedRemote.paused ? "恢复连接" : "暂停连接"}
+                </Button>
+              </div>
+            )}
           </div>
         )}
 
@@ -1270,7 +1319,7 @@ export function SyncOverview({
                             theme="solid"
                             onClick={() => selectView("settings")}
                           >
-                            前往存储管理
+                            前往连接设置
                           </Button>
                         </div>
                       </div>
@@ -1715,9 +1764,7 @@ export function SyncOverview({
                         type={connectionPolicy.paused ? "primary" : "tertiary"}
                         loading={savingConnectionPolicy}
                         onClick={() =>
-                          setConnectionPolicy((prev) =>
-                            prev ? { ...prev, paused: !prev.paused } : prev,
-                          )
+                          void saveConnectionPolicy(!connectionPolicy.paused)
                         }
                       >
                         {connectionPolicy.paused ? "恢复连接" : "暂停连接"}
@@ -1927,7 +1974,10 @@ function SyncTaskRow({
   checked: boolean;
   onSelect: (checked: boolean) => void;
   onNavigate: (path: string) => void;
-  taskHref: (tab: TaskTab, intent?: "mirrorPreview" | "conflicts") => string;
+  taskHref: (
+    tab: TaskTab,
+    intent?: "mirrorPreview" | "conflicts" | "failed",
+  ) => string;
   onEdit: () => void;
   onClone: () => void;
   onToggle: () => void;
@@ -2338,6 +2388,11 @@ function SyncTaskRow({
                 恢复
               </div>
             )}
+            {status.connectionPaused && (
+              <div className="sync-overview-warn">
+                所属连接已暂停，恢复连接后继续
+              </div>
+            )}
             {mirrorNeedsReview && (
               <div className="sync-overview-warn">首次启用镜像需预览确认</div>
             )}
@@ -2375,7 +2430,7 @@ function SyncTaskRow({
               ) : failedRecords ? (
                 <Link
                   className="sync-overview-cta-link is-warning"
-                  to={`/tasks?jobId=${job.id}&tab=records&hasError=1`}
+                  to={taskHref("records", "failed")}
                 >
                   查看失败记录并重试
                 </Link>

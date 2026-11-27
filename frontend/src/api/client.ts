@@ -287,23 +287,41 @@ export const api = {
     localMaxConcurrentJobs?: number;
   }) => request<NativeStorageState>("/native/engine", { method: "PUT", data }),
   saveNativeStorage: (data: unknown) =>
-    request("/native/storage", { method: "POST", data }),
+    request("/native/storage", { method: "POST", data }).then((result) => {
+      invalidateJobsCache();
+      return result;
+    }),
   updateNativeStorage: (data: {
     name: string;
     newName?: string;
     options: Record<string, string>;
     clearSecrets?: string[];
     authSessionId?: string;
-  }) => request("/native/storage", { method: "PUT", data }),
+  }) =>
+    request("/native/storage", { method: "PUT", data }).then((result) => {
+      invalidateJobsCache();
+      return result;
+    }),
   updateNativeStoragePolicy: (data: {
     name: string;
     pollIntervalSec: number;
     weeklySchedule?: WeeklyScheduleConfig;
     bwLimit: string;
     paused: boolean;
-  }) => request("/native/storage/policy", { method: "PUT", data }),
+  }) =>
+    request("/native/storage/policy", { method: "PUT", data }).then(
+      (result) => {
+        invalidateJobsCache();
+        return result;
+      },
+    ),
   deleteNativeStorage: (name: string) =>
-    request("/native/storage", { method: "DELETE", params: { name } }),
+    request("/native/storage", { method: "DELETE", params: { name } }).then(
+      (result) => {
+        invalidateJobsCache();
+        return result;
+      },
+    ),
   testNativeStorage: (data: {
     name?: string;
     options?: Record<string, string>;

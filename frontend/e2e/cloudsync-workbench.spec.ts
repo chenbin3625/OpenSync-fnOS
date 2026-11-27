@@ -537,3 +537,147 @@ test("mobile layout keeps header reachable and zero horizontal overflow", async 
   );
   expect(overflow).toBe(false);
 });
+
+test("unified connection policy pause/limit and failed-record recovery stay in workbench", async ({
+  page,
+}) => {
+  const policyWrites: Array<Record<string, unknown>> = [];
+  let remotePaused = false;
+  let remoteBwLimit = "";
+  let remotePoll = 0;
+
+  await page.route("**/app/opensync/svr/**", async (route) => {
+    const req = route.request();
+    const url = new URL(req.url());
+    const ok = (data: unknown) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ code: 200, data, msg: "" }),
+      });
+
+    if (url.pathname.endsWith("/session")) {
+      return ok({ uid: 1, development: false, version: "0.1.0" });
+    }
+    if (url.pathname.endsWith("/version/latest")) {
+      return ok({ hasUpdate: false, latestVersion: "0.1.0" });
+    }
+    if (url.pathname.endsWith("/native/storage/policy") && req.method() === "PUT") {
+      const body = req.postDataJSON() as Record<string, unknown>;
+      policyWrites.push(body);
+      remotePaused = Boolean(body.paused);
+      remoteBwLimit = String(body.bwLimit || "");
+      remotePoll = Number(body.pollIntervalSec || 0);
+      return ok(null);
+    }
+    if (url.pathname.endsWith("/native/storage")) {
+      return ok({
+        engineId: 1,
+        enabled: true,
+        rcloneAvailable: true,
+        localRoots: [{ id: "Photos", path: "/vol1/Photos" }],
+        remotes: [
+          {
+            name: "PhotoCloud",
+            type: "webdav",
+            summary: "https://dav.example.com",
+            options: {},
+            configuredSecrets: [],
+            usedByJobs: ["照片同步"],
+            usedByCrypts: [],
+            pollIntervalSec: remotePoll,
+            bwLimit: remoteBwLimit,
+            paused: remotePaused,
+          },
+        ],
+      });
+    }
+    if (url.pathname.endsWith("/alist")) {
+      return ok([{ id: 1, kind: "rclone", url: "rclone://native", remark: "内置存储" }]);
+    }
+    if (url.pathname.endsWith("/dashboard")) {
+      return ok({ kpi: { runningJobs: 0 }, jobs: [] });
+    }
+    if (url.pathname.endsWith("/job/items")) {
+      return ok({ dataList: [], count: 0 });
+    }
+    if (url.pathname.endsWith("/job") && url.searchParams.has("current")) {
+      return ok(null);
+    }
+    if (url.pathname.endsWith("/job")) {
+      return ok({
+        count: 1,
+        dataList: [
+          {
+            id: 21,
+            enable: 1,
+            remark: "照片同步",
+            alistId: 1,
+            method: 0,
+            isCron: 3,
+            srcPath: '["/本地/Photos"]',
+            dstPath: '["/PhotoCloud/Photos"]',
+            syncStatus: {
+              state: remotePaused ? "paused" : "error",
+              pendingChanges: 2,
+              lastSuccess: 1700000000,
+              lastPoll: 1700000000,
+              nextPoll: 1700000060,
+              error: remotePaused ? "" : "传输失败：目标磁盘空间不足",
+              errorType: remotePaused ? "" : "transfer",
+              errorSide: remotePaused ? "" : "remote",
+              errorEndpoint: remotePaused ? "" : "PhotoCloud",
+              failures: remotePaused ? 0 : 1,
+              connectionPaused: remotePaused,
+            },
+          },
+        ],
+      });
+    }
+    return ok(null);
+  });
+
+  await page.goto("/app/opensync/sync?storage=PhotoCloud");
+  await expect(page.getByTestId("connection-item-PhotoCloud")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+
+  // Phase 2 recovery CTA opens the unified workbench drawer directly on failed records
+  await page.getByRole("link", { name: "查看失败记录并重试" }).click();
+  await expect(page).toHaveURL(/\/sync\?storage=PhotoCloud&jobId=21&tab=records&hasError=1$/);
+  const drawer = page.locator(".task-detail-drawer");
+  await expect(drawer.getByRole("tab", { name: "同步记录", selected: true })).toBeVisible();
+  await drawer.getByRole("button", { name: "close" }).click();
+  await expect(drawer).toHaveCount(0);
+
+  // Phase 3 one-click pause connection from banner persists and reflects on rail + row
+  await page.locator(".sync-connection-banner").getByRole("button", { name: "暂停连接" }).click();
+  await expect.poll(() => policyWrites.length).toBe(1);
+  expect(policyWrites[0]).toMatchObject({ name: "PhotoCloud", paused: true });
+  await expect(page.getByTestId("connection-item-PhotoCloud")).toContainText("已暂停");
+  await expect(page.locator(".sync-overview-row")).toContainText("所属连接已暂停");
+
+  // Save shared cap and poll interval in Connection Settings, then resume connection
+  await page.getByRole("tab", { name: "连接设置" }).click();
+  const policyCard = page.getByTestId("connection-policy-editor");
+  await policyCard.locator('input[type="number"]').fill("300");
+  await policyCard.locator('input[type="text"]').fill("10M");
+  await policyCard.getByRole("button", { name: "保存连接策略" }).click();
+  await expect.poll(() => policyWrites.length).toBe(2);
+  expect(policyWrites[1]).toMatchObject({
+    name: "PhotoCloud",
+    pollIntervalSec: 300,
+    bwLimit: "10M",
+    paused: true,
+  });
+  await expect(page.locator(".sync-connection-banner")).toContainText("共享限速 10M");
+
+  await page.locator(".sync-connection-banner").getByRole("button", { name: "恢复连接" }).click();
+  await expect.poll(() => policyWrites.length).toBe(3);
+  expect(policyWrites[2]).toMatchObject({
+    name: "PhotoCloud",
+    pollIntervalSec: 300,
+    bwLimit: "10M",
+    paused: false,
+  });
+});

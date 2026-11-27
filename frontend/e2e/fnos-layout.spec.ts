@@ -130,7 +130,6 @@ test("desktop sidebar is 220px with icon menus and bottom settings", async ({
   await expect(sidebar.locator("nav .nav-link .nav-label")).toHaveText([
     "同步工作台",
     "总览看板",
-    "存储管理",
     "通知配置",
   ]);
   const firstNav = sidebar.locator("nav .nav-link").first();
@@ -324,7 +323,6 @@ test("mobile task tabs fit inside the page toolbar", async ({ page }) => {
   await expect(page.locator(".mobile-navigation a")).toHaveText([
     "同步工作台",
     "总览看板",
-    "存储管理",
     "通知配置",
     "设置",
   ]);
