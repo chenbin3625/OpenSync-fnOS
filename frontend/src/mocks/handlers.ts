@@ -581,20 +581,68 @@ export const handlers = [
     }
     return fail("缺少必要参数");
   }),
+  http.get(`${apiBase}/job/items`, ({ request }) => {
+    const query = new URL(request.url).searchParams;
+    const jobId = numberParam(query, "jobId");
+    if (jobId === undefined) return fail("缺少必要参数");
+    return ok(
+      mockStore.listJobItems(jobId, {
+        pageNum: numberParam(query, "pageNum"),
+        pageSize: numberParam(query, "pageSize"),
+        status: numberParam(query, "status"),
+        statusIn: query
+          .getAll("statusIn")
+          .map(Number)
+          .filter((value) => Number.isFinite(value)),
+        type: numberParam(query, "type"),
+        isPath: numberParam(query, "isPath"),
+        hasError: numberParam(query, "hasError"),
+        keyword: query.get("keyword") || undefined,
+        startTime: numberParam(query, "startTime"),
+        endTime: numberParam(query, "endTime"),
+        endTimeExclusive: numberParam(query, "endTimeExclusive"),
+      }),
+    );
+  }),
   http.get(`${apiBase}/job/items/export`, ({ request }) => {
     const query = new URL(request.url).searchParams;
     const taskId = numberParam(query, "taskId");
-    if (taskId === undefined) return fail("缺少任务 ID");
+    const jobId = numberParam(query, "jobId");
+    if (taskId === undefined && jobId === undefined) return fail("缺少任务 ID");
     const format = query.get("format")?.trim().toLowerCase();
     if (format && format !== "csv") return fail("仅支持 CSV 导出");
-    const rows = mockStore.listTaskItems(taskId, { pageNum: 1, pageSize: 500 }).dataList;
+    const filterParams = {
+      pageNum: 1,
+      pageSize: 500,
+      status: numberParam(query, "status"),
+      type: numberParam(query, "type"),
+      isPath: numberParam(query, "isPath"),
+      hasError: numberParam(query, "hasError"),
+      keyword: query.get("keyword") || undefined,
+      startTime: numberParam(query, "startTime"),
+      endTime: numberParam(query, "endTime"),
+      endTimeExclusive: numberParam(query, "endTimeExclusive"),
+    };
+    const rows =
+      taskId !== undefined
+        ? mockStore.listTaskItems(taskId, filterParams).dataList
+        : mockStore.listJobItems(jobId!, filterParams).dataList;
     const text =
       "\uFEFF文件名,源路径,目标路径,大小,状态\n" +
-      rows.map((r) => `${r.fileName || ""},${r.srcPath || ""},${r.dstPath || ""},${r.fileSize || 0},${r.status}`).join("\n");
+      rows
+        .map(
+          (r) =>
+            `${r.fileName || ""},${r.srcPath || ""},${r.dstPath || ""},${r.fileSize || 0},${r.status}`,
+        )
+        .join("\n");
+    const filename =
+      taskId !== undefined
+        ? `opensync-task-${taskId}-items.csv`
+        : `opensync-job-${jobId}-items.csv`;
     return new HttpResponse(text, {
       headers: {
         "Content-Type": "text/csv; charset=utf-8",
-        "Content-Disposition": `attachment; filename="task-${taskId}.csv"`,
+        "Content-Disposition": `attachment; filename="${filename}"`,
       },
     });
   }),
@@ -801,20 +849,27 @@ export const handlers = [
         return fail("缺少必要参数");
       if (body.bwLimit !== undefined && body.action !== "bwlimit")
         return fail("缺少必要参数");
+    } else if (body.action === "retry") {
+      if (body.id === undefined || body.id === null) return fail("缺少必要参数");
     } else if (body.pause === undefined) {
       // Manual run: an empty body used to fall through and run every job.
       if (body.id === undefined || body.id === null) return fail("缺少必要参数");
     } else if (body.id === undefined || body.id === null) {
       return fail("缺少必要参数");
     }
-    mockStore.updateJobAction({
+    const itemIds = Array.isArray(body.itemIds)
+      ? body.itemIds.map(Number).filter(Number.isFinite)
+      : undefined;
+    const errMsg = mockStore.updateJobAction({
       id: body.id as string | number | undefined,
       taskId: body.taskId as string | number | undefined,
       action: typeof body.action === "string" ? body.action : undefined,
+      itemIds,
       pause: typeof body.pause === "boolean" ? body.pause : undefined,
       abort: typeof body.abort === "boolean" ? body.abort : undefined,
       bwLimit: typeof body.bwLimit === "string" ? body.bwLimit : undefined,
     });
+    if (errMsg) return fail(errMsg);
     return ok(null);
   }),
   http.delete(`${apiBase}/job`, ({ request }) => {

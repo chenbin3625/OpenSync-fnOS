@@ -15,7 +15,6 @@ import {
 import { BisyncConflictsModal } from "./BisyncConflictsModal";
 import { CheckModal } from "./CheckModal";
 import { DryRunModal } from "./DryRunModal";
-import { resolveEffectiveSyncStatus } from "./SyncStatus";
 import { TaskOverviewPanel } from "./TaskOverviewPanel";
 import { useAction, useMediaQuery, useResource } from "../lib/hooks";
 import {
@@ -27,14 +26,9 @@ import {
 import { getJobName, parseJobPathList } from "../pages/Home/homeUtils";
 import type { AlistItem, JobItem, NativeRemoteItem } from "../types";
 
-const Realtime = lazy(() =>
+const SyncRecords = lazy(() =>
   import("../pages/TaskExecution").then((module) => ({
-    default: module.Realtime,
-  })),
-);
-const History = lazy(() =>
-  import("../pages/TaskExecution").then((module) => ({
-    default: module.History,
+    default: module.SyncRecords,
   })),
 );
 
@@ -61,7 +55,7 @@ export function TaskDetailDrawer({
 }: TaskDetailDrawerProps) {
   const isMobile = useMediaQuery("(max-width: 720px)");
   const [tab, setTab] = useState<TaskTab>(initialTab);
-  const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
+  const [recordsRefreshKey, setRecordsRefreshKey] = useState(0);
   const [checkOpen, setCheckOpen] = useState(false);
   const [conflictsOpen, setConflictsOpen] = useState(false);
   const [mirrorPreviewOpen, setMirrorPreviewOpen] = useState(false);
@@ -109,7 +103,7 @@ export function TaskDetailDrawer({
         Toast.success(message);
         await onJobsChanged();
         await currentTask.refresh(true);
-        setHistoryRefreshKey((k) => k + 1);
+        setRecordsRefreshKey((k) => k + 1);
       } catch (err) {
         errorToast(err);
       }
@@ -174,8 +168,7 @@ export function TaskDetailDrawer({
           keepDOM={false}
         >
           <Tabs.TabPane tab="任务概览" itemKey="overview" />
-          <Tabs.TabPane tab="实时明细" itemKey="realtime" />
-          <Tabs.TabPane tab="历史记录" itemKey="history" />
+          <Tabs.TabPane tab="同步记录" itemKey="records" />
         </Tabs>
 
         <div className="task-drawer-content">
@@ -190,7 +183,7 @@ export function TaskDetailDrawer({
               onRun={() =>
                 runAction(() => api.jobAction({ id: String(job.id) }), "已触发立即同步")
               }
-              onOpenRealtime={() => setTab("realtime")}
+              onOpenRecords={() => setTab("records")}
               onCheck={() => setCheckOpen(true)}
               onOpenConflicts={() => setConflictsOpen(true)}
               onClone={() => {
@@ -217,6 +210,7 @@ export function TaskDetailDrawer({
                   content:
                     "仅中止当前正在进行的传输批次，已完成的文件不会撤销；持续同步仍保持开启。",
                   okText: "中止本次",
+                  okLabel: "中止本次同步",
                   onOk: () =>
                     actions.run(async () => {
                       await api.taskAction(taskId, "stop");
@@ -243,40 +237,17 @@ export function TaskDetailDrawer({
             />
           )}
 
-          {tab === "realtime" && (
+          {tab === "records" && (
             <Suspense fallback={<LoadingPanel />}>
-              <Realtime
+              <SyncRecords
                 key={job.id}
                 jobId={job.id}
-                syncStatus={resolveEffectiveSyncStatus(job)}
+                refreshKey={recordsRefreshKey}
+                disableRetry={legacy || job.method === 3}
                 onTaskEnded={() => {
                   void onJobsChanged();
-                  setHistoryRefreshKey((k) => k + 1);
+                  setRecordsRefreshKey((k) => k + 1);
                 }}
-                onOpenOverview={() => setTab("overview")}
-                onOpenHistory={() => setTab("history")}
-                onSyncNow={
-                  job.enable === 1 && !legacy
-                    ? () =>
-                        runAction(
-                          () => api.jobAction({ id: String(job.id) }),
-                          "已触发立即同步",
-                        )
-                    : undefined
-                }
-              />
-            </Suspense>
-          )}
-
-          {tab === "history" && (
-            <Suspense fallback={<LoadingPanel />}>
-              <History
-                key={job.id}
-                jobId={job.id}
-                currentTaskId={currentForJob?.taskId}
-                refreshKey={historyRefreshKey}
-                disableRetry={legacy || job.method === 3}
-                onOpenRealtime={() => setTab("realtime")}
               />
             </Suspense>
           )}

@@ -9,16 +9,10 @@ import {
 } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import Button from "@douyinfe/semi-ui/lib/es/button";
-import Progress from "@douyinfe/semi-ui/lib/es/progress";
 import Tabs from "@douyinfe/semi-ui/lib/es/tabs";
-import Tag from "@douyinfe/semi-ui/lib/es/tag";
 import Toast from "@douyinfe/semi-ui/lib/es/toast";
-import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
 import {
-  IconAlertTriangle,
   IconArrowLeft,
-  IconDeleteStroked,
-  IconFolderStroked,
   IconPlusStroked,
 } from "@douyinfe/semi-icons";
 import { api } from "../api/client";
@@ -37,10 +31,7 @@ import { CheckModal } from "../components/CheckModal";
 import { DryRunModal } from "../components/DryRunModal";
 import { TaskOverviewPanel } from "../components/TaskOverviewPanel";
 import { SyncOverview } from "./SyncOverview";
-import {
-  SyncStatusTag,
-  resolveEffectiveSyncStatus,
-} from "../components/SyncStatus";
+import { jobStatusDotClass } from "../components/SyncStatus";
 import { useAction, useResource } from "../lib/hooks";
 import {
   buildTaskSearchParams,
@@ -58,16 +49,12 @@ import {
   parseJobPathList,
 } from "./Home/homeUtils";
 import type {
-  CurrentTaskData,
   JobItem,
   NativeRemoteItem,
 } from "../types";
 
-const Realtime = lazy(() =>
-  import("./TaskExecution").then((module) => ({ default: module.Realtime })),
-);
-const History = lazy(() =>
-  import("./TaskExecution").then((module) => ({ default: module.History })),
+const SyncRecords = lazy(() =>
+  import("./TaskExecution").then((module) => ({ default: module.SyncRecords })),
 );
 const JobEditor = lazy(() => import("./TaskEditor"));
 const StorageEditor = lazy(() =>
@@ -76,7 +63,7 @@ const StorageEditor = lazy(() =>
   })),
 );
 const currentTaskPollMs = 3000;
-const currentTaskRealtimePollMs = 3000;
+const currentTaskRecordsPollMs = 3000;
 const currentTaskFollowUpMs = 1000;
 
 export default function Tasks({ overview = false }: { overview?: boolean }) {
@@ -92,6 +79,12 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
         : -1;
   const rawTab = params.get("tab");
   const jobs = useResource((signal) => api.jobMenu(signal), [], overview);
+  const dashboard = useResource(
+    (signal) =>
+      overview ? api.dashboard(signal).catch(() => null) : Promise.resolve(null),
+    [overview],
+    overview,
+  );
   const engines = useResource((signal) => api.engines(signal));
   const storage = useResource(
     (signal) => overview ? api.nativeStorageState(signal) : Promise.resolve(null),
@@ -110,9 +103,9 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
     open: false,
     job: null,
   });
-  const [checkOpen, setCheckOpen] = useState(false);
+  const [checkJob, setCheckJob] = useState<JobItem | null>(null);
   const [conflictsOpen, setConflictsOpen] = useState(false);
-  const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
+  const [recordsRefreshKey, setRecordsRefreshKey] = useState(0);
   const [pendingCreatedId, setPendingCreatedId] = useState<number | null>(null);
   const mobileJobButtons = useRef<Array<HTMLButtonElement | null>>([]);
   const actions = useAction();
@@ -130,8 +123,8 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
   const selectedJobId = selected?.id;
   const deletedJobIdsRef = useRef<Set<number>>(new Set());
   const hasCryptRemote = useMemo(
-    () => Boolean(selected && jobHasCryptRemote(selected, engines.data)),
-    [selected, engines.data],
+    () => Boolean(selected && jobHasCryptRemote(selected, engines.data, storage.data?.remotes)),
+    [selected, engines.data, storage.data?.remotes],
   );
   const [snapshotState, setSnapshotState] = useState<{
     jobId: number;
@@ -170,22 +163,8 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
       ? currentTask.data
       : null;
   const hasCurrentTask = !!currentTaskForSelected;
-  const currentTaskSettled =
-    !!selectedJobId &&
-    snapshotState?.jobId === selectedJobId &&
-    snapshotState.ok &&
-    !currentTask.loading &&
-    !currentTask.error;
-  const tab = resolveTaskTab(rawTab, {
-    settled: currentTaskSettled,
-    hasCurrentTask,
-    jobRunning: Boolean(selected?.running),
-  });
-  const realtimeTab = tab === "realtime";
-  const realtimeAvailable =
-    hasCurrentTask ||
-    realtimeTab ||
-    (!currentTaskSettled && Boolean(selected?.running));
+  const tab = resolveTaskTab(rawTab);
+  const recordsTab = tab === "records";
   const refreshCurrentTask = currentTask.refresh;
 
   const prevTaskIdRef = useRef<number | null>(null);
@@ -193,24 +172,24 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
     const curId = currentTaskForSelected?.taskId ?? null;
     if (prevTaskIdRef.current !== null && curId === null) {
       void jobs.refresh(true);
-      setHistoryRefreshKey((k) => k + 1);
+      setRecordsRefreshKey((k) => k + 1);
       window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
     }
     prevTaskIdRef.current = curId;
   }, [currentTaskForSelected?.taskId, jobs.refresh]);
 
-  const prevRealtimeTab = useRef(realtimeTab);
+  const prevRecordsTab = useRef(recordsTab);
   useEffect(() => {
-    const enteredRealtime = !prevRealtimeTab.current && realtimeTab;
-    prevRealtimeTab.current = realtimeTab;
+    const enteredRecords = !prevRecordsTab.current && recordsTab;
+    prevRecordsTab.current = recordsTab;
     if (
-      enteredRealtime &&
+      enteredRecords &&
       selectedJobId &&
       !deletedJobIdsRef.current.has(selectedJobId)
     ) {
       void refreshCurrentTask(true);
     }
-  }, [realtimeTab, selectedJobId, refreshCurrentTask]);
+  }, [recordsTab, selectedJobId, refreshCurrentTask]);
 
   useEffect(() => {
     if (!selectedJobId) {
@@ -227,12 +206,12 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
           void jobs.refresh(true);
         }
       },
-      realtimeTab ? currentTaskRealtimePollMs : currentTaskPollMs,
+      recordsTab ? currentTaskRecordsPollMs : currentTaskPollMs,
     );
     return () => {
       clearInterval(interval);
     };
-  }, [selectedJobId, realtimeTab, refreshCurrentTask, jobs.refresh]);
+  }, [selectedJobId, recordsTab, refreshCurrentTask, jobs.refresh]);
 
   const followUp = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(followUp.current), []);
@@ -262,25 +241,38 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
     },
     [selected?.id, setParams],
   );
-  const handleRealtimeEnded = useCallback(() => {
+  const handleTaskEnded = useCallback(() => {
     void jobs.refresh(true);
-    setHistoryRefreshKey((k) => k + 1);
+    setRecordsRefreshKey((k) => k + 1);
   }, [jobs.refresh]);
-  const handleOpenRealtime = useCallback(
-    () => update({ tab: "realtime" }),
+  const handleOpenRecords = useCallback(
+    () => update({ tab: "records" }),
     [update],
   );
-  const handleOpenOverview = useCallback(
-    () => update({ tab: "overview" }),
-    [update],
+  const hasOverviewRunning = useMemo(
+    () =>
+      overview &&
+      (list.some((j) => j.running && !j.paused) ||
+        Boolean(dashboard.data?.kpi?.runningJobs)),
+    [overview, list, dashboard.data?.kpi?.runningJobs],
   );
-  const handleOpenHistory = useCallback(
-    () => update({ tab: "history" }),
-    [update],
-  );
+  useEffect(() => {
+    if (!hasOverviewRunning) return;
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === "visible") {
+        void dashboard.refresh(true);
+        void jobs.refresh(true);
+      }
+    }, 5000);
+    return () => window.clearInterval(interval);
+  }, [hasOverviewRunning, dashboard.refresh, jobs.refresh]);
+
   const refreshJobs = async (options?: { skipCurrentTask?: boolean }) => {
     await jobs.refresh(true);
     window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
+    if (overview) {
+      await dashboard.refresh(true);
+    }
     if (options?.skipCurrentTask) {
       clearTimeout(followUp.current);
       return;
@@ -296,7 +288,7 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
       try {
         await operation();
         Toast.success(message);
-        await refreshJobs();
+        await refreshJobs({ skipCurrentTask: overview });
       } catch (err) {
         errorToast(err);
       }
@@ -306,7 +298,7 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
       try {
         await api.jobAction({ id: String(jobId) });
         Toast.success("已触发立即同步");
-        await refreshJobs();
+        await refreshJobs({ skipCurrentTask: overview });
       } catch (err) {
         errorToast(err);
       }
@@ -325,7 +317,7 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
           try {
             await toggle();
             Toast.success(`${label}已暂停`);
-            await refreshJobs();
+            await refreshJobs({ skipCurrentTask: overview });
           } catch (err) {
             errorToast(err);
             throw err;
@@ -335,6 +327,71 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
       return;
     }
     action(toggle, pausing ? `${label}已暂停` : `${label}已恢复`);
+  };
+  const handleToggleJob = (job: JobItem, running = Boolean(job.running)) => {
+    if (requiresFirstMirrorPreview(job)) {
+      if (overview) {
+        navigate(`/tasks?jobId=${job.id}&tab=overview&mirrorPreview=1`);
+      } else {
+        update({ mirrorPreview: 1 });
+      }
+      return;
+    }
+    toggleSync(job, running);
+  };
+  const handleCloneJob = (job: JobItem) =>
+    setEditor({
+      open: true,
+      job: null,
+      initialDraft: cloneJobToForm(job),
+    });
+  const handleTogglePauseTransfer = (taskId: number, paused: boolean) => {
+    const resuming = Boolean(paused);
+    action(
+      () => api.taskAction(taskId, resuming ? "resume" : "pause"),
+      resuming ? "已继续传输" : "已暂停传输",
+    );
+  };
+  const handleStopJob = (job: JobItem, taskId?: number) => {
+    confirmAction({
+      title: "中止本次同步批次？",
+      content:
+        "仅中止当前正在进行的传输批次，已完成的文件不会撤销；持续同步仍保持开启。如需完全停止，请点击「暂停同步」。",
+      okText: "中止本次",
+      okLabel: "中止本次同步",
+      onOk: () =>
+        actions.run(async () => {
+          try {
+            if (taskId && taskId > 0) {
+              await api.taskAction(taskId, "stop");
+            } else {
+              await api.batchJobAction("stop", [job.id]);
+            }
+            Toast.success("已提交中止本次同步");
+            await refreshJobs({ skipCurrentTask: overview });
+          } catch (err) {
+            errorToast(err);
+            throw err;
+          }
+        }),
+    });
+  };
+  const handleDeleteJob = (job: JobItem) => {
+    const deletingId = job.id;
+    confirmDelete(
+      "删除此持续同步任务？",
+      () =>
+        actions.run(async () => {
+          clearTimeout(followUp.current);
+          await api.deleteJob(deletingId);
+          deletedJobIdsRef.current.add(deletingId);
+          if (!overview && selected?.id === deletingId) {
+            update({ jobId: null });
+          }
+          await refreshJobs({ skipCurrentTask: true });
+        }),
+      "此任务的历史同步记录与同步状态将一并删除。",
+    );
   };
   const mirrorPreview = Boolean(
     selected && selected.method === 1 && selected.isCron === 3 &&
@@ -370,18 +427,25 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
           ) : (jobs.data || storage.data) && (
             <SyncOverview
               jobs={list}
+              liveJobs={dashboard.data?.jobs}
               remotes={storage.data?.remotes || []}
               localRoots={storage.data?.localRoots || []}
               engines={engines.data || []}
+              busy={actions.busy}
               onAdd={(initialRemote) => setEditor({ open: true, job: null, initialRemote })}
+              onEdit={(job) => setEditor({ open: true, job })}
+              onClone={handleCloneJob}
+              onToggle={handleToggleJob}
+              onRun={(job) => triggerSyncNow(job.id)}
+              onStop={handleStopJob}
+              onTogglePauseTransfer={handleTogglePauseTransfer}
+              onDelete={handleDeleteJob}
+              onCheck={(job) => setCheckJob(job)}
               onRepair={(remote) => setRepair({ mode: "form", remote })}
               onAddConnection={() => setRepair({ mode: "form", remote: null })}
               onBrowseRemote={(remote) => setRepair({ mode: "browse", remote })}
               onLocalFolders={() => setRepair({ mode: "local" })}
-              onEditJob={(job) => setEditor({ open: true, job })}
-              onCloneJob={(job) =>
-                setEditor({ open: true, job: null, initialDraft: cloneJobToForm(job) })
-              }
+              onNavigateEngines={() => navigate("/engines")}
               onJobsChanged={() => refreshJobs({ skipCurrentTask: true })}
               onStorageChanged={() => {
                 void storage.refresh(true);
@@ -400,27 +464,19 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
             keepDOM={false}
           >
             <Tabs.TabPane tab="任务详情" itemKey="overview" />
-            <Tabs.TabPane tab="历史任务" itemKey="history" />
             <Tabs.TabPane
               tab={
-                !realtimeAvailable ? (
-                  <Tooltip content="当前没有正在传输的批次" position="top">
-                    <span>实时任务</span>
-                  </Tooltip>
-                ) : (
-                  <span className="realtime-tab-label">
-                    {hasCurrentTask && (
-                      <span
-                        className="kpi-dot kpi-dot--primary kpi-dot--pulse"
-                        aria-hidden="true"
-                      />
-                    )}
-                    <span>实时任务</span>
-                  </span>
-                )
+                <span className="realtime-tab-label">
+                  {hasCurrentTask && (
+                    <span
+                      className="kpi-dot kpi-dot--primary kpi-dot--pulse"
+                      aria-hidden="true"
+                    />
+                  )}
+                  <span>同步记录</span>
+                </span>
               }
-              itemKey="realtime"
-              disabled={!realtimeAvailable}
+              itemKey="records"
             />
           </Tabs>
         }
@@ -486,7 +542,8 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
               className={`mobile-job-chip${selected?.id === job.id ? " active" : ""}`}
               onClick={() => selectMobileJob(job)}
             >
-              {getJobName(job)}
+              <span className={jobStatusDotClass(job)} aria-hidden="true" />
+              <span>{getJobName(job)}</span>
             </button>
           ))}
         </div>
@@ -528,101 +585,42 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
                     )}
                     runKey={String(currentTaskForSelected?.taskId ?? "idle")}
                     onRun={() => triggerSyncNow(selected.id)}
-                    onOpenRealtime={handleOpenRealtime}
-                    onCheck={() => setCheckOpen(true)}
+                    onOpenRecords={handleOpenRecords}
+                    onCheck={() => setCheckJob(selected)}
                     onOpenConflicts={() => setConflictsOpen(true)}
-                    onClone={() =>
-                      setEditor({
-                        open: true,
-                        job: null,
-                        initialDraft: cloneJobToForm(selected),
-                      })
-                    }
+                    onClone={() => handleCloneJob(selected)}
                     onTogglePause={() => {
                       if (!currentTaskForSelected) return;
-                      const { taskId } = currentTaskForSelected;
-                      const resuming = Boolean(currentTaskForSelected.paused);
-                      action(
-                        () => api.taskAction(taskId, resuming ? "resume" : "pause"),
-                        resuming ? "已继续传输" : "已暂停传输",
+                      handleTogglePauseTransfer(
+                        currentTaskForSelected.taskId,
+                        Boolean(currentTaskForSelected.paused),
                       );
                     }}
                     onStop={() => {
                       if (!currentTaskForSelected) return;
-                      const { taskId } = currentTaskForSelected;
-                      confirmAction({
-                        title: "中止本次同步批次？",
-                        content:
-                          "仅中止当前正在进行的传输批次，已完成的文件不会撤销；持续同步仍保持开启。如需完全停止，请点击「暂停同步」。",
-                        okText: "中止本次",
-                        okLabel: "中止本次同步",
-                        onOk: () =>
-                          actions.run(async () => {
-                            try {
-                              await api.taskAction(taskId, "stop");
-                              Toast.success("已提交中止本次同步");
-                              await refreshJobs();
-                            } catch (err) {
-                              errorToast(err);
-                              throw err;
-                            }
-                          }),
-                      });
+                      handleStopJob(selected, currentTaskForSelected.taskId);
                     }}
-                    onToggle={() => {
-                      if (requiresFirstMirrorPreview(selected)) {
-                        update({ mirrorPreview: 1 });
-                        return;
-                      }
-                      toggleSync(selected, Boolean(currentTaskForSelected || selected.running));
-                    }}
+                    onToggle={() =>
+                      handleToggleJob(
+                        selected,
+                        Boolean(currentTaskForSelected || selected.running),
+                      )
+                    }
                     onEdit={() => setEditor({ open: true, job: selected })}
-                    onDelete={() => {
-                      const deletingId = selected.id;
-                      confirmDelete(
-                        "删除此持续同步任务？",
-                        () =>
-                          actions.run(async () => {
-                            clearTimeout(followUp.current);
-                            await api.deleteJob(deletingId);
-                            deletedJobIdsRef.current.add(deletingId);
-                            update({ jobId: null });
-                            await refreshJobs({ skipCurrentTask: true });
-                          }),
-                        "此任务的历史同步记录与同步状态将一并删除。",
-                      );
-                    }}
+                    onDelete={() => handleDeleteJob(selected)}
                   />
                 )}
-                {tab === "realtime" && (
+                {tab === "records" && (
                   <Suspense fallback={<LoadingPanel />}>
-                    <Realtime
+                    <SyncRecords
                       key={selected.id}
                       jobId={selected.id}
-                      syncStatus={resolveEffectiveSyncStatus(selected)}
-                      onTaskEnded={handleRealtimeEnded}
-                      onOpenOverview={handleOpenOverview}
-                      onOpenHistory={handleOpenHistory}
-                      onSyncNow={
-                        selected.enable === 1 && !isLegacyOpenListJob(selected, engines.data)
-                          ? () => triggerSyncNow(selected.id)
-                          : undefined
-                      }
-                    />
-                  </Suspense>
-                )}
-                {tab === "history" && (
-                  <Suspense fallback={<LoadingPanel />}>
-                    <History
-                      key={selected.id}
-                      jobId={selected.id}
-                      currentTaskId={currentTaskForSelected?.taskId}
-                      refreshKey={historyRefreshKey}
+                      refreshKey={recordsRefreshKey}
                       disableRetry={
                         isLegacyOpenListJob(selected, engines.data) ||
                         selected.method === 3
                       }
-                      onOpenRealtime={handleOpenRealtime}
+                      onTaskEnded={handleTaskEnded}
                     />
                   </Suspense>
                 )}
@@ -649,14 +647,18 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
           }}
         />
       )}
-      {checkOpen && selected && (
+      {checkJob && (
         <CheckModal
-          jobId={selected.id}
-          jobName={getJobName(selected)}
-          hasCryptRemote={hasCryptRemote}
-          onClose={() => setCheckOpen(false)}
+          jobId={checkJob.id}
+          jobName={getJobName(checkJob)}
+          hasCryptRemote={
+            selected && checkJob.id === selected.id
+              ? hasCryptRemote
+              : jobHasCryptRemote(checkJob, engines.data)
+          }
+          onClose={() => setCheckJob(null)}
           onRepairStarted={() => {
-            void refreshJobs();
+            void refreshJobs({ skipCurrentTask: overview });
           }}
         />
       )}
@@ -717,9 +719,10 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
               setEditor({ open: false, job: null });
               const createdId = result.createdId;
               const mirrorPreviewId = result.mirrorPreviewId;
-              if (overview && createdId) {
+              if (overview && (createdId || mirrorPreviewId)) {
+                const targetId = createdId ?? mirrorPreviewId;
                 window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
-                navigate(`/tasks?jobId=${createdId}&tab=overview${mirrorPreviewId ? "&mirrorPreview=1" : ""}`);
+                navigate(`/tasks?jobId=${targetId}&tab=overview${mirrorPreviewId ? "&mirrorPreview=1" : ""}`);
                 return;
               }
               if (createdId) {
@@ -739,10 +742,12 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
                     jobs.setData(fresh);
                     window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
                   } else {
-                    await refreshJobs();
+                    await refreshJobs({ skipCurrentTask: overview });
                   }
                 } catch {
-                  await refreshJobs({ skipCurrentTask: Boolean(createdId) });
+                  await refreshJobs({
+                    skipCurrentTask: Boolean(createdId) || overview,
+                  });
                 } finally {
                   if (createdId) {
                     setPendingCreatedId((cur) =>

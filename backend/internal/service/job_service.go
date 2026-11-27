@@ -299,7 +299,9 @@ func activeProtectedHistoryTaskIDs() []int64 {
 		if cur := client.currentTask(); cur != nil {
 			add(cur.TaskID)
 		}
-		add(client.retrySource())
+		for _, sid := range client.retrySources() {
+			add(sid)
+		}
 	}
 	return ids
 }
@@ -1629,6 +1631,25 @@ func RetryFailedTaskItems(taskID int64, itemIDs []int64) error {
 			return err
 		}
 	}
+	return retryJobItemsWithJob(job, func(client *JobClient) error {
+		return client.DoRetrySelectedTaskItems(taskID, itemIDs)
+	})
+}
+
+// RetryJobItems replays the selected non-success items of a job across tasks.
+func RetryJobItems(jobID int64, itemIDs []int64) error {
+	job, err := mapper.GetJobByID(jobID)
+	if err != nil {
+		if err := publicErrorIf(err, msg.T(msg.JobNotFound)); err != nil {
+			return err
+		}
+	}
+	return retryJobItemsWithJob(job, func(client *JobClient) error {
+		return client.DoRetryJobItems(itemIDs)
+	})
+}
+
+func retryJobItemsWithJob(job map[string]interface{}, fn func(*JobClient) error) error {
 	if isLegacyOpenListAlistID(util.ToInt64(job["alistId"])) {
 		return publicError(legacyOpenListJobDisabledMsg)
 	}
@@ -1642,7 +1663,7 @@ func RetryFailedTaskItems(taskID int64, itemIDs []int64) error {
 	if !client.enabled() {
 		return publicError(msg.T(msg.DisabledJobCannotRun))
 	}
-	return client.DoRetrySelectedTaskItems(taskID, itemIDs)
+	return fn(client)
 }
 
 // GetJobList returns paginated job list
@@ -2023,6 +2044,39 @@ func firstPathSegment(p string) string {
 	return trimmed
 }
 
+// GetJobItemList returns paginated file sync records across all runs of a job,
+// along with grouped item errors and recent task-level failures without item rows.
+func GetJobItemList(req map[string]interface{}) (map[string]interface{}, error) {
+	jobID := util.ToInt64(req["jobId"])
+	if jobID <= 0 {
+		return nil, publicError(msg.T(msg.LostPart))
+	}
+	if _, err := mapper.GetJobByID(jobID); err != nil {
+		if err := publicErrorIf(err, msg.T(msg.JobNotFound)); err != nil {
+			return nil, err
+		}
+	}
+	queryParams := make(map[string]interface{}, len(req))
+	for k, v := range req {
+		if k == "taskId" {
+			continue
+		}
+		queryParams[k] = v
+	}
+	result, err := mapper.GetJobTaskItemList(queryParams)
+	if err := publicErrorIf(err, msg.T(msg.ListTooLarge)); err != nil {
+		return nil, err
+	}
+	if result != nil {
+		if groups, gErr := mapper.GetJobErrorGroups(jobID, queryParams, 20); gErr == nil && len(groups) > 0 {
+			result["errorGroups"] = groups
+		}
+		if recentErrors, rErr := mapper.GetJobRecentTaskErrors(jobID, queryParams, 20); rErr == nil && len(recentErrors) > 0 {
+			result["recentErrors"] = recentErrors
+		}
+	}
+	return result, nil
+}
 // RemoveTask deletes a task
 func RemoveTask(taskID int64) error {
 	task, err := mapper.GetJobTaskByID(taskID)
@@ -2036,6 +2090,8 @@ func RemoveTask(taskID int64) error {
 		return publicError(msg.T(msg.JobRunningCannotDelete))
 	}
 
+	historyCleanupMu.Lock()
+	defer historyCleanupMu.Unlock()
 	jobID := util.ToInt64(task["jobId"])
 	jobClientListMu.RLock()
 	client := jobClientList[jobID]
@@ -2047,7 +2103,7 @@ func RemoveTask(taskID int64) error {
 		// A "retry failed items" run replays this task's items in id-ordered
 		// batches. Deleting the source task mid-run silently drops the remainder
 		// of the replay, so it is locked while that run is active.
-		if client.retrySource() == taskID {
+		if client.hasRetrySourceTask(taskID) {
 			return publicError(msg.T(msg.JobRunningCannotDelete))
 		}
 	}

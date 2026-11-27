@@ -127,11 +127,23 @@ test("desktop sidebar is 220px with icon menus and bottom settings", async ({
   const sidebar = page.locator(".app-sidebar");
   await expect(sidebar).toBeVisible();
   expect((await sidebar.boundingBox())?.width).toBe(220);
-  const firstNav = sidebar.getByRole("link", { name: "同步任务", exact: true });
+  await expect(sidebar.locator("nav .nav-link .nav-label")).toHaveText([
+    "总览看板",
+    "同步任务",
+    "存储管理",
+    "通知配置",
+  ]);
+  const firstNav = sidebar.locator("nav .nav-link").first();
+  await expect(firstNav).toHaveText("总览看板");
   const firstNavBox = await firstNav.boundingBox();
   expect(firstNavBox?.width).toBe(204);
   expect(firstNavBox?.height).toBe(36);
   await expect(firstNav).toHaveCSS("font-size", "14px");
+  const syncNav = sidebar.getByRole("link", { name: "同步任务", exact: true });
+  const syncNavBox = await syncNav.boundingBox();
+  expect(syncNavBox?.width).toBe(204);
+  expect(syncNavBox?.height).toBe(36);
+  await expect(syncNav).toHaveCSS("font-size", "14px");
   const toggle = sidebar.getByRole("button", { name: "任务快捷列表" });
   await expect(toggle).toHaveAttribute("aria-expanded", "true");
   await expect(sidebar.locator(".nav-submenu")).toHaveCount(1);
@@ -245,8 +257,7 @@ test("task tabs and page commands share an integrated toolbar row", async ({
 }) => {
   const toolbars = [
     { path: "tasks?tab=overview", tab: "任务详情" },
-    { path: "tasks?tab=realtime", tab: "实时任务" },
-    { path: "tasks?tab=history", tab: "历史任务" },
+    { path: "tasks?tab=records", tab: "同步记录" },
   ];
   for (const { path, tab } of toolbars) {
     await page.goto(`/app/opensync/${path}`);
@@ -310,6 +321,13 @@ test("mobile task tabs fit inside the page toolbar", async ({ page }) => {
 
   await routeMobileTaskFixture(page);
   await page.goto("/app/opensync/tasks?tab=overview");
+  await expect(page.locator(".mobile-navigation a")).toHaveText([
+    "总览看板",
+    "同步任务",
+    "存储管理",
+    "通知配置",
+    "设置",
+  ]);
   const toolbar = page.locator(".page-toolbar");
   const tabs = toolbar.getByRole("tab");
   const action = toolbar.getByRole("button", {
@@ -355,10 +373,10 @@ test("mobile task switcher stays below the toolbar", async ({ page }) => {
 });
 
 test("task management top tabs keep a visible selected state", async ({ page }) => {
-  await page.goto("/app/opensync/tasks?tab=history");
+  await page.goto("/app/opensync/tasks?tab=records");
   const toolbar = page.locator(".page-toolbar");
   const activeTab = toolbar.getByRole("tab", {
-    name: "历史任务",
+    name: "同步记录",
     exact: true,
   });
 
@@ -754,4 +772,57 @@ test("toolbar keeps its divider only when tabs are present", async ({
   const toolbar = page.locator(".page-toolbar");
   await expect(toolbar.locator(".page-tabs .semi-tabs-tab").first()).toBeVisible();
   await expect(toolbar).toHaveCSS("border-bottom-width", "1px");
+});
+
+test("settings page stops scrolling at the bottom log card without blank document overflow", async ({
+  page,
+}) => {
+  await page.route("**/app/opensync/svr/system/logs**", async (route) => {
+    const lines = Array.from(
+      { length: 120 },
+      (_, idx) => `2026/11/26 12:00:${String(idx % 60).padStart(2, "0")} INFO settings log entry #${idx + 1}`,
+    );
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        code: 200,
+        data: { lines, total: lines.length, fileSize: 8192, source: "memory" },
+        msg: "",
+      }),
+    });
+  });
+
+  await page.goto("/app/opensync/settings");
+  await expect(page.locator(".log-viewer-content")).toBeVisible();
+
+  const metrics = await page.evaluate(() => {
+    const root = document.documentElement;
+    const shell = document.querySelector<HTMLElement>(".app-shell")!;
+    const workspace = document.querySelector<HTMLElement>(".app-workspace")!;
+    const logBox = document.querySelector<HTMLElement>(".log-viewer-box")!;
+
+    workspace.scrollTop = workspace.scrollHeight;
+    logBox.scrollTop = logBox.scrollHeight;
+    window.scrollTo(0, 99999);
+
+    const lastCard = [...document.querySelectorAll<HTMLElement>(".settings-card")].at(-1)!;
+    return {
+      documentClientHeight: root.clientHeight,
+      documentScrollHeight: root.scrollHeight,
+      windowScrollY: window.scrollY,
+      shellClientHeight: shell.clientHeight,
+      shellScrollHeight: shell.scrollHeight,
+      workspaceBottom: workspace.getBoundingClientRect().bottom,
+      lastCardBottom: lastCard.getBoundingClientRect().bottom,
+      logScrollMax: logBox.scrollHeight - logBox.clientHeight,
+      logScrollTop: logBox.scrollTop,
+    };
+  });
+
+  expect(metrics.documentScrollHeight).toBe(metrics.documentClientHeight);
+  expect(metrics.shellScrollHeight).toBe(metrics.shellClientHeight);
+  expect(metrics.windowScrollY).toBe(0);
+  expect(metrics.logScrollMax).toBeGreaterThan(0);
+  expect(Math.abs(metrics.logScrollTop - metrics.logScrollMax)).toBeLessThanOrEqual(2);
+  expect(metrics.lastCardBottom).toBeLessThanOrEqual(metrics.workspaceBottom + 1);
 });

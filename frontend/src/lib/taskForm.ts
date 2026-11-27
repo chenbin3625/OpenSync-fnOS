@@ -22,6 +22,7 @@ import {
 import type { CronFieldKey } from "./schedule";
 import {
   cleanPathList,
+  syncPathContains,
   validateSyncPathSelection,
   type ExistingJobPathSummary,
 } from "./syncPathPreview";
@@ -459,10 +460,10 @@ export function findBatchMoveJobs<
   return [];
 }
 
-export type TaskTab = "overview" | "realtime" | "history";
+export type TaskTab = "overview" | "records";
 
 export function parseTaskTab(raw: string | null | undefined): TaskTab | null {
-  if (raw === "overview" || raw === "realtime" || raw === "history") {
+  if (raw === "overview" || raw === "records") {
     return raw;
   }
   return null;
@@ -516,8 +517,8 @@ export function buildTaskSearchParams(
 
   const next = new URLSearchParams();
   next.set("jobId", String(job.id));
-  if (onTasksPage && parseTaskTab(current.get("tab")) === "history") {
-    next.set("tab", "history");
+  if (onTasksPage && parseTaskTab(current.get("tab")) === "records") {
+    next.set("tab", "records");
   }
   return next;
 }
@@ -1054,6 +1055,166 @@ export function validateManualSyncPath(
 
   const normalized = "/" + [canonicalFirst, ...rawSegs.slice(1)].join("/");
   return { error: "", normalized };
+}
+
+/**
+ * 判断在目录选择器中是否允许在指定节点下直接新建子文件夹。
+ * - `/`、`/本地` 本身不能新建目录（本地根须由飞牛系统授权）；
+ * - 需指定存储桶/共享目录的后端（S3/SMB 等）以及 combine 根不支持在存储根下直接建目录；
+ * - 只读存储（HTTP、archive、全只读 union 等）禁止创建目录。
+ */
+export function canCreateFolderUnderPath(
+  rawPath: string,
+  remotes?: readonly NativeRemoteItem[],
+): boolean {
+  const trimmed = rawPath.trim();
+  if (!trimmed || !trimmed.startsWith("/")) return false;
+  if (trimmed.includes("\\") || /[\u0000-\u001f\u007f]/.test(trimmed)) {
+    return false;
+  }
+  const segs = trimmed.replace(/^\/+|\/+$/g, "").split("/").filter(Boolean);
+  if (segs.length === 0 || segs.some((s) => s === "." || s === "..")) {
+    return false;
+  }
+  const [first, ...rest] = segs;
+  if (first === "本地") {
+    return rest.length >= 1;
+  }
+  if (!remotes?.length) {
+    return true;
+  }
+  const info = resolveRemoteChain(first, remotes, new Set(), rest.join("/"));
+  if (!info.found || info.readOnly) {
+    return false;
+  }
+  if (
+    rest.length === 0 &&
+    !info.accumulatedPrefix &&
+    (containerRequiredBackends.has(info.leafBackend) ||
+      info.leafBackend === "combine")
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * 校验目录选择器里新建文件夹的输入（支持单级名称如 `Backup` 或多级相对路径如 `2026/Photos`）。
+ */
+export function validateNewFolderName(rawName: string): {
+  error: string;
+  segments: string[];
+  clean: string;
+} {
+  const trimmed = rawName.trim();
+  if (!trimmed) {
+    return { error: "请输入文件夹名称", segments: [], clean: "" };
+  }
+  if (trimmed.includes("\\") || /[\u0000-\u001f\u007f]/.test(trimmed)) {
+    return {
+      error: "文件夹名称不能包含反斜杠或控制字符",
+      segments: [],
+      clean: "",
+    };
+  }
+  const stripped = trimmed.replace(/^\/+|\/+$/g, "");
+  if (!stripped) {
+    return { error: "请输入文件夹名称", segments: [], clean: "" };
+  }
+  if (stripped.includes("//")) {
+    return { error: "文件夹名称不能包含连续斜杠", segments: [], clean: "" };
+  }
+  const segments = stripped.split("/");
+  if (segments.some((s) => !s || s === "." || s === "..")) {
+    return {
+      error: "文件夹名称不能包含 . 或 ..",
+      segments: [],
+      clean: "",
+    };
+  }
+  return { error: "", segments, clean: segments.join("/") };
+}
+
+/**
+ * 计算新建文件夹后的目标路径、需要逐级重新加载的父目录列表以及需要展开的祖先节点列表。
+ */
+export function buildCreatedFolderPlan(
+  parentPath: string,
+  folderInput: string,
+): {
+  error: string;
+  clean: string;
+  targetPath: string;
+  loadPaths: string[];
+  expandPaths: string[];
+} {
+  const checked = validateNewFolderName(folderInput);
+  if (checked.error) {
+    return {
+      error: checked.error,
+      clean: "",
+      targetPath: "",
+      loadPaths: [],
+      expandPaths: [],
+    };
+  }
+  const parentSegs = parentPath
+    .trim()
+    .replace(/^\/+|\/+$/g, "")
+    .split("/")
+    .filter(Boolean);
+  if (parentSegs.length === 0) {
+    return {
+      error: "请选择有效的上级目录",
+      clean: "",
+      targetPath: "",
+      loadPaths: [],
+      expandPaths: [],
+    };
+  }
+  const cleanParent = "/" + parentSegs.join("/");
+  const targetPath = `${cleanParent}/${checked.clean}`;
+
+  const loadPaths: string[] = [cleanParent];
+  let cur = cleanParent;
+  for (let i = 0; i < checked.segments.length - 1; i += 1) {
+    cur = `${cur}/${checked.segments[i]}`;
+    loadPaths.push(cur);
+  }
+
+  const expandPaths: string[] = ["/"];
+  const allSegs = [...parentSegs, ...checked.segments.slice(0, -1)];
+  let acc = "";
+  for (const seg of allSegs) {
+    acc = `${acc}/${seg}`;
+    expandPaths.push(acc);
+  }
+
+  return {
+    error: "",
+    clean: checked.clean,
+    targetPath,
+    loadPaths,
+    expandPaths,
+  };
+}
+
+/**
+ * 将刚创建的文件夹合并进目录选择器的已选值；多选时移除与其父子重叠的旧祖先项，避免产生嵌套路径冲突。
+ */
+export function mergeCreatedFolderSelection(
+  currentValue: readonly string[],
+  createdPath: string,
+  multiple: boolean,
+): string[] {
+  if (!multiple) {
+    return [createdPath];
+  }
+  const next = currentValue.filter(
+    (item) => item !== createdPath && !syncPathContains(item, createdPath),
+  );
+  next.push(createdPath);
+  return next;
 }
 
 export function validateTrashDir(raw: string): string {

@@ -102,7 +102,7 @@ test("realtime page consumes the progress SSE stream", async ({ page }) => {
     return success(null);
   });
 
-  await page.goto("/app/opensync/tasks?jobId=1&tab=realtime");
+  await page.goto("/app/opensync/tasks?jobId=1&tab=records");
   await expect(page.getByRole("heading", { name: "正在同步" })).toBeVisible();
 
   // The consumer must connect to the backend's SSE route and ask for this job.
@@ -199,7 +199,7 @@ test("realtime page falls back to polling when EventSource is unavailable", asyn
     return success(null);
   });
 
-  await page.goto("/app/opensync/tasks?jobId=1&tab=realtime");
+  await page.goto("/app/opensync/tasks?jobId=1&tab=records");
   await expect(page.getByRole("heading", { name: "正在同步" })).toBeVisible();
   await expect(page.getByRole("tab", { name: /成功/ })).toBeVisible();
 });

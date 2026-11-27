@@ -1,5 +1,5 @@
 appname=opensync
-version=0.0.56
+version=0.1.0
 display_name=OpenSync
 desc=<div><p><strong>OpenSync</strong> 是运行在飞牛 fnOS 上的文件同步与备份工具，可作为群晖 Cloud Sync 的替代方案。</p><p>支持本地授权目录、夸克网盘、123 云盘，以及通过内置 rclone 接入的 S3、WebDAV（兼容自建 OpenList / AList）、SFTP、SMB、OneDrive、Google Drive、Dropbox、Crypt 加密存储等。</p><ul><li>支持持续单向同步、单向镜像与双向同步，可设置传输时段、并发上限和限速。</li><li>提供远程目录浏览、首次启用镜像时的影响预览、数据一致性校验和文件过滤。</li><li>提供实时进度、执行历史、失败重试、回收站，以及双向同步的冲突处理和批量删除保护。</li><li>支持任务通知、存储连通性告警及日报或周报。</li></ul><p>开源地址：<a href="https://github.com/chenbin3625/OpenSync-fnOS">https://github.com/chenbin3625/OpenSync-fnOS</a></p></div>
 platform=x86
@@ -16,4 +16,4 @@ ctl_stop=true
 install_type=
 checkport=false
 disable_authorization_path=false
-changelog=v0.0.56 合并单向同步入口，首次启用镜像时可预览影响。单向镜像取消按数量和比例拦截删除，保留源目录异常变空等保护。改进持续同步的本地监听与扫描，支持在编辑远程存储时改名并更新关联路径。
+changelog=v0.1.0 全面升级 Cloud Sync 同步工作台：新增左连接右任务主从一体视图、滑出式任务详情抽屉、全局状态控制栏、冷启动三步引导与实时动态流；重做 3 步标准同步向导并支持自由多对多模式切换，内联端到端加密与密钥恢复包、7×24 周历分时调度、目录选择器内联新建文件夹以及跨批次同步记录统一展示与按项重试。

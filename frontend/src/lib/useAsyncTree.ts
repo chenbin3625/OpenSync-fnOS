@@ -52,6 +52,18 @@ export function useAsyncTree({
   engineRef.current = engineId;
   const expandedRef = useRef(expandedKeys);
   expandedRef.current = expandedKeys;
+  const loadedKeysRef = useRef(loadedKeys);
+  loadedKeysRef.current = loadedKeys;
+
+  useEffect(() => {
+    if (!dirCache?.subscribe || !engineId) return;
+    return dirCache.subscribe((event) => {
+      if (event.engineId !== engineRef.current) return;
+      if (!loadedKeysRef.current.has(event.path)) return;
+      const children = toTreeChildren(event.path, event.entries);
+      setTreeData((prev) => patchTreeNodes(prev, event.path, children));
+    });
+  }, [dirCache, engineId]);
 
   const loadChildren = useCallback(
     async (

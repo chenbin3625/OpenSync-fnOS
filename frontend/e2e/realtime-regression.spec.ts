@@ -76,7 +76,7 @@ test("realtime view loads the initial active task snapshot", async ({ page }) =>
     return success(null);
   });
 
-  await page.goto("/app/opensync/tasks?jobId=1&tab=realtime");
+  await page.goto("/app/opensync/tasks?jobId=1&tab=records");
   await expect(page.getByRole("heading", { name: "正在同步" })).toBeVisible();
   const stopButton = page.getByRole("button", { name: "中止本次同步", exact: true });
   await expect(stopButton).toHaveCSS("height", "28px");
@@ -166,12 +166,14 @@ test("realtime view loads running rows when the live snapshot is missing", async
     return success(null);
   });
 
-  await page.goto("/app/opensync/tasks?jobId=1&tab=realtime");
+  await page.goto("/app/opensync/tasks?jobId=1&tab=records");
   await expect(page.getByRole("heading", { name: "正在同步" })).toBeVisible({
     timeout: 10000,
   });
 
-  const visibleList = page.locator(".desktop-data:visible, .mobile-data:visible").last();
+  const visibleList = page
+    .locator(".sync-records-live-list .desktop-data:visible, .sync-records-live-list .mobile-data:visible")
+    .first();
   await expect(visibleList.getByText("mobile-running-file.txt")).toBeVisible();
   await expect(visibleList.getByText("42%")).toBeVisible();
 });
@@ -236,7 +238,7 @@ test("mobile realtime view loads the initial status snapshot", async ({
     return success(null);
   });
 
-  await page.goto("/app/opensync/tasks?jobId=1&tab=realtime");
+  await page.goto("/app/opensync/tasks?jobId=1&tab=records");
   await expect(page.getByRole("tab", { name: "成功 3" })).toBeVisible({
     timeout: 2500,
   });
@@ -319,14 +321,14 @@ test("mobile realtime pagination stays at the bottom with short content", async 
     return success(null);
   });
 
-  await page.goto("/app/opensync/tasks?jobId=1&tab=realtime");
-  const mobileList = page.locator(".mobile-data").last();
+  await page.goto("/app/opensync/tasks?jobId=1&tab=records");
+  const mobileList = page.locator(".sync-records-live-list .mobile-data").first();
   await expect(mobileList.getByText("bottom-pager-row.txt")).toBeVisible();
 
   const layout = await page.evaluate(() => {
     const workspace = document.querySelector<HTMLElement>(".task-workspace")!;
     const pager = document.querySelector<HTMLElement>(
-      ".execution-view .table-pagination",
+      ".sync-records-view > .table-pagination",
     )!;
     const workspaceBox = workspace.getBoundingClientRect();
     const pagerBox = pager.getBoundingClientRect();
@@ -421,11 +423,11 @@ test("slow realtime status request completes without cancellation", async ({
     return success(null);
   });
 
-  await page.goto("/app/opensync/tasks?jobId=1&tab=realtime");
+  await page.goto("/app/opensync/tasks?jobId=1&tab=records");
   await page.getByRole("tab", { name: /成功/ }).click();
   const visibleList = page
-    .locator(".desktop-data:visible, .mobile-data:visible")
-    .last();
+    .locator(".sync-records-live-list .desktop-data:visible, .sync-records-live-list .mobile-data:visible")
+    .first();
   await expect(visibleList.getByText("slow-success.txt")).toBeVisible({
     timeout: 8000,
   });
@@ -512,13 +514,13 @@ test("realtime status load failure can be retried", async ({ page }) => {
     return success(null);
   });
 
-  await page.goto("/app/opensync/tasks?jobId=1&tab=realtime");
+  await page.goto("/app/opensync/tasks?jobId=1&tab=records");
   await page.getByRole("tab", { name: /成功/ }).click();
   await expect(page.getByText("实时明细暂时不可用")).toBeVisible();
   await page.getByRole("button", { name: "重试", exact: true }).click();
   const visibleList = page
-    .locator(".desktop-data:visible, .mobile-data:visible")
-    .last();
+    .locator(".sync-records-live-list .desktop-data:visible, .sync-records-live-list .mobile-data:visible")
+    .first();
   await expect(visibleList.getByText("retry-success.txt")).toBeVisible();
   expect(successRequests).toBe(2);
 });
@@ -599,10 +601,10 @@ test("realtime detail refreshes without changing the current view", async ({
     return success(null);
   });
 
-  await page.goto("/app/opensync/tasks?jobId=1&tab=realtime");
+  await page.goto("/app/opensync/tasks?jobId=1&tab=records");
   const realtimeTable = page
-    .locator(".desktop-data:visible, .mobile-data:visible")
-    .last();
+    .locator(".sync-records-live-list .desktop-data:visible, .sync-records-live-list .mobile-data:visible")
+    .first();
   await expect(realtimeTable.getByText("detail-version-1.txt")).toBeVisible();
 
   await expect(realtimeTable.getByText("detail-version-2.txt")).toBeVisible();
@@ -694,12 +696,12 @@ test("realtime detail refresh keeps the selected page", async ({ page }) => {
     return success(null);
   });
 
-  await page.goto("/app/opensync/tasks?jobId=1&tab=realtime");
+  await page.goto("/app/opensync/tasks?jobId=1&tab=records");
   const realtimeTable = page
-    .locator(".desktop-data:visible, .mobile-data:visible")
-    .last();
+    .locator(".sync-records-live-list .desktop-data:visible, .sync-records-live-list .mobile-data:visible")
+    .first();
   await expect(realtimeTable.getByText("running-page-1-v1.txt")).toBeVisible();
-  await page.getByRole("button", { name: "Next" }).click();
+  await page.locator(".sync-records-live-list").getByRole("button", { name: "Next" }).click();
   await expect(realtimeTable.getByText("running-page-2-v1.txt")).toBeVisible();
   pageTwoVisible = true;
 
@@ -810,14 +812,14 @@ test("realtime snapshot refresh keeps the selected status view", async ({
     return success(null);
   });
 
-  await page.goto("/app/opensync/tasks?jobId=1&tab=realtime");
+  await page.goto("/app/opensync/tasks?jobId=1&tab=records");
   await expect(page.getByRole("tab", { name: "成功 1" })).toBeVisible();
   successTabSelected = true;
   await page.getByRole("tab", { name: "成功 1" }).click();
   allowSnapshotUpdate = true;
   const realtimeTable = page
-    .locator(".desktop-data:visible, .mobile-data:visible")
-    .last();
+    .locator(".sync-records-live-list .desktop-data:visible, .sync-records-live-list .mobile-data:visible")
+    .first();
   await expect(realtimeTable.getByText("success-view-file.txt")).toBeVisible();
 
   const refreshedSuccessTab = page.getByRole("tab", { name: "成功 2" });
@@ -939,10 +941,10 @@ test("realtime status tabs ignore stale task detail responses", async ({
     return success(null);
   });
 
-  await page.goto("/app/opensync/tasks?jobId=1&tab=realtime");
+  await page.goto("/app/opensync/tasks?jobId=1&tab=records");
   const realtimeTable = page
-    .locator(".desktop-data:visible, .mobile-data:visible")
-    .last();
+    .locator(".sync-records-live-list .desktop-data:visible, .sync-records-live-list .mobile-data:visible")
+    .first();
   await expect(realtimeTable.getByText("running-detail.txt")).toBeVisible();
 
   const staleResponse = page.waitForResponse((response) => {
@@ -1042,9 +1044,9 @@ test("realtime file columns keep the name readable at 1100px desktop width", asy
     return success(null);
   });
 
-  await page.goto("/app/opensync/tasks?jobId=1&tab=realtime");
+  await page.goto("/app/opensync/tasks?jobId=1&tab=records");
   await page.getByRole("tab", { name: /失败/ }).click();
-  const desktopTable = page.locator(".desktop-data").last();
+  const desktopTable = page.locator(".sync-records-live-list .desktop-data").first();
   await expect(
     desktopTable.getByText("annual-audit-source-archive-with-readable-name.tar.gz"),
   ).toBeVisible();
@@ -1111,8 +1113,8 @@ test("engine connectivity checks are serialized", async ({ page }) => {
   await expect(buttons.first()).toBeEnabled();
 });
 
-test("history load errors stay visible and can be retried", async ({ page }) => {
-  let allowHistorySuccess = false;
+test("sync records load errors stay visible and can be retried", async ({ page }) => {
+  let allowRecordsSuccess = false;
   await page.route("**/app/opensync/svr/**", async (route) => {
     const url = new URL(route.request().url());
     const response = (code: number, data: unknown, msg = "") =>
@@ -1123,13 +1125,9 @@ test("history load errors stay visible and can be retried", async ({ page }) => 
     if (url.pathname.endsWith("/session"))
       return response(200, { uid: 1, development: false, version: "test" });
     if (url.pathname.endsWith("/alist")) return response(200, []);
-    if (
-      url.pathname.endsWith("/job") &&
-      url.searchParams.has("id") &&
-      !url.searchParams.has("current")
-    ) {
-      return !allowHistorySuccess
-        ? response(500, null, "历史记录加载失败")
+    if (url.pathname.endsWith("/job/items")) {
+      return !allowRecordsSuccess
+        ? response(500, null, "同步记录加载失败")
         : response(200, { dataList: [], count: 0 });
     }
     if (url.pathname.endsWith("/job"))
@@ -1138,7 +1136,7 @@ test("history load errors stay visible and can be retried", async ({ page }) => 
           {
             id: 1,
             enable: 1,
-            remark: "历史任务",
+            remark: "同步记录任务",
             srcPath: '["/src"]',
             dstPath: '["/dst"]',
             alistId: 1,
@@ -1146,7 +1144,7 @@ test("history load errors stay visible and can be retried", async ({ page }) => 
             useCacheS: 0,
             method: 0,
             interval: 0,
-            isCron: 2,
+            isCron: 3,
           },
         ],
         count: 1,
@@ -1154,14 +1152,14 @@ test("history load errors stay visible and can be retried", async ({ page }) => 
     return response(200, null);
   });
 
-  await page.goto("/app/opensync/tasks?jobId=1&tab=history");
-  await expect(page.getByText("历史记录加载失败", { exact: true })).toBeVisible();
-  allowHistorySuccess = true;
+  await page.goto("/app/opensync/tasks?jobId=1&tab=records");
+  await expect(page.getByText("同步记录加载失败", { exact: true })).toBeVisible();
+  allowRecordsSuccess = true;
   await page.getByRole("button", { name: "重试", exact: true }).click();
-  await expect(page.getByText("历史记录加载失败", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("同步记录加载失败", { exact: true })).toHaveCount(0);
 });
 
-test("history follows a running execution and links to its live progress", async ({
+test("sync records unify live transfer panel, collapsible task errors, filters, and cross-batch retry", async ({
   page,
 }) => {
   await page.addInitScript(() => {
@@ -1172,11 +1170,19 @@ test("history follows a running execution and links to its live progress", async
     taskId: 102,
     scanFinish: true,
     createTime: 1_700_000_100,
-    duration: 1,
+    duration: 5,
     num: { wait: 0, running: 1, success: 0, fail: 0, other: 0 },
-    size: { wait: 0, running: 1, success: 0, fail: 0, other: 0 },
+    size: { wait: 0, running: 1024, success: 0, fail: 0, other: 0 },
+    doneSize: 0,
+    remainSize: 1024,
+    speed: 512,
+    speedAvg: 512,
+    remainTime: 2,
   };
-  let runStatus: number | null = null;
+  let isRunning = true;
+  const itemQueries: string[] = [];
+  let deletedTaskId: string | null = null;
+  let retryPayload: Record<string, unknown> | null = null;
 
   await page.route("**/app/opensync/svr/**", async (route) => {
     const url = new URL(route.request().url());
@@ -1189,135 +1195,69 @@ test("history follows a running execution and links to its live progress", async
       return success({ uid: 1, development: false, version: "test" });
     if (url.pathname.endsWith("/alist")) return success([]);
     if (url.pathname.endsWith("/job") && url.searchParams.has("current")) {
-      if (runStatus !== 1) return success(null);
+      if (!isRunning) return success(null);
       return success(
         url.searchParams.has("status")
-          ? realtimePage(url, activeTask, [])
+          ? realtimePage(url, activeTask, [
+              { id: 901, fileName: "live-syncing.bin", status: 1, type: 0 },
+            ])
           : activeTask,
       );
     }
-    if (url.pathname.endsWith("/job") && url.searchParams.has("id")) {
-      const records = [{ id: 101, status: 2, createTime: 1_700_000_000 }];
-      if (runStatus !== null) {
-        records.unshift({
-          id: activeTask.taskId,
-          status: runStatus,
-          createTime: activeTask.createTime,
-        });
-      }
+    if (url.pathname.endsWith("/job/items")) {
+      itemQueries.push(url.search);
       const status = url.searchParams.get("status");
-      const statusIn = url.searchParams.getAll("statusIn");
-      const dataList = records.filter((record) =>
-        status !== null
-          ? String(record.status) === status
-          : !statusIn.length || statusIn.includes(String(record.status)),
-      );
-      return success({ dataList, count: dataList.length });
-    }
-    if (url.pathname.endsWith("/job")) {
+      const allRows = [
+        {
+          id: 31,
+          taskId: 100,
+          fileName: "synced-photo.jpg",
+          srcPath: "/src/synced-photo.jpg",
+          dstPath: "/dst/synced-photo.jpg",
+          fileSize: 2048,
+          type: 0,
+          status: 2,
+          createTime: 1_700_000_000,
+        },
+        {
+          id: 32,
+          taskId: 101,
+          fileName: "failed-archive.tar",
+          srcPath: "/src/failed-archive.tar",
+          dstPath: "/dst/failed-archive.tar",
+          fileSize: 4096,
+          type: 0,
+          status: 7,
+          errMsg: "network timeout",
+          createTime: 1_700_000_050,
+        },
+      ];
+      const filtered = status ? allRows.filter((r) => String(r.status) === status) : allRows;
       return success({
-        dataList: [
-          {
-            id: 1,
-            enable: 1,
-            remark: "历史和实时任务",
-            srcPath: '["/src"]',
-            dstPath: '["/dst"]',
-            alistId: 1,
-            method: 0,
-            interval: 0,
-            isCron: 2,
-          },
-        ],
-        count: 1,
+        dataList: filtered,
+        count: filtered.length,
+        errorGroups: [{ reason: "network timeout", count: 1 }],
+        recentErrors: deletedTaskId
+          ? []
+          : [
+              {
+                id: 888,
+                jobId: 1,
+                status: 6,
+                errMsg: "远端目录扫描认证过期",
+                runTime: 1_700_000_060,
+                createTime: 1_700_000_055,
+              },
+            ],
       });
     }
-    return success(null);
-  });
-
-  await page.goto("/app/opensync/tasks?jobId=1&tab=history");
-  const history = page.locator(".history-view");
-  const details = history.getByRole("button", {
-    name: "查看执行明细",
-    exact: true,
-  });
-  const progress = history.getByRole("button", {
-    name: "查看实时进度",
-    exact: true,
-  });
-  await expect(details).toHaveCount(1);
-
-  runStatus = 1;
-  await expect(progress).toBeEnabled();
-  await expect(
-    history.getByText("运行中", { exact: true }).filter({ visible: true }),
-  ).toBeVisible();
-  await expect(
-    history.getByRole("button", { name: "删除执行记录" }),
-  ).toHaveCount(1);
-  await history.getByRole("combobox", { name: "执行状态" }).click();
-  await page.getByRole("option", { name: /运行中$/ }).click();
-  await expect(details).toHaveCount(0);
-  await progress.click();
-  await expect(page).toHaveURL(/jobId=1&tab=realtime$/);
-  await expect(
-    page.getByRole("heading", { name: "正在同步", exact: true }),
-  ).toBeVisible();
-
-  await page.getByRole("tab", { name: "历史任务", exact: true }).click();
-  await expect(progress).toBeEnabled();
-  runStatus = 2;
-  await expect(details).toHaveCount(2);
-  await expect(progress).toHaveCount(0);
-});
-
-test("completed execution details omit file status filtering", async ({ page }) => {
-  const detailRequests: string[] = [];
-  await page.route("**/app/opensync/svr/**", async (route) => {
-    const url = new URL(route.request().url());
-    const success = (data: unknown) =>
-      route.fulfill({
-        contentType: "application/json",
-        body: JSON.stringify({ code: 200, data, msg: "" }),
-      });
-    if (url.pathname.endsWith("/session"))
-      return success({ uid: 1, development: false, version: "test" });
-    if (url.pathname.endsWith("/alist")) return success([]);
-    if (url.pathname.endsWith("/job") && url.searchParams.get("current")) {
+    if (url.pathname.endsWith("/job") && route.request().method() === "DELETE") {
+      deletedTaskId = url.searchParams.get("taskId");
       return success(null);
     }
-    if (url.pathname.endsWith("/job") && url.searchParams.has("taskId")) {
-      detailRequests.push(url.search);
-      return success({
-        dataList: [
-          {
-            id: 31,
-            fileName: "detail-done.txt",
-            srcPath: "/src/detail-done.txt",
-            dstPath: "/dst/detail-done.txt",
-            fileSize: 1024,
-            type: 0,
-            status: 2,
-          },
-        ],
-        count: 1,
-      });
-    }
-    if (url.pathname.endsWith("/job") && url.searchParams.has("id")) {
-      return success({
-        dataList: [
-          {
-            id: 101,
-            status: 2,
-            createTime: 1,
-            runTime: 5,
-            successNum: 1,
-            failNum: 0,
-            allNum: 1,
-          },
-        ],
-        count: 1,
-      });
+    if (url.pathname.endsWith("/job") && route.request().method() === "PUT") {
+      retryPayload = route.request().postDataJSON() as Record<string, unknown>;
+      return success(null);
     }
     if (url.pathname.endsWith("/job")) {
       return success({
@@ -1325,15 +1265,13 @@ test("completed execution details omit file status filtering", async ({ page }) 
           {
             id: 1,
             enable: 1,
-            remark: "已结束任务",
+            remark: "持续同步统一记录",
             srcPath: '["/src"]',
             dstPath: '["/dst"]',
             alistId: 1,
-            useCacheT: 0,
-            useCacheS: 0,
             method: 0,
-            interval: 0,
-            isCron: 2,
+            interval: 60,
+            isCron: 3,
           },
         ],
         count: 1,
@@ -1342,23 +1280,49 @@ test("completed execution details omit file status filtering", async ({ page }) 
     return success(null);
   });
 
-  await page.goto("/app/opensync/tasks?jobId=1&tab=history");
-  await page
-    .getByRole("button", { name: "查看执行明细", exact: true })
-    .click();
-  const details = page.getByRole("dialog");
-  await expect(details.getByText(/^执行明细 · 任务 #/)).toBeVisible();
-  const visibleDetails = details.locator(
-    ".desktop-data:visible, .mobile-data:visible",
-  );
-  await expect(
-    visibleDetails.getByText("detail-done.txt", { exact: true }).first(),
-  ).toBeVisible();
-  await expect(details.getByText("全部状态", { exact: true })).toHaveCount(0);
-  await expect(details.getByText("全部操作类型", { exact: true })).toBeVisible();
-  await expect(details.getByText("全部对象类型", { exact: true })).toBeVisible();
-  await expect(details.getByText("全部错误信息", { exact: true })).toBeVisible();
-  expect(detailRequests.some((query) => query.includes("status="))).toBe(false);
+  await page.goto("/app/opensync/tasks?jobId=1&tab=records");
+
+  // 1. Live panel shows at top while syncing.
+  await expect(page.locator(".sync-records-live-panel").getByRole("heading", { name: "正在同步" })).toBeVisible();
+  await expect(page.locator(".sync-records-live-list").getByText("live-syncing.bin")).toBeVisible();
+
+  // 2. Collapsible recent task errors banner shows summary & expands to dismiss.
+  const errorBanner = page.getByRole("region", { name: "近期同步异常" });
+  await expect(errorBanner).toContainText("近期同步异常（1）");
+  await errorBanner.getByRole("button", { name: /近期同步异常/ }).click();
+  await expect(errorBanner.getByText("远端目录扫描认证过期")).toBeVisible();
+  await errorBanner.getByRole("button", { name: "删除此异常记录" }).click();
+  await expect(errorBanner).toHaveCount(0);
+  expect(deletedTaskId).toBe("888");
+
+  // 3. Persistent file records table renders items and supports status filtering.
+  await expect(page.getByText("synced-photo.jpg", { exact: true })).toBeVisible();
+  await expect(page.getByText("failed-archive.tar", { exact: true })).toBeVisible();
+  await page.getByRole("combobox", { name: "同步状态" }).click();
+  await page.getByRole("option", { name: /已失败$/ }).click();
+  await expect(page.getByText("failed-archive.tar", { exact: true })).toBeVisible();
+  await expect(page.getByText("synced-photo.jpg", { exact: true })).toHaveCount(0);
+
+  // 4. Cross-batch item retry once active batch finishes.
+  isRunning = false;
+  await expect(page.locator(".sync-records-live-panel")).toHaveCount(0);
+  await page.getByRole("button", { name: "重置", exact: true }).click();
+  if ((page.viewportSize()?.width || 0) > 640) {
+    await page
+      .locator("tr")
+      .filter({ hasText: "failed-archive.tar" })
+      .locator(".semi-checkbox")
+      .click();
+    await page.getByRole("button", { name: "重试选中项 (1)" }).click();
+  } else {
+    await page.locator(".mobile-data").getByRole("button", { name: "重试", exact: true }).click();
+  }
+  await expect.poll(() => retryPayload).toEqual({
+    id: "1",
+    action: "retry",
+    itemIds: [32],
+  });
+  expect(itemQueries.some((q) => q.includes("jobId=1"))).toBe(true);
 });
 
 test("remote path load errors remain actionable", async ({ page }) => {
@@ -1464,10 +1428,10 @@ test("switching realtime tab clears the previous tab rows immediately", async ({
     return success(null);
   });
 
-  await page.goto("/app/opensync/tasks?jobId=1&tab=realtime");
+  await page.goto("/app/opensync/tasks?jobId=1&tab=records");
   const visibleList = page
-    .locator(".desktop-data:visible, .mobile-data:visible")
-    .last();
+    .locator(".sync-records-live-list .desktop-data:visible, .sync-records-live-list .mobile-data:visible")
+    .first();
   await expect(visibleList.getByText("running-file.txt")).toBeVisible({
     timeout: 8000,
   });

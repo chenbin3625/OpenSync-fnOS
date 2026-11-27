@@ -102,6 +102,14 @@ func (jt *JobTask) appendFinishMany(items []JobTaskItem) {
 	}
 	jt.initRuntime()
 
+	if jobID := jt.jobIDSnapshot(); jobID > 0 {
+		for i := range items {
+			if items[i].JobID <= 0 {
+				items[i].JobID = jobID
+			}
+		}
+	}
+
 	jt.FinishMu.Lock()
 	for _, item := range items {
 		status := item.Status

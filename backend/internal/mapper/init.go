@@ -111,6 +111,7 @@ func InitSQL() {
 			`CREATE TABLE job_task_item(
 				id integer primary key autoincrement,
 				taskId integer,
+				jobId integer DEFAULT 0,
 				srcPath text,
 				dstPath text,
 				isPath integer DEFAULT 0,
@@ -266,6 +267,19 @@ func ensureIndexes(db *sql.DB) {
 			log.Printf("WARNING: index creation failed, query performance may degrade: %v\nSQL: %s", err, stmt)
 		}
 	}
+	if hasJobID, err := tableHasColumnDBErr(db, "job_task_item", "jobId"); err == nil && hasJobID {
+		jobItemIndexes := []string{
+			"CREATE INDEX IF NOT EXISTS idx_job_task_item_job_time ON job_task_item(jobId, createTime DESC, id DESC)",
+			"CREATE INDEX IF NOT EXISTS idx_job_task_item_job_status_time ON job_task_item(jobId, status, createTime DESC, id DESC)",
+			"CREATE INDEX IF NOT EXISTS idx_job_task_item_job_type_time ON job_task_item(jobId, type, createTime DESC)",
+			"CREATE INDEX IF NOT EXISTS idx_job_task_item_job_is_path_time ON job_task_item(jobId, isPath, createTime DESC)",
+		}
+		for _, stmt := range jobItemIndexes {
+			if _, err := db.Exec(stmt); err != nil {
+				log.Printf("WARNING: index creation failed, query performance may degrade: %v\nSQL: %s", err, stmt)
+			}
+		}
+	}
 }
 
 // rowQuerier is satisfied by *sql.DB and *sql.Tx and is used for single-row
@@ -297,6 +311,10 @@ func dbTableExists(db *sql.DB, table string) (bool, error) {
 // a named constant so shouldSkipMigrationStatement can match it exactly and
 // skip it outside a genuine legacy migration.
 const legacyScanIntervalUpdate = "UPDATE job SET scanIntervalT = 10, useCacheT = 0 WHERE useCacheT = 2"
+
+// backfillJobTaskItemJobIDSQL populates job_task_item.jobId from parent job_task
+// rows for records created before schema version 261128.
+const backfillJobTaskItemJobIDSQL = "UPDATE job_task_item SET jobId = COALESCE((SELECT jobId FROM job_task WHERE job_task.id = job_task_item.taskId), 0) WHERE jobId IS NULL OR jobId = 0"
 
 func migrationStatements(fromVersion int64) []string {
 	var stmts []string
@@ -460,6 +478,10 @@ func migrationStatements(fromVersion int64) []string {
 	}
 	if fromVersion < 261128 {
 		stmts = append(stmts, onewayBaselineSchemaStatements()...)
+		stmts = append(stmts,
+			"ALTER TABLE job_task_item ADD COLUMN jobId integer DEFAULT 0",
+			backfillJobTaskItemJobIDSQL,
+		)
 	}
 	stmts = append(stmts, fmt.Sprintf("UPDATE schema_version SET version=%d", currentVersion))
 	return stmts
@@ -582,6 +604,20 @@ func shouldSkipMigrationStatement(insp schemaInspector, stmt string, legacySpeed
 		// version row was lost and reads as 0) replaying it would silently
 		// disable caching and reset the scan interval of real jobs.
 		return !legacySpeed, nil
+	case backfillJobTaskItemJobIDSQL:
+		hasItemTable, err := insp.tableExists("job_task_item")
+		if err != nil || !hasItemTable {
+			return true, err
+		}
+		hasTaskTable, err := insp.tableExists("job_task")
+		if err != nil || !hasTaskTable {
+			return true, err
+		}
+		hasCol, err := insp.tableHasColumn("job_task_item", "jobId")
+		if err != nil || !hasCol {
+			return true, err
+		}
+		return false, nil
 	case "ALTER TABLE job DROP COLUMN cron":
 		has, err := insp.tableHasColumn("job", "cron")
 		return !has, err

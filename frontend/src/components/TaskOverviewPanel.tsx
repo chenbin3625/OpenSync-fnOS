@@ -69,7 +69,8 @@ export interface TaskOverviewPanelProps {
   paused: boolean;
   runKey: string;
   onRun: () => void;
-  onOpenRealtime: () => void;
+  onOpenRecords?: () => void;
+  onOpenRealtime?: () => void;
   onCheck: () => void;
   onOpenConflicts: () => void;
   onClone: () => void;
@@ -88,6 +89,7 @@ export function TaskOverviewPanel({
   paused,
   runKey,
   onRun,
+  onOpenRecords,
   onOpenRealtime,
   onCheck,
   onOpenConflicts,
@@ -227,6 +229,9 @@ export function TaskOverviewPanel({
     }
     if (typeof obj.multiThreadChunkSize === "string" && obj.multiThreadChunkSize.trim()) {
       list.push(`多线程块 ${obj.multiThreadChunkSize.trim()}`);
+    }
+    if (typeof obj.userAgent === "string" && obj.userAgent.trim()) {
+      list.push("自定义 UA");
     }
     if (typeof obj.ioTimeout === "string" && obj.ioTimeout.trim()) {
       list.push(`I/O超时 ${obj.ioTimeout.trim()}`);
@@ -625,7 +630,7 @@ export function TaskOverviewPanel({
                     theme="light"
                     icon={<IconChevronRight aria-hidden="true" />}
                     iconPosition="right"
-                    onClick={onOpenRealtime}
+                    onClick={onOpenRecords ?? onOpenRealtime}
                   >
                     查看传输明细
                   </Button>

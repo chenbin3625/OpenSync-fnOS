@@ -9,6 +9,7 @@ export {
   formatSecondsShort,
   getContinuousSyncMeta,
   isSyncStatusError,
+  jobStatusDotClass,
   parseJobExtraFlagsObject,
   resolveEffectiveSyncStatus,
   syncStatusLabels,

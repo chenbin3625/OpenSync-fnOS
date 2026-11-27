@@ -48,7 +48,7 @@ test("connects a first WebDAV account inline and reuses it from the sync home", 
     return success(null);
   });
 
-  await page.goto("/app/opensync/");
+  await page.goto("/app/opensync/sync");
   await expect(page.getByRole("heading", { name: "同步任务", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "新建同步任务", exact: true }).click();
   const dialog = page.getByRole("dialog");

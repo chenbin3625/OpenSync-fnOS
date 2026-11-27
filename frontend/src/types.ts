@@ -555,8 +555,18 @@ export interface TaskErrorGroup {
   count: number;
 }
 
+export interface JobRecentTaskError {
+  id: number;
+  jobId: number;
+  status: number;
+  errMsg: string;
+  runTime: number;
+  createTime: number;
+}
+
 export interface TaskItemPageData extends PageData<TaskItem> {
   errorGroups?: TaskErrorGroup[];
+  recentErrors?: JobRecentTaskError[];
 }
 
 export interface RecentTaskItem extends TaskItem {

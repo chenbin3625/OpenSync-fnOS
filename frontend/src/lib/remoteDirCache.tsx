@@ -9,6 +9,12 @@ interface InFlightRequest {
   subscribers: number;
 }
 
+export type RemoteDirUpdateEvent = {
+  engineId: number;
+  path: string;
+  entries: RemoteDirEntry[];
+};
+
 export interface RemoteDirCache {
   fetchPaths: (
     engineId: number,
@@ -16,6 +22,7 @@ export interface RemoteDirCache {
     options?: { signal?: AbortSignal; force?: boolean },
   ) => Promise<RemoteDirEntry[]>;
   invalidateEngine: (engineId?: number) => void;
+  subscribe?: (listener: (event: RemoteDirUpdateEvent) => void) => () => void;
 }
 
 function normalizeCachePath(path: string): string {
@@ -64,6 +71,7 @@ export function createRemoteDirCache(
   const inFlight = new Map<string, InFlightRequest>();
   const keyVersion = new Map<string, number>();
   const engineVersion = new Map<number, number>();
+  const listeners = new Set<(event: RemoteDirUpdateEvent) => void>();
   let allVersion = 0;
   let seq = 0;
 
@@ -90,6 +98,9 @@ export function createRemoteDirCache(
             requestVersion > allVersion;
           if (isLatest) {
             entries.set(key, normalized);
+            for (const listener of listeners) {
+              listener({ engineId, path, entries: normalized });
+            }
           }
           if (inFlight.get(key)?.controller === controller) {
             inFlight.delete(key);
@@ -174,6 +185,12 @@ export function createRemoteDirCache(
           inFlight.delete(key);
         }
       }
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
     },
   };
 }

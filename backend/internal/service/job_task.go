@@ -53,6 +53,7 @@ type JobTask struct {
 	ScanCheckedFiles           atomic.Int64
 
 	RetrySourceTaskID int64
+	RetryJobItems     bool
 	RetryStatuses     []taskStatus
 	RetryItemIDs      []int64
 	OnlyFiles         []string

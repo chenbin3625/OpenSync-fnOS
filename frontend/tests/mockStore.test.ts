@@ -245,4 +245,51 @@ describe("mock store", () => {
     expect(localRecent.dataList[0].jobName).toBe("本地互备");
     expect(localRecent.stats.errorNum).toBe(1);
   });
+
+  it("exposes directories created by mkdirNativeStorage in listPaths", () => {
+    const store = createMockStore();
+    expect(store.mkdirNativeStorage("/Photos/NewYear/2026")).toBeNull();
+    expect(store.listPaths("/Photos").map((entry) => entry.path)).toContain("NewYear");
+    expect(store.listPaths("/Photos/NewYear").map((entry) => entry.path)).toContain("2026");
+
+    const localRoot = store.getNativeStorageState().localRoots[0];
+    expect(store.mkdirNativeStorage(`/本地/${localRoot.id}/Inbox`)).toBeNull();
+    expect(
+      store.listPaths(`/本地/${localRoot.id}`).map((entry) => entry.path),
+    ).toContain("Inbox");
+    expect(store.mkdirNativeStorage("/本地/OnlyOneSegment")).not.toBeNull();
+  });
+
+  it("aggregates job-level items, error groups, recent task errors, and cross-batch retry", () => {
+    const store = createMockStore({
+      jobs: [{ id: 5, remark: "持续同步", enable: 1 }],
+      history: {
+        5: [
+          { id: 501, status: 2, createTime: 100 },
+          { id: 502, status: 7, errMsg: "io timeout", createTime: 200 },
+          { id: 503, status: 6, errMsg: "scan failed: auth expired", createTime: 300 },
+          { id: 504, status: 8, createTime: 400 },
+        ],
+      },
+      taskItems: {
+        501: [{ id: 11, fileName: "a.jpg", status: 2, createTime: 101 }],
+        502: [{ id: 12, fileName: "b.jpg", status: 7, errMsg: "io timeout", createTime: 201 }],
+        503: [{ id: 13, fileName: "c.jpg", status: 6, errMsg: "sys err", createTime: 301 }],
+      },
+    });
+
+    const page = store.listJobItems(5, { pageNum: 1, pageSize: 20 });
+    expect(page.count).toBe(3);
+    expect(page.dataList.map((i) => i.fileName)).toEqual(["c.jpg", "b.jpg", "a.jpg"]);
+    expect(page.errorGroups).toEqual([
+      { reason: "io timeout", count: 1 },
+      { reason: "sys err", count: 1 },
+    ]);
+    expect(page.recentErrors).toBeUndefined();
+
+    // Status 6 (system error) is not retryable on backend; only 0,1,4,5,7,10 are retryable.
+    expect(store.retryJobItems(5, [13])).toBe("未找到可重试的文件项");
+    expect(store.retryJobItems(5, [12])).toBeNull();
+    expect(store.getCurrentTask(5)).not.toBeNull();
+  });
 });

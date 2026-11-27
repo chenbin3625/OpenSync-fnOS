@@ -5,7 +5,6 @@ import DatePicker from "@douyinfe/semi-ui/lib/es/datePicker";
 import Divider from "@douyinfe/semi-ui/lib/es/divider";
 import Progress from "@douyinfe/semi-ui/lib/es/progress";
 import Select from "@douyinfe/semi-ui/lib/es/select";
-import SideSheet from "@douyinfe/semi-ui/lib/es/sideSheet";
 import Table from "@douyinfe/semi-ui/lib/es/table";
 import Tabs from "@douyinfe/semi-ui/lib/es/tabs";
 import Tag from "@douyinfe/semi-ui/lib/es/tag";
@@ -13,9 +12,9 @@ import Toast from "@douyinfe/semi-ui/lib/es/toast";
 import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
 import {
   IconAlertTriangle,
+  IconChevronRight,
   IconDeleteStroked,
   IconDownload,
-  IconEyeOpenedStroked,
   IconPause,
   IconPlay,
   IconRefresh,
@@ -36,7 +35,6 @@ import {
   confirmDelete,
   errorToast,
 } from "../components/common";
-import { SyncStatusTag, syncStatusLabels } from "../components/SyncStatus";
 import { describeBwLimit, formatBwRateHuman } from "../lib/bwLimit";
 import { useAction, useMediaQuery, useResource } from "../lib/hooks";
 import { historyRangeParams } from "../lib/historyFilters";
@@ -58,7 +56,7 @@ import {
   taskProgressPercent,
 } from "./Home/taskRows";
 import { formatTimestamp } from "../utils/date";
-import type { SyncStatus, TaskItem, TaskRecord } from "../types";
+import type { TaskItem } from "../types";
 
 const statusTabs = [
   { key: 0, label: "等待", count: "wait" },
@@ -68,128 +66,225 @@ const statusTabs = [
   { key: -1, label: "其他", count: "other" },
 ] as const;
 
-const historyStatuses = [1, 2, 3, 4, 5, 6, 7, 8];
+const recordStatusOptions = [
+  { value: 2, label: "成功" },
+  { value: 7, label: "已失败" },
+  { value: 4, label: "已停止" },
+  { value: 5, label: "超时" },
+  { value: 6, label: "系统错误" },
+  { value: 10, label: "重试中" },
+  { value: -1, label: "其他状态" },
+];
+
+const bwOptions = [
+  { label: "不限速", value: "off" },
+  { label: "限速 5 MB/s", value: "5M" },
+  { label: "限速 10 MB/s", value: "10M" },
+  { label: "限速 20 MB/s", value: "20M" },
+  { label: "限速 50 MB/s", value: "50M" },
+  { label: "限速 100 MB/s", value: "100M" },
+];
 
 const fileTableWidths = {
   select: 40,
-  name: 340,
-  size: 96,
+  name: 310,
+  size: 92,
   action: 76,
-  status: 160,
+  status: 152,
+  time: 148,
   ops: 56,
 } as const;
 
-export const Realtime = memo(function Realtime({
+export const SyncRecords = memo(function SyncRecords({
   jobId,
-  syncStatus,
+  refreshKey = 0,
+  disableRetry = false,
   onTaskEnded,
-  onOpenOverview,
-  onOpenHistory,
-  onSyncNow,
 }: {
   jobId: number;
-  syncStatus?: SyncStatus | null;
+  refreshKey?: number;
+  disableRetry?: boolean;
   onTaskEnded?: () => void;
-  onOpenOverview?: () => void;
-  onOpenHistory?: () => void;
-  onSyncNow?: () => void;
 }) {
   const {
     currentTask,
-    loading: taskLoading,
     error: taskError,
     refreshCurrentTask,
   } = useRealtimeTask(String(jobId), true);
-  const items = useRealtimeTaskItems({
+  const liveItems = useRealtimeTaskItems({
     jobId: String(jobId),
     enabled: true,
     currentTask,
     pageSize: 10,
   });
+
+  const [page, setPage] = useState(1);
+  const [size, setSize] = useState(20);
+  const [status, setStatus] = useState<number | undefined>();
+  const [type, setType] = useState<number | undefined>();
+  const [object, setObject] = useState<number | undefined>();
+  const [hasError, setHasError] = useState<number | undefined>();
+  const [input, setInput] = useState("");
+  const [keyword, setKeyword] = useState("");
+  const [range, setRange] = useState<Date[]>([]);
+  const [selectedItemIds, setSelectedItemIds] = useState<number[]>([]);
+  const [errorsExpanded, setErrorsExpanded] = useState(false);
+
   const action = useAction();
+  const rangeLabelId = useId();
+
+  const recordsResource = useResource(
+    (signal) =>
+      api.jobItems(
+        jobId,
+        {
+          pageNum: page,
+          pageSize: size,
+          status,
+          type,
+          isPath: object,
+          hasError,
+          keyword,
+          ...historyRangeParams(range),
+        },
+        signal,
+      ),
+    [jobId, page, size, status, type, object, hasError, keyword, range],
+  );
+  const refreshRecords = recordsResource.refresh;
+
   const hadTask = useRef(false);
-  const [batchFinished, setBatchFinished] = useState(false);
   useEffect(() => {
     if (currentTask) {
       hadTask.current = true;
-      setBatchFinished(false);
       return;
     }
-    if (taskLoading || taskError || !hadTask.current) return;
+    if (!hadTask.current || taskError) return;
     if (document.visibilityState === "hidden") return;
     hadTask.current = false;
-    setBatchFinished(true);
     onTaskEnded?.();
-  }, [currentTask, taskLoading, taskError, onTaskEnded]);
+    void refreshRecords(true);
+  }, [currentTask, taskError, onTaskEnded, refreshRecords]);
+
+  const prevTaskId = useRef<number | undefined>(currentTask?.taskId);
+  useEffect(() => {
+    if (prevTaskId.current === currentTask?.taskId) return;
+    prevTaskId.current = currentTask?.taskId;
+    void refreshRecords(true);
+  }, [currentTask?.taskId, refreshRecords]);
+
+  const prevRefreshKey = useRef(refreshKey);
+  useEffect(() => {
+    if (prevRefreshKey.current === refreshKey) return;
+    prevRefreshKey.current = refreshKey;
+    void refreshRecords(true);
+  }, [refreshKey, refreshRecords]);
+
+  const totalCount = recordsResource.data?.count || 0;
+  useClampedPage(
+    page,
+    recordsResource.data ? totalCount : null,
+    size,
+    setPage,
+  );
+
+  useEffect(() => {
+    setSelectedItemIds([]);
+  }, [jobId, page, size, status, type, object, hasError, keyword, range]);
+
   const currentBw = (currentTask?.liveBwLimit || "").trim();
   const currentBwInfo = useMemo(() => describeBwLimit(currentBw), [currentBw]);
-  if (!currentTask) {
-    if (taskError)
-      return (
-        <LoadState
-          loading={false}
-          error={taskError}
-          retry={refreshCurrentTask}
-        />
-      );
-    if (taskLoading) return <LoadingPanel />;
-    return (
-      <div className="realtime-idle-card" role="status">
-        <div className="realtime-idle-head">
-          <h3>
-            {batchFinished ? "本轮同步批次已完成" : "当前没有进行中的传输批次"}
-          </h3>
-          {syncStatus && <SyncStatusTag status={syncStatus} />}
-        </div>
-        <p className="muted">
-          {syncStatus?.state === "paused"
-            ? "持续同步当前已暂停，恢复同步后将自动检测变更并在此显示文件传输明细。"
-            : syncStatus?.state === "error"
-              ? syncStatus.error || `当前状态：${syncStatusLabels[syncStatus.state]}`
-              : "持续同步正在后台监控本地与远端变更，检测到新变更触发同步后将自动显示逐文件进度。"}
-        </p>
-        <div className="realtime-idle-actions">
-          {onOpenOverview && (
-            <Button type="primary" theme="solid" onClick={onOpenOverview}>
-              返回总览
-            </Button>
-          )}
-          {onOpenHistory && (
-            <Button type="tertiary" theme="light" onClick={onOpenHistory}>
-              查看历史记录
-            </Button>
-          )}
-          {onSyncNow && (
-            <Button
-              type="tertiary"
-              icon={<IconRefresh aria-hidden="true" />}
-              onClick={onSyncNow}
-            >
-              立即同步
-            </Button>
-          )}
-        </div>
-      </div>
+  const bwSelectValue =
+    !currentBw || currentBw.toLowerCase() === "off" ? "off" : currentBw;
+  const hasCustomBwOption = !bwOptions.some((o) => o.value === bwSelectValue);
+  const effectiveBwOptions = hasCustomBwOption
+    ? [{ label: currentBwInfo.liveOptionLabel, value: bwSelectValue }, ...bwOptions]
+    : bwOptions;
+
+  const rows = recordsResource.data?.dataList || [];
+  const recentErrors = recordsResource.data?.recentErrors || [];
+  const latestRecentError = recentErrors[0];
+  const selectedSet = useMemo(() => new Set(selectedItemIds), [selectedItemIds]);
+
+  const applyFilter =
+    <T,>(setter: (value: T | undefined) => void) =>
+    (value: T | undefined) => {
+      setter(value);
+      setKeyword(input.trim());
+      setPage(1);
+    };
+
+  const resetFilters = () => {
+    setStatus(undefined);
+    setType(undefined);
+    setObject(undefined);
+    setHasError(undefined);
+    setInput("");
+    setKeyword("");
+    setRange([]);
+    setPage(1);
+  };
+
+  const triggerExport = () => {
+    const url = api.exportJobItemsUrl(jobId, {
+      status,
+      type,
+      isPath: object,
+      hasError,
+      keyword,
+      ...historyRangeParams(range),
+    });
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `opensync-job-${jobId}-items.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  };
+
+  const retryItems = (itemIds: number[]) => {
+    if (!itemIds.length) return;
+    void action.run(async () => {
+      try {
+        await api.retryJobItems(jobId, itemIds);
+        Toast.success(`已提交重试 ${itemIds.length} 项`);
+        setSelectedItemIds([]);
+        window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
+        await Promise.all([refreshCurrentTask(), refreshRecords(true)]);
+      } catch (err) {
+        errorToast(err);
+      }
+    });
+  };
+
+  const dismissRecentError = (taskId: number) => {
+    void action.run(async () => {
+      try {
+        await api.deleteTask(taskId);
+        Toast.success("已清除异常记录");
+        await refreshRecords(true);
+      } catch (err) {
+        errorToast(err);
+      }
+    });
+  };
+
+  const handleClearAll = () => {
+    confirmDelete(
+      "清空此任务的全部同步记录？",
+      () =>
+        action.run(async () => {
+          const res = await api.clearJobHistory(jobId);
+          setSelectedItemIds([]);
+          Toast.success(`已清空 ${res.deleted} 条记录`);
+          await refreshRecords(true);
+        }),
+      "正在进行的传输不会受影响，已完成的文件同步记录和异常记录将被彻底删除。",
     );
-  }
-  const task = currentTask;
-  const activeTab = items.activeTab;
-  const tabItems = items.tabTaskList;
-  const tabTotal = items.tabTaskTotal;
-  const total = task.doneSize + task.remainSize;
-  const totalItems =
-    (task.num?.wait || 0) +
-    (task.num?.running || 0) +
-    (task.num?.success || 0) +
-    (task.num?.fail || 0) +
-    (task.num?.other || 0);
-  const percent = calcTaskDisplayPercent({
-    doneSize: task.doneSize,
-    totalSize: total,
-    num: task.num,
-    scanFinish: task.scanFinish,
-  });
-  const stop = () =>
+  };
+
+  const stopLiveTask = () => {
+    if (!currentTask) return;
     confirmAction({
       title: "中止本次同步批次？",
       content:
@@ -199,7 +294,7 @@ export const Realtime = memo(function Realtime({
       onOk: () =>
         action.run(async () => {
           try {
-            await api.taskAction(task.taskId, "stop");
+            await api.taskAction(currentTask.taskId, "stop");
             Toast.success("已提交中止本次同步");
             window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
             await refreshCurrentTask();
@@ -209,11 +304,14 @@ export const Realtime = memo(function Realtime({
           }
         }),
     });
-  const togglePause = () => {
-    const resuming = Boolean(task.paused);
+  };
+
+  const togglePauseLiveTask = () => {
+    if (!currentTask) return;
+    const resuming = Boolean(currentTask.paused);
     void action.run(async () => {
       try {
-        await api.taskAction(task.taskId, resuming ? "resume" : "pause");
+        await api.taskAction(currentTask.taskId, resuming ? "resume" : "pause");
         Toast.success(resuming ? "已继续传输" : "已暂停传输");
         window.dispatchEvent(new CustomEvent("opensync:jobs-changed"));
         await refreshCurrentTask();
@@ -222,10 +320,14 @@ export const Realtime = memo(function Realtime({
       }
     });
   };
-  const updateLiveBwLimit = (rate: string) =>
+
+  const updateLiveBwLimit = (rate: string) => {
+    if (!currentTask) return;
     void action.run(async () => {
       try {
-        await api.taskAction(task.taskId, "bwlimit", undefined, { bwLimit: rate });
+        await api.taskAction(currentTask.taskId, "bwlimit", undefined, {
+          bwLimit: rate,
+        });
         Toast.success(
           rate && rate !== "off"
             ? `实时限速已调整为 ${formatBwRateHuman(rate)}`
@@ -236,554 +338,443 @@ export const Realtime = memo(function Realtime({
         errorToast(err);
       }
     });
-  const bwOptions = [
-    { label: "不限速", value: "off" },
-    { label: "限速 5 MB/s", value: "5M" },
-    { label: "限速 10 MB/s", value: "10M" },
-    { label: "限速 20 MB/s", value: "20M" },
-    { label: "限速 50 MB/s", value: "50M" },
-    { label: "限速 100 MB/s", value: "100M" },
-  ];
-  const bwSelectValue =
-    !currentBw || currentBw.toLowerCase() === "off"
-      ? "off"
-      : currentBw;
-  const hasCustomBwOption = !bwOptions.some((o) => o.value === bwSelectValue);
-  const effectiveBwOptions = hasCustomBwOption
-    ? [{ label: currentBwInfo.liveOptionLabel, value: bwSelectValue }, ...bwOptions]
-    : bwOptions;
-  const bwSelectControl = (
-    <Select
-      size="small"
-      aria-label="运行中动态限速"
-      className="execution-bw-select"
-      value={bwSelectValue}
-      optionList={effectiveBwOptions}
-      disabled={action.busy}
-      onChange={(v) => updateLiveBwLimit(String(v || "off"))}
-    />
-  );
-  return (
-    <div className="execution-view flex-column">
-      <div className="execution-top">
-        <div className="execution-header">
-          <h2 className="execution-header-title">
-            <span>
-              {task.paused
-                ? "传输已暂停"
-                : task.scanFinish
-                  ? "正在同步"
-                  : task.firstSync
-                    ? "正在同步（扫描中）"
-                    : "正在扫描目录"}
-            </span>
-            {task.paused && (
-              <Tag size="small" color="orange" type="light">
-                已暂停
-              </Tag>
-            )}
-          </h2>
-          <div className="execution-header-actions">
-            {hasCustomBwOption ? (
-              <Tooltip content={currentBwInfo.tooltipSummary}>
-                <span>{bwSelectControl}</span>
-              </Tooltip>
-            ) : (
-              bwSelectControl
-            )}
-            <Button
-              type={task.paused ? "primary" : "tertiary"}
-              theme={task.paused ? "solid" : "light"}
-              size="small"
-              icon={task.paused ? <IconPlay aria-hidden="true" /> : <IconPause aria-hidden="true" />}
-              onClick={togglePause}
-              disabled={action.busy}
-            >
-              {task.paused ? "继续传输" : "暂停"}
-            </Button>
-            <Button
-              type="danger"
-              size="small"
-              icon={<IconStop aria-hidden="true" />}
-              onClick={stop}
-              disabled={action.busy}
-            >
-              中止本次同步
-            </Button>
-          </div>
-        </div>
-        <div className="execution-metrics">
-          <span>实时 {formatSize(task.speed)}/s</span>
-          {task.speedAvg > 0 && (
-            <>
-              <Divider layout="vertical" margin={8} />
-              <span>均速 {formatSize(task.speedAvg)}/s</span>
-            </>
-          )}
-          <Divider layout="vertical" margin={8} />
-          <span>
-            已完成 {formatSize(task.doneSize)} /{" "}
-            {formatSize(task.doneSize + task.remainSize)}
-            {totalItems > 0
-              ? `（${task.num?.success || 0} / ${totalItems} 项）`
-              : ""}
-          </span>
-          <Divider layout="vertical" margin={8} />
-          <span>已运行 {formatDuration(task.duration)}</span>
-          {task.remainTime > 0 && !task.paused && (
-            <>
-              <Divider layout="vertical" margin={8} />
-              <span>预计剩余 {formatDuration(task.remainTime)}</span>
-            </>
-          )}
-        </div>
-        <Progress
-          percent={Math.round(percent)}
-          showInfo
-          stroke={
-            task.paused
-              ? "var(--semi-color-warning)"
-              : "var(--semi-color-primary)"
-          }
+  };
+
+  const renderLiveSection = () => {
+    if (!currentTask) {
+      if (!taskError) return null;
+      return (
+        <InlineNotice
+          icon={<IconAlertTriangle aria-hidden="true" size="small" />}
+          message="实时状态连接中断，正在重试…"
         />
-        {taskError && (
-          <InlineNotice
-            icon={<IconAlertTriangle aria-hidden="true" size="small" />}
-            message="连接中断，正在重试…"
-          />
-        )}
-        {!task.scanFinish && task.scan && (
-          <div className="scan-status">
-            已扫描 {task.scan.scannedDirs} 个目录
-            {task.scan.totalFiles
-              ? ` · 共 ${task.scan.totalFiles} 个文件${
-                  task.scan.checkedFiles
-                    ? `（已核对 ${task.scan.checkedFiles}）`
-                    : ""
-                }`
-              : ` · 待扫描 ${task.scan.remainingDirs} 个目录`}
-          </div>
-        )}
-        <Tabs
-          activeKey={String(activeTab)}
-          onChange={(key) => items.setActiveTab(Number(key))}
-          className="execution-tabs"
-        >
-          {statusTabs.map((tab) => (
-            <Tabs.TabPane
-              key={tab.key}
-              itemKey={String(tab.key)}
-              tab={`${tab.label} ${task.num?.[tab.count] || 0}`}
-            />
-          ))}
-        </Tabs>
-      </div>
-      <div className="execution-scroll">
-        {items.tabError && tabItems.length > 0 && (
-          <InlineNotice
-            icon={<IconAlertTriangle aria-hidden="true" size="small" />}
-            message="明细连接中断，正在重试…"
-          />
-        )}
-        {items.tabError && tabItems.length === 0 ? (
-          <LoadState
-            loading={false}
-            error={items.tabError}
-            retry={items.retryTabTasks}
-          />
-        ) : (
-          <FileTable
-            key={items.tableKey}
-            rows={tabItems}
-            loading={items.tabLoading}
-          />
-        )}
-      </div>
-      <DataPager
-        total={tabTotal}
-        page={items.tabTaskPage}
-        size={items.pageSize}
-        onChange={items.setTabTaskPage}
-        onSizeChange={items.setPageSize}
-      />
-    </div>
-  );
-});
+      );
+    }
 
-export const History = memo(function History({
-  jobId,
-  currentTaskId,
-  refreshKey = 0,
-  disableRetry = false,
-  onOpenRealtime,
-}: {
-  jobId: number;
-  currentTaskId?: number;
-  refreshKey?: number;
-  disableRetry?: boolean;
-  onOpenRealtime: () => void;
-}) {
-  const [page, setPage] = useState(1);
-  const [size, setSize] = useState(10);
-  const [status, setStatus] = useState<number | undefined>();
-  const [input, setInput] = useState("");
-  const [keyword, setKeyword] = useState("");
-  const [range, setRange] = useState<Date[]>([]);
-  const [detail, setDetail] = useState<number | null>(null);
-  const [selectedTaskIds, setSelectedTaskIds] = useState<number[]>([]);
-  const resource = useResource(
-    (signal) =>
-      api.history(
-        jobId,
-        {
-          pageNum: page,
-          pageSize: size,
-          status,
-          statusIn: status === undefined ? historyStatuses : undefined,
-          keyword,
-          ...historyRangeParams(range),
-        },
-        signal,
-      ),
-    [jobId, page, size, status, keyword, range],
-  );
-  const refreshHistory = resource.refresh;
-  const prevCurrentTaskId = useRef(currentTaskId);
-  useEffect(() => {
-    if (prevCurrentTaskId.current === currentTaskId) return;
-    prevCurrentTaskId.current = currentTaskId;
-    void refreshHistory(true);
-  }, [currentTaskId, refreshHistory]);
-  const prevRefreshKey = useRef(refreshKey);
-  useEffect(() => {
-    if (prevRefreshKey.current === refreshKey) return;
-    prevRefreshKey.current = refreshKey;
-    void refreshHistory(true);
-  }, [refreshKey, refreshHistory]);
-  const action = useAction();
-  const rows = resource.data?.dataList || [];
-  const totalCount = resource.data?.count || 0;
-  const isMobile = useMediaQuery("(max-width: 640px)");
-  useClampedPage(page, resource.data ? totalCount : null, size, setPage);
-  const rangeLabelId = useId();
-
-  // Clear selections when page/job changes
-  useEffect(() => {
-    setSelectedTaskIds([]);
-  }, [jobId, page, size, status, keyword, range]);
-
-  const deletableRows = useMemo(
-    () => rows.filter((r) => r.status !== 1),
-    [rows],
-  );
-  const selectedSet = useMemo(() => new Set(selectedTaskIds), [selectedTaskIds]);
-  const allDeletableSelected =
-    deletableRows.length > 0 &&
-    deletableRows.every((r) => selectedSet.has(r.id));
-
-  const retry = (record: TaskRecord) =>
-    void action.run(async () => {
-      try {
-        await api.taskAction(record.id, "retry");
-        Toast.success("已提交重试");
-        await resource.refresh(true);
-      } catch (error) {
-        errorToast(error);
-      }
+    const totalBytes = currentTask.doneSize + currentTask.remainSize;
+    const totalItems =
+      (currentTask.num?.wait || 0) +
+      (currentTask.num?.running || 0) +
+      (currentTask.num?.success || 0) +
+      (currentTask.num?.fail || 0) +
+      (currentTask.num?.other || 0);
+    const percent = calcTaskDisplayPercent({
+      doneSize: currentTask.doneSize,
+      totalSize: totalBytes,
+      num: currentTask.num,
+      scanFinish: currentTask.scanFinish,
     });
-
-  const handleBatchDelete = () => {
-    if (!selectedTaskIds.length) return;
-    confirmDelete(
-      `删除选中的 ${selectedTaskIds.length} 条执行记录？`,
-      () =>
-        action.run(async () => {
-          const res = await api.deleteTasksBatch(selectedTaskIds);
-          setSelectedTaskIds([]);
-          Toast.success(`已删除 ${res.deleted} 条记录`);
-          await resource.refresh(true);
-        }),
-      "相关执行明细将一并清理，无法恢复。",
-    );
-  };
-
-  const handleClearAll = () => {
-    confirmDelete(
-      "清空此任务的全部已完成历史记录？",
-      () =>
-        action.run(async () => {
-          const res = await api.clearJobHistory(jobId);
-          setSelectedTaskIds([]);
-          Toast.success(`已清空 ${res.deleted} 条历史记录`);
-          await resource.refresh(true);
-        }),
-      "正在运行的记录会保留，已完成的历史记录和明细将被彻底删除。",
-    );
-  };
-
-  const renderCounts = (record: TaskRecord) => {
-    if (record.status === 1) return "—";
-    const all = record.allNum ?? 0;
-    const ok = record.successNum ?? 0;
-    const fail = record.failNum ?? 0;
-    if (all === 0 && ok === 0 && fail === 0) return "0 项";
-    return (
-      <span className="history-counts">
-        <span>
-          {ok}/{all}
-        </span>
-        {fail > 0 && <span className="inline-error">（失败 {fail}）</span>}
-      </span>
-    );
-  };
-
-  const controls = (record: TaskRecord) =>
-    record.status === 1 ? (
-      <Button
+    const bwSelectControl = (
+      <Select
         size="small"
-        theme="borderless"
-        disabled={record.id !== currentTaskId}
-        onClick={onOpenRealtime}
-      >
-        查看实时进度
-      </Button>
-    ) : (
-      <div className="row-actions">
-        <IconButton
-          label="查看执行明细"
-          icon={<IconEyeOpenedStroked aria-hidden="true" />}
-          onClick={() => setDetail(record.id)}
-        />
-        {!disableRetry && (
-          <IconButton
-            label={
-              record.status === 4 || record.status === 5
-                ? "继续上次中断 / 重试未完成项"
-                : "重试未完成项"
-            }
-            icon={<IconRefresh aria-hidden="true" />}
-            disabled={action.busy}
-            onClick={() => retry(record)}
-          />
-        )}
-        <IconButton
-          label="删除执行记录"
-          icon={<IconDeleteStroked aria-hidden="true" />}
-          danger
-          onClick={() =>
-            confirmDelete("删除此执行记录？", () =>
-              action.run(async () => {
-                await api.deleteTask(record.id);
-                await resource.refresh(true);
-              }),
-            )
-          }
-        />
-      </div>
+        aria-label="运行中动态限速"
+        className="execution-bw-select"
+        value={bwSelectValue}
+        optionList={effectiveBwOptions}
+        disabled={action.busy}
+        onChange={(v) => updateLiveBwLimit(String(v || "off"))}
+      />
     );
-  return (
-    <div className="history-view flex-column">
-      <div className="filter-bar">
-        <SearchFilterInput
-          ariaLabel="搜索执行记录（任务 ID）"
-          placeholder="任务 ID"
-          value={input}
-          onChange={setInput}
-          onSearch={(next) => {
-            setKeyword(next);
-            setPage(1);
-          }}
-        />
-        <FilterSelect
-          label="执行状态"
-          allLabel="全部状态"
-          value={status}
-          options={historyStatuses.map((value) => ({
-            value,
-            label: taskRecordStatusNames[value],
-          }))}
-          onChange={(next) => {
-            setStatus(next);
-            setKeyword(input.trim());
-            setPage(1);
-          }}
-        />
-        <span id={rangeLabelId} className="sr-only">
-          执行时间范围
-        </span>
-        <DatePicker
-          type="dateRange"
-          aria-labelledby={rangeLabelId}
-          value={range}
-          onChange={(value) => {
-            setRange(normalizeDateRange(value));
-            setKeyword(input.trim());
-            setPage(1);
-          }}
-          showClear
-        />
-        <div className="history-toolbar-actions">
-          {selectedTaskIds.length > 0 && (
-            <Button
-              size="small"
-              type="danger"
-              theme="light"
-              icon={<IconDeleteStroked aria-hidden="true" />}
-              disabled={action.busy}
-              onClick={handleBatchDelete}
-            >
-              批量删除 ({selectedTaskIds.length})
-            </Button>
+
+    return (
+      <section className="sync-records-live-panel" aria-label="当前同步进度">
+        <div className="execution-top">
+          <div className="execution-header">
+            <h2 className="execution-header-title">
+              <span>
+                {currentTask.paused
+                  ? "传输已暂停"
+                  : currentTask.scanFinish
+                    ? "正在同步"
+                    : currentTask.firstSync
+                      ? "正在同步（扫描中）"
+                      : "正在扫描目录"}
+              </span>
+              {currentTask.paused && (
+                <Tag size="small" color="orange" type="light">
+                  已暂停
+                </Tag>
+              )}
+            </h2>
+            <div className="execution-header-actions">
+              {hasCustomBwOption ? (
+                <Tooltip content={currentBwInfo.tooltipSummary}>
+                  <span>{bwSelectControl}</span>
+                </Tooltip>
+              ) : (
+                bwSelectControl
+              )}
+              <Button
+                type={currentTask.paused ? "primary" : "tertiary"}
+                theme={currentTask.paused ? "solid" : "light"}
+                size="small"
+                icon={
+                  currentTask.paused ? (
+                    <IconPlay aria-hidden="true" />
+                  ) : (
+                    <IconPause aria-hidden="true" />
+                  )
+                }
+                onClick={togglePauseLiveTask}
+                disabled={action.busy}
+              >
+                {currentTask.paused ? "继续传输" : "暂停"}
+              </Button>
+              <Button
+                type="danger"
+                size="small"
+                icon={<IconStop aria-hidden="true" />}
+                onClick={stopLiveTask}
+                disabled={action.busy}
+              >
+                中止本次同步
+              </Button>
+            </div>
+          </div>
+          <div className="execution-metrics">
+            <span>实时 {formatSize(currentTask.speed)}/s</span>
+            {currentTask.speedAvg > 0 && (
+              <>
+                <Divider layout="vertical" margin={8} />
+                <span>均速 {formatSize(currentTask.speedAvg)}/s</span>
+              </>
+            )}
+            <Divider layout="vertical" margin={8} />
+            <span>
+              已完成 {formatSize(currentTask.doneSize)} /{" "}
+              {formatSize(totalBytes)}
+              {totalItems > 0
+                ? `（${currentTask.num?.success || 0} / ${totalItems} 项）`
+                : ""}
+            </span>
+            <Divider layout="vertical" margin={8} />
+            <span>已运行 {formatDuration(currentTask.duration)}</span>
+            {currentTask.remainTime > 0 && !currentTask.paused && (
+              <>
+                <Divider layout="vertical" margin={8} />
+                <span>预计剩余 {formatDuration(currentTask.remainTime)}</span>
+              </>
+            )}
+          </div>
+          <Progress
+            percent={Math.round(percent)}
+            showInfo
+            stroke={
+              currentTask.paused
+                ? "var(--semi-color-warning)"
+                : "var(--semi-color-primary)"
+            }
+          />
+          {taskError && (
+            <InlineNotice
+              icon={<IconAlertTriangle aria-hidden="true" size="small" />}
+              message="连接中断，正在重试…"
+            />
           )}
-          {totalCount > 0 && (
+          {!currentTask.scanFinish && currentTask.scan && (
+            <div className="scan-status">
+              已扫描 {currentTask.scan.scannedDirs} 个目录
+              {currentTask.scan.totalFiles
+                ? ` · 共 ${currentTask.scan.totalFiles} 个文件${
+                    currentTask.scan.checkedFiles
+                      ? `（已核对 ${currentTask.scan.checkedFiles}）`
+                      : ""
+                  }`
+                : ` · 待扫描 ${currentTask.scan.remainingDirs} 个目录`}
+            </div>
+          )}
+          <Tabs
+            activeKey={String(liveItems.activeTab)}
+            onChange={(key) => liveItems.setActiveTab(Number(key))}
+            className="execution-tabs"
+          >
+            {statusTabs.map((t) => (
+              <Tabs.TabPane
+                key={t.key}
+                itemKey={String(t.key)}
+                tab={`${t.label} ${currentTask.num?.[t.count] || 0}`}
+              />
+            ))}
+          </Tabs>
+        </div>
+
+        <div className="sync-records-live-list">
+          {liveItems.tabError && liveItems.tabTaskList.length > 0 && (
+            <InlineNotice
+              icon={<IconAlertTriangle aria-hidden="true" size="small" />}
+              message="明细连接中断，正在重试…"
+            />
+          )}
+          {liveItems.tabError && liveItems.tabTaskList.length === 0 ? (
+            <LoadState
+              loading={false}
+              error={liveItems.tabError}
+              retry={liveItems.retryTabTasks}
+            />
+          ) : (
+            <FileTable
+              key={liveItems.tableKey}
+              rows={liveItems.tabTaskList}
+              loading={liveItems.tabLoading}
+            />
+          )}
+          <DataPager
+            total={liveItems.tabTaskTotal}
+            page={liveItems.tabTaskPage}
+            size={liveItems.pageSize}
+            onChange={liveItems.setTabTaskPage}
+            onSizeChange={liveItems.setPageSize}
+          />
+        </div>
+      </section>
+    );
+  };
+
+  return (
+    <div className="sync-records-view history-view flex-column">
+      <div className="sync-records-scroll history-scroll">
+        {renderLiveSection()}
+
+        {recentErrors.length > 0 && (
+          <section className="recent-errors-panel" aria-label="近期同步异常">
+            <div className="recent-errors-head">
+              <button
+                type="button"
+                className="recent-errors-toggle"
+                aria-expanded={errorsExpanded}
+                onClick={() => setErrorsExpanded((prev) => !prev)}
+              >
+                <IconChevronRight
+                  aria-hidden="true"
+                  size="small"
+                  className={`recent-errors-chevron${
+                    errorsExpanded ? " is-open" : ""
+                  }`}
+                />
+                <IconAlertTriangle
+                  aria-hidden="true"
+                  size="small"
+                  className="recent-errors-icon"
+                />
+                <strong>近期同步异常（{recentErrors.length}）</strong>
+                {!errorsExpanded && latestRecentError && (
+                  <span className="recent-errors-preview muted">
+                    最近（{formatTimestamp(latestRecentError.createTime, true)}）：
+                    {latestRecentError.errMsg ||
+                      taskRecordStatusNames[latestRecentError.status] ||
+                      "同步失败"}
+                  </span>
+                )}
+              </button>
+              <span className="recent-errors-hint muted">
+                {errorsExpanded ? "点击收起" : "点击展开详情"}
+              </span>
+            </div>
+            {errorsExpanded && (
+              <ul className="recent-errors-list">
+                {recentErrors.map((err) => (
+                  <li key={err.id} className="recent-error-row">
+                    <div className="recent-error-meta">
+                      <span className="recent-error-time muted">
+                        {formatTimestamp(err.createTime, true)}
+                      </span>
+                      <Status
+                        status={err.status}
+                        label={
+                          taskRecordStatusNames[err.status] ||
+                          String(err.status)
+                        }
+                      />
+                      <span className="recent-error-msg">
+                        {err.errMsg || "同步执行异常"}
+                      </span>
+                    </div>
+                    <IconButton
+                      label="删除此异常记录"
+                      size="small"
+                      icon={<IconDeleteStroked aria-hidden="true" />}
+                      danger
+                      disabled={action.busy}
+                      onClick={() => dismissRecentError(err.id)}
+                    />
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        )}
+
+        <div className="filter-bar sync-records-filter-bar">
+          <SearchFilterInput
+            ariaLabel="搜索同步记录"
+            placeholder="文件 / 路径 / 错误"
+            value={input}
+            onChange={setInput}
+            onSearch={(next) => {
+              setKeyword(next);
+              setPage(1);
+            }}
+          />
+          <FilterSelect
+            label="同步状态"
+            value={status}
+            options={recordStatusOptions}
+            onChange={applyFilter(setStatus)}
+          />
+          <FilterSelect
+            label="操作类型"
+            value={type}
+            options={[
+              { label: "复制/创建", value: 0 },
+              { label: "删除", value: 1 },
+              { label: "移动", value: 2 },
+              { label: "移动（校验后删源）", value: 3 },
+            ]}
+            onChange={applyFilter(setType)}
+          />
+          <FilterSelect
+            label="对象类型"
+            value={object}
+            options={[
+              { label: "文件", value: 0 },
+              { label: "目录", value: 1 },
+            ]}
+            onChange={applyFilter(setObject)}
+          />
+          <FilterSelect
+            label="错误信息"
+            value={hasError}
+            options={[
+              { label: "有错误信息", value: 1 },
+              { label: "无错误信息", value: 0 },
+            ]}
+            onChange={applyFilter(setHasError)}
+          />
+          <span id={rangeLabelId} className="sr-only">
+            同步时间范围
+          </span>
+          <DatePicker
+            type="dateRange"
+            aria-labelledby={rangeLabelId}
+            value={range}
+            onChange={(value) => {
+              setRange(normalizeDateRange(value));
+              setKeyword(input.trim());
+              setPage(1);
+            }}
+            showClear
+          />
+          <Button theme="borderless" onClick={resetFilters}>
+            重置
+          </Button>
+          <div className="history-toolbar-actions">
+            {!disableRetry && selectedItemIds.length > 0 && (
+              <Button
+                size="small"
+                theme="solid"
+                icon={<IconRefresh aria-hidden="true" />}
+                loading={action.busy}
+                onClick={() => retryItems(selectedItemIds)}
+              >
+                重试选中项 ({selectedItemIds.length})
+              </Button>
+            )}
             <Button
               size="small"
               type="tertiary"
-              disabled={action.busy}
-              onClick={handleClearAll}
+              icon={<IconDownload aria-hidden="true" />}
+              onClick={triggerExport}
             >
-              清空已完成
+              导出 CSV
             </Button>
-          )}
+            {(totalCount > 0 || recentErrors.length > 0) && (
+              <Button
+                size="small"
+                type="tertiary"
+                disabled={action.busy}
+                onClick={handleClearAll}
+              >
+                清空记录
+              </Button>
+            )}
+          </div>
         </div>
-      </div>
-      <div className="history-scroll">
-        <LoadState
-          loading={false}
-          error={resource.error}
-          retry={resource.refresh}
-        />
-        {!resource.error &&
-          (isMobile ? (
-            <div className="mobile-data">
-              {resource.loading ? (
-                <LoadingPanel />
-              ) : !rows.length ? (
-                <EmptyState />
-              ) : (
-                rows.map((record) => (
-                  <div className="mobile-record" key={record.id}>
-                    <div className="record-title">
-                      <strong>{formatTimestamp(record.createTime, true)}</strong>
-                      <Status
-                        status={record.status}
-                        label={
-                          taskRecordStatusNames[record.status] ||
-                          String(record.status)
-                        }
-                        error={record.errMsg}
-                      />
-                    </div>
-                    <div className="record-footer">
-                      <span className="muted">
-                        {record.status !== 1 && record.runTime && record.createTime
-                          ? formatDuration(record.runTime - record.createTime)
-                          : "—"}
-                        {record.status !== 1 && record.allNum !== undefined
-                          ? ` · ${record.successNum ?? 0}/${record.allNum} 项`
-                          : ""}
-                        {(record.sumSize ?? 0) > 0
-                          ? ` · ${formatSize(record.sumSize || 0)}`
-                          : ""}
-                      </span>
-                      {controls(record)}
-                    </div>
-                  </div>
-                ))
-              )}
+
+        {recordsResource.data?.errorGroups &&
+          recordsResource.data.errorGroups.length > 0 && (
+            <div className="error-groups-bar">
+              <span className="error-groups-label muted">失败原因聚类：</span>
+              {recordsResource.data.errorGroups.slice(0, 8).map((g) => {
+                const active = keyword === g.reason && hasError === 1;
+                return (
+                  <button
+                    key={g.reason}
+                    type="button"
+                    className={`schedule-chip${active ? " is-active" : ""}`}
+                    title={g.reason}
+                    onClick={() => {
+                      if (active) {
+                        setInput("");
+                        setKeyword("");
+                        setHasError(undefined);
+                      } else {
+                        setInput(g.reason);
+                        setKeyword(g.reason);
+                        setHasError(1);
+                      }
+                      setPage(1);
+                    }}
+                  >
+                    {g.reason.length > 36
+                      ? `${g.reason.slice(0, 36)}…`
+                      : g.reason}{" "}
+                    ({g.count})
+                  </button>
+                );
+              })}
             </div>
-          ) : (
-            <div className="desktop-data">
-              <Table<TaskRecord>
-                dataSource={rows}
-                loading={resource.loading}
-                pagination={false}
-                rowKey="id"
-                empty={<EmptyState />}
-                columns={[
-                  {
-                    title: (
-                      <Checkbox
-                        aria-label="全选本页可删除记录"
-                        checked={allDeletableSelected}
-                        indeterminate={
-                          selectedTaskIds.length > 0 && !allDeletableSelected
-                        }
-                        disabled={!deletableRows.length}
-                        onChange={(e) =>
-                          setSelectedTaskIds(
-                            e.target.checked
-                              ? deletableRows.map((r) => r.id)
-                              : [],
-                          )
-                        }
-                      />
-                    ),
-                    width: 44,
-                    render: (_, record) =>
-                      record.status === 1 ? null : (
-                        <Checkbox
-                          aria-label={`选择记录 #${record.id}`}
-                          checked={selectedSet.has(record.id)}
-                          onChange={(e) =>
-                            setSelectedTaskIds((prev) =>
-                              e.target.checked
-                                ? [...prev, record.id]
-                                : prev.filter((id) => id !== record.id),
-                            )
-                          }
-                        />
-                      ),
-                  },
-                  {
-                    title: "开始时间",
-                    dataIndex: "createTime",
-                    render: (value) => formatTimestamp(value, true),
-                  },
-                  {
-                    title: "状态",
-                    render: (_, record) => (
-                      <Status
-                        status={record.status}
-                        label={
-                          taskRecordStatusNames[record.status] ||
-                          String(record.status)
-                        }
-                        error={record.errMsg}
-                      />
-                    ),
-                  },
-                  {
-                    title: "文件数",
-                    width: 130,
-                    render: (_, record) => renderCounts(record),
-                  },
-                  {
-                    title: "传输大小",
-                    width: 108,
-                    render: (_, record) =>
-                      record.status !== 1 && (record.sumSize ?? 0) > 0
-                        ? formatSize(record.sumSize || 0)
-                        : "—",
-                  },
-                  {
-                    title: "耗时",
-                    width: 108,
-                    render: (_, record) =>
-                      record.status !== 1 && record.runTime && record.createTime
-                        ? formatDuration(record.runTime - record.createTime)
-                        : "—",
-                  },
-                  {
-                    title: "操作",
-                    width: 140,
-                    render: (_, record) => controls(record),
-                  },
-                ]}
-              />
-            </div>
-          ))}
+          )}
+
+        {recordsResource.error ? (
+          <LoadState
+            loading={false}
+            error={recordsResource.error}
+            retry={() => void refreshRecords()}
+          />
+        ) : (
+          <FileTable
+            rows={rows}
+            loading={recordsResource.loading}
+            showTime
+            selectedIds={disableRetry ? undefined : selectedSet}
+            onToggleSelect={
+              disableRetry
+                ? undefined
+                : (id, checked) =>
+                    setSelectedItemIds((prev) =>
+                      checked
+                        ? prev.includes(id)
+                          ? prev
+                          : [...prev, id]
+                        : prev.filter((item) => item !== id),
+                    )
+            }
+            onToggleSelectAll={
+              disableRetry
+                ? undefined
+                : (checked) =>
+                    setSelectedItemIds(
+                      checked
+                        ? rows.filter(isRetryableItem).map((r) => Number(r.id))
+                        : [],
+                    )
+            }
+            onRetrySingle={disableRetry ? undefined : (id) => retryItems([id])}
+            busy={action.busy}
+          />
+        )}
       </div>
+
       <DataPager
         total={totalCount}
         page={page}
@@ -794,23 +785,10 @@ export const History = memo(function History({
           setPage(1);
         }}
       />
-      {detail !== null && (
-        <FileDetails
-          taskId={detail}
-          disableRetry={disableRetry}
-          onClose={() => setDetail(null)}
-          onRetried={() => void resource.refresh(true)}
-        />
-      )}
     </div>
   );
 });
 
-/**
- * Stable row identity. Records without an id (realtime rows not yet saved)
- * fall back to every field that tells two entries apart — never the index,
- * which re-associated per-row state (an expanded mobile card) on page changes.
- */
 export function fileRowKey(record?: TaskItem): string {
   if (record?.id) return String(record.id);
   return [record?.type, record?.srcPath, record?.dstPath, record?.fileName]
@@ -818,18 +796,20 @@ export function fileRowKey(record?: TaskItem): string {
     .join("\u0000");
 }
 
-function isRetryableItem(record: TaskItem): boolean {
+const retryableItemStatuses = new Set([0, 4, 5, 7, 10]);
+
+export function isRetryableItem(record: TaskItem): boolean {
   return (
     typeof record.id === "number" &&
     record.id > 0 &&
-    record.status !== 2 &&
-    record.status !== 1
+    retryableItemStatuses.has(record.status)
   );
 }
 
 export const FileTable = memo(function FileTable({
   rows,
   loading = false,
+  showTime = false,
   selectedIds,
   onToggleSelect,
   onToggleSelectAll,
@@ -838,6 +818,7 @@ export const FileTable = memo(function FileTable({
 }: {
   rows: TaskItem[];
   loading?: boolean;
+  showTime?: boolean;
   selectedIds?: Set<number>;
   onToggleSelect?: (itemId: number, checked: boolean) => void;
   onToggleSelectAll?: (checked: boolean) => void;
@@ -966,6 +947,15 @@ export const FileTable = memo(function FileTable({
         },
       },
     );
+    if (showTime) {
+      base.push({
+        title: "同步时间",
+        width: fileTableWidths.time,
+        className: "file-col-time",
+        render: (_: unknown, record: TaskItem) =>
+          record.createTime ? formatTimestamp(record.createTime, true) : "—",
+      });
+    }
     if (onRetrySingle) {
       base.push({
         title: "重试",
@@ -984,6 +974,7 @@ export const FileTable = memo(function FileTable({
     }
     return base;
   }, [
+    showTime,
     selectedIds,
     onToggleSelect,
     onToggleSelectAll,
@@ -993,6 +984,7 @@ export const FileTable = memo(function FileTable({
     onRetrySingle,
     busy,
   ]);
+
   return (
     <>
       {!isMobile && (
@@ -1019,6 +1011,7 @@ export const FileTable = memo(function FileTable({
               <MobileFileRecord
                 key={fileRowKey(record)}
                 record={record}
+                showTime={showTime}
                 onRetrySingle={onRetrySingle}
                 busy={busy}
               />
@@ -1030,14 +1023,14 @@ export const FileTable = memo(function FileTable({
   );
 });
 
-export { normalizeDateRange };
-
 const MobileFileRecord = memo(function MobileFileRecord({
   record,
+  showTime = false,
   onRetrySingle,
   busy,
 }: {
   record: TaskItem;
+  showTime?: boolean;
   onRetrySingle?: (itemId: number) => void;
   busy?: boolean;
 }) {
@@ -1070,6 +1063,9 @@ const MobileFileRecord = memo(function MobileFileRecord({
           <span className="muted">
             {taskTypeNames[record.type || 0]} ·{" "}
             {record.isPath ? "目录" : formatSize(record.fileSize || 0)}
+            {showTime && record.createTime
+              ? ` · ${formatTimestamp(record.createTime, true)}`
+              : ""}
           </span>
           {record.status === 1 && (
             <span>{taskProgressPercent(record.progress)}%</span>
@@ -1122,256 +1118,4 @@ const MobileFileRecord = memo(function MobileFileRecord({
   );
 });
 
-function FileDetails({
-  taskId,
-  disableRetry = false,
-  onClose,
-  onRetried,
-}: {
-  taskId: number;
-  disableRetry?: boolean;
-  onClose: () => void;
-  onRetried?: () => void;
-}) {
-  const [page, setPage] = useState(1),
-    [size, setSize] = useState(10);
-  const [type, setType] = useState<number | undefined>(),
-    [object, setObject] = useState<number | undefined>(),
-    [hasError, setHasError] = useState<number | undefined>();
-  const [input, setInput] = useState(""),
-    [keyword, setKeyword] = useState("");
-  const [selectedItemIds, setSelectedItemIds] = useState<number[]>([]);
-  const action = useAction();
-
-  const resource = useResource(
-    (signal) =>
-      api.items(
-        taskId,
-        {
-          pageNum: page,
-          pageSize: size,
-          type,
-          isPath: object,
-          hasError,
-          keyword,
-        },
-        signal,
-      ),
-    [taskId, page, size, type, object, hasError, keyword],
-  );
-  useClampedPage(
-    page,
-    resource.data ? resource.data.count || 0 : null,
-    size,
-    setPage,
-  );
-  useEffect(() => {
-    setSelectedItemIds([]);
-  }, [taskId, page, size, type, object, hasError, keyword]);
-
-  const rows = resource.data?.dataList || [];
-  const selectedSet = useMemo(() => new Set(selectedItemIds), [selectedItemIds]);
-
-  const applyFilter =
-    (setter: (value: number | undefined) => void) =>
-    (value: number | undefined) => {
-      setter(value);
-      setKeyword(input.trim());
-      setPage(1);
-    };
-
-  const triggerExport = () => {
-    const url = api.exportTaskItemsUrl(taskId, {
-      type,
-      isPath: object,
-      hasError,
-      keyword,
-    });
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `opensync-task-${taskId}.csv`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-  };
-
-  const retryItems = (itemIds: number[]) => {
-    if (!itemIds.length) return;
-    void action.run(async () => {
-      try {
-        await api.taskAction(taskId, "retry", itemIds);
-        Toast.success(`已提交重试 ${itemIds.length} 项`);
-        setSelectedItemIds([]);
-        onRetried?.();
-      } catch (err) {
-        errorToast(err);
-      }
-    });
-  };
-
-  return (
-    <SideSheet
-      title={`执行明细 · 任务 #${taskId}`}
-      visible
-      onCancel={onClose}
-      placement="bottom"
-      height="100%"
-      className="detail-drawer"
-    >
-      <div className="detail-drawer-body">
-        <div className="filter-bar">
-          <SearchFilterInput
-            ariaLabel="搜索文件明细"
-            placeholder="文件 / 路径 / 错误"
-            value={input}
-            onChange={setInput}
-            onSearch={(next) => {
-              setKeyword(next);
-              setPage(1);
-            }}
-          />
-          <FilterSelect
-            label="操作类型"
-            value={type}
-            options={[
-              { label: "复制/创建", value: 0 },
-              { label: "删除", value: 1 },
-              { label: "移动", value: 2 },
-              { label: "移动（校验后删源）", value: 3 },
-            ]}
-            onChange={applyFilter(setType)}
-          />
-          <FilterSelect
-            label="对象类型"
-            value={object}
-            options={[
-              { label: "文件", value: 0 },
-              { label: "目录", value: 1 },
-            ]}
-            onChange={applyFilter(setObject)}
-          />
-          <FilterSelect
-            label="错误信息"
-            value={hasError}
-            options={[
-              { label: "有错误信息", value: 1 },
-              { label: "无错误信息", value: 0 },
-            ]}
-            onChange={applyFilter(setHasError)}
-          />
-          <Button
-            theme="borderless"
-            onClick={() => {
-              setType(undefined);
-              setObject(undefined);
-              setHasError(undefined);
-              setInput("");
-              setKeyword("");
-              setPage(1);
-            }}
-          >
-            重置
-          </Button>
-          <div className="history-toolbar-actions">
-            {!disableRetry && selectedItemIds.length > 0 && (
-              <Button
-                size="small"
-                theme="solid"
-                icon={<IconRefresh aria-hidden="true" />}
-                loading={action.busy}
-                onClick={() => retryItems(selectedItemIds)}
-              >
-                重试选中项 ({selectedItemIds.length})
-              </Button>
-            )}
-            <Button
-              size="small"
-              type="tertiary"
-              icon={<IconDownload aria-hidden="true" />}
-              onClick={triggerExport}
-            >
-              导出 CSV
-            </Button>
-          </div>
-        </div>
-        {resource.data?.errorGroups && resource.data.errorGroups.length > 0 && (
-          <div className="error-groups-bar">
-            <span className="error-groups-label muted">失败原因聚类：</span>
-            {resource.data.errorGroups.slice(0, 8).map((g) => {
-              const active = keyword === g.reason && hasError === 1;
-              return (
-                <button
-                  key={g.reason}
-                  type="button"
-                  className={`schedule-chip${active ? " is-active" : ""}`}
-                  title={g.reason}
-                  onClick={() => {
-                    if (active) {
-                      setInput("");
-                      setKeyword("");
-                      setHasError(undefined);
-                    } else {
-                      setInput(g.reason);
-                      setKeyword(g.reason);
-                      setHasError(1);
-                    }
-                    setPage(1);
-                  }}
-                >
-                  {g.reason.length > 36 ? `${g.reason.slice(0, 36)}…` : g.reason} ({g.count})
-                </button>
-              );
-            })}
-          </div>
-        )}
-        {resource.error ? (
-          <LoadState
-            loading={false}
-            error={resource.error}
-            retry={() => void resource.refresh()}
-          />
-        ) : (
-          <FileTable
-            rows={rows}
-            loading={resource.loading}
-            selectedIds={disableRetry ? undefined : selectedSet}
-            onToggleSelect={
-              disableRetry
-                ? undefined
-                : (id, checked) =>
-                    setSelectedItemIds((prev) =>
-                      checked
-                        ? prev.includes(id)
-                          ? prev
-                          : [...prev, id]
-                        : prev.filter((item) => item !== id),
-                    )
-            }
-            onToggleSelectAll={
-              disableRetry
-                ? undefined
-                : (checked) =>
-                    setSelectedItemIds(
-                      checked
-                        ? rows.filter(isRetryableItem).map((r) => Number(r.id))
-                        : [],
-                    )
-            }
-            onRetrySingle={disableRetry ? undefined : (id) => retryItems([id])}
-            busy={action.busy}
-          />
-        )}
-      </div>
-      <DataPager
-        total={resource.data?.count || 0}
-        page={page}
-        size={size}
-        onChange={setPage}
-        onSizeChange={(s) => {
-          setSize(s);
-          setPage(1);
-        }}
-      />
-    </SideSheet>
-  );
-}
+export { normalizeDateRange };

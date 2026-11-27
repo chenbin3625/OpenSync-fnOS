@@ -141,11 +141,31 @@ test("creates a WebDAV storage and continuous task, then edits without changing 
     await dialog
       .getByRole("button", { name: "切换为自由多对多 / 云对云模式", exact: true })
       .click();
-    const manualPath = dialog.getByPlaceholder("/存储名称/存储桶/子目录");
-    await manualPath.fill(`/${name}/Photos`);
-    await dialog.getByRole("button", { name: "添加到源路径", exact: true }).click();
-    await manualPath.fill(`/${name}/Backup`);
-    await dialog.getByRole("button", { name: "添加到目标路径", exact: true }).click();
+    await expect(dialog.getByText("手动输入路径")).toHaveCount(0);
+    await expect(dialog.getByPlaceholder("/存储名称/存储桶/子目录")).toHaveCount(0);
+
+    const trees = dialog.locator(".remote-paths");
+    const popover = page.locator(".remote-paths-dropdown");
+    const expandAndSelect = async (
+      picker: import("@playwright/test").Locator,
+      targetKey: string,
+    ) => {
+      await picker.locator('[role="combobox"]').click({ position: { x: 2, y: 18 } });
+      await expect(popover).toBeVisible();
+      const parentNode = popover.locator(`[role="treeitem"][data-key="/${name}"]`);
+      await expect(parentNode).toBeVisible();
+      if ((await parentNode.getAttribute("aria-expanded")) !== "true") {
+        await parentNode.locator(".semi-tree-option-expand-icon").click();
+      }
+      const targetNode = popover.locator(`[role="treeitem"][data-key="${targetKey}"]`);
+      await expect(targetNode).toBeVisible();
+      await targetNode.locator(".semi-tree-option-label").click();
+      await picker.locator('[role="combobox"]').click({ position: { x: 2, y: 18 } });
+      await expect(popover).toBeHidden();
+    };
+
+    await expandAndSelect(trees.nth(0), `/${name}/Photos`);
+    await expandAndSelect(trees.nth(1), `/${name}/Backup`);
     await page
       .getByRole("textbox", { name: "任务名称", exact: true })
       .fill(name);

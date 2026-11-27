@@ -1,9 +1,21 @@
 import { defineConfig } from "@playwright/test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const baseURL = process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:3020";
+const bundledDevRclone = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  ".tools",
+  "rclone",
+  "bin",
+  "rclone",
+);
+const rcloneBin =
+  process.env.OPENSYNC_RCLONE_BIN ||
+  (existsSync(bundledDevRclone) ? bundledDevRclone : "");
 
 // Every backend-mutating spec (engine/job/notify CRUD) writes to the same
 // SQLite database the preview server uses unless it is redirected. A dedicated
@@ -97,6 +109,7 @@ export default defineConfig({
             OPENSYNC_DATA_DIR: dataDir,
             TRIM_PKGVAR: "",
             TRIM_PKGETC: "",
+            ...(rcloneBin ? { OPENSYNC_RCLONE_BIN: rcloneBin } : {}),
           },
           url: "http://127.0.0.1:8040/app/opensync/svr/session",
           // A first run compiles the whole Go module.

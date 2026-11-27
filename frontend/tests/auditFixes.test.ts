@@ -19,14 +19,18 @@ import {
   validateRemoteName,
 } from "../src/components/NativeStorageEditor";
 import {
+  buildCreatedFolderPlan,
   buildJobPayload,
+  canCreateFolderUnderPath,
   defaultJobForm,
   findStandardWebDAVRemotesForPaths,
   isPathDisabledInPicker,
+  mergeCreatedFolderSelection,
   resolveRemoteChain,
   resolveAutoCompareModeForDst,
   validateJobFormFields,
   validateManualSyncPath,
+  validateNewFolderName,
   validateTrashDir,
 } from "../src/lib/taskForm";
 import {
@@ -339,5 +343,56 @@ describe("全流程审计修复回归测试", () => {
       existingJobs: [existingMoveJob],
     });
     expect(previewMoveSameSrc.conflicts[0]).toContain("移动模式源目录");
+  });
+
+  it("目录选择器内创建文件夹的权限判断、命名校验、加载计划与选中合并逻辑", () => {
+    expect(canCreateFolderUnderPath("/", sampleRemotes)).toBe(false);
+    expect(canCreateFolderUnderPath("/本地", sampleRemotes)).toBe(false);
+    expect(canCreateFolderUnderPath("/本地/Photos~123456abcdef", sampleRemotes)).toBe(true);
+    expect(canCreateFolderUnderPath("/MyOSS", sampleRemotes)).toBe(false);
+    expect(canCreateFolderUnderPath("/MyOSS/bucket", sampleRemotes)).toBe(true);
+    expect(canCreateFolderUnderPath("/openlist", sampleRemotes)).toBe(true);
+    expect(canCreateFolderUnderPath("/mirrorHttp", sampleRemotes)).toBe(false);
+    expect(canCreateFolderUnderPath("/openlist", undefined)).toBe(true);
+
+    expect(validateNewFolderName("   ").error).not.toBe("");
+    expect(validateNewFolderName("/").error).not.toBe("");
+    expect(validateNewFolderName("a\\b").error).not.toBe("");
+    expect(validateNewFolderName("a//b").error).not.toBe("");
+    expect(validateNewFolderName("a/../b").error).not.toBe("");
+    expect(validateNewFolderName("/Backup/").clean).toBe("Backup");
+    expect(validateNewFolderName("2026/photos")).toEqual({
+      error: "",
+      segments: ["2026", "photos"],
+      clean: "2026/photos",
+    });
+
+    expect(buildCreatedFolderPlan("/本地/Photos~123456abcdef", "2026/raw")).toEqual({
+      error: "",
+      clean: "2026/raw",
+      targetPath: "/本地/Photos~123456abcdef/2026/raw",
+      loadPaths: [
+        "/本地/Photos~123456abcdef",
+        "/本地/Photos~123456abcdef/2026",
+      ],
+      expandPaths: [
+        "/",
+        "/本地",
+        "/本地/Photos~123456abcdef",
+        "/本地/Photos~123456abcdef/2026",
+      ],
+    });
+
+    // 多选时剔除冲突祖先并保留同级目录；单选时直接选中新目录
+    expect(
+      mergeCreatedFolderSelection(
+        ["/PhotoCloud", "/Other/Dir"],
+        "/PhotoCloud/Backup",
+        true,
+      ),
+    ).toEqual(["/Other/Dir", "/PhotoCloud/Backup"]);
+    expect(
+      mergeCreatedFolderSelection(["/Other/Dir"], "/PhotoCloud/Backup", false),
+    ).toEqual(["/PhotoCloud/Backup"]);
   });
 });

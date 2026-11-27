@@ -57,4 +57,27 @@ describe("typography and style tokens", () => {
     expect(sysDirRule).toBeDefined();
     expect(sysDirRule).not.toContain("font-family");
   });
+
+  it("contains sr-only controls inside positioned scroll containers so Settings never overflows the document", () => {
+    const blockOf = (selector: string) => {
+      const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return new RegExp(`${escaped}\\s*\\{([^}]+)\\}`).exec(stylesCss)?.[1];
+    };
+
+    const shellRule = blockOf(".app-shell");
+    expect(shellRule).toBeDefined();
+    expect(shellRule).toContain("overflow: hidden;");
+
+    for (const selector of [
+      ".app-workspace",
+      ".settings-backup-controls",
+      ".native-file-picker",
+      ".native-browse-header-actions",
+      ".pager-controls",
+    ]) {
+      const rule = blockOf(selector);
+      expect(rule, selector).toBeDefined();
+      expect(rule, selector).toContain("position: relative;");
+    }
+  });
 });

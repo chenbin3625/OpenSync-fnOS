@@ -1110,21 +1110,41 @@ func AddJobTaskItemMany(items []map[string]interface{}) error {
 	if len(items) == 0 {
 		return nil
 	}
+	hasJobID, err := tableHasColumnDBErr(GetDB(), "job_task_item", "jobId")
+	if err != nil {
+		return err
+	}
 	argsList := make([][]interface{}, 0, len(items))
 	for _, item := range items {
 		createTime := item["createTime"]
 		if createTime == nil {
 			createTime = time.Now().Unix()
 		}
-		argsList = append(argsList, []interface{}{
-			item["taskId"], item["srcPath"], item["dstPath"], item["isPath"], item["fileName"],
-			item["fileSize"], item["type"], item["alistTaskId"], item["status"], item["errMsg"],
-			// progress is optional: live progress is streamed over SSE and the
-			// finalized items have no meaningful value, so absent stays NULL.
-			// It is persisted when a caller does supply it (see P3-10).
-			item["progress"],
-			createTime,
-		})
+		if hasJobID {
+			argsList = append(argsList, []interface{}{
+				item["taskId"], util.ToInt64(item["jobId"]), item["srcPath"], item["dstPath"], item["isPath"], item["fileName"],
+				item["fileSize"], item["type"], item["alistTaskId"], item["status"], item["errMsg"],
+				// progress is optional: live progress is streamed over SSE and the
+				// finalized items have no meaningful value, so absent stays NULL.
+				// It is persisted when a caller does supply it (see P3-10).
+				item["progress"],
+				createTime,
+			})
+		} else {
+			argsList = append(argsList, []interface{}{
+				item["taskId"], item["srcPath"], item["dstPath"], item["isPath"], item["fileName"],
+				item["fileSize"], item["type"], item["alistTaskId"], item["status"], item["errMsg"],
+				item["progress"],
+				createTime,
+			})
+		}
+	}
+	if hasJobID {
+		return ExecuteMany(
+			`INSERT INTO job_task_item (taskId, jobId, srcPath, dstPath, isPath, fileName, fileSize, type, alistTaskId, status, errMsg, progress, createTime)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			argsList,
+		)
 	}
 	return ExecuteMany(
 		`INSERT INTO job_task_item (taskId, srcPath, dstPath, isPath, fileName, fileSize, type, alistTaskId, status, errMsg, progress, createTime)
@@ -1134,14 +1154,27 @@ func AddJobTaskItemMany(items []map[string]interface{}) error {
 }
 
 func buildJobTaskItemWhere(params map[string]interface{}) whereBuilder {
-	taskID := params["taskId"]
-	where := newWhereBuilder("WHERE taskId=?", taskID)
+	return buildJobTaskItemWhereWithOptions(params, true)
+}
 
-	if status, ok := params["status"]; ok {
-		if util.ToInt(status) == -1 {
-			where.and("status NOT IN (0,1,2,7)")
-		} else {
-			where.and("status=?", status)
+func buildJobTaskItemWhereWithOptions(params map[string]interface{}, includeDetailFilters bool) whereBuilder {
+	var where whereBuilder
+	if taskID, ok := params["taskId"]; ok && taskID != nil && fmt.Sprint(taskID) != "" {
+		where = newWhereBuilder("WHERE taskId=?", taskID)
+	} else {
+		where = newWhereBuilder("WHERE jobId=?", params["jobId"])
+	}
+
+	if includeDetailFilters {
+		if status, ok := params["status"]; ok {
+			if util.ToInt(status) == -1 {
+				where.and("status NOT IN (0,1,2,7)")
+			} else {
+				where.and("status=?", status)
+			}
+		} else if statuses := parseStatusList(params["statusIn"]); len(statuses) > 0 {
+			clause, statusArgs := statusInClause(statuses)
+			where.and(fmt.Sprintf("status IN (%s)", clause), statusArgs...)
 		}
 	}
 	if typ, ok := params["type"]; ok {
@@ -1150,19 +1183,39 @@ func buildJobTaskItemWhere(params map[string]interface{}) whereBuilder {
 	if isPath, ok := params["isPath"]; ok {
 		where.and("isPath=?", isPath)
 	}
-	if hasError, ok := params["hasError"]; ok {
-		if util.ToInt(hasError) == 1 {
-			where.and("errMsg IS NOT NULL AND errMsg<>''")
-		} else {
-			where.and("(errMsg IS NULL OR errMsg='')")
+	if startTime, ok := params["startTime"]; ok {
+		start := util.ToInt64(startTime)
+		if start > 0 {
+			where.and("createTime >= ?", start)
 		}
 	}
-	if keyword, ok := params["keyword"]; ok {
-		kw := strings.TrimSpace(fmt.Sprintf("%v", keyword))
-		if kw != "" {
-			filterSQL, filterArgs := taskItemKeywordFilter(kw)
-			where.clause += filterSQL
-			where.args = append(where.args, filterArgs...)
+	if endTime, ok := params["endTime"]; ok {
+		end := util.ToInt64(endTime)
+		if end > 0 {
+			where.and("createTime <= ?", end)
+		}
+	}
+	if endTime, ok := params["endTimeExclusive"]; ok {
+		end := util.ToInt64(endTime)
+		if end > 0 {
+			where.and("createTime < ?", end)
+		}
+	}
+	if includeDetailFilters {
+		if hasError, ok := params["hasError"]; ok {
+			if util.ToInt(hasError) == 1 {
+				where.and("errMsg IS NOT NULL AND errMsg<>''")
+			} else {
+				where.and("(errMsg IS NULL OR errMsg='')")
+			}
+		}
+		if keyword, ok := params["keyword"]; ok {
+			kw := strings.TrimSpace(fmt.Sprintf("%v", keyword))
+			if kw != "" {
+				filterSQL, filterArgs := taskItemKeywordFilter(kw)
+				where.clause += filterSQL
+				where.args = append(where.args, filterArgs...)
+			}
 		}
 	}
 	return where
@@ -1381,7 +1434,65 @@ func GetTopFailedTaskItems(taskID int64, limit int) ([]map[string]interface{}, e
 
 // CountJobTaskItemsByIDs counts selected task items matching any of the given statuses.
 func CountJobTaskItemsByIDs(taskID int64, itemIDs []int64, statuses []int) (int64, error) {
-	if len(itemIDs) == 0 || len(statuses) == 0 {
+	return countJobTaskItemsScoped("taskId", taskID, itemIDs, statuses)
+}
+
+// CountJobTaskItemsByJobAndIDs counts selected items belonging to a job across tasks.
+func CountJobTaskItemsByJobAndIDs(jobID int64, itemIDs []int64, statuses []int) (int64, error) {
+	return countJobTaskItemsScoped("jobId", jobID, itemIDs, statuses)
+}
+
+// GetRetryableJobTaskItemSources counts matching items for a job and returns the
+// distinct positive source task IDs they belong to, so cross-task item retries
+// can lock all source tasks against concurrent history cleanup before starting.
+func GetRetryableJobTaskItemSources(jobID int64, itemIDs []int64, statuses []int) (int64, []int64, error) {
+	if jobID <= 0 || len(itemIDs) == 0 || len(statuses) == 0 {
+		return 0, nil, nil
+	}
+	statusClause, statusArgs := statusInClause(statuses)
+	var total int64
+	seenTasks := make(map[int64]struct{})
+	var taskIDs []int64
+	for start := 0; start < len(itemIDs); start += 400 {
+		end := start + 400
+		if end > len(itemIDs) {
+			end = len(itemIDs)
+		}
+		idClause, idArgs := int64InClause(itemIDs[start:end])
+		query := fmt.Sprintf("SELECT taskId FROM job_task_item WHERE jobId=? AND status IN (%s) AND id IN (%s)", statusClause, idClause)
+		args := make([]interface{}, 0, 1+len(statusArgs)+len(idArgs))
+		args = append(args, jobID)
+		args = append(args, statusArgs...)
+		args = append(args, idArgs...)
+		rows, err := GetDB().Query(query, args...)
+		if err != nil {
+			return 0, nil, err
+		}
+		for rows.Next() {
+			var tid int64
+			if scanErr := rows.Scan(&tid); scanErr != nil {
+				_ = rows.Close()
+				return 0, nil, scanErr
+			}
+			total++
+			if tid > 0 {
+				if _, dup := seenTasks[tid]; !dup {
+					seenTasks[tid] = struct{}{}
+					taskIDs = append(taskIDs, tid)
+				}
+			}
+		}
+		if rowsErr := rows.Err(); rowsErr != nil {
+			_ = rows.Close()
+			return 0, nil, rowsErr
+		}
+		_ = rows.Close()
+	}
+	return total, taskIDs, nil
+}
+
+func countJobTaskItemsScoped(scopeCol string, scopeID int64, itemIDs []int64, statuses []int) (int64, error) {
+	if scopeID <= 0 || len(itemIDs) == 0 || len(statuses) == 0 {
 		return 0, nil
 	}
 	statusClause, statusArgs := statusInClause(statuses)
@@ -1392,9 +1503,9 @@ func CountJobTaskItemsByIDs(taskID int64, itemIDs []int64, statuses []int) (int6
 			end = len(itemIDs)
 		}
 		idClause, idArgs := int64InClause(itemIDs[start:end])
-		query := fmt.Sprintf("SELECT COUNT(id) FROM job_task_item WHERE taskId=? AND status IN (%s) AND id IN (%s)", statusClause, idClause)
+		query := fmt.Sprintf("SELECT COUNT(id) FROM job_task_item WHERE %s=? AND status IN (%s) AND id IN (%s)", scopeCol, statusClause, idClause)
 		args := make([]interface{}, 0, 1+len(statusArgs)+len(idArgs))
-		args = append(args, taskID)
+		args = append(args, scopeID)
 		args = append(args, statusArgs...)
 		args = append(args, idArgs...)
 		var count int64
@@ -1408,7 +1519,16 @@ func CountJobTaskItemsByIDs(taskID int64, itemIDs []int64, statuses []int) (int6
 
 // ForEachJobTaskItemsByIDs reads selected task items in id order matching statuses.
 func ForEachJobTaskItemsByIDs(taskID int64, itemIDs []int64, statuses []int, batchSize int, fn func([]map[string]interface{}) error) error {
-	if len(itemIDs) == 0 || len(statuses) == 0 {
+	return forEachJobTaskItemsScoped("taskId", taskID, itemIDs, statuses, batchSize, fn)
+}
+
+// ForEachJobTaskItemsByJobAndIDs reads selected items belonging to a job across tasks in id order.
+func ForEachJobTaskItemsByJobAndIDs(jobID int64, itemIDs []int64, statuses []int, batchSize int, fn func([]map[string]interface{}) error) error {
+	return forEachJobTaskItemsScoped("jobId", jobID, itemIDs, statuses, batchSize, fn)
+}
+
+func forEachJobTaskItemsScoped(scopeCol string, scopeID int64, itemIDs []int64, statuses []int, batchSize int, fn func([]map[string]interface{}) error) error {
+	if scopeID <= 0 || len(itemIDs) == 0 || len(statuses) == 0 {
 		return nil
 	}
 	if batchSize <= 0 || batchSize > 400 {
@@ -1423,14 +1543,15 @@ func ForEachJobTaskItemsByIDs(taskID int64, itemIDs []int64, statuses []int, bat
 		idClause, idArgs := int64InClause(itemIDs[start:end])
 		query := fmt.Sprintf(
 			`SELECT %s FROM job_task_item
-			 WHERE taskId=? AND status IN (%s) AND id IN (%s)
+			 WHERE %s=? AND status IN (%s) AND id IN (%s)
 			 ORDER BY id ASC`,
 			jobTaskItemRuntimeColumns,
+			scopeCol,
 			statusClause,
 			idClause,
 		)
 		args := make([]interface{}, 0, 1+len(statusArgs)+len(idArgs))
-		args = append(args, taskID)
+		args = append(args, scopeID)
 		args = append(args, statusArgs...)
 		args = append(args, idArgs...)
 		items, err := FetchAllToTable(query, args...)
@@ -1711,18 +1832,41 @@ func GetTaskErrorGroups(taskID int64, limit int) ([]map[string]interface{}, erro
 	if taskID <= 0 {
 		return nil, nil
 	}
+	return queryTaskItemErrorGroups(newWhereBuilder("WHERE taskId=?", taskID), limit)
+}
+
+// GetJobErrorGroups returns top grouped failure messages across a job's sync items.
+func GetJobErrorGroups(jobID int64, params map[string]interface{}, limit int) ([]map[string]interface{}, error) {
+	if jobID <= 0 {
+		return nil, nil
+	}
+	scopeParams := make(map[string]interface{}, len(params)+1)
+	for k, v := range params {
+		if k == "taskId" {
+			continue
+		}
+		scopeParams[k] = v
+	}
+	scopeParams["jobId"] = jobID
+	return queryTaskItemErrorGroups(buildJobTaskItemWhereWithOptions(scopeParams, false), limit)
+}
+
+func queryTaskItemErrorGroups(where whereBuilder, limit int) ([]map[string]interface{}, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 20
 	}
-	rows, err := GetDB().Query(
+	where.and("errMsg IS NOT NULL AND TRIM(errMsg) <> ''")
+	query := fmt.Sprintf(
 		`SELECT TRIM(errMsg) AS reason, COUNT(id) AS cnt
 		 FROM job_task_item
-		 WHERE taskId=? AND errMsg IS NOT NULL AND TRIM(errMsg) <> ''
+		 %s
 		 GROUP BY TRIM(errMsg)
 		 ORDER BY cnt DESC
 		 LIMIT ?`,
-		taskID, limit,
+		where.clause,
 	)
+	args := appendSQLArgs(where.args, limit)
+	rows, err := GetDB().Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1743,4 +1887,53 @@ func GetTaskErrorGroups(taskID int64, limit int) ([]map[string]interface{}, erro
 		return nil, err
 	}
 	return out, nil
+}
+
+// GetJobRecentTaskErrors returns recent failed/abnormal runs for a job that
+// did not produce failed file records (e.g. scan, auth, or disk-space errors).
+func GetJobRecentTaskErrors(jobID int64, params map[string]interface{}, limit int) ([]map[string]interface{}, error) {
+	if jobID <= 0 {
+		return nil, nil
+	}
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+	where := newWhereBuilder(
+		`WHERE jobId=?
+		   AND status IN (3, 5, 6, 7)
+		   AND errMsg IS NOT NULL AND TRIM(errMsg) <> ''
+		   AND NOT EXISTS (
+		     SELECT 1 FROM job_task_item i
+		     WHERE i.taskId = job_task.id AND (i.status = 7 OR (i.errMsg IS NOT NULL AND TRIM(i.errMsg) <> ''))
+		   )`,
+		jobID,
+	)
+	if startTime, ok := params["startTime"]; ok {
+		start := util.ToInt64(startTime)
+		if start > 0 {
+			where.and("COALESCE(NULLIF(runTime, 0), createTime) >= ?", start)
+		}
+	}
+	if endTime, ok := params["endTime"]; ok {
+		end := util.ToInt64(endTime)
+		if end > 0 {
+			where.and("COALESCE(NULLIF(runTime, 0), createTime) <= ?", end)
+		}
+	}
+	if endTime, ok := params["endTimeExclusive"]; ok {
+		end := util.ToInt64(endTime)
+		if end > 0 {
+			where.and("COALESCE(NULLIF(runTime, 0), createTime) < ?", end)
+		}
+	}
+	query := fmt.Sprintf(
+		`SELECT id, jobId, status, errMsg, COALESCE(NULLIF(runTime, 0), createTime) AS runTime, createTime
+		 FROM job_task
+		 %s
+		 ORDER BY COALESCE(NULLIF(runTime, 0), createTime) DESC, id DESC
+		 LIMIT ?`,
+		where.clause,
+	)
+	args := appendSQLArgs(where.args, limit)
+	return fetchAllToTableWithLimit(GetDB(), limit, query, args...)
 }

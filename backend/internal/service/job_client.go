@@ -37,11 +37,11 @@ type JobClient struct {
 	// a task, so a cron tick racing a delete cannot create a task for a job that
 	// is about to disappear.
 	closing atomic.Bool
-	// retrySourceID is the historical task whose items the current run replays,
-	// guarded by mu. RemoveTask refuses to delete it while the replay is
-	// running: the replay reads the source task's items in id-ordered batches,
-	// so deleting them mid-run silently drops the remainder.
-	retrySourceID int64
+	// retrySourceID / retrySourceIDs record the historical task(s) whose items
+	// the current run replays, guarded by mu. RemoveTask and history cleanup
+	// refuse to delete them while the replay is running.
+	retrySourceID  int64
+	retrySourceIDs []int64
 	// queueCancel cancels an in-flight wait on engineQueue.Acquire so stop,
 	// pause, delete, and shutdown abort queued jobs immediately.
 	queueCancel context.CancelFunc
@@ -171,14 +171,73 @@ func (jc *JobClient) isClosing() bool {
 func (jc *JobClient) setRetrySource(taskID int64) {
 	jc.mu.Lock()
 	jc.retrySourceID = taskID
+	if taskID > 0 {
+		jc.retrySourceIDs = []int64{taskID}
+	} else {
+		jc.retrySourceIDs = nil
+	}
 	jc.mu.Unlock()
 }
 
-// retrySource is the historical task the current run replays, or 0.
+// setRetrySources records multiple historical tasks whose items the current run replays.
+func (jc *JobClient) setRetrySources(taskIDs []int64) {
+	jc.mu.Lock()
+	if len(taskIDs) > 0 {
+		jc.retrySourceIDs = append([]int64(nil), taskIDs...)
+		jc.retrySourceID = taskIDs[0]
+	} else {
+		jc.retrySourceIDs = nil
+		jc.retrySourceID = 0
+	}
+	jc.mu.Unlock()
+}
+
+// retrySource is the primary historical task the current run replays, or 0.
 func (jc *JobClient) retrySource() int64 {
 	jc.mu.Lock()
 	defer jc.mu.Unlock()
-	return jc.retrySourceID
+	if jc.retrySourceID > 0 {
+		return jc.retrySourceID
+	}
+	if len(jc.retrySourceIDs) > 0 {
+		return jc.retrySourceIDs[0]
+	}
+	return 0
+}
+
+// retrySources returns all historical task IDs protected by the current retry run.
+func (jc *JobClient) retrySources() []int64 {
+	jc.mu.Lock()
+	defer jc.mu.Unlock()
+	var out []int64
+	if jc.retrySourceID > 0 {
+		out = append(out, jc.retrySourceID)
+	}
+	for _, id := range jc.retrySourceIDs {
+		if id <= 0 || id == jc.retrySourceID {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
+}
+
+// hasRetrySourceTask reports whether taskID is currently locked by an active retry replay.
+func (jc *JobClient) hasRetrySourceTask(taskID int64) bool {
+	if taskID <= 0 {
+		return false
+	}
+	jc.mu.Lock()
+	defer jc.mu.Unlock()
+	if jc.retrySourceID == taskID {
+		return true
+	}
+	for _, id := range jc.retrySourceIDs {
+		if id == taskID {
+			return true
+		}
+	}
+	return false
 }
 
 func (jc *JobClient) tryMarkDoing() bool {
@@ -213,6 +272,7 @@ func (jc *JobClient) markDone() {
 	// the task itself is finished).
 	if jc.CurrentJobTask == nil {
 		jc.retrySourceID = 0
+		jc.retrySourceIDs = nil
 	}
 	jc.signalStateChangeLocked()
 	jc.mu.Unlock()
@@ -247,6 +307,7 @@ func (jc *JobClient) clearCurrentTask(task *JobTask) {
 	if task == nil || jc.CurrentJobTask == task {
 		jc.CurrentJobTask = nil
 		jc.retrySourceID = 0
+		jc.retrySourceIDs = nil
 		jc.signalStateChangeLocked()
 	}
 	jc.mu.Unlock()
@@ -523,6 +584,7 @@ func NewJobClient(job map[string]interface{}, isInit bool) (*JobClient, error) {
 
 type markedJobRunOptions struct {
 	sourceTaskID     int64
+	retryJobItems    bool
 	statuses         []taskStatus
 	itemIDs          []int64
 	manual           bool
@@ -557,7 +619,7 @@ func (jc *JobClient) runMarkedJobConfig(sourceTaskID int64, statuses []taskStatu
 func (jc *JobClient) runMarkedJobWithOptions(opts markedJobRunOptions) {
 	// A manual or scheduled full run can drain the same durable inbox. Repair
 	// and historical retries must never acknowledge unrelated pending changes.
-	if opts.syncGeneration == 0 && opts.sourceTaskID == 0 && len(opts.onlyFiles) == 0 {
+	if opts.syncGeneration == 0 && opts.sourceTaskID == 0 && !opts.retryJobItems && len(opts.onlyFiles) == 0 {
 		job := jc.jobSnapshot()
 		extra, _, _ := parseNativeExtraFlags(job["extraFlags"])
 		if util.ToInt(job["isCron"]) == 3 || extra.WatchEnable {
@@ -680,6 +742,10 @@ func (jc *JobClient) runMarkedJobWithOptions(opts markedJobRunOptions) {
 		if len(itemIDs) > 0 {
 			task.RetryItemIDs = append([]int64(nil), itemIDs...)
 		}
+	} else if opts.retryJobItems && len(itemIDs) > 0 {
+		task.RetryJobItems = true
+		task.RetryStatuses = append([]taskStatus(nil), statuses...)
+		task.RetryItemIDs = append([]int64(nil), itemIDs...)
 	}
 	if len(opts.onlyFiles) > 0 {
 		task.OnlyFiles = append([]string(nil), opts.onlyFiles...)
@@ -944,6 +1010,57 @@ func (jc *JobClient) DoRetrySelectedTaskItems(sourceTaskID int64, itemIDs []int6
 		return publicError(msg.T(msg.NoFailedTaskItems))
 	}
 	go jc.runMarkedJobConfig(sourceTaskID, retryableTaskStatuses, itemIDs, false)
+	return nil
+}
+
+// DoRetryJobItems replays the specified retryable item IDs across tasks of this job.
+func (jc *JobClient) DoRetryJobItems(itemIDs []int64) error {
+	if jc.isClosing() {
+		return publicError(msg.T(msg.JobNotFound))
+	}
+	if len(itemIDs) == 0 {
+		return publicError(msg.T(msg.NoRetryItemSelected))
+	}
+	// Query matching items and claim their source task IDs while holding
+	// historyCleanupMu so neither retention cleanup nor manual history clear/delete
+	// can remove job_task_item rows before the replay reads them.
+	historyCleanupMu.Lock()
+	count, sourceTaskIDs, err := mapper.GetRetryableJobTaskItemSources(jc.idSnapshot(), itemIDs, retryableStatusValues())
+	if err != nil {
+		historyCleanupMu.Unlock()
+		return fmt.Errorf("count retryable items: %w", err)
+	}
+	for _, sid := range sourceTaskIDs {
+		if _, deleting := historyDeletingTasks[sid]; deleting {
+			historyCleanupMu.Unlock()
+			return publicError(msg.T(msg.TaskNotFound))
+		}
+	}
+	if count == 0 {
+		historyCleanupMu.Unlock()
+		return publicError(msg.T(msg.NoRetryItemSelected))
+	}
+	if !jc.tryMarkDoing() {
+		historyCleanupMu.Unlock()
+		return publicError(msg.T(msg.JobRunning))
+	}
+	if jc.isClosing() {
+		jc.markDone()
+		historyCleanupMu.Unlock()
+		return publicError(msg.T(msg.JobNotFound))
+	}
+	if !jc.enabled() {
+		jc.markDone()
+		historyCleanupMu.Unlock()
+		return publicError(msg.T(msg.DisabledJobCannotRun))
+	}
+	jc.setRetrySources(sourceTaskIDs)
+	historyCleanupMu.Unlock()
+	go jc.runMarkedJobWithOptions(markedJobRunOptions{
+		retryJobItems: true,
+		statuses:      retryableTaskStatuses,
+		itemIDs:       itemIDs,
+	})
 	return nil
 }
 
