@@ -7,8 +7,10 @@ import {
 } from "../src/lib/taskForm";
 import {
   applyWizardEndpoints,
+  applyWizardMultiEndpoints,
   canSwitchBackToWizard,
   extractFallbackLocalRoots,
+  extractWizardMultiPaths,
   extractWizardPaths,
   formatLocalRootDisplayItems,
   formatNasDisplayPath,
@@ -314,5 +316,80 @@ describe("taskWizard helpers", () => {
     expect(extractFallbackLocalRoots(localEntries)).toEqual([
       { id: "sync~92618e31210e", path: "/vol1/1000/主文件夹/sync" },
     ]);
+  });
+
+  it("supports system local paths (issue #18) and multi-source wizard jobs (issue #5)", () => {
+    const roots = [
+      { id: "sync~92618e31210e", path: "/vol1/1000/主文件夹/sync" },
+      { id: "photos~a1b2c3d4e5f6", path: "/vol1/1000/Photos" },
+    ];
+    const items = formatLocalRootDisplayItems(roots);
+    expect(items.find((i) => i.id === "sync~92618e31210e")?.storagePath).toBe(
+      "/vol1/1000/主文件夹/sync",
+    );
+    expect(isNativeLocalPath("/vol1/1000/主文件夹/sync/rime", roots)).toBe(true);
+    expect(isNativeLocalPath("/jianguoyun/sync", roots)).toBe(false);
+    expect(formatNasDisplayPath("/vol1/1000/主文件夹/sync/rime", roots)).toBe(
+      "/vol1/1000/主文件夹/sync/rime",
+    );
+
+    const base = defaultJobForm(1);
+    const multiUpload = {
+      ...base,
+      srcPath: ["/vol1/1000/主文件夹/sync/rime", "/vol1/1000/Photos"],
+      dstPath: ["/jianguoyun/backup"],
+      method: 0,
+      isCron: 3,
+    };
+    expect(isWizardCompatibleExistingJob(multiUpload, roots)).toBe(true);
+    expect(canSwitchBackToWizard(multiUpload, roots)).toBe(true);
+    expect(extractWizardMultiPaths(multiUpload, roots)).toEqual({
+      nasPaths: ["/vol1/1000/主文件夹/sync/rime", "/vol1/1000/Photos"],
+      remotePaths: ["/jianguoyun/backup"],
+    });
+    expect(inferWizardDirection(multiUpload, roots)).toBe("upload");
+
+    // Bidirectional still requires 1:1
+    expect(
+      isWizardCompatibleExistingJob({ ...multiUpload, method: 3 }, roots),
+    ).toBe(false);
+
+    // Multi-endpoint derivation for upload, download, and bidirectional
+    expect(
+      applyWizardMultiEndpoints(
+        "upload",
+        "none",
+        ["/vol1/1000/主文件夹/sync/rime", "/vol1/1000/Photos"],
+        ["/jianguoyun/backup"],
+      ),
+    ).toEqual({
+      srcPath: ["/vol1/1000/主文件夹/sync/rime", "/vol1/1000/Photos"],
+      dstPath: ["/jianguoyun/backup"],
+      method: 0,
+    });
+    expect(
+      applyWizardMultiEndpoints(
+        "download",
+        "mirror",
+        ["/vol1/1000/主文件夹/sync"],
+        ["/jianguoyun/a", "/jianguoyun/b"],
+      ),
+    ).toEqual({
+      srcPath: ["/jianguoyun/a", "/jianguoyun/b"],
+      dstPath: ["/vol1/1000/主文件夹/sync"],
+      method: 1,
+    });
+    expect(
+      applyWizardMultiEndpoints(
+        "bidirectional",
+        "none",
+        ["/vol1/1000/主文件夹/sync/rime", "/vol1/1000/Photos"],
+        ["/jianguoyun/a", "/jianguoyun/b"],
+      ),
+    ).toEqual({
+      srcPath: ["/vol1/1000/主文件夹/sync/rime"],
+      dstPath: ["/jianguoyun/a"],
+      method: 3,
+    });
   });
 });

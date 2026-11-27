@@ -77,16 +77,34 @@ export function extractFallbackLocalRoots(
 export interface LocalRootDisplayItem {
   id: string;
   virtualPath: string;
+  storagePath: string;
   hostPath: string;
   baseName: string;
   suffix: string;
   label: string;
 }
 
-export function isNativeLocalPath(rawPath?: string | null): boolean {
+export function isNativeLocalPath(
+  rawPath?: string | null,
+  localRoots?: readonly NativeLocalRoot[] | null,
+): boolean {
   if (!rawPath) return false;
-  const first = rawPath.replace(/^\/+/, "").split("/").filter(Boolean)[0];
-  return first === "本地";
+  const clean = normalizeVirtualPath(rawPath);
+  const first = clean.replace(/^\/+/, "").split("/").filter(Boolean)[0];
+  if (first === "本地") return true;
+  if (localRoots?.length) {
+    for (const root of localRoots) {
+      if (!root?.path) continue;
+      const rootClean = normalizeVirtualPath(root.path);
+      if (
+        rootClean !== "/" &&
+        (clean === rootClean || clean.startsWith(`${rootClean}/`))
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function normalizeVirtualPath(rawPath: string): string {
@@ -117,10 +135,13 @@ export function formatLocalRootDisplayItems(
   if (!localRoots?.length) return [];
   const rawItems = localRoots.map((root) => {
     const baseName = stripNativeLocalRootID(root.id).base || root.id;
+    const hostPath = root.path ? normalizeVirtualPath(root.path) : "";
+    const virtualPath = `/本地/${root.id}`;
     return {
       id: root.id,
-      virtualPath: `/本地/${root.id}`,
-      hostPath: root.path || "",
+      virtualPath,
+      storagePath: hostPath || virtualPath,
+      hostPath,
       baseName,
     };
   });
@@ -181,8 +202,10 @@ export function formatLocalRootDisplayItems(
 }
 
 /**
- * Formats a selected NAS virtual path (`/本地/Photos~a1b2c3d4e5f6/2026/Summer`)
- * without exposing `/本地` or `~12hex`. Uses collision-safe root labels when known.
+ * Formats a selected NAS path for display:
+ * - Real host paths (`/vol1/1000/主文件夹/sync/rime`) are shown verbatim.
+ * - Legacy virtual paths (`/本地/Photos~a1b2c3d4e5f6/2026/Summer`) hide `/本地`
+ *   and `~12hex`, using collision-safe root labels when known.
  */
 export function formatNasDisplayPath(
   rawNasPath: string,
@@ -192,7 +215,7 @@ export function formatNasDisplayPath(
   if (clean === "/" || clean === "/本地") return "";
   const segs = clean.replace(/^\/+/, "").split("/").filter(Boolean);
   if (segs[0] !== "本地") {
-    return clean.replace(/^\/+/, "");
+    return clean;
   }
   const rootId = segs[1];
   if (!rootId) return "";
@@ -219,63 +242,106 @@ export function extractRemoteRootAndSubPath(rawRemotePath: string): {
 }
 
 /**
- * Determines whether an existing or draft job fits the 1:1 "NAS 本地 ↔ 云端网盘"
- * standard 3-step wizard. Cloud-to-cloud, local-to-local, multi-source, multi-dst,
- * move mode (method=2), and legacy non-continuous schedules open in Free Mode.
+ * Determines whether an existing or draft job fits the standard 3-step wizard:
+ * - Bidirectional (method=3): 1 NAS ↔ 1 Cloud
+ * - One-way (method=0/1): 1+ source directories on one side → 1 destination on the other side
+ * Cloud-to-cloud, local-to-local, multi-dst, move mode (method=2), and legacy
+ * non-continuous schedules open in Free Mode.
  */
 export function isWizardCompatibleExistingJob(
   form: Pick<JobForm, "method" | "isCron" | "srcPath" | "dstPath">,
+  localRoots?: readonly NativeLocalRoot[] | null,
 ): boolean {
   if (form.method === 2 || form.isCron !== 3) return false;
-  if (form.srcPath.length !== 1 || form.dstPath.length !== 1) return false;
-  const srcLocal = isNativeLocalPath(form.srcPath[0]);
-  const dstLocal = isNativeLocalPath(form.dstPath[0]);
-  return srcLocal !== dstLocal;
+  if (form.srcPath.length === 0 || form.dstPath.length !== 1) return false;
+  if (form.method === 3 && form.srcPath.length !== 1) return false;
+  const dstLocal = isNativeLocalPath(form.dstPath[0], localRoots);
+  return form.srcPath.every(
+    (p) => Boolean(p) && isNativeLocalPath(p, localRoots) !== dstLocal,
+  );
 }
 
 /**
  * Checks whether a Free Mode form can return cleanly to the Standard Wizard.
- * Allows empty selection or at most one NAS path paired with at most one cloud path.
+ * Allows empty selection, 1:1 bidirectional, or one-way multi-source -> single-dst
+ * between NAS local and cloud remote.
  */
 export function canSwitchBackToWizard(
   form: Pick<JobForm, "method" | "isCron" | "srcPath" | "dstPath">,
+  localRoots?: readonly NativeLocalRoot[] | null,
 ): boolean {
   if (form.method === 2 || form.isCron !== 3) return false;
   if (form.srcPath.length === 0 && form.dstPath.length === 0) return true;
-  if (form.srcPath.length > 1 || form.dstPath.length > 1) return false;
-  const all = [...form.srcPath, ...form.dstPath];
-  const localCount = all.filter((p) => isNativeLocalPath(p)).length;
-  const remoteCount = all.length - localCount;
-  return localCount <= 1 && remoteCount <= 1;
+  if (form.dstPath.length > 1) return false;
+  if (form.method === 3 && form.srcPath.length > 1) return false;
+  const srcLocalFlags = form.srcPath
+    .filter(Boolean)
+    .map((p) => isNativeLocalPath(p, localRoots));
+  const dstLocalFlags = form.dstPath
+    .filter(Boolean)
+    .map((p) => isNativeLocalPath(p, localRoots));
+  if (srcLocalFlags.length > 1 && new Set(srcLocalFlags).size > 1) {
+    return false;
+  }
+  if (srcLocalFlags.length > 0 && dstLocalFlags.length > 0) {
+    return srcLocalFlags[0] !== dstLocalFlags[0];
+  }
+  return true;
+}
+
+export function extractWizardMultiPaths(
+  form: Pick<JobForm, "srcPath" | "dstPath">,
+  localRoots?: readonly NativeLocalRoot[] | null,
+): { nasPaths: string[]; remotePaths: string[] } {
+  const all = [...form.srcPath, ...form.dstPath].filter(Boolean);
+  const nasPaths: string[] = [];
+  const remotePaths: string[] = [];
+  for (const p of all) {
+    if (isNativeLocalPath(p, localRoots)) {
+      if (!nasPaths.includes(p)) nasPaths.push(p);
+    } else if (!remotePaths.includes(p)) {
+      remotePaths.push(p);
+    }
+  }
+  return { nasPaths, remotePaths };
 }
 
 export function extractWizardPaths(
   form: Pick<JobForm, "srcPath" | "dstPath">,
+  localRoots?: readonly NativeLocalRoot[] | null,
 ): { nasPath: string; remotePath: string } {
-  const all = [...form.srcPath, ...form.dstPath];
-  const nasPath = all.find((p) => isNativeLocalPath(p)) || "";
-  const remotePath = all.find((p) => p && !isNativeLocalPath(p)) || "";
-  return { nasPath, remotePath };
+  const { nasPaths, remotePaths } = extractWizardMultiPaths(form, localRoots);
+  return { nasPath: nasPaths[0] || "", remotePath: remotePaths[0] || "" };
 }
 
 export function inferWizardDirection(
   form: Pick<JobForm, "method" | "srcPath" | "dstPath" | "extraFlags">,
+  localRoots?: readonly NativeLocalRoot[] | null,
 ): SyncDirectionMode {
   if (form.method === 3) return "bidirectional";
   const stored = form.extraFlags?.syncDirectionMode;
   if (stored === "download") {
     if (!form.srcPath.length && !form.dstPath.length) return "download";
-    if (!isNativeLocalPath(form.srcPath[0]) && isNativeLocalPath(form.dstPath[0])) {
+    if (
+      !isNativeLocalPath(form.srcPath[0], localRoots) &&
+      isNativeLocalPath(form.dstPath[0], localRoots)
+    ) {
       return "download";
     }
   }
   if (stored === "upload") {
     if (!form.srcPath.length && !form.dstPath.length) return "upload";
-    if (isNativeLocalPath(form.srcPath[0]) && !isNativeLocalPath(form.dstPath[0])) {
+    if (
+      isNativeLocalPath(form.srcPath[0], localRoots) &&
+      !isNativeLocalPath(form.dstPath[0], localRoots)
+    ) {
       return "upload";
     }
   }
-  if (!isNativeLocalPath(form.srcPath[0]) && isNativeLocalPath(form.dstPath[0])) {
+  if (
+    !isNativeLocalPath(form.srcPath[0], localRoots) &&
+    isNativeLocalPath(form.dstPath[0], localRoots)
+  ) {
     return "download";
   }
   return "upload";
@@ -290,32 +356,46 @@ export function inferOneWayDeleteMode(
   return "none";
 }
 
-export function applyWizardEndpoints(
+export function applyWizardMultiEndpoints(
   direction: SyncDirectionMode,
   deleteMode: OneWayDeleteMode,
-  nasPath: string,
-  remotePath: string,
+  nasPaths: readonly string[],
+  remotePaths: readonly string[],
 ): { srcPath: string[]; dstPath: string[]; method: number } {
-  const cleanNas = nasPath.trim();
-  const cleanRemote = remotePath.trim();
+  const cleanNas = nasPaths.map((p) => p.trim()).filter(Boolean);
+  const cleanRemote = remotePaths.map((p) => p.trim()).filter(Boolean);
   if (direction === "bidirectional") {
     return {
-      srcPath: cleanNas ? [cleanNas] : [],
-      dstPath: cleanRemote ? [cleanRemote] : [],
+      srcPath: cleanNas.slice(0, 1),
+      dstPath: cleanRemote.slice(0, 1),
       method: 3,
     };
   }
   const method = deleteMode === "mirror" ? 1 : 0;
   if (direction === "download") {
     return {
-      srcPath: cleanRemote ? [cleanRemote] : [],
-      dstPath: cleanNas ? [cleanNas] : [],
+      srcPath: cleanRemote,
+      dstPath: cleanNas.slice(0, 1),
       method,
     };
   }
   return {
-    srcPath: cleanNas ? [cleanNas] : [],
-    dstPath: cleanRemote ? [cleanRemote] : [],
+    srcPath: cleanNas,
+    dstPath: cleanRemote.slice(0, 1),
     method,
   };
+}
+
+export function applyWizardEndpoints(
+  direction: SyncDirectionMode,
+  deleteMode: OneWayDeleteMode,
+  nasPath: string,
+  remotePath: string,
+): { srcPath: string[]; dstPath: string[]; method: number } {
+  return applyWizardMultiEndpoints(
+    direction,
+    deleteMode,
+    nasPath ? [nasPath] : [],
+    remotePath ? [remotePath] : [],
+  );
 }

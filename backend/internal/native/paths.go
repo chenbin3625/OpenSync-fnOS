@@ -285,6 +285,42 @@ func backendRequiresContainer(backend string) bool {
 	}
 }
 
+// IsAuthorizedLocalPath reports whether v refers to either a "/本地/..." virtual
+// local path or a real host filesystem path inside an fnOS-authorized root.
+func IsAuthorizedLocalPath(v string) bool {
+	trimmed := strings.TrimSpace(v)
+	if trimmed == "" {
+		return false
+	}
+	name, _, _ := strings.Cut(strings.TrimPrefix(trimmed, "/"), "/")
+	if strings.EqualFold(name, Local) {
+		return true
+	}
+	_, ok := localAbsToVirtual(trimmed)
+	return ok
+}
+
+// normalizeLocalVirtualPath converts an authorized host filesystem path
+// (e.g. "/vol1/1000/主文件夹/sync/rime") into its internal "/本地/<rootID>/..."
+// representation when its first segment does not match a configured remote.
+func (c Config) normalizeLocalVirtualPath(v string) (string, bool) {
+	trimmed := strings.TrimSuffix(strings.TrimSpace(v), "/")
+	if trimmed == "" || !strings.HasPrefix(trimmed, "/") {
+		return "", false
+	}
+	name, _, _ := strings.Cut(strings.TrimPrefix(trimmed, "/"), "/")
+	if c.isLocalName(name) {
+		return trimmed, true
+	}
+	if _, ok := c.FindKey(name); ok {
+		return "", false
+	}
+	if virt, ok := localAbsToVirtual(trimmed); ok {
+		return virt, true
+	}
+	return "", false
+}
+
 // Resolve maps only trusted names to rclone arguments for directory endpoints.
 // It never accepts an inline connection string or lets a configured local remote expose the host root.
 func (c Config) Resolve(v string) (Endpoint, error) {
@@ -323,6 +359,21 @@ func (c Config) resolveEndpoint(v string, allowFile bool) (Endpoint, error) {
 		}, e
 	}
 	if c[canonicalName] == nil {
+		if virt, ok := localAbsToVirtual(v); ok {
+			localSub := strings.TrimPrefix(virt, "/"+Local+"/")
+			p, e := resolveLocalEntry(localSub, allowFile)
+			id := "/local" + p
+			return Endpoint{
+				Path:            p,
+				RemoteName:      Local,
+				Backend:         "local",
+				LocalPath:       p,
+				Identity:        id,
+				BackingIdentity: id,
+				Sub:             localSub,
+				IsLocal:         true,
+			}, e
+		}
 		return Endpoint{}, errors.New("备份存储不存在")
 	}
 
@@ -649,8 +700,9 @@ func (c Config) ListWithOptions(ctx context.Context, v string, opts SessionOptio
 	}
 
 	n, sub, _ := strings.Cut(strings.Trim(v, "/"), "/")
-	if c.isLocalName(n) {
-		if sub == "" {
+	if virt, isLocal := c.normalizeLocalVirtualPath(v); isLocal {
+		_, localSub, _ := strings.Cut(strings.Trim(virt, "/"), "/")
+		if localSub == "" {
 			for _, r := range authorizedRoots() {
 				push(r.Path, path.Join(v, r.ID))
 			}
@@ -659,7 +711,7 @@ func (c Config) ListWithOptions(ctx context.Context, v string, opts SessionOptio
 			if e != nil {
 				return nil, e
 			}
-			root, rel, e := openDisk(sub)
+			root, rel, e := openDisk(localSub)
 			if e != nil {
 				return nil, e
 			}

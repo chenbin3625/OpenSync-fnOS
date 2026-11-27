@@ -397,8 +397,9 @@ func (c Config) ListDirEntriesWithHash(ctx context.Context, virtualPath string, 
 		return out, true, nil
 	}
 	n, sub := parts(v)
-	if c.isLocalName(n) {
-		if sub == "" {
+	if virt, isLocal := c.normalizeLocalVirtualPath(v); isLocal {
+		_, localSub := parts(virt)
+		if localSub == "" {
 			roots := authorizedRoots()
 			out := make([]DirEntry, 0, len(roots))
 			for _, r := range roots {
@@ -410,7 +411,7 @@ func (c Config) ListDirEntriesWithHash(ctx context.Context, virtualPath string, 
 		if _, err := c.Resolve(v); err != nil {
 			return nil, false, err
 		}
-		root, rel, rootDev, hasRootDev, err := openDiskWithDev(sub)
+		root, rel, rootDev, hasRootDev, err := openDiskWithDev(localSub)
 		if err != nil {
 			return nil, false, err
 		}
@@ -548,8 +549,9 @@ func (c Config) StatEntry(ctx context.Context, virtualPath string, includeHash b
 		return nil, false, errors.New("路径无效")
 	}
 	n, sub := parts(v)
-	if c.isLocalName(n) {
-		if sub == "" {
+	if virt, isLocal := c.normalizeLocalVirtualPath(v); isLocal {
+		_, localSub := parts(virt)
+		if localSub == "" {
 			return nil, false, errors.New("路径无效")
 		}
 		ep, err := c.ResolveEntry(v)
@@ -572,7 +574,7 @@ func (c Config) StatEntry(ctx context.Context, virtualPath string, includeHash b
 		}
 		md5Sum := ""
 		if includeHash && !st.IsDir() {
-			if root, rel, openErr := openDisk(sub); openErr == nil {
+			if root, rel, openErr := openDisk(localSub); openErr == nil {
 				if sum, sumErr := md5FileInRoot(root, rel); sumErr == nil {
 					md5Sum = sum
 				}

@@ -124,7 +124,7 @@ function useLazyFolderMap(
 interface SubfolderRowsProps {
   parentPath: string;
   depth: number;
-  selectedPath: string;
+  selectedPaths: ReadonlySet<string>;
   expandedKeys: Set<string>;
   childrenMap: Record<string, FolderChildNode[]>;
   loadingMap: Record<string, boolean>;
@@ -137,7 +137,7 @@ interface SubfolderRowsProps {
 function SubfolderRows({
   parentPath,
   depth,
-  selectedPath,
+  selectedPaths,
   expandedKeys,
   childrenMap,
   loadingMap,
@@ -188,7 +188,7 @@ function SubfolderRows({
     <>
       {children.map((child) => {
         const expanded = expandedKeys.has(child.fullPath);
-        const selected = selectedPath === child.fullPath;
+        const selected = selectedPaths.has(child.fullPath);
         return (
           <div key={child.fullPath} className="wizard-tree-node">
             <div
@@ -222,7 +222,7 @@ function SubfolderRows({
               <SubfolderRows
                 parentPath={child.fullPath}
                 depth={depth + 1}
-                selectedPath={selectedPath}
+                selectedPaths={selectedPaths}
                 expandedKeys={expandedKeys}
                 childrenMap={childrenMap}
                 loadingMap={loadingMap}
@@ -242,16 +242,22 @@ function SubfolderRows({
 export function NasLocalFolderPicker({
   engineId,
   localRoots,
-  value,
+  value = "",
+  values,
+  multiple = false,
   onChange,
+  onChangeValues,
   onRefresh,
   error,
   epoch,
 }: {
   engineId?: number;
   localRoots?: readonly NativeLocalRoot[];
-  value: string;
-  onChange: (nextPath: string) => void;
+  value?: string;
+  values?: readonly string[];
+  multiple?: boolean;
+  onChange?: (nextPath: string) => void;
+  onChangeValues?: (nextPaths: string[]) => void;
   onRefresh: () => void;
   error?: string;
   epoch?: number;
@@ -261,6 +267,31 @@ export function NasLocalFolderPicker({
     useLazyFolderMap(engineId, dirCache, epoch);
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(() => new Set());
   const [fallbackRoots, setFallbackRoots] = useState<NativeLocalRoot[]>([]);
+
+  const selectedList = useMemo<string[]>(() => {
+    if (values !== undefined) {
+      return values.filter(Boolean);
+    }
+    return value ? [value] : [];
+  }, [values, value]);
+
+  const selectedSet = useMemo(() => new Set(selectedList), [selectedList]);
+
+  const handleSelectPath = useCallback(
+    (targetPath: string) => {
+      if (multiple) {
+        const next = selectedSet.has(targetPath)
+          ? selectedList.filter((p) => p !== targetPath)
+          : [...selectedList, targetPath];
+        onChangeValues?.(next);
+        onChange?.(next[0] ?? "");
+      } else {
+        onChangeValues?.([targetPath]);
+        onChange?.(targetPath);
+      }
+    },
+    [multiple, selectedList, selectedSet, onChange, onChangeValues],
+  );
 
   useEffect(() => {
     if (localRoots && localRoots.length > 0) {
@@ -291,16 +322,39 @@ export function NasLocalFolderPicker({
     [effectiveRoots],
   );
 
-  // Auto-expand ancestor directories of an initially selected NAS path (when editing)
+  // Auto-expand ancestor directories of initially selected NAS paths (supports
+  // both real host paths like `/vol1/1000/sync/rime` and legacy `/本地/<id>/rime`).
   useEffect(() => {
-    if (!value || !engineId) return;
-    const segs = value.replace(/^\/+/, "").split("/").filter(Boolean);
-    if (segs[0] !== "本地" || segs.length < 2) return;
-    const ancestors: string[] = [];
-    for (let i = 2; i < segs.length; i++) {
-      ancestors.push("/" + segs.slice(0, i).join("/"));
+    if (!selectedList.length || !engineId) return;
+    const ancestors = new Set<string>();
+    for (const sel of selectedList) {
+      const clean = "/" + sel.replace(/^\/+|\/+$/g, "");
+      const segs = clean.replace(/^\/+/, "").split("/").filter(Boolean);
+      if (segs[0] === "本地" && segs.length > 2) {
+        for (let i = 2; i < segs.length; i++) {
+          ancestors.add("/" + segs.slice(0, i).join("/"));
+        }
+        continue;
+      }
+      const matchedRoot = displayRoots
+        .filter(
+          (r) =>
+            r.storagePath &&
+            (clean === r.storagePath || clean.startsWith(`${r.storagePath}/`)),
+        )
+        .sort((a, b) => b.storagePath.length - a.storagePath.length)[0];
+      if (matchedRoot && clean !== matchedRoot.storagePath) {
+        const rel = clean.slice(matchedRoot.storagePath.length + 1);
+        const relSegs = rel.split("/").filter(Boolean);
+        ancestors.add(matchedRoot.storagePath);
+        for (let i = 1; i < relSegs.length; i++) {
+          ancestors.add(
+            `${matchedRoot.storagePath}/${relSegs.slice(0, i).join("/")}`,
+          );
+        }
+      }
     }
-    if (ancestors.length === 0) return;
+    if (ancestors.size === 0) return;
     setExpandedKeys((prev) => {
       const next = new Set(prev);
       ancestors.forEach((a) => next.add(a));
@@ -309,7 +363,7 @@ export function NasLocalFolderPicker({
     ancestors.forEach((a) => {
       if (!childrenMap[a]) void loadFolderChildren(a);
     });
-  }, [value, engineId, childrenMap, loadFolderChildren]);
+  }, [selectedList, engineId, displayRoots, childrenMap, loadFolderChildren]);
 
   const handleToggleExpand = (path: string) => {
     setExpandedKeys((prev) => {
@@ -324,9 +378,10 @@ export function NasLocalFolderPicker({
     });
   };
 
-  const selectedLabel = value
-    ? formatNasDisplayPath(value, effectiveRoots)
-    : "";
+  const singleSelectedLabel =
+    !multiple && selectedList[0]
+      ? formatNasDisplayPath(selectedList[0], effectiveRoots)
+      : "";
 
   return (
     <section
@@ -337,6 +392,11 @@ export function NasLocalFolderPicker({
         <div className="wizard-picker-title">
           <IconFolderStroked aria-hidden="true" />
           <span>NAS 本地文件夹</span>
+          {multiple && (
+            <Tag size="small" color="blue" type="light">
+              支持多选
+            </Tag>
+          )}
         </div>
         <Button
           size="small"
@@ -350,8 +410,39 @@ export function NasLocalFolderPicker({
 
       <div className="wizard-picker-selected" aria-live="polite">
         <span className="wizard-picker-selected-label">已选：</span>
-        {selectedLabel ? (
-          <strong className="wizard-picker-selected-path">{selectedLabel}</strong>
+        {multiple ? (
+          selectedList.length > 0 ? (
+            <div className="wizard-selected-tags" style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+              {selectedList.map((p) => (
+                <Tag
+                  key={p}
+                  size="small"
+                  color="blue"
+                  type="light"
+                  closable
+                  onClose={() => handleSelectPath(p)}
+                >
+                  {formatNasDisplayPath(p, effectiveRoots) || p}
+                </Tag>
+              ))}
+              {selectedList.length > 1 && (
+                <button
+                  type="button"
+                  className="wizard-inline-link"
+                  onClick={() => {
+                    onChangeValues?.([]);
+                    onChange?.("");
+                  }}
+                >
+                  清空
+                </button>
+              )}
+            </div>
+          ) : (
+            <span className="muted">请在下方选择一个或多个本地授权目录</span>
+          )
+        ) : singleSelectedLabel ? (
+          <strong className="wizard-picker-selected-path">{singleSelectedLabel}</strong>
         ) : (
           <span className="muted">请在下方选择一个本地授权目录</span>
         )}
@@ -385,8 +476,10 @@ export function NasLocalFolderPicker({
         ) : (
           <div className="wizard-folder-tree" role="tree" aria-label="NAS 授权目录列表">
             {displayRoots.map((root) => {
-              const expanded = expandedKeys.has(root.virtualPath);
-              const selected = value === root.virtualPath;
+              const rootPath = root.storagePath;
+              const expanded = expandedKeys.has(rootPath);
+              const selected =
+                selectedSet.has(rootPath) || selectedSet.has(root.virtualPath);
               return (
                 <div key={root.id} className="wizard-tree-node">
                   <div
@@ -397,7 +490,7 @@ export function NasLocalFolderPicker({
                       className="wizard-tree-expand"
                       aria-label={`${expanded ? "折叠" : "展开"} ${root.label}`}
                       aria-expanded={expanded}
-                      onClick={() => handleToggleExpand(root.virtualPath)}
+                      onClick={() => handleToggleExpand(rootPath)}
                     >
                       {expanded ? (
                         <IconChevronDown size="small" aria-hidden="true" />
@@ -408,25 +501,30 @@ export function NasLocalFolderPicker({
                     <button
                       type="button"
                       className="wizard-tree-select"
-                      data-virtual-path={root.virtualPath}
+                      data-virtual-path={rootPath}
                       aria-pressed={selected}
-                      onClick={() => onChange(root.virtualPath)}
+                      onClick={() => handleSelectPath(rootPath)}
                     >
                       <IconFolderStroked size="small" aria-hidden="true" />
                       <span className="wizard-tree-label">{root.label}</span>
+                      {root.hostPath && (
+                        <span className="muted" style={{ fontSize: 11, marginLeft: 6 }}>
+                          {root.hostPath}
+                        </span>
+                      )}
                     </button>
                   </div>
                   {expanded && (
                     <SubfolderRows
-                      parentPath={root.virtualPath}
+                      parentPath={rootPath}
                       depth={1}
-                      selectedPath={value}
+                      selectedPaths={selectedSet}
                       expandedKeys={expandedKeys}
                       childrenMap={childrenMap}
                       loadingMap={loadingMap}
                       errorMap={errorMap}
                       onToggleExpand={handleToggleExpand}
-                      onSelectPath={onChange}
+                      onSelectPath={handleSelectPath}
                       onRetryFolder={(p) => void loadFolderChildren(p, true)}
                     />
                   )}
@@ -449,8 +547,11 @@ export function CloudRemoteFolderPicker({
   engineId,
   remotes,
   preferredRemote,
-  value,
+  value = "",
+  values,
+  multiple = false,
   onChange,
+  onChangeValues,
   onAddStorage,
   onRefresh,
   error,
@@ -459,8 +560,11 @@ export function CloudRemoteFolderPicker({
   engineId?: number;
   remotes?: readonly NativeRemoteItem[];
   preferredRemote?: string;
-  value: string;
-  onChange: (nextPath: string) => void;
+  value?: string;
+  values?: readonly string[];
+  multiple?: boolean;
+  onChange?: (nextPath: string) => void;
+  onChangeValues?: (nextPaths: string[]) => void;
   onAddStorage: () => void;
   onRefresh: () => void;
   error?: string;
@@ -479,21 +583,48 @@ export function CloudRemoteFolderPicker({
   const [manualOpen, setManualOpen] = useState(false);
   const [manualSubPath, setManualSubPath] = useState("");
 
+  const selectedList = useMemo<string[]>(() => {
+    if (values !== undefined) {
+      return values.filter(Boolean);
+    }
+    return value ? [value] : [];
+  }, [values, value]);
+
+  const selectedSet = useMemo(() => new Set(selectedList), [selectedList]);
+  const primaryValue = selectedList[0] ?? "";
+
+  const handleSelectPath = useCallback(
+    (targetPath: string) => {
+      if (multiple) {
+        const next = selectedSet.has(targetPath)
+          ? selectedList.filter((p) => p !== targetPath)
+          : [...selectedList, targetPath];
+        onChangeValues?.(next);
+        onChange?.(next[0] ?? "");
+      } else {
+        onChangeValues?.([targetPath]);
+        onChange?.(targetPath);
+      }
+    },
+    [multiple, selectedList, selectedSet, onChange, onChangeValues],
+  );
+
   const remoteList = useMemo(
     () =>
       [...(remotes || [])].sort((a, b) => a.name.localeCompare(b.name, "zh-Hans-CN")),
     [remotes],
   );
 
-  // Auto-expand preferredRemote or current selected remote's ancestor path
+  // Auto-expand preferredRemote or current selected remotes' ancestor paths
   useEffect(() => {
     if (!engineId) return;
     const toExpand = new Set<string>();
     if (preferredRemote && remoteList.some((r) => r.name === preferredRemote)) {
       toExpand.add(`/${preferredRemote}`);
     }
-    if (value && !value.startsWith("/本地")) {
-      const segs = value.replace(/^\/+/, "").split("/").filter(Boolean);
+    for (const sel of selectedList) {
+      if (!sel || sel.startsWith("/本地")) continue;
+      const segs = sel.replace(/^\/+/, "").split("/").filter(Boolean);
       for (let i = 1; i < segs.length; i++) {
         toExpand.add("/" + segs.slice(0, i).join("/"));
       }
@@ -510,7 +641,7 @@ export function CloudRemoteFolderPicker({
     toExpand.forEach((p) => {
       if (!childrenMap[p]) void loadFolderChildren(p);
     });
-  }, [engineId, preferredRemote, remoteList, value, childrenMap, loadFolderChildren]);
+  }, [engineId, preferredRemote, remoteList, selectedList, childrenMap, loadFolderChildren]);
 
   const handleToggleRemoteOrFolder = (path: string) => {
     setExpandedKeys((prev) => {
@@ -526,8 +657,8 @@ export function CloudRemoteFolderPicker({
   };
 
   const selectedMeta = useMemo(
-    () => extractRemoteRootAndSubPath(value),
-    [value],
+    () => extractRemoteRootAndSubPath(primaryValue),
+    [primaryValue],
   );
 
   const selectedChain = useMemo(
@@ -539,8 +670,8 @@ export function CloudRemoteFolderPicker({
   );
 
   const getMkdirParentForRemote = (remote: NativeRemoteItem): string => {
-    if (selectedMeta.remoteName.toLowerCase() === remote.name.toLowerCase() && value) {
-      return value;
+    if (selectedMeta.remoteName.toLowerCase() === remote.name.toLowerCase() && primaryValue) {
+      return primaryValue;
     }
     return `/${remote.name}`;
   };
@@ -582,7 +713,16 @@ export function CloudRemoteFolderPicker({
         return next;
       });
       await loadFolderChildren(parent, true);
-      onChange(fullNewPath);
+      if (multiple) {
+        const next = selectedSet.has(fullNewPath)
+          ? selectedList
+          : [...selectedList, fullNewPath];
+        onChangeValues?.(next);
+        onChange?.(next[0] ?? "");
+      } else {
+        onChangeValues?.([fullNewPath]);
+        onChange?.(fullNewPath);
+      }
       setMkdirTargetRemote(null);
       setNewFolderName("");
       Toast.success(`已创建远端文件夹：${fullNewPath}`);
@@ -602,7 +742,16 @@ export function CloudRemoteFolderPicker({
       Toast.warning(check.error);
       return;
     }
-    onChange(check.normalized);
+    if (multiple) {
+      const next = selectedSet.has(check.normalized)
+        ? selectedList
+        : [...selectedList, check.normalized];
+      onChangeValues?.(next);
+      onChange?.(next[0] ?? "");
+    } else {
+      onChangeValues?.([check.normalized]);
+      onChange?.(check.normalized);
+    }
     setManualSubPath("");
     setManualOpen(false);
   };
@@ -616,6 +765,11 @@ export function CloudRemoteFolderPicker({
         <div className="wizard-picker-title">
           <IconCloudStroked aria-hidden="true" />
           <span>云端存储文件夹</span>
+          {multiple && (
+            <Tag size="small" color="blue" type="light">
+              支持多选
+            </Tag>
+          )}
         </div>
         <div className="wizard-picker-actions">
           <Button
@@ -638,9 +792,40 @@ export function CloudRemoteFolderPicker({
 
       <div className="wizard-picker-selected" aria-live="polite">
         <span className="wizard-picker-selected-label">已选：</span>
-        {value ? (
+        {multiple ? (
+          selectedList.length > 0 ? (
+            <div className="wizard-selected-tags" style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+              {selectedList.map((p) => (
+                <Tag
+                  key={p}
+                  size="small"
+                  color="blue"
+                  type="light"
+                  closable
+                  onClose={() => handleSelectPath(p)}
+                >
+                  {p}
+                </Tag>
+              ))}
+              {selectedList.length > 1 && (
+                <button
+                  type="button"
+                  className="wizard-inline-link"
+                  onClick={() => {
+                    onChangeValues?.([]);
+                    onChange?.("");
+                  }}
+                >
+                  清空
+                </button>
+              )}
+            </div>
+          ) : (
+            <span className="muted">请选择一个或多个远端网盘文件夹</span>
+          )
+        ) : primaryValue ? (
           <strong className="wizard-picker-selected-path">
-            {value}
+            {primaryValue}
             {selectedChain?.hasCrypt && (
               <Tag size="small" color="green" type="light" style={{ marginLeft: 6 }}>
                 已加密
@@ -676,7 +861,7 @@ export function CloudRemoteFolderPicker({
             {remoteList.map((remote) => {
               const rootPath = `/${remote.name}`;
               const expanded = expandedKeys.has(rootPath);
-              const rootSelected = value === rootPath;
+              const rootSelected = selectedSet.has(rootPath);
               const chain = resolveRemoteChain(remote.name, remoteList);
               const needsSubdir =
                 isContainerRequiredBackend(chain.leafBackend) &&
@@ -717,7 +902,7 @@ export function CloudRemoteFolderPicker({
                           void loadFolderChildren(rootPath);
                         }
                         if (!needsSubdir) {
-                          onChange(rootPath);
+                          handleSelectPath(rootPath);
                         }
                       }}
                     >
@@ -799,13 +984,13 @@ export function CloudRemoteFolderPicker({
                       <SubfolderRows
                         parentPath={rootPath}
                         depth={1}
-                        selectedPath={value}
+                        selectedPaths={selectedSet}
                         expandedKeys={expandedKeys}
                         childrenMap={childrenMap}
                         loadingMap={loadingMap}
                         errorMap={errorMap}
                         onToggleExpand={handleToggleRemoteOrFolder}
-                        onSelectPath={onChange}
+                        onSelectPath={handleSelectPath}
                         onRetryFolder={(p) => void loadFolderChildren(p, true)}
                       />
                     </div>

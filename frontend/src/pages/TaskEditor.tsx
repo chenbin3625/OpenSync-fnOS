@@ -100,13 +100,14 @@ import {
   type JobForm,
 } from "../lib/taskForm";
 import {
-  applyWizardEndpoints,
+  applyWizardMultiEndpoints,
   canSwitchBackToWizard,
   extractRemoteRootAndSubPath,
-  extractWizardPaths,
+  extractWizardMultiPaths,
   formatNasDisplayPath,
   inferOneWayDeleteMode,
   inferWizardDirection,
+  isNativeLocalPath,
   isWizardCompatibleExistingJob,
 } from "../lib/taskWizard";
 import {
@@ -327,26 +328,53 @@ export default function TaskEditor({
   }, [defaultEngineId, form.alistId, setForm]);
 
   const initialPaths = useMemo(
-    () => extractWizardPaths(seedForm),
-    [seedForm],
+    () => extractWizardMultiPaths(seedForm, nativeStorage.data?.localRoots),
+    [seedForm, nativeStorage.data?.localRoots],
   );
-  const [wizardNasPath, setWizardNasPath] = useState<string>(
-    initialPaths.nasPath,
+  const [wizardNasPaths, setWizardNasPaths] = useState<string[]>(
+    initialPaths.nasPaths,
   );
-  const [wizardRemotePath, setWizardRemotePath] = useState<string>(
-    initialPaths.remotePath,
+  const [wizardRemotePaths, setWizardRemotePaths] = useState<string[]>(
+    initialPaths.remotePaths,
   );
+  const wizardNasPath = wizardNasPaths[0] ?? "";
+  const wizardRemotePath = wizardRemotePaths[0] ?? "";
   const [wizardDirection, setWizardDirection] = useState<SyncDirectionMode>(
     () =>
-      job || initialDraft ? inferWizardDirection(seedForm) : "upload",
+      job || initialDraft
+        ? inferWizardDirection(seedForm, nativeStorage.data?.localRoots)
+        : "upload",
   );
   const [wizardDeleteMode, setWizardDeleteMode] = useState<OneWayDeleteMode>(
     () => inferOneWayDeleteMode(seedForm),
   );
+  const syncedSystemLocalRootsRef = useRef(false);
+  useEffect(() => {
+    const roots = nativeStorage.data?.localRoots;
+    if (syncedSystemLocalRootsRef.current || !roots?.length || dirty) return;
+    if (!job && !initialDraft) {
+      syncedSystemLocalRootsRef.current = true;
+      return;
+    }
+    const allSeedPaths = [...seedForm.srcPath, ...seedForm.dstPath];
+    const hasSystemLocalPath = allSeedPaths.some(
+      (p) => p && !p.startsWith("/本地") && isNativeLocalPath(p, roots),
+    );
+    syncedSystemLocalRootsRef.current = true;
+    if (!hasSystemLocalPath) return;
+    const compat = isWizardCompatibleExistingJob(seedForm, roots);
+    setIsFreeMode(!compat);
+    if (compat) {
+      const next = extractWizardMultiPaths(seedForm, roots);
+      setWizardNasPaths(next.nasPaths);
+      setWizardRemotePaths(next.remotePaths);
+      setWizardDirection(inferWizardDirection(seedForm, roots));
+    }
+  }, [nativeStorage.data?.localRoots, dirty, job, initialDraft, seedForm]);
   const [inlineCryptDraft, setInlineCryptDraft] = useState<InlineCryptDraft>(
     () =>
       createInitialInlineCryptDraft(
-        initialPaths.remotePath,
+        initialPaths.remotePaths[0] ?? "",
         nativeStorage.data?.remotes,
       ),
   );
@@ -738,11 +766,11 @@ export default function TaskEditor({
   const applyWizardStateToForm = (
     nextDir: SyncDirectionMode,
     nextDelMode: OneWayDeleteMode,
-    nextNas: string,
-    nextRemote: string,
+    nextNas: readonly string[],
+    nextRemote: readonly string[],
     extraPatch?: Partial<JobForm>,
   ) => {
-    const endpoints = applyWizardEndpoints(
+    const endpoints = applyWizardMultiEndpoints(
       nextDir,
       nextDelMode,
       nextNas,
@@ -795,24 +823,27 @@ export default function TaskEditor({
     }
   };
 
-  const handleWizardNasSelect = (nextNas: string) => {
-    setWizardNasPath(nextNas);
+  const handleWizardNasSelect = (nextNas: string[]) => {
+    const trimmed = wizardDirection === "upload" ? nextNas : nextNas.slice(0, 1);
+    setWizardNasPaths(trimmed);
     applyWizardStateToForm(
       wizardDirection,
       wizardDeleteMode,
-      nextNas,
-      wizardRemotePath,
+      trimmed,
+      wizardRemotePaths,
     );
   };
 
-  const handleWizardRemoteSelect = (nextRemote: string) => {
-    setWizardRemotePath(nextRemote);
+  const handleWizardRemoteSelect = (nextRemote: string[]) => {
+    const trimmed =
+      wizardDirection === "download" ? nextRemote : nextRemote.slice(0, 1);
+    setWizardRemotePaths(trimmed);
     if (createdInlineCryptName) setCreatedInlineCryptName("");
     applyWizardStateToForm(
       wizardDirection,
       wizardDeleteMode,
-      wizardNasPath,
-      nextRemote,
+      wizardNasPaths,
+      trimmed,
     );
   };
 
@@ -821,11 +852,26 @@ export default function TaskEditor({
     if (nextDir === "download" && inlineCryptDraft.enabled) {
       setInlineCryptDraft((prev) => ({ ...prev, enabled: false }));
     }
+    let nextNas = wizardNasPaths;
+    let nextRemote = wizardRemotePaths;
+    if (nextDir === "bidirectional") {
+      if (nextNas.length > 1 || nextRemote.length > 1) {
+        nextNas = nextNas.slice(0, 1);
+        nextRemote = nextRemote.slice(0, 1);
+        Toast.info("双向同步仅支持 1 对 1 目录，已保留首个已选目录");
+      }
+    } else if (nextDir === "upload" && nextRemote.length > 1) {
+      nextRemote = nextRemote.slice(0, 1);
+    } else if (nextDir === "download" && nextNas.length > 1) {
+      nextNas = nextNas.slice(0, 1);
+    }
+    setWizardNasPaths(nextNas);
+    setWizardRemotePaths(nextRemote);
     applyWizardStateToForm(
       nextDir,
       wizardDeleteMode,
-      wizardNasPath,
-      wizardRemotePath,
+      nextNas,
+      nextRemote,
     );
   };
 
@@ -834,8 +880,8 @@ export default function TaskEditor({
     applyWizardStateToForm(
       wizardDirection,
       nextDelMode,
-      wizardNasPath,
-      wizardRemotePath,
+      wizardNasPaths,
+      wizardRemotePaths,
     );
   };
 
@@ -858,24 +904,25 @@ export default function TaskEditor({
   };
 
   const switchToWizardMode = () => {
-    if (!canSwitchBackToWizard(form)) {
+    const roots = nativeStorage.data?.localRoots;
+    if (!canSwitchBackToWizard(form, roots)) {
       Toast.warning(
-        "标准向导仅支持单个「NAS 本地 ↔ 云端存储」目录组合，请先将路径调整为 1 对 1 后再切换",
+        "标准向导仅支持「NAS 本地 ↔ 云端存储」同步（单向支持多源到单目标，双向为 1 对 1），请调整后再切换",
       );
       return;
     }
-    const { nasPath, remotePath } = extractWizardPaths(form);
-    const dir = inferWizardDirection(form);
+    const { nasPaths, remotePaths } = extractWizardMultiPaths(form, roots);
+    const dir = inferWizardDirection(form, roots);
     const del = inferOneWayDeleteMode(form);
-    setWizardNasPath(nasPath);
-    setWizardRemotePath(remotePath);
+    setWizardNasPaths(nasPaths);
+    setWizardRemotePaths(remotePaths);
     setWizardDirection(dir);
     setWizardDeleteMode(del);
     setIsFreeMode(false);
     setStep(0);
     setActiveTab("folders");
-    if (nasPath || remotePath) {
-      applyWizardStateToForm(dir, del, nasPath, remotePath);
+    if (nasPaths.length > 0 || remotePaths.length > 0) {
+      applyWizardStateToForm(dir, del, nasPaths, remotePaths);
     }
   };
 
@@ -926,11 +973,11 @@ export default function TaskEditor({
             }
             finalForm = {
               ...finalForm,
-              ...applyWizardEndpoints(
+              ...applyWizardMultiEndpoints(
                 wizardDirection,
                 wizardDeleteMode,
-                wizardNasPath,
-                wizardFinalRemotePath,
+                wizardNasPaths,
+                [wizardFinalRemotePath],
               ),
             };
           }
@@ -1184,12 +1231,16 @@ export default function TaskEditor({
   );
 
   const wizardPathPreview = useMemo(() => {
-    if (isFreeMode || !wizardNasPath || !wizardFinalRemotePath) return null;
-    const endpoints = applyWizardEndpoints(
+    if (isFreeMode || !wizardNasPaths.length || !wizardRemotePaths.length) return null;
+    const effectiveRemotePaths =
+      wizardDirection !== "download" && wizardFinalRemotePath
+        ? [wizardFinalRemotePath]
+        : wizardRemotePaths;
+    const endpoints = applyWizardMultiEndpoints(
       wizardDirection,
       wizardDeleteMode,
-      wizardNasPath,
-      wizardFinalRemotePath,
+      wizardNasPaths,
+      effectiveRemotePaths,
     );
     return buildSyncPathPreview({
       srcPaths: endpoints.srcPath,
@@ -1202,7 +1253,8 @@ export default function TaskEditor({
     });
   }, [
     isFreeMode,
-    wizardNasPath,
+    wizardNasPaths,
+    wizardRemotePaths,
     wizardFinalRemotePath,
     wizardDirection,
     wizardDeleteMode,
@@ -1301,9 +1353,23 @@ export default function TaskEditor({
   const step2OptionalBtnLabel = currentTabs[2].label;
   const saveLabel = isNew && form.isCron === 3 && form.method === 1 ? "保存并预览" : "保存";
 
-  const nasDisplaySummary = wizardNasPath
-    ? formatNasDisplayPath(wizardNasPath, nativeStorage.data?.localRoots)
-    : "";
+  const nasDisplaySummary = useMemo(() => {
+    if (!wizardNasPaths.length) return "";
+    const first = formatNasDisplayPath(
+      wizardNasPaths[0],
+      nativeStorage.data?.localRoots,
+    );
+    return wizardNasPaths.length > 1
+      ? `${first} 等 ${wizardNasPaths.length} 个目录`
+      : first;
+  }, [wizardNasPaths, nativeStorage.data?.localRoots]);
+
+  const remoteDisplaySummary = useMemo(() => {
+    if (!wizardRemotePaths.length) return "";
+    return wizardRemotePaths.length > 1
+      ? `${wizardRemotePaths[0]} 等 ${wizardRemotePaths.length} 个目录`
+      : wizardRemotePaths[0];
+  }, [wizardRemotePaths]);
 
   const wizardDirectionArrow =
     wizardDirection === "bidirectional"
@@ -1313,13 +1379,20 @@ export default function TaskEditor({
         : "→";
 
   const bidirectional = wizardDirection === "bidirectional";
-  const resolvedDestination = wizardPathPreview?.items[0]?.resolvedDst;
+  const isWizardMultiSource =
+    (wizardDirection === "upload" && wizardNasPaths.length > 1) ||
+    (wizardDirection === "download" && wizardRemotePaths.length > 1);
+  const resolvedDestination = !isWizardMultiSource
+    ? wizardPathPreview?.items[0]?.resolvedDst
+    : undefined;
   const nasLanding = wizardDirection === "download" && resolvedDestination
     ? formatNasDisplayPath(resolvedDestination, nativeStorage.data?.localRoots)
     : nasDisplaySummary;
-  const cloudLanding = wizardDirection === "upload" && resolvedDestination
-    ? resolvedDestination.replace(/\/$/, "")
-    : wizardFinalRemotePath;
+  const cloudLanding = wizardDirection === "download"
+    ? remoteDisplaySummary
+    : wizardDirection === "upload" && resolvedDestination
+      ? resolvedDestination.replace(/\/$/, "")
+      : wizardFinalRemotePath;
   const wizardConflictOptions = bidirectional
     ? [
         { value: 0, label: "保留较新版本（另一版本删除）" },
@@ -1353,7 +1426,9 @@ export default function TaskEditor({
         <span className="muted">
           {bidirectional
             ? "文件直接写入对端所选目录，保留相对路径。"
-            : "源目录内的文件直接写入所示目标位置，保留相对路径。"}
+            : isWizardMultiSource
+              ? "多个源目录将按各自目录名写入目标目录的对应子目录。"
+              : "源目录内的文件直接写入所示目标位置，保留相对路径。"}
         </span>
       </dd>
       <dt>删除影响</dt>
@@ -2151,7 +2226,7 @@ export default function TaskEditor({
                 <div className="form-section" style={panelStyle("folders")}>
                   <div className="wizard-mode-bar">
                     <span className="muted">
-                      标准向导 · 面向最常见的「NAS 本地文件夹 ↔ 远程网盘文件夹」1 对 1 同步
+                      标准向导 · 面向「NAS 本地文件夹 ↔ 远程网盘文件夹」同步（单向同步支持源目录多选）
                     </span>
                     <Button
                       size="small"
@@ -2193,11 +2268,12 @@ export default function TaskEditor({
                     <NasLocalFolderPicker
                       engineId={form.alistId}
                       localRoots={nativeStorage.data?.localRoots}
-                      value={wizardNasPath}
-                      onChange={handleWizardNasSelect}
+                      values={wizardNasPaths}
+                      multiple={wizardDirection === "upload"}
+                      onChangeValues={handleWizardNasSelect}
                       onRefresh={refreshFolders}
                       error={
-                        validatedSteps.has(0) && !wizardNasPath
+                        validatedSteps.has(0) && !wizardNasPaths.length
                           ? "请选择 NAS 本地文件夹"
                           : wizardDirection !== "download"
                             ? showStepError(0, "srcPath")
@@ -2210,12 +2286,13 @@ export default function TaskEditor({
                       engineId={form.alistId}
                       remotes={nativeStorage.data?.remotes}
                       preferredRemote={preferredRemote}
-                      value={wizardRemotePath}
-                      onChange={handleWizardRemoteSelect}
+                      values={wizardRemotePaths}
+                      multiple={wizardDirection === "download"}
+                      onChangeValues={handleWizardRemoteSelect}
                       onAddStorage={() => setAddingStorage(true)}
                       onRefresh={refreshFolders}
                       error={
-                        validatedSteps.has(0) && !wizardRemotePath
+                        validatedSteps.has(0) && !wizardRemotePaths.length
                           ? "请选择云端存储文件夹"
                           : wizardDirection === "download"
                             ? showStepError(0, "srcPath")
@@ -2225,7 +2302,7 @@ export default function TaskEditor({
                     />
                   </div>
 
-                  {(nasDisplaySummary || wizardRemotePath) && (
+                  {(nasDisplaySummary || remoteDisplaySummary) && (
                     <div className="wizard-pair-summary" role="status">
                       <span className="wizard-pair-endpoint">
                         <strong>NAS</strong> {nasDisplaySummary || "未选择"}
@@ -2234,9 +2311,21 @@ export default function TaskEditor({
                         {wizardDirectionArrow}
                       </span>
                       <span className="wizard-pair-endpoint">
-                        <strong>云端</strong> {wizardRemotePath || "未选择"}
+                        <strong>云端</strong> {remoteDisplaySummary || "未选择"}
                       </span>
                     </div>
+                  )}
+
+                  {form.srcPath.length > 1 && form.dstPath.length > 0 && (
+                    <SyncPathPreview
+                      srcPaths={form.srcPath}
+                      dstPaths={form.dstPath}
+                      storedDstMap={job?.dstMap}
+                      method={form.method}
+                      existingJobs={existingJobs}
+                      currentJobId={job?.id}
+                      engineId={form.alistId}
+                    />
                   )}
 
                   {wizardPathPreview?.conflicts[0] && (

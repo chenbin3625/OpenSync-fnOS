@@ -884,8 +884,7 @@ func validateJobInput(job map[string]interface{}, rejectNestedDst bool) error {
 	}
 	if extra, _, err := parseNativeExtraFlags(job["extraFlags"]); err == nil && method != 3 {
 		isLocal := func(p string) bool {
-			name, _, _ := strings.Cut(strings.TrimPrefix(p, "/"), "/")
-			return strings.EqualFold(name, native.Local)
+			return native.IsAuthorizedLocalPath(p)
 		}
 		if extra.SyncDirection == "upload" || extra.SyncDirection == "download" {
 			for _, p := range srcPaths {
@@ -2020,7 +2019,7 @@ func findJobIDsForStorage(storage string) ([]int64, error) {
 					continue
 				}
 				hasAny = true
-				if !strings.EqualFold(seg, native.Local) {
+				if !native.IsAuthorizedLocalPath(p) {
 					onlyLocal = false
 					break
 				}

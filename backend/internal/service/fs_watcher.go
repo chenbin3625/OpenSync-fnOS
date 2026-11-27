@@ -69,11 +69,6 @@ func resolveLocalWatchRoots(srcPaths []string) []watchLocalRoot {
 	var out []watchLocalRoot
 	seen := make(map[string]struct{})
 	for _, vp := range srcPaths {
-		trimmed := strings.TrimPrefix(strings.TrimSpace(vp), "/")
-		seg, _, _ := strings.Cut(trimmed, "/")
-		if !strings.EqualFold(seg, native.Local) {
-			continue
-		}
 		ep, err := emptyCfg.Resolve(vp)
 		if err != nil || !ep.IsLocal || ep.LocalPath == "" {
 			continue
