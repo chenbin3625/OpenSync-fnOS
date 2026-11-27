@@ -156,7 +156,12 @@ func (jt *JobTask) completeContinuousRun(status taskStatus, message string) {
 	if status != taskStatusSuccess && status != taskStatusNoSync && message == "" {
 		message = "本轮同步未全部完成，待处理变更已保留，将自动重试"
 	}
-	if err := mapper.CompleteSyncRun(util.ToInt64(jt.Job["id"]), jt.SyncGeneration, message); err != nil {
+	if err := mapper.CompleteSyncRun(
+		util.ToInt64(jt.Job["id"]),
+		jt.SyncGeneration,
+		message,
+		syncErrorForJob(jt.Job, message),
+	); err != nil {
 		log.Printf("Task %d failed to checkpoint continuous sync: %v", jt.TaskID, err)
 	}
 }

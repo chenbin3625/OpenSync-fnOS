@@ -32,12 +32,13 @@ import { DryRunModal } from "../components/DryRunModal";
 import { TaskDetailDrawer } from "../components/TaskDetailDrawer";
 import { TaskOverviewPanel } from "../components/TaskOverviewPanel";
 import { SyncOverview } from "./SyncOverview";
-import { jobStatusDotClass } from "../components/SyncStatus";
+import { jobStatusDotClass, resolveSyncError } from "../components/SyncStatus";
 import { useAction, useResource } from "../lib/hooks";
 import {
   buildTaskSearchParams,
   cloneJobToForm,
   getJobConnectionScope,
+  getJobMountNames,
   isLegacyOpenListJob,
   jobHasCryptRemote,
   requiresFirstMirrorPreview,
@@ -90,8 +91,9 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
   );
   const engines = useResource((signal) => api.engines(signal));
   const storage = useResource(
-    (signal) => overview ? api.nativeStorageState(signal) : Promise.resolve(null),
+    (signal) => api.nativeStorageState(signal),
     [overview],
+    overview,
   );
   const [repair, setRepair] = useState<
     | { mode: "local" | "form" | "browse"; remote?: NativeRemoteItem | null }
@@ -126,6 +128,22 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
   const detailJob = drawerJob ?? selected;
   const selectedJobId = detailJob?.id;
   const deletedJobIdsRef = useRef<Set<number>>(new Set());
+  const repairRemoteForDetail = useMemo(() => {
+    if (!detailJob || !storage.data?.remotes?.length) return null;
+    const info = resolveSyncError(detailJob.syncStatus);
+    const mounts = getJobMountNames(detailJob);
+    const candidates = storage.data.remotes.filter((remote) =>
+      mounts.some((mount) => mount.toLowerCase() === remote.name.toLowerCase()),
+    );
+    if (info.endpoint) {
+      return (
+        candidates.find(
+          (remote) => remote.name.toLowerCase() === info.endpoint.toLowerCase(),
+        ) ?? null
+      );
+    }
+    return candidates.length === 1 ? candidates[0] : null;
+  }, [detailJob, storage.data?.remotes]);
   const [snapshotState, setSnapshotState] = useState<{
     jobId: number;
     ok: boolean;
@@ -443,7 +461,14 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
       paused={Boolean(currentTaskForSelected?.paused ?? detailJob.paused)}
       runKey={String(currentTaskForSelected?.taskId ?? "idle")}
       onRun={() => triggerSyncNow(detailJob.id)}
-      onOpenRecords={handleOpenRecords}
+      onOpenRecords={() => update({ tab: "records", hasError: null })}
+      onOpenFailedRecords={() => update({ tab: "records", hasError: 1 })}
+      onRepairConnection={
+        repairRemoteForDetail
+          ? () => setRepair({ mode: "form", remote: repairRemoteForDetail })
+          : undefined
+      }
+      onLocalFolders={() => setRepair({ mode: "local" })}
       onCheck={() => setCheckJob(detailJob)}
       onOpenConflicts={() => update({ conflicts: 1 })}
       onClone={() => {
@@ -468,6 +493,7 @@ export default function Tasks({ overview = false }: { overview?: boolean }) {
         key={detailJob.id}
         jobId={detailJob.id}
         refreshKey={recordsRefreshKey}
+        initialHasError={params.get("hasError") === "1" ? 1 : undefined}
         disableRetry={isLegacyOpenListJob(detailJob, engines.data) || detailJob.method === 3}
         onTaskEnded={handleTaskEnded}
       />

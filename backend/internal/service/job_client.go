@@ -632,7 +632,8 @@ func (jc *JobClient) runMarkedJobWithOptions(opts markedJobRunOptions) {
 	started := false
 	defer func() {
 		if opts.syncGeneration > 0 && !started {
-			_ = mapper.RecordSyncError(jc.idSnapshot(), "同步启动中断，待处理变更已保留，将自动重试")
+			job := jc.jobSnapshot()
+			_ = recordSyncErrorForJob(jc.idSnapshot(), job, "同步启动中断，待处理变更已保留，将自动重试")
 		}
 	}()
 	sourceTaskID := opts.sourceTaskID
